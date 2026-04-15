@@ -16,7 +16,7 @@
 //! queues through the driver; wake signals the loop; the loop dequeues, stages,
 //! applies via `CoreExecutor`, and marks inputs consumed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -3396,6 +3396,16 @@ impl MeerkatMachine {
             available_fields.insert(
                 "drain_running".into(),
                 formal_projection_value(&drain_running),
+            );
+            available_fields.insert(
+                "silent_intent_overrides".into(),
+                formal_projection_value(
+                    &ingress
+                        .silent_intent_overrides()
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                ),
             );
             available_fields.insert(
                 "active_requested_deferred_names".into(),

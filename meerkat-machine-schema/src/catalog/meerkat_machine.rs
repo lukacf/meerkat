@@ -61,6 +61,10 @@ pub fn meerkat_machine() -> MachineSchema {
                 field("peer_ingress_configured", TypeRef::Bool),
                 field("drain_running", TypeRef::Bool),
                 field(
+                    "silent_intent_overrides",
+                    TypeRef::Set(Box::new(TypeRef::String)),
+                ),
+                field(
                     "active_requested_deferred_names",
                     TypeRef::Set(Box::new(TypeRef::String)),
                 ),
@@ -83,6 +87,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("pre_run_phase", Expr::None),
                     init("peer_ingress_configured", Expr::Bool(false)),
                     init("drain_running", Expr::Bool(false)),
+                    init("silent_intent_overrides", Expr::EmptySet),
                     init("active_requested_deferred_names", Expr::EmptySet),
                     init("staged_requested_deferred_names", Expr::EmptySet),
                     init("active_visibility_revision", Expr::U64(0)),
@@ -1688,17 +1693,29 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    for phase in ["Idle", "Attached", "Running", "Retired", "Stopped"] {
+    for phase in ["Idle", "Attached", "Running", "Retired"] {
         transitions.push(self_loop_transition_with(
             &format!("SetSilentIntents{phase}"),
             phase,
             "SetSilentIntents",
             vec!["session_id", "intents"],
-            vec![],
+            vec![Update::Assign {
+                field: "silent_intent_overrides".into(),
+                expr: Expr::Binding("intents".into()),
+            }],
             vec![],
             vec![session_registered_guard()],
         ));
     }
+    transitions.push(self_loop_transition_with(
+        "SetSilentIntentsStopped",
+        "Stopped",
+        "SetSilentIntents",
+        vec!["session_id", "intents"],
+        vec![],
+        vec![],
+        vec![session_registered_guard()],
+    ));
 
     // Abort/Wait only require a registered session in the runtime; they are
     // local drain-management no-ops when no drain slot is present.

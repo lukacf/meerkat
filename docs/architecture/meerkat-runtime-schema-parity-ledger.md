@@ -88,6 +88,10 @@ Current state:
   `RuntimeIngressAuthority`, while the live runtime loop and exact audits were
   already driven by emitted wake/process effects plus the typed
   `post_admission_signal`
+- Meerkat now formally owns `silent_intent_overrides` as checked-in ingress
+  state instead of leaving it below the machine boundary; exact audited parity
+  stayed green after lifting it, and the targeted runtime/model regression for
+  `SetSilentIntents` is green
 - live recycle no longer detours through a handwritten control-side
   `Recovering` hop: the runtime helper now realizes recycle as the same direct
   control projection the checked-in Meerkat machine already models
@@ -201,6 +205,12 @@ Interpretation:
   `ContainsSession`, `SessionHasExecutor`, `SessionHasComms`,
   `OpsLifecycleRegistry`, `InputState`, `ListActiveInputs`) is also now
   `fixed` across the audited frontier.
+- A first ingress-authority absorption slice is now landed too:
+  `SetSilentIntents` no longer depends on lower-authority hidden state because
+  `silent_intent_overrides` is part of the checked-in Meerkat model. A broader
+  admitted-input ledger absorption was explored and deliberately deferred
+  because `Ingest` / `Prepare` still need a wider payload/modeling tranche for
+  exact parity.
 - The reducer/control family is now also closed. Three sub-results matter:
   - direct runtime probes confirmed that `Recycle`, `Prepare`, `Commit`, and
     `Fail` already matched the current schema surface for the audited frontier

@@ -275,6 +275,7 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
 
     for required in [
         "current_run_id",
+        "silent_intent_overrides",
         "active_requested_deferred_names",
         "staged_requested_deferred_names",
         "active_visibility_revision",

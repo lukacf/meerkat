@@ -12540,6 +12540,38 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
 }
 
 #[tokio::test]
+async fn modeled_meerkat_set_silent_intents_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("set silent intents test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::SetSilentIntents {
+                session_id: fixture.session_id.clone(),
+                intents: runtime_parity_silent_intents(),
+            },
+        )
+        .await
+        .expect("set silent intents should succeed");
+    assert!(matches!(result, MeerkatMachineCommandResult::Unit));
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("set silent intents test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input =
+        runtime_modeled_kernel_input(&schema, &before, RuntimeParityProbeInput::SetSilentIntents)
+            .expect("modeled set silent intents input should build");
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_runtime() {
     let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
     let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)

@@ -144,6 +144,12 @@ Hopcroft-style behavioral quotient over the reachable graph.
   longer consumes them. Exact audited parity stayed green, TLC/Hopcroft stayed
   flat, and the remaining wake/process carrier is now just emitted effects +
   `post_admission_signal`.
+- Absorbed `silent_intent_overrides` into the checked-in Meerkat machine so
+  `SetSilentIntents` no longer depends on lower-authority hidden ingress
+  state. The targeted runtime/model regression is green, exact audited parity
+  stayed flat, and a larger admitted-input ledger absorption was explicitly
+  deferred because `Ingest` / `Prepare` still need a wider exact-modeling
+  tranche.
 - Removed the dead handwritten `RuntimeControlAuthority` admission/wake branch
   (`SubmitWork`, `AdmissionAccepted`, `AdmissionRejected`,
   `AdmissionDeduplicated`, `wake_pending`, `process_pending`) after verifying

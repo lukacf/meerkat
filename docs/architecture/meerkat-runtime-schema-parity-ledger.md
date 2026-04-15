@@ -192,6 +192,11 @@ Current state:
   as top-level mirrored revision state. TLC stayed green, the raw quotient
   dropped again from `260` to `196`, and the truthful Meerkat graph fell from
   `1,773` to `742` reachable states.
+- Fast-loop landed: `attachment_live` was removed from the checked-in
+  Meerkat state after collapsing interrupt/cancel/stop legality onto phase
+  rather than a second top-level "live" bit. TLC stayed green, the raw
+  quotient dropped again from `196` to `133`, and the truthful Meerkat graph
+  fell from `742` to `474` reachable states.
 
 ## Full-row Snapshot (2026-04-15)
 

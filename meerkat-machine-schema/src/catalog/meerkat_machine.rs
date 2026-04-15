@@ -52,7 +52,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "active_generation",
                     TypeRef::Option(Box::new(TypeRef::Named("Generation".into()))),
                 ),
-                field("attachment_live", TypeRef::Bool),
                 field(
                     "current_run_id",
                     TypeRef::Option(Box::new(TypeRef::Named("RunId".into()))),
@@ -70,7 +69,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("active_runtime_id", Expr::None),
                     init("active_fence_token", Expr::None),
                     init("active_generation", Expr::None),
-                    init("attachment_live", Expr::Bool(false)),
                     init("current_run_id", Expr::None),
                     init("pre_run_phase", Expr::None),
                     init("silent_intent_overrides", Expr::EmptySet),
@@ -383,7 +381,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant: "InterruptCurrentRun".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![],
                 to: "Attached".into(),
                 emit: vec![
@@ -405,7 +403,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant: "InterruptCurrentRun".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![],
                 to: "Running".into(),
                 emit: vec![
@@ -427,7 +425,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant: "CancelAfterBoundary".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![],
                 to: "Attached".into(),
                 emit: vec![EffectEmit {
@@ -443,7 +441,7 @@ pub fn meerkat_machine() -> MachineSchema {
                     variant: "CancelAfterBoundary".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![],
                 to: "Running".into(),
                 emit: vec![EffectEmit {
@@ -537,20 +535,14 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("reset", "runtime reset")],
             },
             TransitionSchema {
-                name: "StopRuntimeExecutorDetached".into(),
-                from: vec![
-                    "Initializing".into(),
-                    "Idle".into(),
-                    "Attached".into(),
-                    "Running".into(),
-                    "Retired".into(),
-                ],
+                name: "StopRuntimeExecutorUnbound".into(),
+                from: vec!["Initializing".into(), "Idle".into(), "Retired".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("StopRuntimeExecutor"),
                     variant: "StopRuntimeExecutor".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_not_live_guard()],
+                guards: vec![],
                 updates: vec![
                     Update::Assign {
                         field: "current_run_id".into(),
@@ -569,14 +561,14 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("stop", "runtime executor stopped")],
             },
             TransitionSchema {
-                name: "StopRuntimeExecutorLiveAttached".into(),
+                name: "StopRuntimeExecutorAttached".into(),
                 from: vec!["Attached".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("StopRuntimeExecutor"),
                     variant: "StopRuntimeExecutor".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![Update::Assign {
                     field: "silent_intent_overrides".into(),
                     expr: Expr::EmptySet,
@@ -585,14 +577,14 @@ pub fn meerkat_machine() -> MachineSchema {
                 emit: vec![notice_emit("stop", "runtime executor stopped")],
             },
             TransitionSchema {
-                name: "StopRuntimeExecutorLiveRunning".into(),
+                name: "StopRuntimeExecutorRunning".into(),
                 from: vec!["Running".into()],
                 on: InputMatch {
                     kind: meerkat_trigger_kind("StopRuntimeExecutor"),
                     variant: "StopRuntimeExecutor".into(),
                     bindings: vec![],
                 },
-                guards: vec![attachment_live_guard()],
+                guards: vec![],
                 updates: vec![Update::Assign {
                     field: "silent_intent_overrides".into(),
                     expr: Expr::EmptySet,
@@ -670,10 +662,6 @@ fn reset_session_state() -> Vec<Update> {
         Update::Assign {
             field: "active_generation".into(),
             expr: Expr::None,
-        },
-        Update::Assign {
-            field: "attachment_live".into(),
-            expr: Expr::Bool(false),
         },
         Update::Assign {
             field: "current_run_id".into(),
@@ -949,20 +937,6 @@ fn runtime_is_bound_guard() -> Guard {
             Box::new(Expr::Field("active_runtime_id".into())),
             Box::new(Expr::None),
         ),
-    }
-}
-
-fn attachment_live_guard() -> Guard {
-    Guard {
-        name: "attachment_live".into(),
-        expr: Expr::Field("attachment_live".into()),
-    }
-}
-
-fn attachment_not_live_guard() -> Guard {
-    Guard {
-        name: "attachment_not_live".into(),
-        expr: Expr::Not(Box::new(Expr::Field("attachment_live".into()))),
     }
 }
 
@@ -1347,10 +1321,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             bindings: vec!["session_id".into()],
         },
         guards: vec![],
-        updates: vec![Update::Assign {
-            field: "attachment_live".into(),
-            expr: Expr::Bool(true),
-        }],
+        updates: vec![],
         to: "Attached".into(),
         emit: vec![],
     });
@@ -1361,10 +1332,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             phase,
             "EnsureSessionWithExecutor",
             vec!["session_id"],
-            vec![Update::Assign {
-                field: "attachment_live".into(),
-                expr: Expr::Bool(true),
-            }],
+            vec![],
             vec![],
             vec![],
         ));

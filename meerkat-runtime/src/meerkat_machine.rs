@@ -4180,10 +4180,6 @@ impl MeerkatMachine {
                 formal_projection_value(&Some(driver.runtime_id().to_string())),
             );
             available_fields.insert(
-                "attachment_live".into(),
-                formal_projection_value(&attachment_live),
-            );
-            available_fields.insert(
                 "current_run_id".into(),
                 formal_projection_value(&control.current_run_id.as_ref().map(ToString::to_string)),
             );

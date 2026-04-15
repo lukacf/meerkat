@@ -11,7 +11,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_runtime_id`: `Option<AgentRuntimeId>`
 - `active_fence_token`: `Option<FenceToken>`
 - `active_generation`: `Option<Generation>`
-- `attachment_live`: `Bool`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
@@ -401,32 +400,24 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `InterruptCurrentRunAttached`
 - From: `Attached`
 - On: `InterruptCurrentRun`()
-- Guards:
-  - `attachment_live`
 - Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
 - To: `Attached`
 
 ### `InterruptCurrentRun`
 - From: `Running`
 - On: `InterruptCurrentRun`()
-- Guards:
-  - `attachment_live`
 - Emits: `WakeInterrupt`, `RequestCancellationAtBoundary`
 - To: `Running`
 
 ### `CancelAfterBoundaryAttached`
 - From: `Attached`
 - On: `CancelAfterBoundary`()
-- Guards:
-  - `attachment_live`
 - Emits: `RequestCancellationAtBoundary`
 - To: `Attached`
 
 ### `CancelAfterBoundary`
 - From: `Running`
 - On: `CancelAfterBoundary`()
-- Guards:
-  - `attachment_live`
 - Emits: `RequestCancellationAtBoundary`
 - To: `Running`
 
@@ -503,27 +494,21 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
-### `StopRuntimeExecutorDetached`
-- From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`
+### `StopRuntimeExecutorUnbound`
+- From: `Initializing`, `Idle`, `Retired`
 - On: `StopRuntimeExecutor`()
-- Guards:
-  - `attachment_not_live`
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
-### `StopRuntimeExecutorLiveAttached`
+### `StopRuntimeExecutorAttached`
 - From: `Attached`
 - On: `StopRuntimeExecutor`()
-- Guards:
-  - `attachment_live`
 - Emits: `RuntimeNotice`
 - To: `Attached`
 
-### `StopRuntimeExecutorLiveRunning`
+### `StopRuntimeExecutorRunning`
 - From: `Running`
 - On: `StopRuntimeExecutor`()
-- Guards:
-  - `attachment_live`
 - Emits: `RuntimeNotice`
 - To: `Running`
 

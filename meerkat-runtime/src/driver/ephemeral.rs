@@ -1116,10 +1116,10 @@ impl EphemeralRuntimeDriver {
                 ));
             }
         };
-        if self.phase != next_phase {
-            self.transition_phase(next_phase);
-        } else {
+        if self.phase == next_phase {
             self.phase = next_phase;
+        } else {
+            self.transition_phase(next_phase);
         }
         self.current_run_id = None;
         self.pre_run_phase = None;

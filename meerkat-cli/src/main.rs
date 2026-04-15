@@ -72,6 +72,27 @@ const EXIT_SUCCESS: u8 = 0;
 const EXIT_ERROR: u8 = 1;
 const EXIT_BUDGET_EXHAUSTED: u8 = 2;
 
+#[cfg(not(feature = "mini-surface"))]
+const CLI_ABOUT: &str = "Run agent tasks, manage local config, and build mob artifacts";
+#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
+const CLI_ABOUT: &str = "Run agent tasks and manage lightweight local config from the terminal";
+#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
+const CLI_ABOUT: &str = "Run agent tasks and manage lightweight local config from the terminal";
+
+#[cfg(not(feature = "mini-surface"))]
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, mcp, config, realm\n  Deployment:   mob\n  Utility:      session, blob, models, capabilities, doctor\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> -h` for the basic view and `rkat <command> --help` for all options.";
+#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, config, realm\n  Utility:      session, models, capabilities, doctor\n\nExamples:\n  rkat-mini \"summarize this repository\"\n  cat story.txt | rkat-mini \"summarize the story\"\n  git diff | rkat-mini run \"review these changes\"\n  rkat-mini run -t workspace \"fix the failing test\"\n  rkat-mini skill list\n\nUse `rkat-mini <command> -h` for the basic view and `rkat-mini <command> --help` for all options.";
+#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
+const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run\n  Realm config: init, config, realm\n  Utility:      session, models, capabilities, doctor\n\nExamples:\n  rkat-mini \"summarize this repository\"\n  cat story.txt | rkat-mini \"summarize the story\"\n  git diff | rkat-mini run \"review these changes\"\n  rkat-mini run -t workspace \"fix the failing test\"\n\nUse `rkat-mini <command> -h` for the basic view and `rkat-mini <command> --help` for all options.";
+
+#[cfg(not(feature = "mini-surface"))]
+const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
+#[cfg(all(feature = "mini-surface", feature = "mini-skills"))]
+const RUN_AFTER_HELP: &str = "Examples:\n  rkat-mini run \"summarize this repository\"\n  cat story.txt | rkat-mini run \"summarize the story\"\n  git diff | rkat-mini run --json \"review these changes\"\n  rkat-mini run --resume \"keep going\"\n  rkat-mini run --resume ~2 \"pick this thread back up\"\n  rkat-mini run --skill ./skills/reviewer \"review these changes\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
+#[cfg(all(feature = "mini-surface", not(feature = "mini-skills")))]
+const RUN_AFTER_HELP: &str = "Examples:\n  rkat-mini run \"summarize this repository\"\n  cat story.txt | rkat-mini run \"summarize the story\"\n  git diff | rkat-mini run --json \"review these changes\"\n  rkat-mini run --resume \"keep going\"\n  rkat-mini run --resume ~2 \"pick this thread back up\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
+
 /// Safely truncate a string to approximately `max_bytes`, respecting UTF-8 char boundaries.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -403,7 +424,7 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
             builtins: true,
             shell: true,
             memory: true,
-            mob: true,
+            mob: !cfg!(feature = "mini-surface"),
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
@@ -605,12 +626,10 @@ async fn init_project_config() -> anyhow::Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "rkat", version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "Run agent tasks, manage local config, and build mob artifacts")]
+#[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"))]
+#[command(about = CLI_ABOUT)]
 #[command(override_usage = "rkat [OPTIONS] <PROMPT>\n       rkat [OPTIONS] <COMMAND>")]
-#[command(
-    after_help = "Command groups:\n  Runtime:      run\n  Realm config: init, skill, mcp, config, realm\n  Deployment:   mob\n  Utility:      session, blob, models, capabilities, doctor\n\nExamples:\n  rkat \"summarize this repository\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n\nUse `rkat <command> -h` for the basic view and `rkat <command> --help` for all options."
-)]
+#[command(after_help = ROOT_AFTER_HELP)]
 struct Cli {
     /// Explicit realm ID (opaque). Reuse to share state across surfaces.
     #[arg(
@@ -697,9 +716,7 @@ impl From<RealmBackendArg> for RealmBackend {
 enum Commands {
     /// Initialize local project config from the global template
     Init,
-    #[command(
-        after_help = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n  rkat run --yolo --param temperature=0.2 \"take the gloves off\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set"
-    )]
+    #[command(after_help = RUN_AFTER_HELP)]
     /// Run an agent with a prompt
     Run {
         /// The prompt to execute
@@ -793,6 +810,7 @@ enum Commands {
         output_schema: Option<String>,
 
         /// Skill IDs or local skill paths to preload for this run. Repeatable.
+        #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
         #[arg(
             long = "skill",
             value_name = "PATH_OR_ID",
@@ -858,6 +876,7 @@ enum Commands {
         /// By default MCP servers connect in the background and their tools
         /// become available as each server is ready. Use this flag when the
         /// first prompt requires MCP tools to be available.
+        #[cfg(not(feature = "mini-surface"))]
         #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
         wait_for_mcp: bool,
 
@@ -904,6 +923,7 @@ enum Commands {
     },
 
     /// Blob management
+    #[cfg(not(feature = "mini-surface"))]
     Blob {
         #[command(subcommand)]
         command: BlobCommands,
@@ -916,6 +936,7 @@ enum Commands {
         command: RealmCommands,
     },
 
+    #[cfg(not(feature = "mini-surface"))]
     #[command(
         after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list --scope all\n  rkat mcp get filesystem --scope project"
     )]
@@ -925,6 +946,7 @@ enum Commands {
         command: McpCommands,
     },
 
+    #[cfg(not(feature = "mini-surface"))]
     #[command(
         after_help = "Examples:\n  rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack\n  rkat mob inspect dist/release-triage.mobpack\n  rkat mob validate dist/release-triage.mobpack\n  rkat mob deploy dist/release-triage.mobpack \"triage the latest release regressions\"\n  rkat mob web build dist/release-triage.mobpack -o dist/release-triage-web"
     )]
@@ -934,6 +956,7 @@ enum Commands {
         command: MobCommands,
     },
 
+    #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
     #[command(name = "skill")]
     /// Skill introspection and realm-local skill resources
     Skills {
@@ -1468,6 +1491,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             params,
             provider_params_json,
             output_schema,
+            #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
             skills,
             allow_tools,
             block_tools,
@@ -1476,12 +1500,21 @@ async fn main() -> anyhow::Result<ExitCode> {
             app_context,
             tools,
             yolo,
+            #[cfg(not(feature = "mini-surface"))]
             wait_for_mcp,
             verbose,
             keep_alive,
             stdin,
             line_format,
         } => {
+            #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
+            let skills = skills;
+            #[cfg(not(any(not(feature = "mini-surface"), feature = "mini-skills")))]
+            let skills = Vec::new();
+            #[cfg(not(feature = "mini-surface"))]
+            let wait_for_mcp = wait_for_mcp;
+            #[cfg(feature = "mini-surface")]
+            let wait_for_mcp = false;
             Box::pin(handle_run_command(
                 prompt,
                 resume,
@@ -1527,10 +1560,14 @@ async fn main() -> anyhow::Result<ExitCode> {
                 interrupt_session(&session_id, &cli_scope).await
             }
         },
+        #[cfg(not(feature = "mini-surface"))]
         Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
+        #[cfg(not(feature = "mini-surface"))]
         Commands::Mcp { command } => handle_mcp_command(command).await,
+        #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
         Commands::Skills { command } => handle_skills_command(command, &cli_scope).await,
+        #[cfg(not(feature = "mini-surface"))]
         Commands::Mob { command } => handle_mob_command(command, &cli_scope).await,
         Commands::Config { command } => match command {
             ConfigCommands::Get {
@@ -3406,7 +3443,7 @@ async fn run_agent(
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     let keep_alive = resolve_keep_alive(keep_alive)?;
-    let effective_mob = enable_mob || config.tools.mob_enabled;
+    let effective_mob = !cfg!(feature = "mini-surface") && (enable_mob || config.tools.mob_enabled);
     let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
     let preload_skills = if preload_skills.is_empty() {
         None
@@ -4000,15 +4037,16 @@ async fn resume_session_with_llm_override(
     let service = Arc::new(persistent_service);
 
     log_stage("compose_external_tool_dispatchers");
-    let mut run_mob_tools = if tooling.mob.resolve(config.tools.mob_enabled) {
-        log_stage("get_or_create_mob_persistent_service");
-        let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
-        let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-            Arc::new(MobCliSessionService::new(mob_persistent));
-        Some(prepare_run_mob_tools(scope, run_mob_service).await?)
-    } else {
-        None
-    };
+    let mut run_mob_tools =
+        if !cfg!(feature = "mini-surface") && tooling.mob.resolve(config.tools.mob_enabled) {
+            log_stage("get_or_create_mob_persistent_service");
+            let mob_persistent = remember_mob_persistent_service(scope, Arc::clone(&service))?;
+            let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+                Arc::new(MobCliSessionService::new(mob_persistent));
+            Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+        } else {
+            None
+        };
     // Load optional MCP tools immediately before external tool composition so
     // later early-return windows cannot skip adapter shutdown.
     let (mcp_external_tools, mcp_adapter) = load_mcp_external_tools(scope, wait_for_mcp).await;

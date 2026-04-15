@@ -670,39 +670,54 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "blob/get" => self.handle_blob_get(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/external_event" => {
                 handlers::event::handle_external_event(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/create" => {
                 handlers::schedule::handle_create(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/get" => {
                 handlers::schedule::handle_get(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/list" => {
                 handlers::schedule::handle_list(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/update" => {
                 handlers::schedule::handle_update(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/pause" => {
                 handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/resume" => {
                 handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/delete" => {
                 handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/occurrences" => {
                 handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/call" => {
                 handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
@@ -837,7 +852,9 @@ impl MethodRouter {
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
             "comms/peers" => self.handle_comms_peers(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "skills/inspect" => {
                 handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
             }
@@ -873,9 +890,13 @@ impl MethodRouter {
                 )
                 .await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/state" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -901,6 +922,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/accept" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -926,6 +948,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/retire" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -951,6 +974,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/reset" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -976,6 +1000,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "input/state" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -993,6 +1018,7 @@ impl MethodRouter {
                         .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "input/list" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {

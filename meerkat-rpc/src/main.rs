@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "rkat-rpc", version = env!("CARGO_PKG_VERSION"))]
+#[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Meerkat JSON-RPC stdio server")]
 struct Cli {
     /// Explicit realm ID to join.

@@ -1,6 +1,6 @@
 # Surface Composability and CLI Layering Proposal
 
-Status: Proposal
+Status: Implemented in stages; retained as the parent rationale and command-layering record
 Scope: Surface composition, product layering, and CLI organization for Meerkat
 Related:
 - `docs/architecture/meerkat-runtime-dogma.md`
@@ -94,6 +94,23 @@ Treat this as a three-workstream effort:
 This order matters. If `rkat` UX is redesigned first, it will likely freeze in
 more product-specific assumptions that then become harder to remove from the
 surface stack.
+
+## Current shipped outcome
+
+The shared-surface/runtime work from this proposal is now reflected in the codebase:
+
+- shared embedded and runtime-backed surface helpers back the main product surfaces
+- `rkat`, `rkat-rpc`, `rkat-rest`, and `rkat-mcp` consume those shared seams
+- `e2e-build` proves minimal composed fixtures plus built product surfaces
+- the canonical CLI execution family is centered on `run --resume[=<SESSION>]`
+
+The product-layering work also shipped two official slim binaries:
+
+- `rkat-mini`
+- `rkat-rpc-mini`
+
+These are static capability-gated builds of the existing CLI/RPC crates, not
+new reimplementations and not runtime-dynamic command subsets.
 
 ## Workstream 1: Make Composability Great Again
 

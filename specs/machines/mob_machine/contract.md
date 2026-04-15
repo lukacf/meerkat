@@ -106,6 +106,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId)
 - `RequestRuntimeRetire`
 - `RequestRuntimeDestroy`
 - `EmitMemberLifecycleNotice`(kind: String)
@@ -141,6 +142,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `active_members_present`
   - `current_binding_matches`
+- Emits: `RequestRuntimeIngress`
 - To: `Running`
 
 ### `ObserveWorkCompleted`

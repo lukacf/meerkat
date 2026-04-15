@@ -1520,9 +1520,9 @@ Next ==
     \/ AbortAllStopped
     \/ EnsureDrainRunningAttached
     \/ EnsureDrainRunningRunning
-    \/ \E runtime_id \in StringValues : IngestIdle(runtime_id)
-    \/ \E runtime_id \in StringValues : IngestAttached(runtime_id)
-    \/ \E runtime_id \in StringValues : IngestRunning(runtime_id)
+    \/ \E runtime_id \in AgentRuntimeIdValues : IngestIdle(runtime_id)
+    \/ \E runtime_id \in AgentRuntimeIdValues : IngestAttached(runtime_id)
+    \/ \E runtime_id \in AgentRuntimeIdValues : IngestRunning(runtime_id)
     \/ \E kind \in StringValues : PublishEventIdle(kind)
     \/ \E kind \in StringValues : PublishEventAttached(kind)
     \/ \E kind \in StringValues : PublishEventRunning(kind)

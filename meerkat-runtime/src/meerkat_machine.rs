@@ -488,6 +488,51 @@ async fn machine_reset(driver: &mut DriverEntry) -> Result<ResetReport, RuntimeD
     driver.finalize_reset().await
 }
 
+fn machine_prepare_bindings_projection(driver: &mut DriverEntry) -> Result<(), RuntimeDriverError> {
+    match driver.runtime_state() {
+        RuntimeState::Initializing | RuntimeState::Idle => {
+            driver.set_control_projection(RuntimeState::Attached, None, None);
+            Ok(())
+        }
+        RuntimeState::Attached
+        | RuntimeState::Running
+        | RuntimeState::Retired
+        | RuntimeState::Stopped => Ok(()),
+        from => Err(RuntimeDriverError::Internal(
+            RuntimeStateTransitionError {
+                from,
+                to: RuntimeState::Attached,
+            }
+            .to_string(),
+        )),
+    }
+}
+
+fn machine_executor_attach_projection(
+    driver: &mut DriverEntry,
+) -> Result<bool, RuntimeDriverError> {
+    match driver.runtime_state() {
+        RuntimeState::Idle => {
+            driver.set_control_projection(RuntimeState::Attached, None, None);
+            Ok(true)
+        }
+        RuntimeState::Attached => Ok(false),
+        from => Err(RuntimeDriverError::Internal(
+            RuntimeStateTransitionError {
+                from,
+                to: RuntimeState::Attached,
+            }
+            .to_string(),
+        )),
+    }
+}
+
+fn machine_unregister_session_projection(driver: &mut DriverEntry) {
+    if matches!(driver.runtime_state(), RuntimeState::Attached) {
+        driver.set_control_projection(RuntimeState::Idle, None, None);
+    }
+}
+
 async fn machine_recycle_preserving_work(
     driver: &mut DriverEntry,
 ) -> Result<usize, RuntimeDriverError> {
@@ -1263,15 +1308,9 @@ impl MeerkatMachine {
                     .ok_or(RuntimeDriverError::Internal(format!(
                         "session {session_id} missing after register_session_inner"
                     )))?;
-                let driver_state = Self::driver_runtime_state(&entry.driver).await;
-                if matches!(driver_state, RuntimeState::Idle) {
-                    let mut driver = entry.driver.lock().await;
-                    driver.attach().map_err(|error| {
-                        RuntimeDriverError::Internal(format!(
-                            "failed to attach runtime driver while preparing bindings for session {session_id}: {error}"
-                        ))
-                    })?;
-                }
+                let mut driver = entry.driver.lock().await;
+                machine_prepare_bindings_projection(&mut driver)?;
+                drop(driver);
                 Ok(MeerkatMachineCommandResult::Bindings(
                     meerkat_core::SessionRuntimeBindings {
                         session_id,
@@ -2395,40 +2434,15 @@ impl MeerkatMachine {
 
         let should_wake = {
             let mut driver_guard = driver.lock().await;
-            if let Err(error) = driver_guard.attach() {
-                let repaired = if error.from == RuntimeState::Attached
-                    && error.to == RuntimeState::Attached
-                {
+            match machine_executor_attach_projection(&mut driver_guard) {
+                Ok(true) => {}
+                Ok(false) => {
                     tracing::warn!(
                         %session_id,
-                        error = %error,
-                        "runtime driver remained attached without a live published loop; detaching and retrying attachment"
+                        "runtime driver remained attached without a live published loop; republishing attachment"
                     );
-                    match driver_guard.detach() {
-                        Ok(_) => match driver_guard.attach() {
-                            Ok(()) => true,
-                            Err(retry_error) => {
-                                tracing::warn!(
-                                    %session_id,
-                                    error = %retry_error,
-                                    "failed to re-attach runtime driver after repairing stale attachment state"
-                                );
-                                false
-                            }
-                        },
-                        Err(detach_error) => {
-                            tracing::warn!(
-                                %session_id,
-                                error = %detach_error,
-                                "failed to detach stale attached runtime driver before retrying attachment"
-                            );
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-                if !repaired {
+                }
+                Err(error) => {
                     tracing::warn!(
                         %session_id,
                         error = %error,
@@ -2603,7 +2617,7 @@ impl MeerkatMachine {
 
         if let Some(entry) = entry {
             let mut driver = entry.driver.lock().await;
-            let _ = driver.detach(); // Attached → Idle (no-op if not Attached)
+            machine_unregister_session_projection(&mut driver);
             drop(driver);
 
             let mut completions = entry.completions.lock().await;

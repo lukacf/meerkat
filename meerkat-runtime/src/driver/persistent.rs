@@ -687,7 +687,8 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         {
             match runtime_state {
                 RuntimeState::Retired if self.inner.runtime_state() != RuntimeState::Retired => {
-                    EphemeralRuntimeDriver::retire(&mut self.inner)?;
+                    self.inner
+                        .set_control_projection(RuntimeState::Retired, None, None);
                 }
                 RuntimeState::Stopped
                     if self.inner.runtime_state() != RuntimeState::Stopped

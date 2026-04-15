@@ -219,6 +219,15 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 ],
             ),
             route(
+                "work_request_reaches_meerkat",
+                "mob",
+                "RequestRuntimeIngress",
+                "meerkat",
+                RouteTargetKind::Input,
+                "Ingest",
+                &[bind("runtime_id", "agent_runtime_id")],
+            ),
+            route(
                 "retire_request_reaches_meerkat",
                 "mob",
                 "RequestRuntimeRetire",
@@ -323,6 +332,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
                 "basic_round_trip",
                 &[
                     "binding_request_reaches_meerkat",
+                    "work_request_reaches_meerkat",
                     "runtime_bound_reaches_mob",
                     "work_completed_reaches_mob",
                 ],

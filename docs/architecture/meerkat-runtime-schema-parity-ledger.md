@@ -261,11 +261,11 @@ Current exact-parity state:
   owner in `RuntimeIngressAuthority`, which no longer derives a second active
   run identity but still owns contributor queues and reset / stop / destroy /
   recover bookkeeping below the two checked-in machines
-- a second checked-in gap also remains on the formal side: the
-  `meerkat_mob_seam` composition still models the Mob <- Meerkat return leg
-  but not the forward Mob -> Meerkat work-ingress route, so the seam cannot yet
-  truthfully claim to verify Mob-originated work against Meerkat batching /
-  boundary legality end to end
+- a second checked-in gap on the formal side is now closed too: the
+  `meerkat_mob_seam` composition models both the Mob <- Meerkat return leg and
+  the forward Mob -> Meerkat runtime-ingress request route. The checked-in seam
+  still leaves `WorkRef -> InputId` translation below the machine boundary, but
+  it no longer omits the behavior-bearing forward request itself
 
 Interpretation:
 
@@ -318,6 +318,15 @@ Interpretation:
   checked-in Meerkat module now owns the `BoundaryApplied -> RunCompleted` and
   `RunFailed` realization helpers, so the loop no longer carries a second copy
   of terminal run semantics below the machine boundary
+- ordinary attachment projection is no longer realized through direct driver
+  lifecycle verbs either: `PrepareBindings`, stale loop republish, and session
+  unregister now project `Idle <-> Attached` through machine-owned helpers
+  rather than calling `attach()` / `detach()` as semantic reducers
+- the formal seam is no longer missing the forward Mob -> Meerkat ingress
+  request: `SubmitWork` now emits `RequestRuntimeIngress`, the composition
+  routes that effect into Meerkat `Ingest`, and the truthful Mob quotient moved
+  to raw/phase/full `207 / 209 / 1323`, which is the right signature for
+  adding real routed behavior rather than more representative shadow state
 - the outer Meerkat ingress/prepare shell also no longer pre-rejects the same
   non-accepting phases that the direct driver contract already rejects: the
   machine boundary now normalizes only the public `Destroyed` error shape while
@@ -513,8 +522,8 @@ Outcome:
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in
    [`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
-6. Use the next loop to target payload-sensitive Meerkat admission semantics
-   beyond the now-modeled attached-steer and running-interrupt cases,
-   especially the question of which live ingress/post-admission carriers
-   belong in the two-machine model versus which should stay below it as
-   lower-authority mechanics.
+6. Use the next loop to target the remaining Meerkat contributor-set /
+   batch-legality seam: `RuntimeIngressAuthority` still owns the legality of
+   `StageDrainSnapshot`, `BoundaryApplied`, and terminal run-event contributor
+   sets below the checked-in machine boundary, even though coarse lifecycle and
+   run identity are now machine-owned.

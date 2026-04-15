@@ -50,7 +50,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Abort`(session_id: SessionId)
 - `AbortAll`
 - `Wait`(session_id: SessionId)
-- `Ingest`(runtime_id: String)
+- `Ingest`(runtime_id: AgentRuntimeId)
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)

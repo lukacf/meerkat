@@ -92,6 +92,10 @@ pub fn mob_machine() -> MachineSchema {
                         fields: runtime_binding_request_fields(),
                     },
                     VariantSchema {
+                        name: "RequestRuntimeIngress".into(),
+                        fields: work_submission_fields(),
+                    },
+                    VariantSchema {
                         name: "RequestRuntimeRetire".into(),
                         fields: vec![],
                     },
@@ -186,8 +190,10 @@ pub fn mob_machine() -> MachineSchema {
                 ],
                 updates: vec![],
                 to: "Running".into(),
-                // SubmitMemberWork effect removed (unimplemented route to MeerkatMachine).
-                emit: vec![],
+                // SubmitWork formally requests runtime ingress on the bound
+                // member runtime. The WorkRef -> InputId translation still
+                // happens below the machine boundary.
+                emit: vec![work_submission_emit("RequestRuntimeIngress")],
             },
             TransitionSchema {
                 name: "ObserveWorkCompleted".into(),
@@ -395,6 +401,7 @@ pub fn mob_machine() -> MachineSchema {
         ci_step_limit: Some(6),
         effect_dispositions: vec![
             routed_disposition("RequestRuntimeBinding", &["MeerkatMachine"]),
+            routed_disposition("RequestRuntimeIngress", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeRetire", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeDestroy", &["MeerkatMachine"]),
             external_disposition("EmitMemberLifecycleNotice"),
@@ -468,6 +475,20 @@ fn runtime_observation_emit(variant: &str) -> EffectEmit {
     EffectEmit {
         variant: variant.into(),
         fields: IndexMap::new(),
+    }
+}
+
+fn work_submission_emit(variant: &str) -> EffectEmit {
+    EffectEmit {
+        variant: variant.into(),
+        fields: IndexMap::from([
+            (
+                "agent_runtime_id".into(),
+                Expr::Binding("agent_runtime_id".into()),
+            ),
+            ("fence_token".into(), Expr::Binding("fence_token".into())),
+            ("work_id".into(), Expr::Binding("work_id".into())),
+        ]),
     }
 }
 

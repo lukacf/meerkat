@@ -21,7 +21,7 @@ async fn mark_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriver
         return Ok(());
     }
 
-    driver.stop_runtime().await
+    driver.finalize_stop_runtime().await
 }
 
 /// Deliver one executor control command and report whether the runtime loop

@@ -1533,7 +1533,7 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
         },
         VariantSchema {
             name: "Ingest".into(),
-            fields: vec![field("runtime_id", TypeRef::String)],
+            fields: vec![field("runtime_id", named("AgentRuntimeId"))],
         },
         VariantSchema {
             name: "PublishEvent".into(),

@@ -2434,9 +2434,11 @@ name = "machine-dsl-tests"
 version = "0.5.2"
 dependencies = [
  "indexmap",
+ "meerkat-machine-codegen",
  "meerkat-machine-dsl",
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
+ "trybuild",
 ]
 
 [[package]]

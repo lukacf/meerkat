@@ -15,7 +15,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
-- `staged_requested_deferred_names`: `Set<String>`
 - `active_visibility_revision`: `u64`
 - `staged_visibility_revision`: `u64`
 
@@ -463,6 +462,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `active_not_behind_staged`
   - `equal_revision_requires_equal_active_and_staged_input`
+  - `active_requested_subset_of_staged_requested`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Idle`
 
@@ -473,6 +473,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `active_not_behind_staged`
   - `equal_revision_requires_equal_active_and_staged_input`
+  - `active_requested_subset_of_staged_requested`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Attached`
 
@@ -483,6 +484,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `active_not_behind_staged`
   - `equal_revision_requires_equal_active_and_staged_input`
+  - `active_requested_subset_of_staged_requested`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Running`
 
@@ -493,6 +495,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `active_not_behind_staged`
   - `equal_revision_requires_equal_active_and_staged_input`
+  - `active_requested_subset_of_staged_requested`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Retired`
 
@@ -503,6 +506,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `active_not_behind_staged`
   - `equal_revision_requires_equal_active_and_staged_input`
+  - `active_requested_subset_of_staged_requested`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Stopped`
 

@@ -2,8 +2,8 @@ use indexmap::IndexMap;
 
 use crate::{
     EffectDisposition, EffectDispositionRule, EffectEmit, EnumSchema, Expr, FieldSchema, Guard,
-    HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, RustBinding, StateSchema,
-    TransitionSchema, TypeRef, Update, VariantSchema, machine::TriggerKind,
+    HelperSchema, InitSchema, InputMatch, InvariantSchema, MachineSchema, Quantifier, RustBinding,
+    StateSchema, TransitionSchema, TypeRef, Update, VariantSchema, machine::TriggerKind,
 };
 
 pub fn meerkat_machine() -> MachineSchema {
@@ -62,10 +62,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     "silent_intent_overrides",
                     TypeRef::Set(Box::new(TypeRef::String)),
                 ),
-                field(
-                    "staged_requested_deferred_names",
-                    TypeRef::Set(Box::new(TypeRef::String)),
-                ),
                 field("active_visibility_revision", TypeRef::U64),
                 field("staged_visibility_revision", TypeRef::U64),
             ],
@@ -80,7 +76,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("current_run_id", Expr::None),
                     init("pre_run_phase", Expr::None),
                     init("silent_intent_overrides", Expr::EmptySet),
-                    init("staged_requested_deferred_names", Expr::EmptySet),
                     init("active_visibility_revision", Expr::U64(0)),
                     init("staged_visibility_revision", Expr::U64(0)),
                 ],
@@ -764,10 +759,6 @@ fn reset_session_state() -> Vec<Update> {
             expr: Expr::None,
         },
         Update::Assign {
-            field: "staged_requested_deferred_names".into(),
-            expr: Expr::EmptySet,
-        },
-        Update::Assign {
             field: "active_visibility_revision".into(),
             expr: Expr::U64(0),
         },
@@ -924,20 +915,10 @@ fn request_deferred_tools_transition(name: &str, phase: &str) -> TransitionSchem
             bindings: vec!["names".into(), "witnesses".into()],
         },
         guards: vec![session_registered_guard()],
-        updates: vec![
-            Update::ForEach {
-                binding: "name".into(),
-                over: Expr::Binding("names".into()),
-                updates: vec![Update::SetInsert {
-                    field: "staged_requested_deferred_names".into(),
-                    value: Expr::Binding("name".into()),
-                }],
-            },
-            Update::Assign {
-                field: "staged_visibility_revision".into(),
-                expr: next_staged_visibility_revision_expr(),
-            },
-        ],
+        updates: vec![Update::Assign {
+            field: "staged_visibility_revision".into(),
+            expr: next_staged_visibility_revision_expr(),
+        }],
         to: phase.into(),
         emit: vec![],
     }
@@ -975,18 +956,34 @@ fn publish_committed_visible_set_transition(name: &str, phase: &str) -> Transiti
                         Box::new(Expr::Binding("active_visibility_revision".into())),
                         Box::new(Expr::Binding("staged_visibility_revision".into())),
                     ),
-                    Expr::And(vec![Expr::Eq(
-                        Box::new(Expr::Binding("active_filter".into())),
-                        Box::new(Expr::Binding("staged_filter".into())),
-                    )]),
+                    Expr::And(vec![
+                        Expr::Eq(
+                            Box::new(Expr::Binding("active_filter".into())),
+                            Box::new(Expr::Binding("staged_filter".into())),
+                        ),
+                        Expr::Eq(
+                            Box::new(Expr::Binding("active_requested_deferred_names".into())),
+                            Box::new(Expr::Binding("staged_requested_deferred_names".into())),
+                        ),
+                    ]),
                 ]),
+            },
+            Guard {
+                name: "active_requested_subset_of_staged_requested".into(),
+                expr: Expr::Quantified {
+                    quantifier: Quantifier::All,
+                    binding: "requested_name".into(),
+                    over: Box::new(Expr::Binding("active_requested_deferred_names".into())),
+                    body: Box::new(Expr::Contains {
+                        collection: Box::new(Expr::Binding(
+                            "staged_requested_deferred_names".into(),
+                        )),
+                        value: Box::new(Expr::Binding("requested_name".into())),
+                    }),
+                },
             },
         ],
         updates: vec![
-            Update::Assign {
-                field: "staged_requested_deferred_names".into(),
-                expr: Expr::Binding("staged_requested_deferred_names".into()),
-            },
             Update::Assign {
                 field: "active_visibility_revision".into(),
                 expr: Expr::Binding("active_visibility_revision".into()),

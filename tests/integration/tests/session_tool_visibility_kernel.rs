@@ -144,11 +144,10 @@ fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_acti
         "top-level machine should no longer mirror active requested names",
     );
 
-    match requested.fields.get("staged_requested_deferred_names") {
-        Some(KernelValue::Set(names)) => {
-            assert!(names.contains(&string("search")));
-            assert!(names.contains(&string("view_image")));
-        }
-        other => panic!("unexpected staged names shape: {other:?}"),
-    }
+    assert!(
+        !requested
+            .fields
+            .contains_key("staged_requested_deferred_names"),
+        "top-level machine should no longer mirror staged requested names",
+    );
 }

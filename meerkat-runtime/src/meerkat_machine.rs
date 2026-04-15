@@ -4201,10 +4201,6 @@ impl MeerkatMachine {
                 ),
             );
             available_fields.insert(
-                "staged_requested_deferred_names".into(),
-                formal_projection_value(&visibility_state.staged_requested_deferred_names),
-            );
-            available_fields.insert(
                 "active_visibility_revision".into(),
                 formal_projection_value(&visibility_state.active_revision),
             );

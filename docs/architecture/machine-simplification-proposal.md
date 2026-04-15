@@ -328,6 +328,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | `drain_running` should remain checked-in Meerkat state | rejected / landed | Removed `drain_running` from the checked-in Meerkat state after confirming it is only a top-level projection of lower-authority drain lifecycle. TLC stayed green, the raw quotient stayed flat at `459`, and the truthful Meerkat graph fell from `19,459` to `14,536` reachable states. |
 | `active_requested_deferred_names` should remain checked-in Meerkat state | rejected / landed | Removed `active_requested_deferred_names` from the checked-in Meerkat state while leaving the canonical `SessionToolVisibilityState` and visibility owner untouched below the machine boundary. TLC stayed green, the raw quotient stayed flat at `459`, and the truthful Meerkat graph fell again from `14,536` to `11,293` reachable states. |
 | `peer_ingress_configured` should remain checked-in Meerkat state | rejected / landed | Removed `peer_ingress_configured` from the checked-in Meerkat state after confirming it is only a top-level projection of lower-authority ingress/drain slot truth. TLC stayed green, the raw quotient dropped from `459` to `340`, and the truthful Meerkat graph fell again from `11,293` to `7,255` reachable states. |
+| `staged_requested_deferred_names` should remain checked-in Meerkat state | rejected / landed | Removed `staged_requested_deferred_names` from the checked-in Meerkat state while keeping the canonical staged deferred-name set in the lower-authority visibility owner. The machine now enforces active-vs-staged deferred-name constraints directly on `PublishCommittedVisibleSet` input bindings. TLC stayed green, the raw quotient stayed flat at `340`, and the truthful Meerkat graph fell again from `7,255` to `3,835` reachable states. |
 | Helper-owned admission wake/process signaling should stay below the checked-in machine | rejected / landed | Removed admission-side `WakeRuntime` / `InterruptYielding` / `RequestImmediateProcessing` ownership from `RuntimeIngressAuthority`, then lifted the final admission signal classifier into the machine-owned accept surface itself: the checked-in runtime now derives the post-admission signal from the resolved `AcceptOutcome` policy plus the steer/immediacy bit, and the driver helper no longer caches admission-time signal truth locally. All three Meerkat parity audits, the direct driver regression lanes, full runtime tests, and clippy stayed green. |
 | Handwritten runtime-control admission/wake state should stay alive below the two-machine model | rejected / landed | Removed the dead handwritten `RuntimeControlAuthority` admission/wake branch (`SubmitWork`, `AdmissionAccepted`, `AdmissionRejected`, `AdmissionDeduplicated`, `wake_pending`, `process_pending`) after proving the live runtime never exercised it. Exact Meerkat parity stayed green, TLC/Hopcroft stayed flat, and the remaining handwritten helper is now narrowed to coarse run-lifecycle / recycle bookkeeping instead of a shadow admission machine. |
 | Live recycle should keep the helper-only `Recovering` detour | rejected / landed | Collapsed the live helper recycle path to the same direct control projection the checked-in Meerkat machine already models (`Idle/Retired -> Idle`, `Attached -> Attached`). Exact Meerkat parity stayed green, TLC/Hopcroft stayed flat, and the extra helper-side recycle completion transition was removed without changing the truthful state-space readout. |
@@ -400,9 +401,9 @@ We ran three observation modes for each machine:
 | MobMachine | `none` | 2238 | 207 | 90.8% | After restoring stale-binding truth and then lifting `SubmitWork` origin legality into `MobMachine`, the truthful graph is still strongly quotientable. The remaining state is machine-owned binding/origin/work-routing truth, not representative identity shadow state. |
 | MobMachine | `phase` | 2238 | 209 | 90.7% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection even after stale-binding restoration, the forward ingress route, and origin-sensitive submit-work legality. |
 | MobMachine | `full` | 2238 | 2238 | 0.0% | Once the remaining authoritative counters, binding table, and externally-addressable set are preserved, every reachable Mob snapshot is still distinct. |
-| MeerkatMachine | `none` | 19,459 | 459 | 97.6% | After the control/ingress owner-reduction cuts, the truthful graph remains highly quotientable. The largest mixed block is now driven by checked-in machine facts like `staged_visibility_revision`, `pre_run_phase`, `active_visibility_revision`, `current_run_id`, `peer_ingress_configured`, and `attachment_live`, not by deleted helper folklore. |
-| MeerkatMachine | `phase` | 19,459 | 464 | 97.6% | Preserving phase still adds only five quotient blocks, so phase remains almost entirely projection even after the latest control/ingress cuts. |
-| MeerkatMachine | `full` | 19,459 | 19,070 | 2.0% | Preserving the full snapshot still keeps nearly every remaining Meerkat state distinct, but the surviving structure now sits in real checked-in machine fields rather than in duplicated helper-owned lifecycle state. |
+| MeerkatMachine | `none` | 3,835 | 340 | 91.1% | After the fast-loop removal of top-level ingress and visibility mirrors, the truthful graph is much smaller and still strongly quotientable. The remaining largest mixed block is driven mostly by visibility revisions, `pre_run_phase`, runtime binding, and the still-live silent-intent carrier. |
+| MeerkatMachine | `phase` | 3,835 | 345 | 91.0% | Preserving phase now adds only five quotient blocks, so phase remains almost entirely projection even after the latest Meerkat reductions. |
+| MeerkatMachine | `full` | 3,835 | 3,718 | 3.1% | Preserving the full snapshot still keeps most remaining Meerkat states distinct, but what survives now is far closer to real machine-owned binding / visibility / run-return truth than to helper folklore. |
 
 That rerun also clarified the remaining architectural blockers. The stale
 `RuntimeControlAuthority` problem is gone, and `RuntimeIngressAuthority` no
@@ -874,19 +875,19 @@ That is the strongest concrete evidence so far that the current phase surface
 is layered on top of a smaller field-driven machine instead of acting as the
 primary semantic axis. The most discriminating fields inside the block are now:
 
-- `staged_visibility_revision` (`8` value buckets; largest bucket `1,165`)
-- `active_visibility_revision` (`3` buckets; largest bucket `1,882`)
-- `pre_run_phase` (`3` buckets; largest bucket `2,436`)
-- `attachment_live` (`2` buckets; split `2,715 / 1,996`)
-- `current_run_id` (`2` buckets; split `2,716 / 1,995`)
-- `peer_ingress_configured` (`2` buckets; split `2,772 / 1,939`)
-- `staged_requested_deferred_names` (`2` buckets; split `2,924 / 1,787`)
-- `active_requested_deferred_names` (`2` buckets; split `3,109 / 1,602`)
+- `staged_visibility_revision` (`8` value buckets; largest bucket `434`)
+- `pre_run_phase` (`4` buckets; largest bucket `596`)
+- `active_visibility_revision` (`3` buckets; largest bucket `545`)
+- `current_run_id` (`2` buckets; split `766 / 723`)
+- `attachment_live` (`2` buckets; split `832 / 657`)
+- `silent_intent_overrides` (`2` buckets; split `898 / 591`)
+- `active_fence_token` (`2` buckets; split `1,011 / 478`)
+- `active_generation` (`2` buckets; split `1,011 / 478`)
 
 The read is strikingly consistent with the earlier field-ablation pass: the
-largest Meerkat block is now dominated by visibility-staging, runtime binding,
-ingress, and pre-run restoration dimensions rather than by phase labels or the
-removed top-level filter mirrors.
+largest Meerkat block is now dominated by visibility revisions, runtime
+binding, and pre-run restoration dimensions rather than by phase labels or the
+removed top-level ingress / deferred-name mirrors.
 
 ### Audit-map results
 

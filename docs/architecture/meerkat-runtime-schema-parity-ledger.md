@@ -173,6 +173,13 @@ Current state:
   lower-authority ingress/drain slot truth. TLC stayed green, the raw quotient
   dropped from `459` to `340`, and the truthful Meerkat graph fell again from
   `11,293` to `7,255` reachable states.
+- Fast-loop landed: `staged_requested_deferred_names` was removed from the
+  checked-in Meerkat state while the canonical visibility owner retained the
+  staged deferred-name set below the machine boundary. The machine now enforces
+  the active-vs-staged deferred-name invariants directly on
+  `PublishCommittedVisibleSet` input bindings instead of storing a top-level
+  mirror. TLC stayed green, the raw quotient stayed flat at `340`, and the
+  truthful Meerkat graph fell again from `7,255` to `3,835` reachable states.
 
 ## Full-row Snapshot (2026-04-15)
 

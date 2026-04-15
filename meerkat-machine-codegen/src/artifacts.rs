@@ -2057,6 +2057,26 @@ fn render_named_domain_assignment(
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
 ) -> String {
+    if name == "ToolFilter" {
+        let target_cardinality = sample_cardinality.max(2);
+        let mut values = named_samples
+            .get(name)
+            .into_iter()
+            .flat_map(|samples| samples.iter().take(target_cardinality).cloned())
+            .collect::<Vec<_>>();
+        let base_len = values.len();
+        values.extend(
+            ((base_len + 1)..=target_cardinality)
+                .map(|idx| format!("{}_{}", tla_ident(name).to_lowercase(), idx)),
+        );
+        let rendered = values
+            .into_iter()
+            .map(|sample| tla_string(&sample))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{{{rendered}}}");
+    }
+
     if let Some(rendered) = collected_sample_literals(name, sample_cardinality, named_samples) {
         return format!("{{{}}}", rendered.join(", "));
     }
@@ -6512,4 +6532,29 @@ fn tla_ident(value: &str) -> String {
 
 fn tla_string(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meerkat_schema() -> MachineSchema {
+        canonical_machine_schemas()
+            .into_iter()
+            .find(|machine| machine.machine == "MeerkatMachine")
+            .expect("MeerkatMachine schema")
+            .schema
+    }
+
+    #[test]
+    fn machine_ci_cfg_broadens_tool_filter_domain() {
+        let cfg = render_machine_ci_cfg(&meerkat_schema(), false);
+        assert!(cfg.contains("ToolFilterValues = {\"All\", \"toolfilter_2\"}"));
+    }
+
+    #[test]
+    fn machine_deep_cfg_broadens_tool_filter_domain() {
+        let cfg = render_machine_ci_cfg(&meerkat_schema(), true);
+        assert!(cfg.contains("ToolFilterValues = {\"All\", \"toolfilter_2\"}"));
+    }
 }

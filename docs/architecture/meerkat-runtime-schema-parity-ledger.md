@@ -113,6 +113,10 @@ Current exact-parity state:
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed
   green after removing both
+- the Meerkat verification `ToolFilter` domain is no longer singleton: CI/deep
+  now both admit `{"All", "toolfilter_2"}`, which raises the truthful
+  reachable state space sharply without changing the exact runtime/schema audit
+  frontier
 - the pure query surface remains runtime-audited helper behavior, but it is no
   longer counted as formal transition coverage
 
@@ -291,13 +295,14 @@ Outcome:
    until the DSL work deliberately lifts them into the top-level machine.
 3. Use the trustworthy post-parity Hopcroft rerun as the Meerkat
    simplification baseline after the visibility-boundary and
-   LLM/capability-boundary, wake/process, and dead active-work cuts:
-   raw `11,814 -> 385`, phase `11,814 -> 390`, TLC `598,901 generated /
-   11,814 distinct / depth 9`.
+   LLM/capability-boundary, wake/process, dead active-work, and
+   non-singleton `ToolFilter` cuts:
+   raw `38,945 -> 385`, phase `38,945 -> 390`, TLC `3,517,281 generated /
+   38,945 distinct / depth 9`.
 4. Read that baseline together with the largest-block field projection from
    [`docs/architecture/machine-simplification-proposal.md`](machine-simplification-proposal.md):
-   the dominant Meerkat mixed block is now measured as `4,669` states over
-   `1,971` extended-state tuples, with `1,566` tuples reused across multiple
+   the dominant Meerkat mixed block is now measured as `16,103` states over
+   `6,948` extended-state tuples, with `5,338` tuples reused across multiple
    phases.
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in

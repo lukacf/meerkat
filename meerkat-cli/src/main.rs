@@ -1,4 +1,5 @@
 //! meerkat-cli - Headless CLI for Meerkat
+#![cfg_attr(feature = "mini-surface", allow(dead_code))]
 
 mod mcp;
 #[cfg(feature = "comms")]
@@ -1508,13 +1509,13 @@ async fn main() -> anyhow::Result<ExitCode> {
             line_format,
         } => {
             #[cfg(any(not(feature = "mini-surface"), feature = "mini-skills"))]
-            let skills = skills;
+            let run_skills = skills;
             #[cfg(not(any(not(feature = "mini-surface"), feature = "mini-skills")))]
-            let skills = Vec::new();
+            let run_skills = Vec::new();
             #[cfg(not(feature = "mini-surface"))]
-            let wait_for_mcp = wait_for_mcp;
+            let wait_for_mcp_enabled = wait_for_mcp;
             #[cfg(feature = "mini-surface")]
-            let wait_for_mcp = false;
+            let wait_for_mcp_enabled = false;
             Box::pin(handle_run_command(
                 prompt,
                 resume,
@@ -1531,7 +1532,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 params,
                 provider_params_json,
                 output_schema,
-                skills,
+                run_skills,
                 allow_tools,
                 block_tools,
                 labels,
@@ -1539,7 +1540,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 app_context,
                 tools,
                 yolo,
-                wait_for_mcp,
+                wait_for_mcp_enabled,
                 verbose,
                 keep_alive,
                 stdin,
@@ -8780,6 +8781,7 @@ mod tests {
         assert!(err.to_string().contains("intent"));
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_mob_run_flow_short_flags_parse() {
         let cli = Cli::try_parse_from(["rkat", "mob", "run-flow", "mob-1", "--flow", "f1", "-s"])
@@ -8803,6 +8805,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_pack_command_parses() {
         let cli = Cli::try_parse_from([
@@ -8829,6 +8832,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_deploy_command_parses() {
         let cli = Cli::try_parse_from([
@@ -8869,6 +8873,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_deploy_surface_flag_parses() {
         let cli = Cli::try_parse_from([
@@ -8892,6 +8897,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mcp_add_and_remove_parse_local_config_surface() {
         let add = Cli::try_parse_from([
@@ -8946,6 +8952,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_help_snapshots_cover_current_public_surface() {
         use clap::CommandFactory;
@@ -8985,6 +8992,7 @@ mod tests {
         assert!(mob.contains("wait-kickoff"));
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_wait_kickoff_command_parses() {
         let cli = Cli::try_parse_from([
@@ -9021,6 +9029,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_deploy_override_flags_parse() {
         let cli = Cli::try_parse_from([
@@ -9060,6 +9069,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[test]
     fn test_cli_mob_web_build_command_parses() {
         let cli = Cli::try_parse_from([

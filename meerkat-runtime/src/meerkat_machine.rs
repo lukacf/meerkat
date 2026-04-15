@@ -3383,14 +3383,6 @@ impl MeerkatMachine {
                 formal_projection_value(&drain_running),
             );
             available_fields.insert(
-                "active_filter".into(),
-                formal_projection_value(&visibility_state.active_filter),
-            );
-            available_fields.insert(
-                "staged_filter".into(),
-                formal_projection_value(&visibility_state.staged_filter),
-            );
-            available_fields.insert(
                 "active_requested_deferred_names".into(),
                 formal_projection_value(&visibility_state.active_requested_deferred_names),
             );

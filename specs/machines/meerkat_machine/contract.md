@@ -15,8 +15,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pre_run_phase`: `Option<String>`
 - `peer_ingress_configured`: `Bool`
 - `drain_running`: `Bool`
-- `active_filter`: `ToolFilter`
-- `staged_filter`: `ToolFilter`
 - `active_requested_deferred_names`: `Set<String>`
 - `staged_requested_deferred_names`: `Set<String>`
 - `active_visibility_revision`: `u64`

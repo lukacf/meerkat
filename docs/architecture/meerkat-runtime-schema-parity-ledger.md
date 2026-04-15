@@ -62,10 +62,21 @@ Current state:
   routed seam effects: `current_llm_identity`, `current_capability_surface`,
   `capability_surface_status`, `capability_base_filter`,
   `inherited_base_filter`
-- the formal Meerkat state no longer carries the dead wake/process pending
-  bits: `wake_pending` and `process_pending` were constant `FALSE` across the
-  truthful reachable graph and their removal kept the exact parity surface
+- the top-level Meerkat machine no longer carries the dead wake/process
+  mirrors: `wake_pending` and `process_pending` were constant `FALSE` across
+  the truthful reachable graph and their removal kept the exact parity surface
   unchanged
+- this does **not** mean runtime-control wake/process behavior is now fully
+  modeled elsewhere in the canonical catalog: the authoritative
+  `RuntimeControlAuthority` still owns the real wake/process semantics in
+  handwritten code, so absorbing that behavior back into the checked-in
+  Meerkat machine is a distinct follow-up from removing the dead top-level
+  mirrors
+- the top-level Meerkat machine no longer carries the filter mirror pair
+  `active_filter` / `staged_filter`; the authoritative
+  `MachineToolVisibilityOwner` still owns the real filter state, exact parity
+  stayed green, and the truthful Meerkat reachable graph fell from `38,945`
+  back to `11,814` states while the raw/phase quotient stayed at `385 / 390`
 - the pure query/helper surface is now explicitly carried as
   `surface_only_inputs` instead of formal self-loops:
   `ContainsSession`, `SessionHasExecutor`, `SessionHasComms`,
@@ -107,8 +118,13 @@ Current exact-parity state:
   as top-level Meerkat machine state because they do not affect command
   legality, phase changes, or routed effect identity
 - the old wake/process pending bits are also gone from the top-level formal
-  machine; the current truthful graph never drove them away from
-  `FALSE`, and exact parity stayed green after the cut
+  machine; the truthful graph never drove those mirrors away from `FALSE`,
+  and exact parity stayed green after the cut
+- that top-level cut does not close the deeper control-authority modeling
+  question: the real `wake_pending` / `process_pending` behavior still lives in
+  handwritten `RuntimeControlAuthority` logic and should be absorbed back into
+  the checked-in Meerkat machine rather than treated as verified by the
+  top-level audit
 - the dead top-level active-work slice is also gone: `active_work_id` never
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed
@@ -117,6 +133,10 @@ Current exact-parity state:
   now both admit `{"All", "toolfilter_2"}`, which raises the truthful
   reachable state space sharply without changing the exact runtime/schema audit
   frontier
+- after broadening that `ToolFilter` domain, we removed the top-level
+  `active_filter` / `staged_filter` mirrors as well; exact parity stayed green
+  and the truthful Meerkat readout returned to `11,814` reachable states with
+  raw/phase/full quotients `385 / 390 / 11,425`
 - the pure query surface remains runtime-audited helper behavior, but it is no
   longer counted as formal transition coverage
 

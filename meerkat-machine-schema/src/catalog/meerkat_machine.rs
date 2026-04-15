@@ -56,8 +56,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 field("pre_run_phase", TypeRef::Option(Box::new(TypeRef::String))),
                 field("peer_ingress_configured", TypeRef::Bool),
                 field("drain_running", TypeRef::Bool),
-                field("active_filter", named("ToolFilter")),
-                field("staged_filter", named("ToolFilter")),
                 field(
                     "active_requested_deferred_names",
                     TypeRef::Set(Box::new(TypeRef::String)),
@@ -80,8 +78,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("pre_run_phase", Expr::None),
                     init("peer_ingress_configured", Expr::Bool(false)),
                     init("drain_running", Expr::Bool(false)),
-                    init("active_filter", tool_filter_all()),
-                    init("staged_filter", tool_filter_all()),
                     init("active_requested_deferred_names", Expr::EmptySet),
                     init("staged_requested_deferred_names", Expr::EmptySet),
                     init("active_visibility_revision", Expr::U64(0)),
@@ -530,10 +526,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 ],
                 updates: vec![
                     Update::Assign {
-                        field: "active_filter".into(),
-                        expr: Expr::Field("staged_filter".into()),
-                    },
-                    Update::Assign {
                         field: "active_requested_deferred_names".into(),
                         expr: Expr::Field("staged_requested_deferred_names".into()),
                     },
@@ -859,14 +851,6 @@ fn reset_session_state() -> Vec<Update> {
             expr: Expr::Bool(false),
         },
         Update::Assign {
-            field: "active_filter".into(),
-            expr: tool_filter_all(),
-        },
-        Update::Assign {
-            field: "staged_filter".into(),
-            expr: tool_filter_all(),
-        },
-        Update::Assign {
             field: "active_requested_deferred_names".into(),
             expr: Expr::EmptySet,
         },
@@ -945,13 +929,6 @@ fn named(name: &str) -> TypeRef {
     TypeRef::Named(name.into())
 }
 
-fn tool_filter_all() -> Expr {
-    Expr::NamedVariant {
-        enum_name: "ToolFilter".into(),
-        variant: "All".into(),
-    }
-}
-
 fn register_session_transition(name: &str, phase: &str) -> TransitionSchema {
     TransitionSchema {
         name: name.into(),
@@ -1025,16 +1002,10 @@ fn stage_persistent_filter_transition(name: &str, phase: &str) -> TransitionSche
             bindings: vec!["filter".into(), "witnesses".into()],
         },
         guards: vec![session_registered_guard()],
-        updates: vec![
-            Update::Assign {
-                field: "staged_filter".into(),
-                expr: Expr::Binding("filter".into()),
-            },
-            Update::Assign {
-                field: "staged_visibility_revision".into(),
-                expr: next_staged_visibility_revision_expr(),
-            },
-        ],
+        updates: vec![Update::Assign {
+            field: "staged_visibility_revision".into(),
+            expr: next_staged_visibility_revision_expr(),
+        }],
         to: phase.into(),
         emit: vec![],
     }
@@ -1129,14 +1100,6 @@ fn publish_committed_visible_set_transition(name: &str, phase: &str) -> Transiti
             },
         ],
         updates: vec![
-            Update::Assign {
-                field: "active_filter".into(),
-                expr: Expr::Binding("active_filter".into()),
-            },
-            Update::Assign {
-                field: "staged_filter".into(),
-                expr: Expr::Binding("staged_filter".into()),
-            },
             Update::Assign {
                 field: "active_requested_deferred_names".into(),
                 expr: Expr::Binding("active_requested_deferred_names".into()),

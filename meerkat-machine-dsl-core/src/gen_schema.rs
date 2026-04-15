@@ -533,17 +533,19 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
 /// For derived-phase machines: enumerate all phases, substitute the phase projection's
 /// defining conditions into the guard, and check if the result is trivially false.
 fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
-    let non_terminal: Vec<String> = def
+    // All phases are candidates for `from` — including terminal phases.
+    // A transition CAN originate from a terminal phase (the schema records where
+    // transitions are reachable, not where they're useful).
+    let all_phases: Vec<String> = def
         .phase_enum
         .variants
         .iter()
-        .filter(|v| !def.terminal_phases.iter().any(|tp| tp == *v))
         .map(|v| v.to_string())
         .collect();
 
     let guard = match &t.guard {
         Some(g) => g,
-        None => return non_terminal, // no guard → all non-terminal phases
+        None => return all_phases, // no guard → all phases
     };
 
     if def.is_stored_phase() {
@@ -551,15 +553,272 @@ fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
         let mut phases = Vec::new();
         extract_phase_refs_from_guard(def, guard, &mut phases);
         if phases.is_empty() {
-            // Guard doesn't reference the phase field → all non-terminal
-            non_terminal
+            // Guard doesn't reference the phase field → all phases
+            all_phases
         } else {
             phases
         }
     } else {
-        // Derived-phase: for now, return all non-terminal phases.
-        // Full boolean substitution is a later optimization.
-        non_terminal
+        // Derived-phase: enumerate all non-terminal phases, substitute the phase
+        // projection's defining conditions into the guard, check if trivially false.
+        derive_from_phases_derived(def, guard, &all_phases)
+    }
+}
+
+/// For derived-phase machines: determine which phases are compatible with a guard.
+///
+/// For each phase, the projection defines conditions under which that phase is active.
+/// We check if the guard is satisfiable given those conditions.
+///
+/// Algorithm: for each candidate phase, collect the field constraints implied by
+/// the phase projection (the phase's own condition AND the negation of all
+/// higher-priority phases' conditions). Then check if the guard is trivially
+/// contradicted by those constraints.
+fn derive_from_phases_derived(
+    def: &MachineDef,
+    guard: &ExprDef,
+    all_phases: &[String],
+) -> Vec<String> {
+    let proj = match &def.phase_projection {
+        Some(p) => p,
+        None => return all_phases.to_vec(),
+    };
+
+    // Collect the field constraints that each guard references
+    let guard_fields = collect_field_refs(guard);
+    if guard_fields.is_empty() {
+        return all_phases.to_vec();
+    }
+
+    let mut from = Vec::new();
+
+    for phase_name in all_phases {
+        // Find the projection rule for this phase
+        let rule_idx = proj
+            .rules
+            .iter()
+            .position(|r| r.phase.to_string() == *phase_name);
+        let rule_idx = match rule_idx {
+            Some(i) => i,
+            None => {
+                from.push(phase_name.clone());
+                continue;
+            }
+        };
+
+        // Build the field facts for this phase:
+        // - All higher-priority rules' conditions are FALSE
+        // - This rule's condition is TRUE (if it has one)
+        let mut field_facts: Vec<(String, FieldFact)> = Vec::new();
+
+        for (i, rule) in proj.rules.iter().enumerate() {
+            if i < rule_idx {
+                // Higher-priority: its condition is FALSE for our phase
+                if let Some(cond) = &rule.condition {
+                    collect_negated_facts(cond, &mut field_facts);
+                }
+            } else if i == rule_idx {
+                // Our phase: its condition is TRUE
+                if let Some(cond) = &rule.condition {
+                    collect_positive_facts(cond, &mut field_facts);
+                }
+            }
+        }
+
+        // Check if the guard is contradicted by these facts
+        if !is_contradicted(guard, &field_facts) {
+            from.push(phase_name.clone());
+        }
+    }
+
+    if from.is_empty() {
+        // Shouldn't happen — return all phases as fallback
+        all_phases.to_vec()
+    } else {
+        from
+    }
+}
+
+/// A fact about a field's value, derived from phase projection conditions.
+#[derive(Debug)]
+enum FieldFact {
+    IsTrue,
+    IsFalse,
+    IsSome,
+    IsNone,
+    GteValue(u64),
+    LtValue(u64),
+    GtZero,
+    EqZero,
+}
+
+/// Collect field references from an expression.
+fn collect_field_refs(expr: &ExprDef) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_field_refs_inner(expr, &mut refs);
+    refs
+}
+
+fn collect_field_refs_inner(expr: &ExprDef, out: &mut Vec<String>) {
+    match expr {
+        ExprDef::Field(name) => out.push(name.to_string()),
+        ExprDef::Not(inner) => collect_field_refs_inner(inner, out),
+        ExprDef::And(exprs) | ExprDef::Or(exprs) => {
+            for e in exprs {
+                collect_field_refs_inner(e, out);
+            }
+        }
+        ExprDef::Eq(l, r)
+        | ExprDef::Neq(l, r)
+        | ExprDef::Gt(l, r)
+        | ExprDef::Gte(l, r)
+        | ExprDef::Lt(l, r)
+        | ExprDef::Lte(l, r)
+        | ExprDef::Add(l, r)
+        | ExprDef::Sub(l, r) => {
+            collect_field_refs_inner(l, out);
+            collect_field_refs_inner(r, out);
+        }
+        ExprDef::IsSome(inner) | ExprDef::IsNone(inner) => collect_field_refs_inner(inner, out),
+        ExprDef::Contains { collection, value } => {
+            collect_field_refs_inner(collection, out);
+            collect_field_refs_inner(value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Extract positive facts from a condition (the condition is TRUE).
+fn collect_positive_facts(expr: &ExprDef, facts: &mut Vec<(String, FieldFact)>) {
+    match expr {
+        // self.active → active is true
+        ExprDef::Field(name) => facts.push((name.to_string(), FieldFact::IsTrue)),
+        // !self.active → active is false
+        ExprDef::Not(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts.push((name.to_string(), FieldFact::IsFalse));
+            }
+        }
+        // self.field.is_some() → field is Some
+        ExprDef::IsSome(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts.push((name.to_string(), FieldFact::IsSome));
+            }
+        }
+        // self.field.is_none() → field is None
+        ExprDef::IsNone(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts.push((name.to_string(), FieldFact::IsNone));
+            }
+        }
+        // self.value >= self.limit → value >= limit (simplified: value is GteValue)
+        ExprDef::Gte(left, _right) => {
+            if let ExprDef::Field(name) = left.as_ref() {
+                facts.push((name.to_string(), FieldFact::GtZero));
+            }
+        }
+        // self.value > 0 → value is GtZero
+        ExprDef::Gt(left, right) => {
+            if let (ExprDef::Field(name), ExprDef::U64(0)) = (left.as_ref(), right.as_ref()) {
+                facts.push((name.to_string(), FieldFact::GtZero));
+            }
+        }
+        // conjunction: extract from both sides
+        ExprDef::And(exprs) => {
+            for e in exprs {
+                collect_positive_facts(e, facts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract negated facts from a condition (the condition is FALSE).
+fn collect_negated_facts(expr: &ExprDef, facts: &mut Vec<(String, FieldFact)>) {
+    match expr {
+        // condition `self.active` is FALSE → active is false
+        ExprDef::Field(name) => facts.push((name.to_string(), FieldFact::IsFalse)),
+        // condition `!self.active` is FALSE → active is true
+        ExprDef::Not(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts.push((name.to_string(), FieldFact::IsTrue));
+            }
+        }
+        // condition `self.field.is_some()` is FALSE → field is None
+        ExprDef::IsSome(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts.push((name.to_string(), FieldFact::IsNone));
+            }
+        }
+        // condition `self.value > 0` is FALSE → value == 0
+        ExprDef::Gt(left, right) => {
+            if let (ExprDef::Field(name), ExprDef::U64(0)) = (left.as_ref(), right.as_ref()) {
+                facts.push((name.to_string(), FieldFact::EqZero));
+            }
+        }
+        // For OR conditions being FALSE, ALL sub-conditions are false
+        ExprDef::Or(exprs) => {
+            for e in exprs {
+                collect_negated_facts(e, facts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check if a guard expression is contradicted by known field facts.
+fn is_contradicted(guard: &ExprDef, facts: &[(String, FieldFact)]) -> bool {
+    match guard {
+        // self.active && facts say active is false → contradicted
+        ExprDef::Field(name) => facts
+            .iter()
+            .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsFalse)),
+        ExprDef::Not(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts
+                    .iter()
+                    .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsTrue))
+            } else {
+                false
+            }
+        }
+        ExprDef::IsSome(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts
+                    .iter()
+                    .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsNone))
+            } else {
+                false
+            }
+        }
+        ExprDef::IsNone(inner) => {
+            if let ExprDef::Field(name) = inner.as_ref() {
+                facts
+                    .iter()
+                    .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsSome))
+            } else {
+                false
+            }
+        }
+        ExprDef::Eq(left, right) => {
+            // self.field == None but facts say field is Some → contradicted
+            if let (ExprDef::Field(name), ExprDef::None) = (left.as_ref(), right.as_ref()) {
+                return facts
+                    .iter()
+                    .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsSome));
+            }
+            if let (ExprDef::None, ExprDef::Field(name)) = (left.as_ref(), right.as_ref()) {
+                return facts
+                    .iter()
+                    .any(|(f, fact)| f == &name.to_string() && matches!(fact, FieldFact::IsSome));
+            }
+            false
+        }
+        // AND: if any conjunct is contradicted, the whole guard is contradicted
+        ExprDef::And(exprs) => exprs.iter().any(|e| is_contradicted(e, facts)),
+        // OR: only contradicted if ALL disjuncts are contradicted
+        ExprDef::Or(exprs) => exprs.iter().all(|e| is_contradicted(e, facts)),
+        _ => false,
     }
 }
 
@@ -624,6 +883,7 @@ fn extract_phase_refs_from_guard(def: &MachineDef, expr: &ExprDef, out: &mut Vec
 
 fn is_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
     matches!(expr, ExprDef::Field(name) if name == phase_field_name)
+        || matches!(expr, ExprDef::CurrentPhase)
 }
 
 fn is_phase_field_expr(expr: &ExprDef, phase_field_name: &str) -> bool {

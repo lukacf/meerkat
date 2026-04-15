@@ -1,6 +1,293 @@
 use meerkat_machine_dsl::machine;
 
 // ============================================================
+// End-to-end: DSL → runtime code + schema → TLA+ rendering
+// ============================================================
+
+mod e2e_tla {
+    use super::*;
+
+    machine! {
+        machine Turnstile {
+            version: 1,
+            rust: "test" / "turnstile",
+
+            state {
+                phase: TurnstilePhase,
+                coin_count: u64,
+                pass_count: u64,
+            }
+
+            init(Locked) {
+                coin_count = 0,
+                pass_count = 0,
+            }
+
+            terminal []
+
+            phase TurnstilePhase {
+                Locked,
+                Unlocked,
+            }
+
+            input TurnstileInput {
+                InsertCoin,
+                Push,
+            }
+
+            effect TurnstileEffect {
+                CoinAccepted { total: u64 },
+                PersonPassed { total: u64 },
+                PushRejected,
+            }
+
+            invariant unlocked_requires_coin {
+                self.phase != Phase::Unlocked || self.coin_count > 0
+            }
+
+            disposition CoinAccepted => local,
+            disposition PersonPassed => local,
+            disposition PushRejected => external,
+
+            transition InsertCoinLocked {
+                on input InsertCoin
+                guard { self.phase == Phase::Locked }
+                update {
+                    self.coin_count += 1;
+                }
+                to Unlocked
+                emit CoinAccepted { total: self.coin_count }
+            }
+
+            transition InsertCoinUnlocked {
+                on input InsertCoin
+                guard { self.phase == Phase::Unlocked }
+                update {
+                    self.coin_count += 1;
+                }
+                to Unlocked
+                emit CoinAccepted { total: self.coin_count }
+            }
+
+            transition PushUnlocked {
+                on input Push
+                guard { self.phase == Phase::Unlocked }
+                update {
+                    self.pass_count += 1;
+                }
+                to Locked
+                emit PersonPassed { total: self.pass_count }
+            }
+
+            transition PushLocked {
+                on input Push
+                guard { self.phase == Phase::Locked }
+                update {}
+                to Locked
+                emit PushRejected
+            }
+        }
+    }
+
+    // ---- Direction 1: Runtime dispatch works ----
+
+    #[test]
+    fn runtime_dispatch_full_cycle() {
+        let mut auth = TurnstileAuthority::new();
+        assert_eq!(auth.state.phase(), TurnstilePhase::Locked);
+
+        // Insert coin → Unlocked
+        let r = TurnstileMutator::apply(&mut auth, TurnstileInput::InsertCoin).unwrap();
+        assert_eq!(r.to_phase, TurnstilePhase::Unlocked);
+        assert_eq!(auth.state.coin_count, 1);
+
+        // Push → Locked (person passes)
+        let r = TurnstileMutator::apply(&mut auth, TurnstileInput::Push).unwrap();
+        assert_eq!(r.to_phase, TurnstilePhase::Locked);
+        assert_eq!(auth.state.pass_count, 1);
+
+        // Push while locked → stays Locked (rejected)
+        let r = TurnstileMutator::apply(&mut auth, TurnstileInput::Push).unwrap();
+        assert_eq!(r.to_phase, TurnstilePhase::Locked);
+        assert_eq!(r.effects, vec![TurnstileEffect::PushRejected]);
+    }
+
+    // ---- Direction 2: Schema validates ----
+
+    #[test]
+    fn schema_validates() {
+        let schema = TurnstileState::schema();
+        schema.validate().expect("turnstile schema should validate");
+    }
+
+    #[test]
+    fn schema_structure() {
+        let schema = TurnstileState::schema();
+        assert_eq!(schema.machine, "Turnstile");
+        assert_eq!(schema.state.phase.variants.len(), 2);
+        assert_eq!(schema.state.fields.len(), 3);
+        assert_eq!(schema.transitions.len(), 4);
+        assert_eq!(schema.effects.variants.len(), 3);
+        assert_eq!(schema.invariants.len(), 1);
+        assert_eq!(schema.effect_dispositions.len(), 3);
+
+        // Verify from-phases are derived correctly
+        let insert_locked = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "InsertCoinLocked")
+            .unwrap();
+        assert_eq!(insert_locked.from, vec!["Locked"]);
+
+        let push_unlocked = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "PushUnlocked")
+            .unwrap();
+        assert_eq!(push_unlocked.from, vec!["Unlocked"]);
+    }
+
+    // ---- Direction 3: Schema → TLA+ rendering ----
+
+    #[test]
+    fn schema_renders_to_tla_module() {
+        let schema = TurnstileState::schema();
+        let tla = meerkat_machine_codegen::render_machine_module(&schema);
+
+        // Verify the TLA+ module has expected structure
+        assert!(
+            tla.contains("---- MODULE Machine_Turnstile ----"),
+            "TLA+ should contain module header"
+        );
+        assert!(tla.contains("STATE"), "TLA+ should contain STATE section");
+        assert!(
+            tla.contains("phase : "),
+            "TLA+ should declare phase variable"
+        );
+        assert!(
+            tla.contains("coin_count"),
+            "TLA+ should reference coin_count field"
+        );
+        assert!(
+            tla.contains("pass_count"),
+            "TLA+ should reference pass_count field"
+        );
+        assert!(
+            tla.contains("TRANSITIONS"),
+            "TLA+ should contain TRANSITIONS section"
+        );
+        assert!(
+            tla.contains("InsertCoinLocked"),
+            "TLA+ should contain InsertCoinLocked transition"
+        );
+        assert!(
+            tla.contains("PushUnlocked"),
+            "TLA+ should contain PushUnlocked transition"
+        );
+        assert!(
+            tla.contains("INVARIANTS"),
+            "TLA+ should contain INVARIANTS section"
+        );
+        assert!(
+            tla.contains("unlocked_requires_coin"),
+            "TLA+ should contain invariant"
+        );
+        assert!(
+            tla.contains("EFFECTS"),
+            "TLA+ should contain EFFECTS section"
+        );
+        assert!(
+            tla.contains("===="),
+            "TLA+ should end with module terminator"
+        );
+    }
+
+    // ---- Direction 4: Schema → kernel interpreter round-trip ----
+
+    #[test]
+    fn schema_feeds_kernel_interpreter() {
+        let schema = TurnstileState::schema();
+
+        // The kernel interpreter can construct from the schema and run transitions
+        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state should work");
+
+        assert_eq!(state.phase, "Locked");
+
+        // Feed InsertCoin input
+        let input = meerkat_machine_kernels::KernelInput {
+            variant: "InsertCoin".into(),
+            fields: std::collections::BTreeMap::new(),
+        };
+        let outcome = kernel
+            .transition(&state, &input)
+            .expect("InsertCoin should succeed");
+        assert_eq!(outcome.next_state.phase, "Unlocked");
+        assert_eq!(outcome.effects.len(), 1);
+        assert_eq!(outcome.effects[0].variant, "CoinAccepted");
+    }
+
+    // ---- Full e2e: DSL dispatch == kernel dispatch ----
+
+    #[test]
+    fn dsl_dispatch_matches_kernel_dispatch() {
+        let schema = TurnstileState::schema();
+        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
+
+        // Run the same sequence through both dispatchers
+        let mut auth = TurnstileAuthority::new();
+        let mut kernel_state = kernel.initial_state().unwrap();
+
+        let inputs = vec![
+            ("InsertCoin", TurnstileInput::InsertCoin),
+            ("Push", TurnstileInput::Push),
+            ("Push", TurnstileInput::Push),
+            ("InsertCoin", TurnstileInput::InsertCoin),
+            ("InsertCoin", TurnstileInput::InsertCoin),
+            ("Push", TurnstileInput::Push),
+        ];
+
+        for (variant_name, dsl_input) in inputs {
+            let kernel_input = meerkat_machine_kernels::KernelInput {
+                variant: variant_name.into(),
+                fields: std::collections::BTreeMap::new(),
+            };
+
+            let dsl_result = TurnstileMutator::apply(&mut auth, dsl_input);
+            let kernel_result = kernel.transition(&kernel_state, &kernel_input);
+
+            // Both should agree on accept/reject
+            assert_eq!(
+                dsl_result.is_ok(),
+                kernel_result.is_ok(),
+                "DSL and kernel disagree on {variant_name}: dsl={}, kernel={}",
+                dsl_result.is_ok(),
+                kernel_result.is_ok()
+            );
+
+            if let (Ok(dsl_out), Ok(kernel_out)) = (&dsl_result, &kernel_result) {
+                // Same target phase
+                assert_eq!(
+                    format!("{:?}", dsl_out.to_phase),
+                    kernel_out.next_state.phase,
+                    "Phase mismatch on {variant_name}"
+                );
+
+                // Same number of effects
+                assert_eq!(
+                    dsl_out.effects.len(),
+                    kernel_out.effects.len(),
+                    "Effect count mismatch on {variant_name}"
+                );
+
+                // Advance both states
+                kernel_state = kernel_out.next_state.clone();
+            }
+        }
+    }
+}
+
+// ============================================================
 // Traffic Light: minimal stored-phase machine
 // ============================================================
 
@@ -284,6 +571,44 @@ mod counter {
         assert_eq!(schema.state.phase.variants.len(), 4);
         assert_eq!(schema.state.fields.len(), 3);
         assert_eq!(schema.transitions.len(), 5);
+    }
+
+    #[test]
+    fn schema_derived_from_phases() {
+        let schema = CounterState::schema();
+
+        // StartIdle guards on !self.active → phase projection: Stopped is when !active
+        // So this transition fires from Stopped (active=false)
+        let start = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "StartIdle")
+            .unwrap();
+        assert!(
+            start.from.contains(&"Stopped".to_string()),
+            "StartIdle should be from Stopped, got {:?}",
+            start.from
+        );
+        // Should NOT include Counting or AtLimit (those require active=true)
+        assert!(!start.from.contains(&"Counting".to_string()));
+        assert!(!start.from.contains(&"AtLimit".to_string()));
+
+        // StopActive guards on self.active → fires from Idle, Counting, AtLimit (all active=true)
+        let stop = schema
+            .transitions
+            .iter()
+            .find(|t| t.name == "StopActive")
+            .unwrap();
+        assert!(
+            !stop.from.contains(&"Stopped".to_string()),
+            "StopActive should not be from Stopped"
+        );
+        // Should include at least Idle and Counting
+        assert!(
+            stop.from.contains(&"Idle".to_string()) || stop.from.contains(&"Counting".to_string()),
+            "StopActive should fire from active phases, got {:?}",
+            stop.from
+        );
     }
 }
 

@@ -9,6 +9,7 @@ publish = false
 meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
 meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
 meerkat-machine-kernels = { path = "../../meerkat-machine-kernels" }
+meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
 indexmap = "2"
 
 [lints]

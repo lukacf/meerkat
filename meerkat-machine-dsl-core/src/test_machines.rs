@@ -1,8 +1,8 @@
-/// Test machine definitions for verifying DSL parsing and code generation.
-///
-/// These are token streams that exercise every DSL feature. Tests parse them
-/// into `MachineDef` ASTs and verify the structure, then (once generators are
-/// built) expand them and verify the generated code compiles and behaves correctly.
+//! Test machine definitions for verifying DSL parsing and code generation.
+//!
+//! These are token streams that exercise every DSL feature. Tests parse them
+//! into `MachineDef` ASTs and verify the structure, then (once generators are
+//! built) expand them and verify the generated code compiles and behaves correctly.
 
 /// Minimal stored-phase machine: traffic light with 2 phases, 1 input.
 pub const TRAFFIC_LIGHT: &str = r#"
@@ -414,6 +414,7 @@ machine Counter {
 "#;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -20,7 +20,7 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
         .phase_enum
         .variants
         .iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let input_variants: HashSet<_> = def
         .inputs
@@ -98,12 +98,13 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
                 }
             }
             // Last rule should be a fallback (no condition)
-            if let Some(last) = proj.rules.last() {
-                if last.condition.is_some() && proj.rules.len() == def.phase_enum.variants.len() {
-                    // All rules have conditions — no fallback. This may be intentional
-                    // but is a common mistake, so warn via the error.
-                    // Actually, don't error here — the unreachable! in codegen catches it.
-                }
+            if let Some(last) = proj.rules.last()
+                && last.condition.is_some()
+                && proj.rules.len() == def.phase_enum.variants.len()
+            {
+                // All rules have conditions — no fallback. This may be intentional
+                // but is a common mistake, so warn via the error.
+                // Actually, don't error here — the unreachable! in codegen catches it.
             }
         }
     }
@@ -194,8 +195,12 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
 
         // Validate field references in guard
         if let Some(guard) = &t.guard {
-            let binding_names: HashSet<_> =
-                t.trigger.bindings.iter().map(|b| b.to_string()).collect();
+            let binding_names: HashSet<_> = t
+                .trigger
+                .bindings
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             validate_expr(
                 guard,
                 &field_names,
@@ -207,8 +212,12 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
 
         // Validate field references in updates
         for update in &t.updates {
-            let binding_names: HashSet<_> =
-                t.trigger.bindings.iter().map(|b| b.to_string()).collect();
+            let binding_names: HashSet<_> = t
+                .trigger
+                .bindings
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
             validate_update(
                 update,
                 &field_names,

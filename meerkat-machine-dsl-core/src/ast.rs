@@ -50,6 +50,7 @@ impl MachineDef {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
+#[allow(dead_code)] // span used for future error reporting
 pub struct FieldDef {
     pub name: Ident,
     pub ty: TypeDef,
@@ -269,6 +270,7 @@ pub enum ExprDef {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // variants used by generated code, not all exercised in tests yet
 pub enum UpdateDef {
     Assign {
         field: Ident,

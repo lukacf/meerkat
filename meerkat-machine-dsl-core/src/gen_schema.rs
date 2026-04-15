@@ -20,7 +20,11 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let state_fields = gen_state_fields(def);
     let init_phase = def.init_phase.to_string();
     let init_fields = gen_init_fields(def);
-    let terminal_phases: Vec<_> = def.terminal_phases.iter().map(|p| p.to_string()).collect();
+    let terminal_phases: Vec<_> = def
+        .terminal_phases
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
 
     let input_name = def.inputs.name.to_string();
     let input_variants = gen_enum_variants(&def.inputs);
@@ -28,7 +32,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let surface_only: Vec<_> = def
         .surface_only_inputs
         .iter()
-        .map(|i| i.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     let signal_name = def.signals.name.to_string();
@@ -136,7 +140,7 @@ fn gen_type_ref(ty: &crate::ast::TypeDef) -> TokenStream {
 }
 
 fn gen_state_fields(def: &MachineDef) -> Vec<TokenStream> {
-    let phase_field_name = def.phase_field_name().map(|f| f.to_string());
+    let phase_field_name = def.phase_field_name().map(std::string::ToString::to_string);
     def.state_fields
         .iter()
         // Exclude the stored-phase field — the schema models phase separately
@@ -459,7 +463,12 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 crate::ast::TriggerKindDef::Input => quote! { TriggerKind::Input },
                 crate::ast::TriggerKindDef::Signal => quote! { TriggerKind::Signal },
             };
-            let bindings: Vec<_> = t.trigger.bindings.iter().map(|b| b.to_string()).collect();
+            let bindings: Vec<_> = t
+                .trigger
+                .bindings
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
 
             // Guards — strip phase-field references (they're in `from` instead)
             let guards = if let Some(guard) = &t.guard {
@@ -607,7 +616,7 @@ fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
         .phase_enum
         .variants
         .iter()
-        .map(|v| v.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     let guard = match &t.guard {
@@ -664,7 +673,7 @@ fn derive_from_phases_derived(
         let rule_idx = proj
             .rules
             .iter()
-            .position(|r| r.phase.to_string() == *phase_name);
+            .position(|r| r.phase == phase_name.as_str());
         let rule_idx = match rule_idx {
             Some(i) => i,
             None => {
@@ -708,6 +717,7 @@ fn derive_from_phases_derived(
 
 /// A fact about a field's value, derived from phase projection conditions.
 #[derive(Debug)]
+#[allow(dead_code)] // variants used for future derived-phase analysis
 enum FieldFact {
     IsTrue,
     IsFalse,
@@ -912,10 +922,10 @@ fn extract_phase_refs_from_guard(def: &MachineDef, expr: &ExprDef, out: &mut Vec
                 if let ExprDef::Phase(variant) = right.as_ref() {
                     out.push(variant.to_string());
                 }
-            } else if is_phase_field(right, &phase_field_name) {
-                if let ExprDef::Phase(variant) = left.as_ref() {
-                    out.push(variant.to_string());
-                }
+            } else if is_phase_field(right, &phase_field_name)
+                && let ExprDef::Phase(variant) = left.as_ref()
+            {
+                out.push(variant.to_string());
             }
         }
         // is_active_phase(self.lifecycle_phase) — helper call with phase field
@@ -1010,7 +1020,7 @@ fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
                 .collect();
             match remaining.len() {
                 0 => None,
-                1 => Some(remaining.into_iter().next().unwrap()),
+                1 => remaining.into_iter().next(),
                 _ => Some(ExprDef::And(remaining)),
             }
         }
@@ -1022,7 +1032,7 @@ fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
                 .collect();
             match remaining.len() {
                 0 => None,
-                1 => Some(remaining.into_iter().next().unwrap()),
+                1 => remaining.into_iter().next(),
                 _ => Some(ExprDef::Or(remaining)),
             }
         }
@@ -1041,7 +1051,7 @@ fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
 /// Check if an expression is a reference to the stored phase field.
 fn is_phase_ref(def: &MachineDef, expr: &ExprDef) -> bool {
     match expr {
-        ExprDef::Field(name) => def.phase_field_name().map_or(false, |pf| pf == name),
+        ExprDef::Field(name) => def.phase_field_name() == Some(name),
         ExprDef::CurrentPhase => true,
         _ => false,
     }
@@ -1054,7 +1064,7 @@ fn gen_dispositions(def: &MachineDef) -> Vec<TokenStream> {
             crate::ast::DispositionKind::Local => quote! { EffectDisposition::Local },
             crate::ast::DispositionKind::External => quote! { EffectDisposition::External },
             crate::ast::DispositionKind::Routed(machines) => {
-                let names: Vec<_> = machines.iter().map(|m| m.to_string()).collect();
+                let names: Vec<_> = machines.iter().map(std::string::ToString::to_string).collect();
                 quote! { EffectDisposition::Routed { consumer_machines: vec![#(#names.into()),*] } }
             }
         };

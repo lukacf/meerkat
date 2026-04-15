@@ -378,7 +378,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
         && content
             .fork()
             .parse::<Ident>()
-            .map_or(false, |id| id == "per_phase")
+            .is_ok_and(|id| id == "per_phase")
     {
         let _kw: Ident = content.parse()?;
         Some(parse_ident_list(&content)?)
@@ -398,7 +398,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
         && content
             .fork()
             .parse::<Ident>()
-            .map_or(false, |id| id == "guard")
+            .is_ok_and(|id| id == "guard")
     {
         let _guard_kw: Ident = content.parse()?;
         let guard_content;
@@ -413,7 +413,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
         && content
             .fork()
             .parse::<Ident>()
-            .map_or(false, |id| id == "update")
+            .is_ok_and(|id| id == "update")
     {
         let _update_kw: Ident = content.parse()?;
         let update_content;
@@ -432,12 +432,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
 
     // optional emit Effect { fields } (can repeat)
     let mut effects = Vec::new();
-    while content.peek(Ident)
-        && content
-            .fork()
-            .parse::<Ident>()
-            .map_or(false, |id| id == "emit")
-    {
+    while content.peek(Ident) && content.fork().parse::<Ident>().is_ok_and(|id| id == "emit") {
         let _emit_kw: Ident = content.parse()?;
         effects.push(parse_effect_emit(&content)?);
     }

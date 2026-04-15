@@ -16,9 +16,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         })
         .collect();
 
-    let default_fields: Vec<_> = if def.is_stored_phase() {
-        // For stored-phase machines, the phase field gets the init phase value
-        let phase_field = def.phase_field_name().unwrap();
+    let default_fields: Vec<_> = if let Some(phase_field) = def.phase_field_name() {
         let phase_enum_name = &def.phase_enum.name;
         let init_phase = &def.init_phase;
 

@@ -60,7 +60,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
         })
         .collect();
 
-    let helpers: Vec<_> = def.helpers.iter().map(|h| gen_helper(h)).collect();
+    let helpers: Vec<_> = def.helpers.iter().map(gen_helper).collect();
 
     let signal_method = if has_signals {
         quote! {
@@ -243,7 +243,7 @@ fn gen_transition_chain(
                 arms.push(quote! { else { #body } });
             }
         }
-        let last_has_guard = transitions.last().map_or(true, |t| t.guard.is_some());
+        let last_has_guard = transitions.last().is_none_or(|t| t.guard.is_some());
         if last_has_guard {
             let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {
@@ -265,8 +265,7 @@ fn gen_transition_body(def: &MachineDef, t: &TransitionDef) -> TokenStream {
         stmts.push(gen_update(update, prefix));
     }
 
-    if def.is_stored_phase() {
-        let phase_field = def.phase_field_name().unwrap();
+    if let Some(phase_field) = def.phase_field_name() {
         let phase_enum = &def.phase_enum.name;
         let to_phase = &t.to_phase;
         stmts.push(quote! { self.state.#phase_field = #phase_enum::#to_phase; });
@@ -442,6 +441,7 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
 }
 
 /// Convenience alias for authority-context expressions.
+#[allow(dead_code)]
 pub(crate) fn gen_guard_expr(expr: &ExprDef) -> TokenStream {
     gen_expr(expr, FieldPrefix::AuthorityState)
 }

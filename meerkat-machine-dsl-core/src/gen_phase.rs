@@ -9,8 +9,7 @@ pub fn generate(def: &MachineDef) -> TokenStream {
     let phase_name = &def.phase_enum.name;
     let variants: Vec<_> = def.phase_enum.variants.iter().collect();
 
-    let phase_method = if def.is_stored_phase() {
-        let phase_field = def.phase_field_name().unwrap();
+    let phase_method = if let Some(phase_field) = def.phase_field_name() {
         quote! {
             pub fn phase(&self) -> #phase_name {
                 self.#phase_field

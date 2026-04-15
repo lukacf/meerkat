@@ -125,7 +125,7 @@ mod e2e_tla {
         let schema = TurnstileState::schema();
         assert_eq!(schema.machine, "Turnstile");
         assert_eq!(schema.state.phase.variants.len(), 2);
-        assert_eq!(schema.state.fields.len(), 3);
+        assert_eq!(schema.state.fields.len(), 2); // phase field excluded from schema
         assert_eq!(schema.transitions.len(), 4);
         assert_eq!(schema.effects.variants.len(), 3);
         assert_eq!(schema.invariants.len(), 1);
@@ -1050,7 +1050,7 @@ mod order_lifecycle {
         assert_eq!(schema.machine, "OrderLifecycle");
         assert_eq!(schema.version, 1);
         assert_eq!(schema.state.phase.variants.len(), 6);
-        assert_eq!(schema.state.fields.len(), 10);
+        assert_eq!(schema.state.fields.len(), 9); // lifecycle_phase excluded from schema
         assert_eq!(schema.inputs.variants.len(), 9);
         assert_eq!(schema.signals.variants.len(), 1);
         assert_eq!(schema.effects.variants.len(), 6);

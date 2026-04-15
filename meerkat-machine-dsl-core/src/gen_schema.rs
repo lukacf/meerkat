@@ -128,12 +128,19 @@ fn gen_type_ref(ty: &crate::ast::TypeDef) -> TokenStream {
             let name = ident.to_string();
             quote! { TypeRef::Named(#name.into()) }
         }
+        crate::ast::TypeDef::Enum(ident) => {
+            let name = ident.to_string();
+            quote! { TypeRef::Enum(#name.into()) }
+        }
     }
 }
 
 fn gen_state_fields(def: &MachineDef) -> Vec<TokenStream> {
+    let phase_field_name = def.phase_field_name().map(|f| f.to_string());
     def.state_fields
         .iter()
+        // Exclude the stored-phase field — the schema models phase separately
+        .filter(|f| Some(f.name.to_string()) != phase_field_name)
         .map(|f| {
             let name = f.name.to_string();
             let ty = gen_type_ref(&f.ty);
@@ -147,14 +154,8 @@ fn gen_state_fields(def: &MachineDef) -> Vec<TokenStream> {
 fn gen_init_fields(def: &MachineDef) -> Vec<TokenStream> {
     let mut fields = Vec::new();
 
-    // For stored-phase, emit the phase field init
-    if def.is_stored_phase() {
-        let phase_field_name = def.phase_field_name().unwrap().to_string();
-        let init_phase = def.init_phase.to_string();
-        fields.push(quote! {
-            FieldInit { field: #phase_field_name.into(), expr: Expr::Phase(#init_phase.into()) }
-        });
-    }
+    // Note: the phase init is handled by InitSchema.phase, not as a field init.
+    // So we skip it here even for stored-phase machines.
 
     for init in &def.init_fields {
         let name = init.name.to_string();
@@ -166,7 +167,63 @@ fn gen_init_fields(def: &MachineDef) -> Vec<TokenStream> {
     fields
 }
 
-fn gen_schema_expr(expr: &crate::ast::ExprDef) -> TokenStream {
+/// Rewrite Field(phase_field) → CurrentPhase in an expression tree.
+/// Used for stored-phase machines where the phase field isn't in the schema's
+/// field list — the schema uses CurrentPhase instead.
+fn rewrite_phase_field_to_current(expr: &ExprDef, phase_field: &str) -> ExprDef {
+    match expr {
+        ExprDef::Field(name) if name == phase_field => ExprDef::CurrentPhase,
+        ExprDef::Not(inner) => {
+            ExprDef::Not(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
+        }
+        ExprDef::And(exprs) => ExprDef::And(
+            exprs
+                .iter()
+                .map(|e| rewrite_phase_field_to_current(e, phase_field))
+                .collect(),
+        ),
+        ExprDef::Or(exprs) => ExprDef::Or(
+            exprs
+                .iter()
+                .map(|e| rewrite_phase_field_to_current(e, phase_field))
+                .collect(),
+        ),
+        ExprDef::Eq(l, r) => ExprDef::Eq(
+            Box::new(rewrite_phase_field_to_current(l, phase_field)),
+            Box::new(rewrite_phase_field_to_current(r, phase_field)),
+        ),
+        ExprDef::Neq(l, r) => ExprDef::Neq(
+            Box::new(rewrite_phase_field_to_current(l, phase_field)),
+            Box::new(rewrite_phase_field_to_current(r, phase_field)),
+        ),
+        ExprDef::IsSome(inner) => {
+            ExprDef::IsSome(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
+        }
+        ExprDef::IsNone(inner) => {
+            ExprDef::IsNone(Box::new(rewrite_phase_field_to_current(inner, phase_field)))
+        }
+        ExprDef::Call { helper, args } => ExprDef::Call {
+            helper: helper.clone(),
+            args: args
+                .iter()
+                .map(|a| rewrite_phase_field_to_current(a, phase_field))
+                .collect(),
+        },
+        _ => expr.clone(),
+    }
+}
+
+/// Generate schema expression, rewriting phase field references if needed.
+fn gen_schema_expr_for(def: &MachineDef, expr: &ExprDef) -> TokenStream {
+    if let Some(pf) = def.phase_field_name() {
+        let rewritten = rewrite_phase_field_to_current(expr, &pf.to_string());
+        gen_schema_expr(&rewritten)
+    } else {
+        gen_schema_expr(expr)
+    }
+}
+
+fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
     match expr {
         ExprDef::Bool(v) => quote! { Expr::Bool(#v) },
         ExprDef::U64(v) => quote! { Expr::U64(#v) },
@@ -351,7 +408,7 @@ fn gen_helpers(def: &MachineDef) -> Vec<TokenStream> {
         .map(|h| {
             let name = h.name.to_string();
             let return_ty = gen_type_ref(&h.return_ty);
-            let body = gen_schema_expr(&h.body);
+            let body = gen_schema_expr_for(def, &h.body);
             let params: Vec<_> = h
                 .params
                 .iter()
@@ -378,7 +435,7 @@ fn gen_invariants(def: &MachineDef) -> Vec<TokenStream> {
         .iter()
         .map(|inv| {
             let name = inv.name.to_string();
-            let expr = gen_schema_expr(&inv.expr);
+            let expr = gen_schema_expr_for(def, &inv.expr);
             quote! {
                 InvariantSchema { name: #name.into(), expr: #expr }
             }
@@ -399,10 +456,15 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
             };
             let bindings: Vec<_> = t.trigger.bindings.iter().map(|b| b.to_string()).collect();
 
-            // Guards
+            // Guards — strip phase-field references (they're in `from` instead)
             let guards = if let Some(guard) = &t.guard {
-                let expr = gen_schema_expr(guard);
-                quote! { vec![Guard { name: String::new(), expr: #expr }] }
+                let stripped = strip_phase_guards(def, guard);
+                if let Some(remaining) = stripped {
+                    let expr = gen_schema_expr_for(def, &remaining);
+                    quote! { vec![Guard { name: String::new(), expr: #expr }] }
+                } else {
+                    quote! { vec![] }
+                }
             } else {
                 quote! { vec![] }
             };
@@ -905,6 +967,78 @@ fn extract_phases_from_helper_body(expr: &ExprDef, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Strip phase-field references from a guard expression.
+///
+/// For stored-phase machines, guards like `self.lifecycle_phase == Phase::Pending`
+/// are handled by the `from` list, not by schema guards. This function removes
+/// those comparisons, returning `None` if the entire guard was phase-only.
+fn strip_phase_guards(def: &MachineDef, expr: &ExprDef) -> Option<ExprDef> {
+    if !def.is_stored_phase() {
+        return Some(expr.clone());
+    }
+
+    match expr {
+        // self.lifecycle_phase == Phase::X → remove entirely
+        ExprDef::Eq(left, right) | ExprDef::Neq(left, right) => {
+            if is_phase_ref(def, left) || is_phase_ref(def, right) {
+                None
+            } else {
+                Some(expr.clone())
+            }
+        }
+        // helper(self.lifecycle_phase) → remove entirely
+        ExprDef::Call { args, .. } => {
+            if args.iter().any(|a| is_phase_ref(def, a)) {
+                None
+            } else {
+                Some(expr.clone())
+            }
+        }
+        // conjunction: filter out phase predicates, keep the rest
+        ExprDef::And(exprs) => {
+            let remaining: Vec<_> = exprs
+                .iter()
+                .filter_map(|e| strip_phase_guards(def, e))
+                .collect();
+            match remaining.len() {
+                0 => None,
+                1 => Some(remaining.into_iter().next().unwrap()),
+                _ => Some(ExprDef::And(remaining)),
+            }
+        }
+        // disjunction: filter out phase predicates
+        ExprDef::Or(exprs) => {
+            let remaining: Vec<_> = exprs
+                .iter()
+                .filter_map(|e| strip_phase_guards(def, e))
+                .collect();
+            match remaining.len() {
+                0 => None,
+                1 => Some(remaining.into_iter().next().unwrap()),
+                _ => Some(ExprDef::Or(remaining)),
+            }
+        }
+        // Negation of a phase ref
+        ExprDef::Not(inner) => {
+            if strip_phase_guards(def, inner).is_none() {
+                None
+            } else {
+                Some(expr.clone())
+            }
+        }
+        _ => Some(expr.clone()),
+    }
+}
+
+/// Check if an expression is a reference to the stored phase field.
+fn is_phase_ref(def: &MachineDef, expr: &ExprDef) -> bool {
+    match expr {
+        ExprDef::Field(name) => def.phase_field_name().map_or(false, |pf| pf == name),
+        ExprDef::CurrentPhase => true,
+        _ => false,
     }
 }
 

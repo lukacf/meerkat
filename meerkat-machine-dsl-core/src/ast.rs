@@ -66,11 +66,14 @@ pub enum TypeDef {
     Set(Box<TypeDef>),
     Map(Box<TypeDef>, Box<TypeDef>),
     Named(Ident),
+    /// Enum type reference (maps to TypeRef::Enum in schema)
+    Enum(Ident),
 }
 
 impl TypeDef {
     pub fn is_named(&self, name: &str) -> bool {
         matches!(self, TypeDef::Named(ident) if ident == name)
+            || matches!(self, TypeDef::Enum(ident) if ident == name)
     }
 }
 

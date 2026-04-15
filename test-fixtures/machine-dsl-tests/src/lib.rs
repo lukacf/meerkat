@@ -6,5 +6,6 @@
 // Re-export for test modules
 pub use meerkat_machine_schema;
 
+mod occurrence_lifecycle;
 #[cfg(test)]
 mod tests;

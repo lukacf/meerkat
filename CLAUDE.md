@@ -62,6 +62,37 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 ANTHROPIC_API_KEY=... ./scripts/repo-cargo run --example simple
 ```
 
+## Build Efficiency
+
+This is a large workspace (~25 crates). Careless builds waste minutes. Follow these rules:
+
+**Use package-scoped commands during development.** Do NOT default to `--workspace` for every build or check. Scope to the crate you're changing and its immediate dependents:
+
+```bash
+# Editing meerkat-core? Check just what you touched + direct dependents
+./scripts/repo-cargo check -p meerkat-core -p meerkat-runtime -p meerkat-session
+
+# Editing meerkat-mob? Check the mob subtree
+./scripts/repo-cargo check -p meerkat-mob -p meerkat-mob-mcp
+
+# Running tests for one crate
+./scripts/repo-cargo nextest run -p meerkat-mob
+
+# Only use workspace-wide commands for final verification
+./scripts/repo-cargo clippy --workspace -- -D warnings
+./scripts/repo-cargo nextest run --workspace --status-level none --final-status-level fail
+```
+
+**Never run parallel cargo commands.** They deadlock on the workspace file lock. Run builds sequentially.
+
+**Always use `./scripts/repo-cargo`** instead of bare `cargo`. The wrapper manages per-worktree build caches and avoids cross-worktree cache pollution.
+
+**Key dependency chains to know** (touching a crate rebuilds everything downstream):
+- `meerkat-core` → rebuilds almost everything (~27s incremental)
+- `meerkat-runtime` → rebuilds mob, rpc, rest, cli, integration tests
+- `meerkat-mob` → rebuilds mob-mcp, rpc, rest, cli, integration tests
+- Leaf crates (`meerkat-models`, `meerkat-machine-schema`) → fast, minimal cascade
+
 ## Architecture
 
 ```

@@ -198,6 +198,12 @@ fn parse_type_def(input: ParseStream) -> Result<TypeDef> {
             let _: Token![>] = input.parse()?;
             Ok(TypeDef::Map(Box::new(key), Box::new(value)))
         }
+        "Enum" => {
+            let _: Token![<] = input.parse()?;
+            let inner: Ident = input.parse()?;
+            let _: Token![>] = input.parse()?;
+            Ok(TypeDef::Enum(inner))
+        }
         _ => Ok(TypeDef::Named(ident)),
     }
 }

@@ -80,6 +80,7 @@ pub(crate) fn gen_type(ty: &TypeDef) -> TokenStream {
             quote! { std::collections::BTreeMap<#key_ty, #val_ty> }
         }
         TypeDef::Named(ident) => quote! { #ident },
+        TypeDef::Enum(ident) => quote! { #ident },
     }
 }
 

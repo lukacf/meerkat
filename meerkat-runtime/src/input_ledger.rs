@@ -137,12 +137,12 @@ impl InputLedger {
         let terminal_keys = self
             .idempotency_index
             .iter()
-            .filter_map(|(key, input_id)| {
+            .filter(|(_, input_id)| {
                 self.states
-                    .get(input_id)
+                    .get(*input_id)
                     .is_some_and(InputState::is_terminal)
-                    .then(|| key.clone())
             })
+            .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
         let overflow = terminal_keys
             .len()

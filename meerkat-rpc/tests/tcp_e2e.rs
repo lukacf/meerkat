@@ -241,7 +241,7 @@ async fn tcp_e2e_session_create_and_turn_start_with_test_client() {
     .await;
     let (read, write) = stream2.into_split();
     let mut reader2 = BufReader::new(read);
-    let create_resp = read_jsonl(&mut reader2).await;
+    let create_resp = read_response_for_id(&mut reader2, 2).await;
     assert!(
         create_resp["error"].is_null(),
         "session/create failed: {create_resp}"

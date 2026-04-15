@@ -2,8 +2,8 @@
 //!
 //! This module provides typed enums and a sealed mutator trait that enforces
 //! all MobLifecycle state mutations flow through the machine authority.
-//! Handwritten shell code calls [`MobLifecycleAuthority::apply`] and executes
-//! returned effects; it cannot mutate canonical state directly.
+//! Handwritten shell code calls [`MobLifecycleAuthority::apply_in_phase`] and
+//! executes returned effects; it cannot mutate canonical state directly.
 //!
 //! The transition table encoded here is the single source of truth, matching
 //! the machine schema in `meerkat-machine-schema/src/catalog/mob_lifecycle.rs`:
@@ -47,6 +47,13 @@ pub(crate) enum MobLifecycleInput {
     Destroy,
     StartRun,
     FinishRun,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "cleanup markers retained only for lower-authority table tests after production reset flow stopped using them"
+        )
+    )]
     BeginCleanup,
     FinishCleanup,
 }
@@ -63,6 +70,7 @@ pub(crate) enum MobLifecycleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobLifecycleEffect {
     EmitLifecycleNotice,
+    #[cfg_attr(not(test), allow(dead_code))]
     RequestCleanup,
 }
 
@@ -91,6 +99,25 @@ pub(crate) struct MobLifecycleTransition {
     pub effects: Vec<MobLifecycleEffect>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MobLifecycleSnapshot {
+    pub phase: MobState,
+    pub active_run_count: u32,
+    pub cleanup_pending: bool,
+}
+
+#[cfg(test)]
+impl Default for MobLifecycleSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Running,
+            active_run_count: 0,
+            cleanup_pending: false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical machine state (fields)
 // ---------------------------------------------------------------------------
@@ -106,15 +133,17 @@ struct MobLifecycleFields {
 // Sealed mutator trait — only the authority implements this
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 mod sealed {
     pub trait Sealed {}
 }
 
 /// Sealed trait for MobLifecycle state mutation.
 ///
-/// Only [`MobLifecycleAuthority`] implements this. Handwritten code cannot
-/// create alternative implementations, ensuring single-source-of-truth
-/// semantics for lifecycle state.
+/// Only [`MobLifecycleAuthority`] implements this. Tests keep a phase-owning
+/// helper surface for direct table checks, while production code routes coarse
+/// lifecycle legality through [`MobLifecycleAuthority::apply_in_phase`].
+#[cfg(test)]
 pub(crate) trait MobLifecycleMutator: sealed::Sealed {
     /// Apply a typed input to the current machine state.
     ///
@@ -134,7 +163,8 @@ pub(crate) trait MobLifecycleMutator: sealed::Sealed {
 /// cache so that `MobHandle` can read the current phase lock-free.
 #[derive(Clone)]
 pub(crate) struct MobLifecycleAuthority {
-    /// Canonical phase.
+    /// Test-only phase owner retained for direct authority table tests.
+    #[cfg(test)]
     phase: MobState,
     /// Canonical machine-owned fields.
     fields: MobLifecycleFields,
@@ -143,6 +173,7 @@ pub(crate) struct MobLifecycleAuthority {
     observable: Arc<AtomicU8>,
 }
 
+#[cfg(test)]
 impl sealed::Sealed for MobLifecycleAuthority {}
 
 impl MobLifecycleAuthority {
@@ -153,6 +184,7 @@ impl MobLifecycleAuthority {
     pub(crate) fn with_phase(observable: Arc<AtomicU8>, phase: MobState) -> Self {
         observable.store(phase as u8, Ordering::Release);
         Self {
+            #[cfg(test)]
             phase,
             fields: MobLifecycleFields {
                 active_run_count: 0,
@@ -163,8 +195,22 @@ impl MobLifecycleAuthority {
     }
 
     /// Current phase (read from canonical state).
+    #[cfg(test)]
     pub(crate) fn phase(&self) -> MobState {
         self.phase
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_in_phase(
+        &self,
+        phase: MobState,
+        active_run_count: u32,
+    ) -> MobLifecycleSnapshot {
+        MobLifecycleSnapshot {
+            phase,
+            active_run_count,
+            cleanup_pending: false,
+        }
     }
 
     /// Current active_run_count from canonical state.
@@ -176,14 +222,26 @@ impl MobLifecycleAuthority {
     /// Check if a transition is legal without applying it.
     ///
     /// Used by shell code for pre-checks (e.g. Destroy/Reset eligibility).
+    #[cfg(test)]
     pub(crate) fn can_accept(&self, input: MobLifecycleInput) -> bool {
         self.evaluate(input).is_ok()
+    }
+
+    pub(crate) fn can_accept_in_phase(
+        &self,
+        phase: MobState,
+        active_run_count: u32,
+        input: MobLifecycleInput,
+    ) -> bool {
+        self.evaluate_in_phase(phase, active_run_count, input)
+            .is_ok()
     }
 
     /// Require that the authority is in one of the given phases.
     ///
     /// Returns `MobError::InvalidTransition` if not. The `hint_to` parameter
     /// provides a target state for the error message (not a real transition).
+    #[cfg(test)]
     pub(crate) fn require_phase(
         &self,
         allowed: &[MobState],
@@ -200,23 +258,33 @@ impl MobLifecycleAuthority {
     }
 
     /// Evaluate a transition without committing it.
+    #[cfg(test)]
     fn evaluate(
         &self,
+        input: MobLifecycleInput,
+    ) -> Result<(MobState, MobLifecycleFields, Vec<MobLifecycleEffect>), MobError> {
+        self.evaluate_in_phase(self.phase, self.fields.active_run_count, input)
+    }
+
+    fn evaluate_in_phase(
+        &self,
+        phase: MobState,
+        active_run_count: u32,
         input: MobLifecycleInput,
     ) -> Result<(MobState, MobLifecycleFields, Vec<MobLifecycleEffect>), MobError> {
         use MobLifecycleInput::{
             BeginCleanup, Destroy, FinishCleanup, FinishRun, MarkCompleted, Resume, Start,
             StartRun, Stop,
         };
-        use MobState::{Completed, Creating, Destroyed, Running, Stopped};
+        use MobState::{Completed, Destroyed, Running, Stopped};
 
-        let phase = self.phase;
         let mut fields = self.fields.clone();
+        fields.active_run_count = active_run_count;
         let mut effects = Vec::new();
 
         let next_phase = match (phase, input) {
-            // Start: Creating|Stopped -> Running
-            (Creating | Stopped, Start) => Running,
+            // Start: Stopped -> Running
+            (Stopped, Start) => Running,
 
             // Stop: Running -> Stopped
             (Running, Stop) => Stopped,
@@ -235,10 +303,10 @@ impl MobLifecycleAuthority {
                 Completed
             }
 
-            // Destroy: Creating|Running|Stopped|Completed -> Destroyed
+            // Destroy: Running|Stopped|Completed -> Destroyed
             // Updates: active_run_count = 0, cleanup_pending = false
             // Emits: EmitLifecycleNotice
-            (Creating | Running | Stopped | Completed, Destroy) => {
+            (Running | Stopped | Completed, Destroy) => {
                 fields.active_run_count = 0;
                 fields.cleanup_pending = false;
                 effects.push(MobLifecycleEffect::EmitLifecycleNotice);
@@ -301,8 +369,29 @@ impl MobLifecycleAuthority {
 
         Ok((next_phase, fields, effects))
     }
+
+    pub(crate) fn apply_in_phase(
+        &mut self,
+        phase: MobState,
+        active_run_count: u32,
+        input: MobLifecycleInput,
+    ) -> Result<MobLifecycleTransition, MobError> {
+        let (next_phase, next_fields, effects) =
+            self.evaluate_in_phase(phase, active_run_count, input)?;
+
+        self.fields.cleanup_pending = next_fields.cleanup_pending;
+        self.observable.store(next_phase as u8, Ordering::Release);
+
+        Ok(MobLifecycleTransition {
+            next_phase,
+            active_run_count: next_fields.active_run_count,
+            cleanup_pending: next_fields.cleanup_pending,
+            effects,
+        })
+    }
 }
 
+#[cfg(test)]
 impl MobLifecycleMutator for MobLifecycleAuthority {
     fn apply(&mut self, input: MobLifecycleInput) -> Result<MobLifecycleTransition, MobError> {
         let (next_phase, next_fields, effects) = self.evaluate(input)?;
@@ -334,12 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn start_from_creating_transitions_to_running() {
+    fn start_from_creating_is_rejected() {
         let mut auth = make_authority(MobState::Creating);
         let result = auth.apply(MobLifecycleInput::Start);
-        let transition = result.expect("start from creating should succeed");
-        assert_eq!(transition.next_phase, MobState::Running);
-        assert_eq!(auth.phase(), MobState::Running);
+        assert!(result.is_err());
+        assert_eq!(auth.phase(), MobState::Creating);
     }
 
     #[test]
@@ -466,8 +554,8 @@ mod tests {
     #[test]
     fn observable_cache_is_updated_on_transition() {
         let observable = Arc::new(AtomicU8::new(0));
-        let mut auth = MobLifecycleAuthority::with_phase(observable.clone(), MobState::Creating);
-        assert_eq!(observable.load(Ordering::Acquire), MobState::Creating as u8);
+        let mut auth = MobLifecycleAuthority::with_phase(observable.clone(), MobState::Stopped);
+        assert_eq!(observable.load(Ordering::Acquire), MobState::Stopped as u8);
         auth.apply(MobLifecycleInput::Start).expect("start");
         assert_eq!(observable.load(Ordering::Acquire), MobState::Running as u8);
     }
@@ -485,7 +573,7 @@ mod tests {
     fn require_phase_accepts_allowed() {
         let auth = make_authority(MobState::Running);
         assert!(
-            auth.require_phase(&[MobState::Running, MobState::Creating], MobState::Running)
+            auth.require_phase(&[MobState::Running, MobState::Stopped], MobState::Running)
                 .is_ok()
         );
     }
@@ -508,12 +596,7 @@ mod tests {
 
     #[test]
     fn destroy_from_all_valid_phases() {
-        for phase in [
-            MobState::Creating,
-            MobState::Running,
-            MobState::Stopped,
-            MobState::Completed,
-        ] {
+        for phase in [MobState::Running, MobState::Stopped, MobState::Completed] {
             let mut auth = make_authority(phase);
             let t = auth
                 .apply(MobLifecycleInput::Destroy)
@@ -530,7 +613,7 @@ mod tests {
 
     #[test]
     fn stop_from_non_running_is_rejected() {
-        for phase in [MobState::Creating, MobState::Completed, MobState::Destroyed] {
+        for phase in [MobState::Completed, MobState::Destroyed] {
             let mut auth = make_authority(phase);
             assert!(
                 auth.apply(MobLifecycleInput::Stop).is_err(),

@@ -16,6 +16,7 @@ OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
+MapRemove(map, key) == [x \in DOMAIN map \ {key} |-> map[x]]
 StartsWith(seq, prefix) == /\ Len(prefix) <= Len(seq) /\ SubSeq(seq, 1, Len(prefix)) = prefix
 SeqElements(seq) == {seq[i] : i \in 1..Len(seq)}
 RECURSIVE SeqRemove(_, _)

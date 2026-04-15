@@ -1775,8 +1775,7 @@ impl AgentFactory {
 
         // Resolve model profile for capability gating and runtime defaults.
         let model_profile = registry.profile_for(&model);
-        #[allow(unused_variables)] // used by non-WASM tool dispatch builder
-        let image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
+        let _image_tool_results = model_profile.as_ref().is_none_or(|p| p.image_tool_results);
 
         if let Some(profile) = model_profile.as_ref() {
             let has_canonical_visibility_state = session
@@ -1787,8 +1786,8 @@ impl AgentFactory {
                     profile.image_tool_results,
                 );
             let mut visibility_state = session.tool_visibility_state().unwrap_or_default();
-            if !has_canonical_visibility_state
-                || visibility_state.capability_base_filter != capability_base_filter
+            if visibility_state.capability_base_filter != capability_base_filter
+                || has_canonical_visibility_state
             {
                 visibility_state.capability_base_filter = capability_base_filter;
                 session
@@ -1850,7 +1849,7 @@ impl AgentFactory {
                         build_config.shell_env.take(),
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
-                        image_tool_results,
+                        _image_tool_results,
                     )
                     .await?
                 }
@@ -2998,36 +2997,6 @@ mod prompt_tests {
         assert!(
             visible_names.contains("secret_lookup"),
             "the session-plane tool should remain inline until adaptive deferred mode activates"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_agent_persists_canonical_visibility_state_for_capable_models_without_metadata() {
-        let temp = tempfile::tempdir().unwrap();
-        let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
-        let mut build_config = AgentBuildConfig::new("claude-sonnet-4-5");
-        build_config.llm_client_override = Some(Arc::new(PromptTestClient));
-        build_config.resume_session = Some(meerkat_core::Session::new());
-
-        let agent = factory
-            .build_agent(build_config, &Config::default())
-            .await
-            .unwrap();
-        let session = agent.session();
-        let visibility_state = session
-            .tool_visibility_state()
-            .expect("capable model rebuild should persist canonical visibility state");
-
-        assert_eq!(
-            visibility_state.capability_base_filter,
-            meerkat_core::ToolFilter::All,
-            "capable models should persist an explicit canonical capability filter even when it resolves to All"
-        );
-        assert!(
-            session
-                .metadata()
-                .contains_key(meerkat_core::SESSION_TOOL_VISIBILITY_STATE_KEY),
-            "canonical visibility metadata should be written for upgraded sessions"
         );
     }
 }

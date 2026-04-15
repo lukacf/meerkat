@@ -193,7 +193,6 @@ if include_scenario(39):
                 "idle",
                 "running",
                 "initializing",
-                "recovering",
             }
 
             accepted = await client_b.runtime_accept(

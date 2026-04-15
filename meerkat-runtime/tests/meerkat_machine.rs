@@ -1436,6 +1436,68 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
 }
 
 #[tokio::test]
+async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_runtime::completion::CompletionOutcome;
+
+    struct SuccessExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for SuccessExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
+    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let sid = SessionId::new();
+    adapter
+        .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
+        .await;
+
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, make_prompt("loop boundary waiter failure"))
+        .await
+        .expect("accept should succeed");
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should expose a completion handle");
+
+    let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+        .await
+        .expect("completion waiter should resolve when the runtime loop exits");
+    assert!(
+        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        "boundary commit failure should terminate the waiter when the loop exits, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,

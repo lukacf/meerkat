@@ -61,6 +61,8 @@ pub enum InputAbandonReason {
     Retired,
     /// Runtime was reset.
     Reset,
+    /// Runtime was stopped.
+    Stopped,
     /// Runtime was destroyed.
     Destroyed,
     /// Input was explicitly cancelled.

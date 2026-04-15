@@ -7,9 +7,9 @@
 //! - S24 ephemeral recovery
 //! - S25 retire/reset/destroy lifecycle operations
 
-use std::collections::BTreeSet;
+use std::sync::{Arc, RwLock as StdRwLock};
 
-use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use meerkat_core::types::HandlingMode;
 
 use crate::accept::AcceptOutcome;
@@ -19,12 +19,8 @@ use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{PolicyDecision, RoutingDisposition};
-use crate::policy_table::DefaultPolicyTable;
+use crate::policy::PolicyDecision;
 use crate::queue::InputQueue;
-use crate::runtime_control_authority::{
-    RuntimeControlAuthority, RuntimeControlInput, RuntimeControlMutator,
-};
 use crate::runtime_event::{
     InputLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope, RuntimeStateChangeEvent,
 };
@@ -33,10 +29,7 @@ use crate::runtime_ingress_authority::{
     RuntimeIngressInput, RuntimeIngressMutator,
 };
 use crate::runtime_state::RuntimeState;
-use crate::traits::{
-    DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeControlCommand,
-    RuntimeDriverError,
-};
+use crate::traits::{RecoveryReport, ResetReport, RetireReport, RuntimeDriverError};
 
 /// Typed post-admission signal that the runtime loop should act on.
 ///
@@ -78,30 +71,42 @@ impl PostAdmissionSignal {
     }
 }
 
-/// Derive the handling mode from a policy decision's routing disposition.
-pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
-    match policy.routing_disposition {
-        RoutingDisposition::Steer => HandlingMode::Steer,
-        _ => HandlingMode::Queue,
+/// Shared coarse runtime control projection owned by the checked-in
+/// `MeerkatMachine` and borrowed by concrete driver shells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeControlProjection {
+    pub(crate) phase: RuntimeState,
+    pub(crate) current_run_id: Option<RunId>,
+    pub(crate) pre_run_phase: Option<RuntimeState>,
+}
+
+impl Default for RuntimeControlProjection {
+    fn default() -> Self {
+        Self {
+            phase: RuntimeState::Idle,
+            current_run_id: None,
+            pre_run_phase: None,
+        }
     }
 }
 
-/// Whether this input should request immediate processing after admission.
-///
-/// This is intentionally narrower than "routes through the steer lane".
-/// `ResponseProgress` uses checkpoint routing for boundary batching, but it
-/// must remain passive unless the input kind explicitly carries steer intent.
-pub(crate) fn requests_immediate_processing(input: &Input) -> bool {
-    matches!(input.handling_mode(), Some(HandlingMode::Steer))
+#[derive(Debug, Clone, Default)]
+pub struct ReplayQueuedContributorsPlan {
+    pub queue_work_ids: Vec<InputId>,
+    pub steer_work_ids: Vec<InputId>,
+    pub wake_runtime: bool,
+    pub notice_kind: &'static str,
 }
 
 /// Ephemeral runtime driver -- all state in-memory.
 #[derive(Clone)]
 pub struct EphemeralRuntimeDriver {
     runtime_id: LogicalRuntimeId,
-    /// Canonical RMAT/MTAS authority for runtime control state.
-    /// Single source of truth for phase transitions (Idle/Attached/Running/Retired/etc.).
-    control: RuntimeControlAuthority,
+    /// Shared coarse runtime projection owned by the machine/session entry.
+    ///
+    /// The concrete driver may read and realize this state, but it is not the
+    /// semantic owner of the lifecycle tuple.
+    control: Arc<StdRwLock<RuntimeControlProjection>>,
     ledger: InputLedger,
     queue: InputQueue,
     steer_queue: InputQueue,
@@ -119,10 +124,42 @@ pub struct EphemeralRuntimeDriver {
 }
 
 impl EphemeralRuntimeDriver {
+    fn read_control_projection(&self) -> std::sync::RwLockReadGuard<'_, RuntimeControlProjection> {
+        match self.control.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn write_control_projection(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, RuntimeControlProjection> {
+        match self.control.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn new(runtime_id: LogicalRuntimeId) -> Self {
+        Self::new_with_control(
+            runtime_id,
+            Arc::new(StdRwLock::new(RuntimeControlProjection::default())),
+        )
+    }
+
+    pub(crate) fn new_with_control(
+        runtime_id: LogicalRuntimeId,
+        control: Arc<StdRwLock<RuntimeControlProjection>>,
+    ) -> Self {
         Self {
             runtime_id,
-            control: RuntimeControlAuthority::from_state(RuntimeState::Idle),
+            control,
             ledger: InputLedger::new(),
             queue: InputQueue::new(),
             steer_queue: InputQueue::new(),
@@ -133,28 +170,19 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    pub(crate) fn control_handle(&self) -> Arc<StdRwLock<RuntimeControlProjection>> {
+        self.control.clone()
+    }
+
+    fn control_snapshot(&self) -> RuntimeControlProjection {
+        self.read_control_projection().clone()
+    }
+
     pub fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
-        let overrides = intents.into_iter().collect::<BTreeSet<_>>();
-        match self
-            .ingress
-            .apply(RuntimeIngressInput::SetSilentIntentOverrides { intents: overrides })
-        {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-                self.silent_comms_intents = self
-                    .ingress
-                    .silent_intent_overrides()
-                    .iter()
-                    .cloned()
-                    .collect();
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ingress authority rejected SetSilentIntentOverrides"
-                );
-            }
+        if self.control_snapshot().phase == RuntimeState::Stopped {
+            return;
         }
+        self.silent_comms_intents = intents;
     }
 
     pub fn silent_comms_intents(&self) -> Vec<String> {
@@ -196,6 +224,15 @@ impl EphemeralRuntimeDriver {
         self.steer_queue = self.build_projection_queue(self.ingress.steer_queue(), "steer_queue");
     }
 
+    pub(crate) fn replace_ingress(&mut self, ingress: RuntimeIngressAuthority) {
+        self.ingress = ingress;
+    }
+
+    pub(crate) fn rebuild_queue_projections_after_recovery(&mut self) {
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+    }
+
     fn debug_assert_queue_projection_alignment(&self) {
         debug_assert_eq!(
             self.queue.input_ids(),
@@ -224,6 +261,7 @@ impl EphemeralRuntimeDriver {
         work_id: InputId,
         content_shape: ContentShape,
         handling_mode: HandlingMode,
+        is_prompt: bool,
         lifecycle_state: InputLifecycleState,
         policy: PolicyDecision,
         request_id: Option<RequestId>,
@@ -233,6 +271,7 @@ impl EphemeralRuntimeDriver {
             work_id,
             content_shape,
             handling_mode,
+            is_prompt,
             lifecycle_state,
             policy,
             request_id,
@@ -315,13 +354,6 @@ impl EphemeralRuntimeDriver {
                         "ingress authority: notice"
                     );
                 }
-                RuntimeIngressEffect::SilentIntentApplied { work_id, intent } => {
-                    tracing::debug!(
-                        work_id = ?work_id,
-                        intent = %intent,
-                        "ingress authority: silent intent applied"
-                    );
-                }
                 RuntimeIngressEffect::StageInput { work_id, run_id } => {
                     // Derived from ingress authority's StageDrainSnapshot decision:
                     // drive the per-input lifecycle authority and emit the Staged event.
@@ -355,15 +387,6 @@ impl EphemeralRuntimeDriver {
                     tracing::trace!(
                         effect = ?effect,
                         "ingress authority: accept-phase effect (handled in accept path)"
-                    );
-                }
-                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id }
-                | RuntimeIngressEffect::RecoverRollback { work_id }
-                | RuntimeIngressEffect::RecoverKeep { work_id } => {
-                    tracing::trace!(
-                        work_id = ?work_id,
-                        effect = ?effect,
-                        "ingress authority: recovery effect"
                     );
                 }
             }
@@ -431,62 +454,82 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn is_idle(&self) -> bool {
-        self.control.is_idle()
+        self.control_snapshot().phase == RuntimeState::Idle
     }
     pub fn is_idle_or_attached(&self) -> bool {
-        self.control.phase().is_idle_or_attached()
+        self.control_snapshot().phase.is_idle_or_attached()
     }
 
-    pub fn attach(&mut self) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
-        let transition = self.control.apply(RuntimeControlInput::AttachExecutor)?;
+    pub fn phase(&self) -> RuntimeState {
+        self.control_snapshot().phase
+    }
+
+    pub fn current_run_id(&self) -> Option<RunId> {
+        self.control_snapshot().current_run_id
+    }
+
+    pub fn pre_run_phase(&self) -> Option<RuntimeState> {
+        self.control_snapshot().pre_run_phase
+    }
+
+    pub fn can_process_queue(&self) -> bool {
+        self.control_snapshot().phase.can_process_queue()
+    }
+
+    /// Low-level control projection shim for external contract tests.
+    ///
+    /// This does not decide lifecycle legality; it only applies an already
+    /// chosen MeerkatMachine control projection to the concrete driver shell.
+    #[doc(hidden)]
+    pub fn contract_set_control_projection(
+        &mut self,
+        next_phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
+        self.set_control_projection(next_phase, current_run_id, pre_run_phase);
+    }
+
+    fn set_phase(&mut self, next_phase: RuntimeState) -> RuntimeState {
+        let mut control = self.write_control_projection();
+        let from_phase = control.phase;
+        control.phase = next_phase;
+        from_phase
+    }
+
+    fn transition_phase(&mut self, next_phase: RuntimeState) {
+        let from_phase = self.set_phase(next_phase);
         self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
+            from: from_phase,
+            to: next_phase,
         }));
-        Ok(())
     }
-    pub fn detach(
+
+    pub(crate) fn set_control_projection(
         &mut self,
-    ) -> Result<Option<RuntimeState>, crate::runtime_state::RuntimeStateTransitionError> {
-        if self.control.is_attached() {
-            let transition = self.control.apply(RuntimeControlInput::DetachExecutor)?;
-            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                from: transition.from_phase,
-                to: transition.next_phase,
-            }));
-            Ok(Some(RuntimeState::Attached))
+        next_phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
+        if self.control_snapshot().phase == next_phase {
+            self.write_control_projection().phase = next_phase;
         } else {
-            Ok(None)
+            self.transition_phase(next_phase);
         }
-    }
-    pub fn start_run(
-        &mut self,
-        run_id: RunId,
-    ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
-        let _transition = self
-            .control
-            .apply(RuntimeControlInput::BeginRun { run_id })?;
-        Ok(())
-    }
-    pub fn complete_run(
-        &mut self,
-    ) -> Result<RunId, crate::runtime_state::RuntimeStateTransitionError> {
-        let run_id = self.control.current_run_id().cloned().ok_or(
-            crate::runtime_state::RuntimeStateTransitionError {
-                from: self.control.phase(),
-                to: RuntimeState::Idle,
-            },
-        )?;
-        let _transition = self.control.apply(RuntimeControlInput::RunCompleted {
-            run_id: run_id.clone(),
-        })?;
-        Ok(run_id)
+        let mut control = self.write_control_projection();
+        control.current_run_id = current_run_id;
+        control.pre_run_phase = pre_run_phase;
     }
     /// Drain and return the accumulated post-admission signal.
     ///
     /// Returns the strongest signal seen since the last drain and resets to `None`.
     pub fn take_post_admission_signal(&mut self) -> PostAdmissionSignal {
         std::mem::replace(&mut self.post_admission_signal, PostAdmissionSignal::None)
+    }
+
+    /// Inspect the current typed post-admission signal without draining it.
+    pub fn post_admission_signal(&self) -> PostAdmissionSignal {
+        self.post_admission_signal
     }
 
     /// Drain the typed signal and return whether wake is needed (backward-compat).
@@ -591,17 +634,6 @@ impl EphemeralRuntimeDriver {
     pub fn input_states_snapshot(&self) -> Vec<InputState> {
         self.ledger.iter().map(|(_, state)| state.clone()).collect()
     }
-    /// Get a reference to the runtime control authority.
-    pub fn control(&self) -> &RuntimeControlAuthority {
-        &self.control
-    }
-    /// Get a mutable reference to the runtime control authority.
-    ///
-    /// This is primarily a contract-test hook for driving explicit runtime
-    /// control transitions in recovery scenarios.
-    pub fn control_mut(&mut self) -> &mut RuntimeControlAuthority {
-        &mut self.control
-    }
     /// Clear the physical queue projections without touching canonical ingress
     /// truth. Used by recovery contract tests to simulate projection loss.
     pub fn clear_queue_projections(&mut self) {
@@ -650,32 +682,35 @@ impl EphemeralRuntimeDriver {
         input_ids: &[InputId],
         run_id: &RunId,
     ) -> Result<(), InputLifecycleError> {
-        // Ingress authority: StageDrainSnapshot — the authority owns the Staged
-        // transition. It emits StageInput effects that drive the per-input lifecycle
-        // authority and Staged events (handled in process_ingress_effects).
-        // No independent shell StageForRun call — single source of truth.
-        match self.ingress.apply(RuntimeIngressInput::StageDrainSnapshot {
-            run_id: run_id.clone(),
-            contributing_work_ids: input_ids.to_vec(),
-        }) {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-                self.rebuild_queue_projections();
-                self.debug_assert_queue_projection_alignment();
+        self.machine_realize_stage_batch(input_ids, run_id)
+    }
+
+    /// Machine-owned realization for a validated staged contributor batch.
+    pub(crate) fn machine_realize_stage_batch(
+        &mut self,
+        input_ids: &[InputId],
+        run_id: &RunId,
+    ) -> Result<(), InputLifecycleError> {
+        // The checked-in Meerkat machine already owns contributor-set legality
+        // for starting a run batch. Production no longer routes this through
+        // an ingress-helper transition surface; it applies the already-decided
+        // queue removal and staged lifecycle updates directly.
+        self.ingress.remove_from_queue_lanes(input_ids);
+        for input_id in input_ids {
+            self.ingress
+                .set_lifecycle_state(input_id, InputLifecycleState::Staged);
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                state.apply(InputLifecycleInput::StageForRun {
+                    run_id: run_id.clone(),
+                })?;
             }
-            Err(err) => {
-                tracing::warn!(
-                    input_ids = ?input_ids,
-                    run_id = ?run_id,
-                    error = %err,
-                    "ingress authority rejected StageDrainSnapshot"
-                );
-                return Err(InputLifecycleError::InvalidTransition {
-                    from: InputLifecycleState::Queued,
-                    input: format!("StageDrainSnapshot rejected: {err}"),
-                });
-            }
+            self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
+                input_id: input_id.clone(),
+                run_id: run_id.clone(),
+            }));
         }
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
 
         Ok(())
     }
@@ -796,175 +831,83 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    pub fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
-        // Ingress authority: Retire
-        match self.ingress.apply(RuntimeIngressInput::Retire) {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ingress authority rejected Retire"
-                );
-            }
-        }
-
-        let transition = self
-            .control
-            .apply(RuntimeControlInput::RetireRequested)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
+    pub(crate) fn finalize_retire(&mut self) -> RetireReport {
         let inputs_pending_drain = self.ledger.iter().filter(|(_, s)| !s.is_terminal()).count();
-        Ok(RetireReport {
+        RetireReport {
             inputs_abandoned: 0,
             inputs_pending_drain,
-        })
+        }
     }
 
-    pub fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
-        // Ingress authority: Reset (authority rejects if a run is in progress)
-        match self.ingress.apply(RuntimeIngressInput::Reset) {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ingress authority rejected Reset"
-                );
-            }
-        }
+    /// Low-level retire realization shim for external contract tests.
+    ///
+    /// Callers are responsible for setting the control projection first.
+    #[doc(hidden)]
+    pub fn contract_finalize_retire(&mut self) -> RetireReport {
+        self.finalize_retire()
+    }
 
+    pub(crate) fn reset_cleanup(&mut self) -> ResetReport {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Reset);
         self.queue.drain();
         self.steer_queue.drain();
         self.post_admission_signal = PostAdmissionSignal::None;
-        match self.control.apply(RuntimeControlInput::ResetRequested) {
-            Ok(transition) => {
-                self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                    from: transition.from_phase,
-                    to: transition.next_phase,
-                }));
-            }
-            Err(err) if err.from == RuntimeState::Idle => {}
-            Err(err) => {
-                return Err(RuntimeDriverError::Internal(err.to_string()));
-            }
-        }
+        self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-        Ok(ResetReport {
+        ResetReport {
             inputs_abandoned: abandoned,
-        })
+        }
     }
 
-    pub fn destroy(&mut self) -> Result<usize, RuntimeDriverError> {
-        // Ingress authority: Destroy
-        match self.ingress.apply(RuntimeIngressInput::Destroy) {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ingress authority rejected Destroy"
-                );
-            }
-        }
+    /// Low-level reset realization shim for external contract tests.
+    ///
+    /// Callers are responsible for setting the post-reset control projection.
+    #[doc(hidden)]
+    pub fn contract_reset_cleanup(&mut self) -> ResetReport {
+        self.reset_cleanup()
+    }
 
-        let transition = self
-            .control
-            .apply(RuntimeControlInput::DestroyRequested)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
+    pub(crate) fn destroy_cleanup(&mut self) -> usize {
         let abandoned = self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
+        self.silent_comms_intents.clear();
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-        Ok(abandoned)
+        abandoned
     }
 
-    pub fn recover_ephemeral(&mut self) -> RecoveryReport {
-        // Ingress authority: Recover — returns typed per-input recovery effects.
-        let recovery_effects = match self.ingress.apply(RuntimeIngressInput::Recover) {
-            Ok(transition) => {
-                self.process_ingress_effects(&transition.effects);
-                transition.effects
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "ingress authority rejected Recover"
-                );
-                Vec::new()
-            }
-        };
+    /// Low-level destroy realization shim for external contract tests.
+    ///
+    /// Callers are responsible for setting the destroyed control projection.
+    #[doc(hidden)]
+    pub fn contract_destroy_cleanup(&mut self) -> usize {
+        self.destroy_cleanup()
+    }
 
-        // Execute the authority's per-input recovery effects.
-        let mut recovered = 0;
-        let mut abandoned = 0;
-        let mut requeued = 0;
+    pub(crate) fn stop_runtime_cleanup(&mut self) {
+        self.abandon_all_non_terminal(InputAbandonReason::Stopped);
+        self.silent_comms_intents.clear();
+        self.queue.drain();
+        self.steer_queue.drain();
+    }
 
-        for effect in &recovery_effects {
-            match effect {
-                RuntimeIngressEffect::RecoverConsumeOnAccept { work_id } => {
-                    if let Some(state) = self.ledger.get_mut(work_id) {
-                        let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
-                        abandoned += 1;
-                        recovered += 1;
-                    }
-                }
-                RuntimeIngressEffect::RecoverRollback { work_id } => {
-                    if let Some(state) = self.ledger.get_mut(work_id) {
-                        match state.current_state() {
-                            InputLifecycleState::Accepted => {
-                                let _ = state.apply(InputLifecycleInput::QueueAccepted);
-                            }
-                            InputLifecycleState::Staged => {
-                                let _ = state.apply(InputLifecycleInput::RollbackStaged);
-                            }
-                            _ => {}
-                        }
-                        requeued += 1;
-                        recovered += 1;
-                    }
-                }
-                RuntimeIngressEffect::RecoverKeep { work_id } => {
-                    if self.ledger.get(work_id).is_some() {
-                        recovered += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
+    pub(crate) fn finalize_stop_runtime(&mut self) {
+        self.stop_runtime_cleanup();
+    }
 
-        self.rebuild_queue_projections();
-        self.debug_assert_queue_projection_alignment();
+    /// Low-level stop realization shim for external contract tests.
+    ///
+    /// Callers are responsible for setting the stopped control projection.
+    #[doc(hidden)]
+    pub fn contract_finalize_stop_runtime(&mut self) {
+        self.finalize_stop_runtime();
+    }
 
-        RecoveryReport {
-            inputs_recovered: recovered,
-            inputs_abandoned: abandoned,
-            inputs_requeued: requeued,
-            details: Vec::new(),
-        }
+    pub fn recover_ephemeral(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
+        crate::meerkat_machine::machine_recover_ephemeral_driver(self)
     }
 
     pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
-        let transition = self
-            .control
-            .apply(RuntimeControlInput::RecycleRequested)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
-
         let transferred = self.ledger.active_input_ids().len();
         let runtime_id = self.runtime_id.clone();
         let silent_comms_intents = self.silent_comms_intents.clone();
@@ -972,22 +915,12 @@ impl EphemeralRuntimeDriver {
         let ingress = self.ingress.clone();
         let control = self.control.clone();
 
-        *self = Self::new(runtime_id);
+        *self = Self::new_with_control(runtime_id, control);
         self.silent_comms_intents = silent_comms_intents;
         self.ledger = ledger;
         self.ingress = ingress;
-        self.control = control;
 
-        let _ = self.recover_ephemeral();
-
-        let transition = self
-            .control
-            .apply(RuntimeControlInput::RecycleSucceeded)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
+        self.recover_ephemeral()?;
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
 
@@ -1016,8 +949,9 @@ impl EphemeralRuntimeDriver {
             .map(|(id, _)| id.clone())
             .collect();
         let mut count = 0;
+        let mut terminal_inputs = Vec::new();
         for id in &non_terminal_ids {
-            if let Some(state) = self.ledger.get_mut(id)
+            let outcome = if let Some(state) = self.ledger.get_mut(id)
                 && state
                     .apply(InputLifecycleInput::Abandon {
                         reason: reason.clone(),
@@ -1025,6 +959,11 @@ impl EphemeralRuntimeDriver {
                     .is_ok()
             {
                 count += 1;
+                state.terminal_outcome().cloned()
+            } else {
+                None
+            };
+            if outcome.is_some() {
                 self.events
                     .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                         InputLifecycleEvent::Abandoned {
@@ -1032,6 +971,23 @@ impl EphemeralRuntimeDriver {
                             reason: format!("{reason:?}"),
                         },
                     )));
+            }
+            if let Some(outcome) = outcome {
+                terminal_inputs.push((id.clone(), outcome));
+            }
+        }
+        if !terminal_inputs.is_empty() {
+            match self
+                .ingress
+                .apply(RuntimeIngressInput::ReconcileTerminalInputs { terminal_inputs })
+            {
+                Ok(transition) => self.process_ingress_effects(&transition.effects),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "ingress authority rejected terminal reconciliation after abandon"
+                    );
+                }
             }
         }
         count
@@ -1046,21 +1002,142 @@ impl EphemeralRuntimeDriver {
         self.debug_assert_queue_projection_alignment();
         abandoned
     }
+
+    pub async fn run_completed(
+        &mut self,
+        run_id: RunId,
+        consumed_input_ids: Vec<InputId>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.machine_realize_run_completed(&run_id, &consumed_input_ids)
+    }
+
+    /// Machine-owned realization for a validated run-completion transition.
+    pub(crate) fn machine_realize_run_completed(
+        &mut self,
+        run_id: &RunId,
+        consumed_input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        // The checked-in Meerkat machine already owns contributor-set legality
+        // for completion. Production applies the already-decided consumed
+        // lifecycle mirror directly instead of routing through an ingress
+        // helper transition.
+        for input_id in consumed_input_ids {
+            self.ingress
+                .set_lifecycle_state(input_id, InputLifecycleState::Consumed);
+        }
+
+        self.consume_inputs(consumed_input_ids, run_id)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn run_failed(
+        &mut self,
+        run_id: RunId,
+        contributing_input_ids: Vec<InputId>,
+        replay_plan: ReplayQueuedContributorsPlan,
+        _error: String,
+        _recoverable: bool,
+    ) -> Result<(), RuntimeDriverError> {
+        self.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
+    }
+
+    /// Machine-owned realization for a validated failed-run replay plan.
+    pub(crate) fn machine_realize_run_failed(
+        &mut self,
+        run_id: &RunId,
+        contributing_input_ids: &[InputId],
+        replay_plan: &ReplayQueuedContributorsPlan,
+    ) -> Result<(), RuntimeDriverError> {
+        self.ingress
+            .replay_queue_lanes(&replay_plan.queue_work_ids, &replay_plan.steer_work_ids);
+        if replay_plan.wake_runtime && self.post_admission_signal < PostAdmissionSignal::WakeLoop {
+            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
+        }
+        tracing::debug!(
+            run_id = ?run_id,
+            kind = replay_plan.notice_kind,
+            queue = replay_plan.queue_work_ids.len(),
+            steer = replay_plan.steer_work_ids.len(),
+            "runtime replayed queued contributors"
+        );
+
+        self.rollback_staged(contributing_input_ids)
+            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn boundary_applied(
+        &mut self,
+        run_id: RunId,
+        receipt: RunBoundaryReceipt,
+        _session_snapshot: Option<Vec<u8>>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.machine_realize_boundary_applied(&run_id, &receipt)
+    }
+
+    /// Machine-owned realization for a validated boundary-application step.
+    pub(crate) fn machine_realize_boundary_applied(
+        &mut self,
+        run_id: &RunId,
+        receipt: &RunBoundaryReceipt,
+    ) -> Result<(), RuntimeDriverError> {
+        // The checked-in Meerkat machine already owns contributor-set legality
+        // for boundary application. Production applies the already-decided
+        // pending-consumption lifecycle mirror directly instead of routing
+        // through an ingress helper transition.
+        for input_id in &receipt.contributing_input_ids {
+            self.ingress
+                .set_lifecycle_state(input_id, InputLifecycleState::AppliedPendingConsumption);
+        }
+        tracing::debug!(
+            contributors = receipt.contributing_input_ids.len(),
+            sequence = receipt.sequence,
+            "runtime boundary applied"
+        );
+
+        for input_id in &receipt.contributing_input_ids {
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                let applied = state
+                    .apply(InputLifecycleInput::MarkApplied {
+                        run_id: run_id.clone(),
+                    })
+                    .is_ok();
+                let _ = state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
+                    boundary_sequence: receipt.sequence,
+                });
+                if applied {
+                    self.events
+                        .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                            InputLifecycleEvent::Applied {
+                                input_id: input_id.clone(),
+                                run_id: run_id.clone(),
+                            },
+                        )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let control_phase = self.control.phase();
-        match control_phase.can_accept_input() {
-            true => {}
-            false => {
+        match self.runtime_state() {
+            RuntimeState::Retired | RuntimeState::Stopped => {
                 return Err(RuntimeDriverError::NotReady {
-                    state: control_phase,
+                    state: self.runtime_state(),
                 });
             }
+            RuntimeState::Destroyed => return Err(RuntimeDriverError::Destroyed),
+            RuntimeState::Initializing
+            | RuntimeState::Idle
+            | RuntimeState::Attached
+            | RuntimeState::Running => {}
         }
+
         if let Err(e) = validate_durability(&input) {
             match e {
                 DurabilityError::DerivedForbidden { .. }
@@ -1099,12 +1176,9 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                         self.process_ingress_effects(&transition.effects);
                     }
                     Err(err) => {
-                        tracing::warn!(
-                            input_id = ?input_id,
-                            existing_id = ?existing_id,
-                            error = %err,
-                            "ingress authority rejected AdmitDeduplicated"
-                        );
+                        return Err(RuntimeDriverError::Internal(format!(
+                            "ingress authority rejected AdmitDeduplicated for '{input_id}' against '{existing_id}': {err}"
+                        )));
                     }
                 }
                 self.emit_event(RuntimeEvent::InputLifecycle(
@@ -1121,17 +1195,18 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         } else {
             self.ledger.accept(state.clone());
         }
-        let runtime_idle = self.control.phase().is_idle_or_attached();
-        let mut policy = DefaultPolicyTable::resolve(&input, runtime_idle);
-        crate::silent_intent::apply_silent_intent_override(
+        let runtime_idle = self.runtime_state().is_idle_or_attached();
+        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
+        let resolved = crate::accept::resolve_admission(
             &input,
+            runtime_idle,
             &self.silent_comms_intents,
-            &mut policy,
+            existing_superseded_id,
         );
         if let Some(s) = self.ledger.get_mut(&input_id) {
             s.policy = Some(PolicySnapshot {
-                version: policy.policy_version,
-                decision: policy.clone(),
+                version: resolved.policy.policy_version,
+                decision: resolved.policy.clone(),
             });
         }
         self.emit_event(RuntimeEvent::InputLifecycle(
@@ -1139,45 +1214,54 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 input_id: input_id.clone(),
             },
         ));
-        // --- Ingress authority: authority-owned classification ---
-        // All mechanical lookups done unconditionally; authority.admit() decides
-        // the admission path (queued vs consumed-on-accept) based on the policy.
-        // Zero policy branching in shell code.
-        let handling_mode = handling_mode_from_policy(&policy);
-        let request_immediate_processing = requests_immediate_processing(&input);
+        // --- Ingress authority: machine-owned admission plan ---
+        // All mechanical lookups happen here, but the checked-in admission
+        // plan now decides the semantic path (consume-on-accept, queue,
+        // priority, coalesce, supersede). The helper only applies that plan.
+        let handling_mode = resolved.handling_mode;
         let content_shape = ContentShape(input.kind_id().to_string());
         let is_prompt = matches!(input, Input::Prompt(_));
-        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
-        match self.ingress.admit(
-            input_id.clone(),
-            content_shape,
-            handling_mode,
-            request_immediate_processing,
-            is_prompt,
-            None, // request_id
-            None, // reservation_key
-            policy.clone(),
-            existing_superseded_id,
-        ) {
+        let ingress_input = match resolved.admission_plan {
+            crate::accept::AdmissionPlan::ConsumedOnAccept => {
+                RuntimeIngressInput::AdmitConsumedOnAccept {
+                    work_id: input_id.clone(),
+                    content_shape,
+                    request_id: None,
+                    reservation_key: None,
+                    policy: resolved.policy.clone(),
+                }
+            }
+            crate::accept::AdmissionPlan::Queued {
+                persist_and_queue,
+                queue_action,
+                existing_action,
+            } => RuntimeIngressInput::AdmitQueued {
+                work_id: input_id.clone(),
+                content_shape,
+                handling_mode,
+                is_prompt,
+                request_id: None,
+                reservation_key: None,
+                policy: resolved.policy.clone(),
+                persist_and_queue,
+                queue_action,
+                existing_action,
+            },
+        };
+        match self.ingress.apply(ingress_input) {
             Ok(transition) => {
                 self.process_accept_effects(&transition.effects, &input);
             }
             Err(err) => {
-                tracing::warn!(
-                    input_id = ?input_id,
-                    error = %err,
-                    "ingress authority rejected accept_input"
-                );
+                return Err(RuntimeDriverError::Internal(format!(
+                    "ingress authority rejected accept_input for '{input_id}': {err}"
+                )));
             }
         }
-        // Wake/process decisions are driven by the ingress authority effects
-        // (WakeRuntime / RequestImmediateProcessing). The authority respects
-        // WakeMode::None and only emits these effects when the policy allows.
-        // No shell-side override here — that would bypass the authority.
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
         Ok(AcceptOutcome::Accepted {
             input_id,
-            policy,
+            policy: resolved.policy,
             state: final_state,
         })
     }
@@ -1189,214 +1273,11 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         Ok(())
     }
 
-    async fn on_run_event(&mut self, event: RunEvent) -> Result<(), RuntimeDriverError> {
-        match event {
-            RunEvent::RunCompleted {
-                run_id,
-                consumed_input_ids,
-            } => {
-                // Ingress authority: RunCompleted — always call; authority rejects if run doesn't match.
-                match self.ingress.apply(RuntimeIngressInput::RunCompleted {
-                    run_id: run_id.clone(),
-                }) {
-                    Ok(transition) => {
-                        self.process_ingress_effects(&transition.effects);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            run_id = ?run_id,
-                            error = %err,
-                            "ingress authority rejected RunCompleted"
-                        );
-                    }
-                }
-
-                self.consume_inputs(&consumed_input_ids, &run_id)
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                self.control
-                    .apply(RuntimeControlInput::RunCompleted {
-                        run_id: run_id.clone(),
-                    })
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-            }
-            RunEvent::RunFailed { ref run_id, .. } => {
-                // Ingress authority: RunFailed — always call; authority rejects if run doesn't match.
-                match self.ingress.apply(RuntimeIngressInput::RunFailed {
-                    run_id: run_id.clone(),
-                }) {
-                    Ok(transition) => {
-                        self.process_ingress_effects(&transition.effects);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            run_id = ?run_id,
-                            error = %err,
-                            "ingress authority rejected RunFailed"
-                        );
-                    }
-                }
-
-                let staged_ids: Vec<InputId> = self
-                    .ledger
-                    .iter()
-                    .filter(|(_, s)| s.current_state() == InputLifecycleState::Staged)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                self.rollback_staged(&staged_ids)
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                // Wake decision is authority-driven: the ingress authority emits
-                // WakeRuntime when rolled-back inputs are re-enqueued (above).
-                self.control
-                    .apply(RuntimeControlInput::RunFailed {
-                        run_id: run_id.clone(),
-                    })
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-            }
-            RunEvent::RunCancelled { ref run_id, .. } => {
-                // Ingress authority: RunCancelled — always call; authority rejects if run doesn't match.
-                match self.ingress.apply(RuntimeIngressInput::RunCancelled {
-                    run_id: run_id.clone(),
-                }) {
-                    Ok(transition) => {
-                        self.process_ingress_effects(&transition.effects);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            run_id = ?run_id,
-                            error = %err,
-                            "ingress authority rejected RunCancelled"
-                        );
-                    }
-                }
-
-                let staged_ids: Vec<InputId> = self
-                    .ledger
-                    .iter()
-                    .filter(|(_, s)| s.current_state() == InputLifecycleState::Staged)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                self.rollback_staged(&staged_ids)
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                // Wake decision is authority-driven: the ingress authority emits
-                // WakeRuntime when rolled-back inputs are re-enqueued (above).
-                self.control
-                    .apply(RuntimeControlInput::RunCancelled {
-                        run_id: run_id.clone(),
-                    })
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-            }
-            RunEvent::RunStarted { .. } => {}
-            RunEvent::BoundaryApplied {
-                run_id, receipt, ..
-            } => {
-                // Ingress authority: BoundaryApplied
-                if self.ingress.current_run() == Some(&run_id) {
-                    match self.ingress.apply(RuntimeIngressInput::BoundaryApplied {
-                        run_id: run_id.clone(),
-                        boundary_sequence: receipt.sequence,
-                    }) {
-                        Ok(transition) => {
-                            self.process_ingress_effects(&transition.effects);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                run_id = ?run_id,
-                                boundary_sequence = receipt.sequence,
-                                error = %err,
-                                "ingress authority rejected BoundaryApplied"
-                            );
-                        }
-                    }
-                }
-
-                for input_id in &receipt.contributing_input_ids {
-                    if let Some(state) = self.ledger.get_mut(input_id) {
-                        let applied = state
-                            .apply(InputLifecycleInput::MarkApplied {
-                                run_id: run_id.clone(),
-                            })
-                            .is_ok();
-                        let _ = state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
-                            boundary_sequence: receipt.sequence,
-                        });
-                        if applied {
-                            self.events
-                                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                                    InputLifecycleEvent::Applied {
-                                        input_id: input_id.clone(),
-                                        run_id: run_id.clone(),
-                                    },
-                                )));
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn on_runtime_control(
-        &mut self,
-        command: RuntimeControlCommand,
-    ) -> Result<(), RuntimeDriverError> {
-        match command {
-            RuntimeControlCommand::Stop => {
-                // Ingress authority: Destroy (Stop abandons everything)
-                match self.ingress.apply(RuntimeIngressInput::Destroy) {
-                    Ok(transition) => {
-                        self.process_ingress_effects(&transition.effects);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "ingress authority rejected Destroy on Stop"
-                        );
-                    }
-                }
-
-                let transition = self
-                    .control
-                    .apply(RuntimeControlInput::StopRequested)
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-                self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-                    from: transition.from_phase,
-                    to: transition.next_phase,
-                }));
-                self.abandon_all_non_terminal(InputAbandonReason::Destroyed);
-                self.queue.drain();
-                self.steer_queue.drain();
-            }
-            RuntimeControlCommand::Resume => {
-                match self.control.apply(RuntimeControlInput::ResumeRequested) {
-                    Ok(_) => {}
-                    Err(err) if err.from != RuntimeState::Recovering => {}
-                    Err(err) => {
-                        return Err(RuntimeDriverError::Internal(err.to_string()));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        Ok(self.recover_ephemeral())
+        self.recover_ephemeral()
     }
     fn runtime_state(&self) -> RuntimeState {
-        self.control.phase()
-    }
-    async fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError> {
-        EphemeralRuntimeDriver::retire(self)
-    }
-    async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError> {
-        EphemeralRuntimeDriver::reset(self)
-    }
-    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
-        let abandoned = EphemeralRuntimeDriver::destroy(self)?;
-        Ok(DestroyReport {
-            inputs_abandoned: abandoned,
-        })
+        self.control_snapshot().phase
     }
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.ledger.get(input_id)

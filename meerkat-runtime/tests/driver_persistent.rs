@@ -197,6 +197,28 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
     })
 }
 
+fn bind_running(driver: &mut PersistentRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
+    driver.contract_set_control_projection(
+        RuntimeState::Running,
+        Some(run_id),
+        Some(pre_run_phase),
+    );
+}
+
+async fn retire_runtime(
+    driver: &mut PersistentRuntimeDriver,
+) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
+    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_finalize_retire().await
+}
+
+async fn reset_runtime(
+    driver: &mut PersistentRuntimeDriver,
+) -> Result<meerkat_runtime::ResetReport, meerkat_runtime::RuntimeDriverError> {
+    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
+    driver.contract_finalize_reset().await
+}
+
 #[tokio::test]
 async fn durable_before_ack() {
     let store = Arc::new(InMemoryRuntimeStore::new());
@@ -339,7 +361,7 @@ async fn boundary_applied_persists_atomically() {
     driver.accept_input(input).await.unwrap();
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&input_id, &run_id).unwrap();
 
     // Fire BoundaryApplied — this should persist atomically
@@ -352,11 +374,11 @@ async fn boundary_applied_persists_atomically() {
         sequence: 0,
     };
     driver
-        .on_run_event(meerkat_core::lifecycle::RunEvent::BoundaryApplied {
-            run_id: run_id.clone(),
-            receipt: receipt.clone(),
-            session_snapshot: Some(b"session-data".to_vec()),
-        })
+        .boundary_applied(
+            run_id.clone(),
+            receipt.clone(),
+            Some(b"session-data".to_vec()),
+        )
         .await
         .unwrap();
 
@@ -469,7 +491,7 @@ async fn retire_preserves_inputs_for_drain() {
     let input_id = input.id().clone();
     driver.accept_input(input).await.unwrap();
 
-    let report = driver.retire().await.unwrap();
+    let report = retire_runtime(&mut driver).await.unwrap();
     assert_eq!(report.inputs_abandoned, 0);
     assert_eq!(report.inputs_pending_drain, 1);
 
@@ -495,7 +517,7 @@ async fn reset_persists_abandoned_inputs() {
     let input_id = input.id().clone();
     driver.accept_input(input).await.unwrap();
 
-    let report = driver.reset().await.unwrap();
+    let report = reset_runtime(&mut driver).await.unwrap();
     assert_eq!(report.inputs_abandoned, 1);
 
     let stored = store

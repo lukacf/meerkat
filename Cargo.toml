@@ -30,6 +30,7 @@ members = [
     "meerkat-machine-schema",
     "meerkat-machine-codegen",
     "meerkat-machine-kernels",
+    "test-fixtures/surface-build-fixtures",
     "xtask",
 ]
 
@@ -71,7 +72,7 @@ anyhow = "1.0"
 # Utilities
 nix = { version = "0.29", features = ["signal", "process", "fs"] }
 which = "7"
-uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+uuid = { version = "1.11", features = ["v4", "v5", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 tracing = "0.1"
@@ -119,7 +120,6 @@ meerkat-models = { version = "0.5.2", path = "meerkat-models" }
 meerkat-core = { version = "0.5.2", path = "meerkat-core" }
 meerkat-client = { version = "0.5.2", path = "meerkat-client", default-features = false }
 meerkat-schedule = { version = "0.5.2", path = "meerkat-schedule" }
-meerkat-store = { version = "0.5.2", path = "meerkat-store", default-features = false }
 meerkat-tools = { version = "0.5.2", path = "meerkat-tools", default-features = false }
 meerkat-mcp = { version = "0.5.2", path = "meerkat-mcp" }
 meerkat-mcp-server = { version = "0.5.2", path = "meerkat-mcp-server" }
@@ -141,6 +141,7 @@ meerkat-machine-schema = { version = "0.5.2", path = "meerkat-machine-schema" }
 meerkat-machine-codegen = { version = "0.5.2", path = "meerkat-machine-codegen" }
 meerkat-machine-kernels = { version = "0.5.2", path = "meerkat-machine-kernels" }
 meerkat-machine-derive = { version = "0.5.2", path = "meerkat-machine-derive" }
+meerkat-store = { version = "0.5.2", path = "meerkat-store", default-features = false }
 
 [profile.dev]
 split-debuginfo = "off"

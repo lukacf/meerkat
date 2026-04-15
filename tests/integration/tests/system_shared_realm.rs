@@ -34,6 +34,16 @@ fn workspace_root() -> PathBuf {
 }
 
 fn binary_path(name: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(format!(
+        "RKAT_TEST_BIN_{}",
+        name.replace('-', "_").to_ascii_uppercase()
+    )) {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return path;
+        }
+    }
+
     if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")) {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -53,31 +63,15 @@ fn binary_path(name: &str) -> PathBuf {
     }
 
     let root = workspace_root();
-    if let Some(candidate) = [
+    [
         root.join(format!("target/debug/{name}")),
         root.join(format!("target/release/{name}")),
     ]
     .into_iter()
     .find(|candidate| candidate.exists())
-    {
-        return candidate;
-    }
-
-    // Fall back to the explicit test-bin override only after trying the actual
-    // built workspace binaries. Under the shared-realm e2e wrappers, the copied
-    // e2e-bin carrier can wedge in dyld before `main`, while the real target
-    // binary remains healthy.
-    if let Some(path) = std::env::var_os(format!(
-        "RKAT_TEST_BIN_{}",
-        name.replace('-', "_").to_ascii_uppercase()
-    )) {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return path;
-        }
-    }
-
-    panic!("binary '{name}' not found; build it in CARGO_TARGET_DIR or repo target")
+    .unwrap_or_else(|| {
+        panic!("binary '{name}' not found; build it in CARGO_TARGET_DIR or repo target")
+    })
 }
 
 async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -659,7 +653,8 @@ async fn cli_rpc_cli_default_sqlite_shared_realm_roundtrip()
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id.to_string(),
         "Continue from CLI again.",
     ];
@@ -752,7 +747,8 @@ async fn cli_rest_cli_default_sqlite_shared_realm_roundtrip()
         state_root.to_str().unwrap(),
         "--realm",
         realm_id,
-        "resume",
+        "run",
+        "--resume",
         &session_id.to_string(),
         "Continue from CLI again.",
     ];

@@ -186,6 +186,7 @@ pub fn occurrence_lifecycle_machine() -> MachineSchema {
                 },
             ],
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "OccurrenceLifecycleSignal".into(),
             variants: vec![],

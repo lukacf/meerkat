@@ -81,6 +81,9 @@ jobs:
       - name: Verify Rust release packaging
         run: make check-rust-release-packaging
 
+      - name: Check rkat-mini skill size gate
+        run: make check-mini-skill-size
+
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/v')
         run: make verify-version
@@ -131,13 +134,15 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
+          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+          cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+          for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
             codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
           done
 
@@ -149,7 +154,7 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
+          BINARIES=("rkat" "rkat-mini" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
@@ -291,7 +296,7 @@ jobs:
             echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
             echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
             echo ""
-            for r in rkat-rpc rkat-rest rkat-mcp; do
+            for r in rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
               gen_resource "$r" "$target"
               echo ""
             done
@@ -327,7 +332,7 @@ jobs:
             echo '  def install'
             echo '    bin.install "rkat"'
             echo ''
-            echo '    %w[rkat-rpc rkat-rest rkat-mcp].each do |name|'
+            echo '    %w[rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
             echo '      resource(name).stage do'
             echo '        bin.install name'
             echo '      end'

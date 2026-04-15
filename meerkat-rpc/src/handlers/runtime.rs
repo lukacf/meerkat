@@ -22,7 +22,6 @@ fn to_wire_runtime_state(state: RuntimeState) -> Result<WireRuntimeState, String
         RuntimeState::Idle => WireRuntimeState::Idle,
         RuntimeState::Attached => WireRuntimeState::Attached,
         RuntimeState::Running => WireRuntimeState::Running,
-        RuntimeState::Recovering => WireRuntimeState::Recovering,
         RuntimeState::Retired => WireRuntimeState::Retired,
         RuntimeState::Stopped => WireRuntimeState::Stopped,
         RuntimeState::Destroyed => WireRuntimeState::Destroyed,

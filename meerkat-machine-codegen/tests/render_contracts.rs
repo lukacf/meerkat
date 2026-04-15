@@ -16,7 +16,7 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
 
     assert!(rendered.starts_with("---- MODULE Machine_MeerkatMachine ----"));
     assert!(rendered.contains(
-        "STATE\n  phase : {\"Initializing\", \"Idle\", \"Attached\", \"Running\", \"Recovering\", \"Retired\", \"Stopped\", \"Destroyed\"}"
+        "STATE\n  phase : {\"Initializing\", \"Idle\", \"Attached\", \"Running\", \"Retired\", \"Stopped\", \"Destroyed\"}"
     ));
     assert!(rendered.contains("INPUTS\n  MeerkatMachineInput = {"));
     assert!(rendered.contains("SIGNALS\n  MeerkatMachineSignal = {"));
@@ -30,6 +30,8 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
         "\"SetPeerIngressContext\"",
         "\"AcceptWithCompletion\"",
         "\"AcceptWithoutWake\"",
+        "\"StagePersistentFilter\"",
+        "\"RequestDeferredTools\"",
         "\"AbortAll\"",
         "\"Wait\"",
         "\"Prepare\"",
@@ -41,16 +43,11 @@ fn renders_canonical_meerkat_machine_fixture_with_stable_sections() {
             "rendered MeerkatMachine module should include input {required}"
         );
     }
-    for required in [
-        "\"Initialize\"",
-        "\"StagePersistentFilter\"",
-        "\"RequestDeferredTools\"",
-    ] {
-        assert!(
-            rendered.contains(required),
-            "rendered MeerkatMachine module should include signal {required}"
-        );
-    }
+    let required = "\"Initialize\"";
+    assert!(
+        rendered.contains(required),
+        "rendered MeerkatMachine module should include signal {required}"
+    );
     assert!(rendered.contains("TRANSITIONS\n  Initialize"));
     assert!(rendered.contains("PrepareBindings"));
     assert!(rendered.ends_with("====\n"));
@@ -61,9 +58,10 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     let rendered = render_machine_module(&mob_machine());
 
     assert!(rendered.starts_with("---- MODULE Machine_MobMachine ----"));
-    assert!(rendered.contains(
-        "STATE\n  phase : {\"Creating\", \"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}"
-    ));
+    assert!(
+        rendered
+            .contains("STATE\n  phase : {\"Running\", \"Stopped\", \"Completed\", \"Destroyed\"}")
+    );
     assert!(rendered.contains("INPUTS\n  MobMachineInput = {"));
     assert!(rendered.contains("SIGNALS\n  MobMachineSignal = {"));
     for required in [
@@ -74,12 +72,7 @@ fn renders_canonical_mob_machine_fixture_with_identity_native_inputs() {
     ] {
         assert!(rendered.contains(required));
     }
-    for required in [
-        "\"Start\"",
-        "\"ObserveRuntimeReady\"",
-        "\"StartRun\"",
-        "\"FinishRun\"",
-    ] {
+    for required in ["\"ObserveRuntimeReady\"", "\"StartRun\"", "\"FinishRun\""] {
         assert!(rendered.contains(required));
     }
     assert!(rendered.contains("AgentIdentity"));
@@ -93,9 +86,6 @@ fn renders_kernel_seam_composition_with_routes() {
     assert!(rendered.starts_with("---- MODULE Composition_meerkat_mob_seam ----"));
     assert!(rendered.contains(
         "binding_request_reaches_meerkat == mob.RequestRuntimeBinding -> meerkat.PrepareBindings (Input) [Immediate]"
-    ));
-    assert!(rendered.contains(
-        "work_completed_reaches_mob == meerkat.WorkCompleted -> mob.ObserveWorkCompleted (Signal) [Immediate]"
     ));
     assert!(rendered.contains("ROUTES"));
     assert!(rendered.ends_with("====\n"));
@@ -113,8 +103,8 @@ fn renders_machine_mapping_coverage_with_named_items() {
     assert!(rendered.contains("### Code Anchors"));
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Transitions"));
-    assert!(rendered.contains("- `PrepareBindingsIdle`"));
-    assert!(rendered.contains("- `destroyed_has_no_active_work`"));
+    assert!(rendered.contains("- `PrepareBindingsInitializing`"));
+    assert!(rendered.contains("- `bind-run-boundary-terminal`"));
 }
 
 #[test]
@@ -129,7 +119,7 @@ fn renders_composition_mapping_coverage_with_routes() {
     assert!(rendered.contains("### Scenarios"));
     assert!(rendered.contains("### Routes"));
     assert!(rendered.contains("- `binding_request_reaches_meerkat`"));
-    assert!(rendered.contains("- `work_completed_reaches_mob`"));
+    assert!(rendered.contains("- `work_request_reaches_meerkat`"));
 }
 
 #[test]
@@ -147,7 +137,7 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     );
     assert!(appended.contains("Manual text."));
     assert!(appended.contains(GENERATED_COVERAGE_START));
-    assert!(appended.contains("- `PrepareBindingsIdle`"));
+    assert!(appended.contains("- `PrepareBindingsInitializing`"));
     assert!(appended.contains(GENERATED_COVERAGE_END));
 
     let existing = format!(
@@ -156,5 +146,5 @@ fn merges_mapping_document_by_appending_and_replacing_generated_block() {
     let replaced = merge_mapping_document(Some(&existing), "MeerkatMachine", &generated);
     assert!(!replaced.contains("old block"));
     assert!(replaced.contains("Manual text."));
-    assert!(replaced.contains("- `PrepareBindingsIdle`"));
+    assert!(replaced.contains("- `PrepareBindingsInitializing`"));
 }

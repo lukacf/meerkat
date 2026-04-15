@@ -94,7 +94,9 @@ fn codegen_writes_canonical_machine_and_composition_authority_modules() {
     .expect("seam model");
     assert!(seam_model.contains("Generated composition model for meerkat_mob_seam."));
     assert!(seam_model.contains("binding_request_reaches_meerkat"));
-    assert!(seam_model.contains("work_completed_reaches_mob"));
+    assert!(seam_model.contains("work_request_reaches_meerkat"));
+    assert!(seam_model.contains("EntryPacketAdmissible(packet) =="));
+    assert!(seam_model.contains("RejectPendingEntryInput =="));
 }
 
 #[test]

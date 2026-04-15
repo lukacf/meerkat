@@ -91,10 +91,10 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
   <Tab title="CLI">
     ```bash
     # Resume the most recent session
-    rkat resume last "Now explain it in more detail"
+    rkat run --resume "Now explain it in more detail"
 
-    # Or use the shortcut
-    rkat continue "Now explain it in more detail"
+    # Or target a specific prior session
+    rkat run --resume ~2 "Now explain it in more detail"
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -165,16 +165,16 @@ CLI supports short prefix matching and relative aliases for resuming sessions.
 
 ```bash
 # Full UUID
-rkat resume 01936f8a-7b2c-7000-8000-000000000001 "Keep going"
+rkat run --resume 01936f8a-7b2c-7000-8000-000000000001 "Keep going"
 
 # Short prefix (git-style, fails on ambiguity)
-rkat resume 019c8b99 "Keep going"
+rkat run --resume 019c8b99 "Keep going"
 
 # Most recent session
-rkat resume last "Keep going"
+rkat run --resume last "Keep going"
 
 # 2nd most recent
-rkat resume ~2 "Go back to this one"
+rkat run --resume ~2 "Go back to this one"
 
 # Shortcut for `resume last`
 rkat c "Keep going"
@@ -185,9 +185,9 @@ rkat c "Keep going"
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat sessions list
-    rkat sessions list --limit 10
-    rkat sessions list --limit 10 --offset 20
+    rkat session list
+    rkat session list --limit 10
+    rkat session list --limit 10 --offset 20
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -233,7 +233,7 @@ rkat c "Keep going"
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat sessions show 01936f8a-...
+    rkat session show 01936f8a-...
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -280,7 +280,7 @@ rkat c "Keep going"
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat sessions delete 01936f8a-...
+    rkat session delete 01936f8a-...
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -326,7 +326,7 @@ Cancel an in-flight turn. No-op if the session is idle.
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat sessions interrupt 01936f8a-...
+    rkat session interrupt 01936f8a-...
     ```
   </Tab>
   <Tab title="JSON-RPC">

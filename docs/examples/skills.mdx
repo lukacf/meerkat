@@ -14,10 +14,10 @@ Discover all skills from every source (project, user, git, HTTP, embedded) with 
   <Tab title="CLI">
     ```bash
     # Human-readable table
-    rkat skills list
+    rkat skill list
 
     # Machine-readable JSON
-    rkat skills list --json
+    rkat skill list --json
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -77,10 +77,10 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
   <Tab title="CLI">
     ```bash
     # Inspect the active version
-    rkat skills inspect task-workflow
+    rkat skill inspect task-workflow
 
     # Inspect a shadowed version from a specific source
-    rkat skills inspect task-workflow --source company --json
+    rkat skill inspect task-workflow --source company --json
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -142,12 +142,14 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
 
 ## Inject skills on session create
 
-Pass `skill_references` to resolve and inject skill content into the system prompt when a session starts.
+Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces, to resolve and inject skill content into the system prompt when a session starts.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run "Extract emails" --skill-refs "/email-extractor" "/formatting/markdown"
+    rkat run "Extract emails" \
+      --skill /email-extractor \
+      --skill /formatting/markdown
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -226,7 +228,7 @@ Preloaded skills are resolved and injected into the system prompt before the fir
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run "Help me deploy" --preload-skills "deployment-guide" "shell-patterns"
+    rkat run "Help me deploy" --skill deployment-guide --skill shell-patterns
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -297,8 +299,8 @@ Inject skills into a specific turn on an existing session. The skill content is 
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat resume <session-id> "Now format the output" \
-      --skill-refs "/formatting/markdown"
+    rkat run --resume <session-id> "Now format the output" \
+      --skill formatting/markdown
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -380,5 +382,5 @@ Skills are discovered from multiple sources in precedence order. The first sourc
 | 5 | Embedded | Built-in skills from component crates |
 
 <Note>
-A project skill with the same ID as a built-in skill overrides the built-in. Use `rkat skills list --json` to see shadowing details.
+A project skill with the same ID as a built-in skill overrides the built-in. Use `rkat skill list --json` to see shadowing details.
 </Note>

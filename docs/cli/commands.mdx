@@ -20,9 +20,11 @@ You can also use subcommands explicitly:
 
 ```bash
 rkat run "summarize this repository"
-rkat resume last "keep going"
+rkat run --resume "keep going"
 rkat mob pack ./mobs/release-triage -o dist/release-triage.mobpack
 ```
+
+Meerkat also ships `rkat-mini`, a smaller static surface for run/session/config workflows. See [Mini surfaces](/guides/mini-surfaces) for the exact contract.
 
 ## Global flags
 
@@ -43,17 +45,41 @@ rkat [--realm <id>] [--isolated] [--instance <id>] \
 |---------|---------|
 | `rkat <PROMPT>` | Run a task directly from the terminal |
 | `rkat run <PROMPT>` | Explicit form of the default prompt command |
-| `rkat resume <SESSION_ID> <PROMPT>` | Continue a saved session |
-| `rkat continue <PROMPT>` | Shortcut for `resume last` |
-| `rkat sessions ...` | Inspect, delete, or interrupt sessions |
+| `rkat run --resume[=<SESSION>] <PROMPT>` | Continue a saved session |
+| `rkat session ...` | Inspect, delete, or interrupt sessions |
+| `rkat realm ...` | Inspect or manage realms |
 | `rkat config ...` | Read or update CLI/runtime config |
 | `rkat mcp ...` | Manage local/project MCP server config |
 | `rkat mob ...` | Pack, inspect, validate, deploy, and build mob artifacts |
-| `rkat skills ...` | Inspect available skills |
-| `rkat models catalog` | List built-in models plus configured self-hosted aliases |
+| `rkat skill ...` | Manage configured skill sources and inspect available skills |
+| `rkat models` | List built-in models plus configured self-hosted aliases |
 | `rkat capabilities` | Show runtime capabilities |
 | `rkat doctor` | Check local setup, provider keys, and self-hosted server reachability |
 | `rkat init` | Create project config from the global template |
+
+## `rkat-mini`
+
+`rkat-mini` keeps the same task-first execution model but trims the shipped command set down to:
+
+- `run`
+- `init`
+- `blob`
+- `skill`
+- `config`
+- `session`
+- `realm`
+- `models`
+- `capabilities`
+- `doctor`
+
+It intentionally omits:
+
+- `mob`
+- `mcp`
+- peer/comms-facing UX
+- schedule-facing UX
+
+The built-in shell and patch flows still work through `--tools workspace`.
 
 ## Prompt-first usage
 
@@ -76,23 +102,23 @@ rkat run --yolo --param temperature=0.2 "take the gloves off"
 ### Common run flags
 
 - `-m, --model <MODEL>`
-- `-p, --provider <anthropic|openai|gemini|self_hosted>`
 - `-o, --output <text|json>`
 - `--json`
 - `-s, --stream`
 - `--no-stream`
+- `--resume[=<SESSION>]`
+- `--skill <PATH_OR_ID>` repeatable
 - `-d, --max-duration <DURATION>`
-- `--max-tool-calls <N>`
 - `-t, --tools <safe|workspace|full|none>`
-- `--yolo`
-- `--param <KEY=VALUE>` repeatable
-- `--params-json <JSON>`
-- `--schema <FILE_OR_JSON>`
-- `--allow-tool <TOOL>` repeatable
-- `--block-tool <TOOL>` repeatable
 - `--stdin <auto|blob|lines|off>`
-- `--line-format <text|json>`
-- `--wait-for-mcp`
+- `--keep-alive`
+- `-v, --verbose`
+
+For the full advanced set, use:
+
+```bash
+rkat run --help
+```
 
 ### Tool presets
 
@@ -157,19 +183,19 @@ tail -f app.log | rkat run --stdin lines "watch for incidents and call them out"
 
 `--line-format json` treats each incoming line as JSON instead of plain text.
 
-## resume
+## run --resume
 
 ```bash
-rkat resume [OPTIONS] <SESSION_ID> <PROMPT>
+rkat run --resume[=<SESSION_ID>] [OPTIONS] <PROMPT>
 ```
 
 Examples:
 
 ```bash
-rkat resume last "keep going"
-rkat resume ~2 "pick this thread back up"
-cat notes.txt | rkat resume last "merge these notes into the plan"
-tail -f app.log | rkat resume last --stdin lines "watch for new incidents"
+rkat run --resume "keep going"
+rkat run --resume ~2 "pick this thread back up"
+cat notes.txt | rkat run --resume "merge these notes into the plan"
+tail -f app.log | rkat run --resume --stdin lines "watch for new incidents"
 ```
 
 `SESSION_ID` accepts:
@@ -179,30 +205,23 @@ tail -f app.log | rkat resume last --stdin lines "watch for new incidents"
 - `last`
 - `~N`
 
+Omitting the value means `last`, so `rkat run --resume "keep going"` and `rkat run --resume last "keep going"` are equivalent.
+
 Resume supports the same stdin model as `run`, plus per-turn tool overlays and provider params.
 
 Self-hosted aliases work the same way:
 
 ```bash
-rkat resume last -m gemma-4-31b "Continue with the local model"
+rkat run --resume -m gemma-4-31b "Continue with the local model"
 ```
 
-## continue
+## session
 
 ```bash
-rkat continue [OPTIONS] <PROMPT>
-rkat c [OPTIONS] <PROMPT>
-```
-
-Shortcut for `rkat resume last <PROMPT>`.
-
-## sessions
-
-```bash
-rkat sessions list [--limit <N>] [--label <KEY=VALUE>]
-rkat sessions show <SESSION_ID>
-rkat sessions delete <SESSION_ID>
-rkat sessions interrupt <SESSION_ID>
+rkat session list [--limit <N>] [--label <KEY=VALUE>]
+rkat session show <SESSION_ID>
+rkat session delete <SESSION_ID>
+rkat session interrupt <SESSION_ID>
 ```
 
 This is the human/operator session surface. CLI-internal control-plane session APIs are not exposed here.
@@ -224,10 +243,10 @@ rkat config patch '{"agent":{"model":"gpt-5.2"}}'
 rkat config patch '{"self_hosted":{"servers":{"ollama":{"transport":"openai_compatible","base_url":"http://127.0.0.1:11434","api_style":"chat_completions"}}}}'
 ```
 
-## models catalog
+## models
 
 ```bash
-rkat models catalog
+rkat models
 ```
 
 This prints the effective runtime model registry for the active realm, including configured `self_hosted` aliases and their `server_id`.
@@ -310,17 +329,20 @@ Optional overrides:
 - `RKAT_WASM_PACK_BIN`
 - `RKAT_WEB_RUNTIME_CRATE_DIR`
 
-## skills
+## skill
 
 ```bash
-rkat skills list [--json]
-rkat skills inspect <ID> [--source <SOURCE>] [--json]
+rkat skill add <PATH_OR_ID> [--name <NAME>]
+rkat skill remove <NAME_OR_ID_OR_PATH>
+rkat skill get <NAME_OR_ID_OR_PATH> [--json]
+rkat skill list [--json]
+rkat skill inspect <ID> [--source <SOURCE>] [--json]
 ```
 
 ## models
 
 ```bash
-rkat models catalog [--json]
+rkat models [--json]
 ```
 
 Lists all available models grouped by provider, including display name, tier, context window, max output tokens, and profile capabilities (temperature, thinking, reasoning support). Data is compiled from the `meerkat-models` catalog.

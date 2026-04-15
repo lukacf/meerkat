@@ -2,6 +2,8 @@ use super::*;
 use crate::MobRuntimeMode;
 use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
+#[cfg(test)]
+use crate::runtime::MobLifecycleSnapshot;
 use crate::runtime::mob_member_lifecycle_authority::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
     MobMemberLifecycleAuthority, MobMemberLifecycleInput, MobMemberTerminalClass,
@@ -1020,6 +1022,13 @@ impl MobHandle {
                     .send_actor_command(|reply_tx| MobCommand::OrchestratorSnapshot { reply_tx })
                     .await?;
                 Ok(MobMachineCommandResult::OrchestratorSnapshot(snapshot))
+            }
+            #[cfg(test)]
+            MobMachineCommand::LifecycleSnapshot => {
+                let snapshot = self
+                    .send_actor_command(|reply_tx| MobCommand::LifecycleSnapshot { reply_tx })
+                    .await?;
+                Ok(MobMachineCommandResult::LifecycleSnapshot(snapshot))
             }
             MobMachineCommand::SetSpawnPolicy { policy } => {
                 self.send_actor_command(|reply_tx| MobCommand::SetSpawnPolicy { policy, reply_tx })
@@ -2268,6 +2277,19 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::OrchestratorSnapshot(snapshot) => Ok(snapshot),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn debug_lifecycle_snapshot(&self) -> Result<MobLifecycleSnapshot, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::LifecycleSnapshot)
+            .await?
+        {
+            MobMachineCommandResult::LifecycleSnapshot(snapshot) => Ok(snapshot),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),

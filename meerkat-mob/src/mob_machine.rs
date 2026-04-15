@@ -9,6 +9,8 @@ use crate::ids::{
 };
 use crate::roster::{Roster, RosterEntry};
 use crate::run::MobRun;
+#[cfg(test)]
+use crate::runtime::MobLifecycleSnapshot;
 use crate::runtime::MobMemberListEntry;
 #[cfg(test)]
 use crate::runtime::MobOrchestratorSnapshot;
@@ -131,6 +133,8 @@ pub(crate) enum MobMachineCommand {
     FlowTrackerCounts,
     #[cfg(test)]
     OrchestratorSnapshot,
+    #[cfg(test)]
+    LifecycleSnapshot,
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
     },
@@ -168,6 +172,8 @@ pub(crate) enum MobMachineCommandResult {
     FlowTrackerCounts((usize, usize)),
     #[cfg(test)]
     OrchestratorSnapshot(MobOrchestratorSnapshot),
+    #[cfg(test)]
+    LifecycleSnapshot(MobLifecycleSnapshot),
 }
 
 #[doc(hidden)]
@@ -177,7 +183,11 @@ pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
         .iter()
         .copied()
         .collect();
-    for excluded in ["FlowTrackerCounts", "OrchestratorSnapshot"] {
+    for excluded in [
+        "FlowTrackerCounts",
+        "OrchestratorSnapshot",
+        "LifecycleSnapshot",
+    ] {
         variants.shift_remove(excluded);
     }
     variants

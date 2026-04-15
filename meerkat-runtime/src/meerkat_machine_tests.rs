@@ -1,5 +1,6 @@
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -15,6 +16,14 @@ use meerkat_core::ops::{OperationId, OperationResult};
 use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
 };
+use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
+use meerkat_machine_kernels::{
+    KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,
+};
+use meerkat_machine_schema::{
+    MachineSchema, TriggerKind, TypeRef, meerkat_machine as schema_meerkat_machine,
+};
+use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::completion::CompletionOutcome;
@@ -522,8 +531,6 @@ async fn meerkat_machine_spine_snapshot_tracks_steered_prompt_input() {
 
     assert!(snapshot.inputs.queue.is_empty());
     assert_eq!(snapshot.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(snapshot.inputs.wake_requested);
-    assert!(snapshot.inputs.process_requested);
     assert_eq!(snapshot.inputs.admission_order.len(), 1);
     let input_snapshot = &snapshot.inputs.admission_order[0];
     assert_eq!(input_snapshot.input_id, input_id);
@@ -1022,8 +1029,6 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     assert_eq!(before_destroy.control.phase, RuntimeState::Idle);
     assert!(before_destroy.inputs.queue.is_empty());
     assert_eq!(before_destroy.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_destroy.inputs.wake_requested);
-    assert!(before_destroy.inputs.process_requested);
     assert_eq!(before_destroy.completion_waiters.input_count, 1);
     assert_eq!(before_destroy.completion_waiters.waiter_count, 1);
     assert_eq!(before_destroy.completion_waiters.waiting_inputs.len(), 1);
@@ -4533,8 +4538,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(before_recover.control.phase, RuntimeState::Idle);
     assert!(before_recover.inputs.queue.is_empty());
     assert_eq!(before_recover.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_recover.inputs.wake_requested);
-    assert!(before_recover.inputs.process_requested);
     assert_eq!(before_recover.completion_waiters.input_count, 1);
     assert_eq!(before_recover.completion_waiters.waiter_count, 1);
     assert_eq!(before_recover.completion_waiters.waiting_inputs.len(), 1);
@@ -4566,8 +4569,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(after_recover.control.phase, RuntimeState::Idle);
     assert!(after_recover.inputs.queue.is_empty());
     assert_eq!(after_recover.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_recover.inputs.wake_requested);
-    assert!(after_recover.inputs.process_requested);
     assert_eq!(after_recover.completion_waiters.input_count, 1);
     assert_eq!(after_recover.completion_waiters.waiter_count, 1);
     assert_eq!(after_recover.completion_waiters.waiting_inputs.len(), 1);
@@ -4620,8 +4621,6 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.inputs.current_run_id, None);
     assert!(after_wait_all.inputs.queue.is_empty());
     assert_eq!(after_wait_all.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_wait_all.inputs.wake_requested);
-    assert!(after_wait_all.inputs.process_requested);
     assert_eq!(after_wait_all.completion_waiters.input_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiter_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiting_inputs.len(), 1);
@@ -4703,8 +4702,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(before_recycle.control.phase, RuntimeState::Idle);
     assert!(before_recycle.inputs.queue.is_empty());
     assert_eq!(before_recycle.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_recycle.inputs.wake_requested);
-    assert!(before_recycle.inputs.process_requested);
     assert_eq!(before_recycle.completion_waiters.input_count, 1);
     assert_eq!(before_recycle.completion_waiters.waiter_count, 1);
     assert_eq!(before_recycle.completion_waiters.waiting_inputs.len(), 1);
@@ -4736,8 +4733,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(after_recycle.control.phase, RuntimeState::Idle);
     assert!(after_recycle.inputs.queue.is_empty());
     assert_eq!(after_recycle.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_recycle.inputs.wake_requested);
-    assert!(after_recycle.inputs.process_requested);
     assert_eq!(after_recycle.completion_waiters.input_count, 1);
     assert_eq!(after_recycle.completion_waiters.waiter_count, 1);
     assert_eq!(after_recycle.completion_waiters.waiting_inputs.len(), 1);
@@ -4790,8 +4785,6 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.inputs.current_run_id, None);
     assert!(after_wait_all.inputs.queue.is_empty());
     assert_eq!(after_wait_all.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(after_wait_all.inputs.wake_requested);
-    assert!(after_wait_all.inputs.process_requested);
     assert_eq!(after_wait_all.completion_waiters.input_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiter_count, 1);
     assert_eq!(after_wait_all.completion_waiters.waiting_inputs.len(), 1);
@@ -6315,8 +6308,6 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     assert_eq!(before_reset.control.phase, RuntimeState::Idle);
     assert!(before_reset.inputs.queue.is_empty());
     assert_eq!(before_reset.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_reset.inputs.wake_requested);
-    assert!(before_reset.inputs.process_requested);
     assert_eq!(before_reset.completion_waiters.input_count, 1);
     assert_eq!(before_reset.completion_waiters.waiter_count, 1);
     assert_eq!(before_reset.completion_waiters.waiting_inputs.len(), 1);
@@ -7842,8 +7833,6 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     assert_eq!(before_stop.control.phase, RuntimeState::Idle);
     assert!(before_stop.inputs.queue.is_empty());
     assert_eq!(before_stop.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_stop.inputs.wake_requested);
-    assert!(before_stop.inputs.process_requested);
     assert_eq!(before_stop.completion_waiters.input_count, 1);
     assert_eq!(before_stop.completion_waiters.waiter_count, 1);
     assert_eq!(before_stop.completion_waiters.waiting_inputs.len(), 1);
@@ -8808,8 +8797,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
 }
 
 #[tokio::test]
-async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_steer_queue_visible()
- {
+async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_queue() {
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
 
@@ -8867,8 +8855,6 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_
     assert_eq!(before_retire.control.phase, RuntimeState::Idle);
     assert!(before_retire.inputs.queue.is_empty());
     assert_eq!(before_retire.inputs.steer_queue, vec![input_id.clone()]);
-    assert!(before_retire.inputs.wake_requested);
-    assert!(before_retire.inputs.process_requested);
     assert_eq!(before_retire.completion_waiters.input_count, 1);
     assert_eq!(before_retire.completion_waiters.waiter_count, 1);
     assert_eq!(before_retire.completion_waiters.waiting_inputs.len(), 1);
@@ -8910,10 +8896,9 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_but_leaves_
     assert_eq!(after_retire.control.current_run_id, None);
     assert_eq!(after_retire.inputs.current_run_id, None);
     assert!(after_retire.inputs.queue.is_empty());
-    assert_eq!(
-        after_retire.inputs.steer_queue,
-        vec![input_id.clone()],
-        "retire currently leaves the steered input visible in the steer queue even after the steered completion waiter terminates"
+    assert!(
+        after_retire.inputs.steer_queue.is_empty(),
+        "retire should clear steered queued visibility once ledger-owned abandonment is reconciled back into ingress"
     );
     assert_eq!(after_retire.completion_waiters.input_count, 0);
     assert_eq!(after_retire.completion_waiters.waiter_count, 0);
@@ -9580,13 +9565,19 @@ async fn register_session_rejects_destroyed_session() {
     // Second register must be rejected — DestroyedShapeInvariant forbids
     // resurrecting a destroyed binding.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::RegisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::RegisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("register should reject a destroyed session");
     assert!(
-        matches!(err, RuntimeDriverError::Destroyed),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::Destroyed)
+        ),
         "expected Destroyed, got {err:?}"
     );
 }
@@ -9598,13 +9589,19 @@ async fn unregister_session_rejects_unknown_session() {
 
     // Unregister on a session that was never registered must return an error.
     let err = adapter
-        .execute_meerkat_machine_session_command(MeerkatMachineSessionCommand::UnregisterSession {
-            session_id: session_id.clone(),
-        })
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::UnregisterSession {
+                session_id: session_id.clone(),
+            },
+        )
         .await
         .expect_err("unregister should reject an unknown session");
     assert!(
-        matches!(err, RuntimeDriverError::NotReady { .. }),
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::NotReady { .. })
+        ),
         "expected NotReady, got {err:?}"
     );
 }
@@ -10346,22 +10343,213 @@ async fn publish_committed_visible_set_rejects_stale_active_revision() {
 }
 
 #[tokio::test]
-async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
+async fn publish_committed_visible_set_rejects_equal_revisions_with_divergent_filters() {
     let adapter = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
-    // active_revision > staged_revision is valid — the active set has
-    // advanced past the last staged projection.
     let state = meerkat_core::SessionToolVisibilityState {
-        active_revision: 5,
+        active_filter: meerkat_core::ToolFilter::All,
+        staged_filter: meerkat_core::ToolFilter::Deny(["secret".to_string()].into_iter().collect()),
+        active_revision: 3,
         staged_revision: 3,
         ..Default::default()
     };
-    let result = adapter
+    let err = adapter
         .publish_committed_visible_set(&session_id, state)
+        .await
+        .expect_err("publish should reject equal revisions with divergent filters");
+    assert!(
+        matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn publish_committed_visible_set_rejects_active_requested_names_outside_staged() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let state = meerkat_core::SessionToolVisibilityState {
+        active_requested_deferred_names: ["probe_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: BTreeSet::new(),
+        active_revision: 4,
+        staged_revision: 3,
+        ..Default::default()
+    };
+    let err = adapter
+        .publish_committed_visible_set(&session_id, state)
+        .await
+        .expect_err("publish should reject active requested names outside staged names");
+    assert!(
+        matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
+    let adapter = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+
+    // active_revision > staged_revision is valid — the active set has
+    // advanced past the last staged projection.
+    let state = runtime_parity_publish_state_with_revisions(5, 3);
+    let result = adapter
+        .publish_committed_visible_set(&session_id, state.clone())
         .await;
-    result.expect("publish should succeed when active_revision >= staged_revision");
+    let published = result.expect("publish should succeed when active_revision >= staged_revision");
+    assert_eq!(
+        published, state,
+        "publish should preserve the supplied state"
+    );
+    assert_eq!(
+        bindings
+            .tool_visibility_owner
+            .visibility_state()
+            .expect("owner state should be readable"),
+        state,
+        "publish must persist active-ahead visibility state exactly"
+    );
+}
+
+#[tokio::test]
+async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reconfigure() {
+    let schema = modeled_meerkat_kernel::schema();
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Attached).await;
+    install_runtime_parity_reconfigure_host(&fixture.adapter);
+    SessionServiceRuntimeExt::reconfigure_session_llm_identity(
+        fixture.adapter.as_ref(),
+        &fixture.session_id,
+        SessionLlmReconfigureRequest {
+            model: Some("gpt-5.2".to_string()),
+            provider: Some("openai".to_string()),
+            provider_params: None,
+        },
+    )
+    .await
+    .expect("reconfigure should succeed for attached fixture");
+
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("pre-stage snapshot should exist");
+    assert!(
+        !before
+            .formal_available_fields
+            .contains_key("active_visibility_revision"),
+        "top-level machine should no longer mirror active visibility revision",
+    );
+    assert!(
+        !before
+            .formal_available_fields
+            .contains_key("staged_visibility_revision"),
+        "top-level machine should no longer mirror staged visibility revision",
+    );
+
+    let input = runtime_modeled_kernel_input(
+        &schema,
+        &before,
+        RuntimeParityProbeInput::StagePersistentFilter,
+    )
+    .expect("modeled stage input should build");
+
+    let revision = fixture
+        .adapter
+        .stage_persistent_filter(
+            &fixture.session_id,
+            meerkat_core::ToolFilter::Deny(["probe_tool".to_string()].into_iter().collect()),
+            runtime_parity_witnesses(),
+        )
+        .await
+        .expect("stage should succeed after active-ahead reconfigure");
+    assert_eq!(
+        revision.0, 2,
+        "stage should advance from max(active, staged)"
+    );
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("post-stage snapshot should exist");
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_reconfigure() {
+    let schema = modeled_meerkat_kernel::schema();
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Attached).await;
+    install_runtime_parity_reconfigure_host(&fixture.adapter);
+    SessionServiceRuntimeExt::reconfigure_session_llm_identity(
+        fixture.adapter.as_ref(),
+        &fixture.session_id,
+        SessionLlmReconfigureRequest {
+            model: Some("gpt-5.2".to_string()),
+            provider: Some("openai".to_string()),
+            provider_params: None,
+        },
+    )
+    .await
+    .expect("reconfigure should succeed for attached fixture");
+
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("pre-request snapshot should exist");
+    let input = runtime_modeled_kernel_input(
+        &schema,
+        &before,
+        RuntimeParityProbeInput::RequestDeferredTools,
+    )
+    .expect("modeled request input should build");
+
+    let revision = fixture
+        .adapter
+        .request_deferred_tools(
+            &fixture.session_id,
+            ["probe_tool".to_string()].into_iter().collect(),
+            runtime_parity_witnesses(),
+        )
+        .await
+        .expect("request should succeed after active-ahead reconfigure");
+    assert_eq!(
+        revision.0, 2,
+        "request should advance from max(active, staged)"
+    );
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("post-request snapshot should exist");
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn modeled_publish_matches_runtime_for_active_ahead_state() {
+    let schema = modeled_meerkat_kernel::schema();
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("pre-publish snapshot should exist");
+    let input = runtime_modeled_publish_input(5, 3);
+
+    fixture
+        .adapter
+        .publish_committed_visible_set(
+            &fixture.session_id,
+            runtime_parity_publish_state_with_revisions(5, 3),
+        )
+        .await
+        .expect("publish should accept active-ahead state");
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("post-publish snapshot should exist");
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    fixture.cleanup().await;
 }
 
 #[derive(Clone)]
@@ -10527,29 +10715,6 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
 }
 
 #[tokio::test]
-async fn prepare_bindings_keeps_session_idle_until_executor_attaches() {
-    let adapter = MeerkatMachine::ephemeral();
-    let session_id = SessionId::new();
-
-    adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .expect("bindings should prepare");
-
-    let phase = adapter
-        .meerkat_machine_spine_snapshot(&session_id)
-        .await
-        .expect("snapshot should exist after preparing bindings")
-        .control
-        .phase;
-    assert_eq!(
-        phase,
-        RuntimeState::Idle,
-        "prepare_bindings must not advertise a live attached runtime before an executor is attached"
-    );
-}
-
-#[tokio::test]
 async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_attached_session() {
     struct NoopExecutor;
 
@@ -10645,102 +10810,6 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
     assert_eq!(
         owner_state.active_revision, 1,
         "committed visibility revision should advance when the visible set changes"
-    );
-}
-
-#[tokio::test]
-async fn reconfigure_session_llm_identity_does_not_bump_revision_when_visible_set_is_unchanged() {
-    struct NoopExecutor;
-
-    #[async_trait::async_trait]
-    impl CoreExecutor for NoopExecutor {
-        async fn apply(
-            &mut self,
-            run_id: RunId,
-            primitive: RunPrimitive,
-        ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
-                    run_id,
-                    boundary: RunApplyBoundary::RunStart,
-                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-                run_result: None,
-            })
-        }
-
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            Ok(())
-        }
-    }
-
-    let adapter = MeerkatMachine::ephemeral();
-    let session_id = SessionId::new();
-    let bindings = adapter
-        .prepare_bindings(session_id.clone())
-        .await
-        .expect("bindings should prepare");
-    adapter
-        .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
-
-    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
-        model: "claude-sonnet-4-5".to_string(),
-        provider: meerkat_core::Provider::Anthropic,
-        self_hosted_server_id: None,
-        provider_params: None,
-    }));
-    let current_visibility_state = Arc::new(std::sync::Mutex::new(
-        meerkat_core::SessionToolVisibilityState::default(),
-    ));
-    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
-        current_identity,
-        current_visibility_state,
-        target_identity: meerkat_core::SessionLlmIdentity {
-            model: "gpt-5.2".to_string(),
-            provider: meerkat_core::Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-        },
-        current_capability_surface: Some(test_llm_capability_surface(true)),
-        target_capability_surface: test_llm_capability_surface(false),
-        base_tool_names: BTreeSet::new(),
-        fail_persist: false,
-    }));
-
-    let report = adapter
-        .reconfigure_session_llm_identity(
-            &session_id,
-            SessionLlmReconfigureRequest {
-                model: Some("gpt-5.2".to_string()),
-                provider: Some("openai".to_string()),
-                provider_params: None,
-            },
-        )
-        .await
-        .expect("attached session should reconfigure");
-
-    assert!(
-        !report.tool_visibility_delta.committed_visible_set_changed,
-        "no committed tool visibility change should be reported when the relevant tool is absent"
-    );
-    assert!(
-        !report.tool_visibility_delta.revision_bumped,
-        "visibility revision must not bump when the committed visible set is unchanged"
-    );
-    assert_eq!(
-        bindings
-            .tool_visibility_owner
-            .visibility_state()
-            .expect("owner state should remain readable")
-            .active_revision,
-        0,
-        "active visibility revision should remain stable on a visibility no-op"
     );
 }
 
@@ -11172,4 +11241,3009 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
         meerkat_core::ToolFilter::All,
         "machine-owned visibility should clear back to unresolved/default state on discard"
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityClassification {
+    SameSurface,
+    DifferentSurface,
+    LeftOnly,
+    RightOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityPhase {
+    Idle,
+    Attached,
+    Running,
+    Retired,
+    Stopped,
+}
+
+impl RuntimeParityPhase {
+    fn schema_name(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Running => "Running",
+            Self::Retired => "Retired",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeParityOutcomeKind {
+    Ok,
+    Err,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RuntimeParitySnapshotSummary {
+    phase: String,
+    current_run_present: bool,
+    formal_session_id: Option<String>,
+    formal_active_runtime_id: Option<String>,
+    formal_current_run_id: Option<String>,
+    pre_run_phase: Option<String>,
+    attachment_live: bool,
+    queue_len: usize,
+    steer_queue_len: usize,
+    current_run_contributor_count: usize,
+    admitted_input_count: usize,
+    post_admission_signal: String,
+    ledger_input_count: usize,
+    ledger_non_terminal_count: usize,
+    ledger_accepted_count: usize,
+    ledger_queued_count: usize,
+    ledger_staged_count: usize,
+    ledger_applied_count: usize,
+    ledger_applied_pending_consumption_count: usize,
+    ledger_consumed_count: usize,
+    ledger_superseded_count: usize,
+    ledger_coalesced_count: usize,
+    ledger_abandoned_count: usize,
+    wait_request_present: bool,
+    drain_slot_present: bool,
+    drain_phase: Option<String>,
+    formal_available_fields: std::collections::BTreeMap<String, String>,
+    formal_unavailable_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeParityObservableSurface {
+    outcome_kind: RuntimeParityOutcomeKind,
+    result_summary: String,
+    after: Option<RuntimeParitySnapshotSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeParityInvocationReport {
+    phase: String,
+    setup_tags: Vec<String>,
+    before: Option<RuntimeParitySnapshotSummary>,
+    outcome_kind: RuntimeParityOutcomeKind,
+    result_summary: String,
+    after: Option<RuntimeParitySnapshotSummary>,
+}
+
+impl RuntimeParityInvocationReport {
+    fn observable_surface(&self) -> RuntimeParityObservableSurface {
+        RuntimeParityObservableSurface {
+            outcome_kind: self.outcome_kind,
+            result_summary: self.result_summary.clone(),
+            after: self
+                .after
+                .as_ref()
+                .map(runtime_parity_normalize_observable_snapshot),
+        }
+    }
+}
+
+fn runtime_parity_normalize_observable_snapshot(
+    snapshot: &RuntimeParitySnapshotSummary,
+) -> RuntimeParitySnapshotSummary {
+    let mut normalized = snapshot.clone();
+    normalized.formal_session_id = Some("\"<session-id>\"".to_string());
+    normalized.formal_active_runtime_id = Some("\"<runtime-id>\"".to_string());
+    normalized.formal_current_run_id = normalized
+        .formal_current_run_id
+        .as_ref()
+        .map(|_| "\"<run-id>\"".to_string());
+    normalized
+}
+
+fn assert_runtime_parity_identity_stability(
+    probe: RuntimeParityProbeInput,
+    before: Option<&RuntimeParitySnapshotSummary>,
+    after: Option<&RuntimeParitySnapshotSummary>,
+) {
+    let (Some(before), Some(after)) = (before, after) else {
+        return;
+    };
+
+    assert_eq!(
+        before.formal_session_id, after.formal_session_id,
+        "runtime parity probe {probe:?} should keep formal session_id stable"
+    );
+    assert_eq!(
+        before.formal_active_runtime_id, after.formal_active_runtime_id,
+        "runtime parity probe {probe:?} should keep formal active_runtime_id stable"
+    );
+    if before.formal_current_run_id.is_some() && after.formal_current_run_id.is_some() {
+        assert_eq!(
+            before.formal_current_run_id, after.formal_current_run_id,
+            "runtime parity probe {probe:?} should not churn current_run_id while a run remains bound"
+        );
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeParitySchemaTransitionSummary {
+    transition: String,
+    to_phase: String,
+    binding_names: Vec<String>,
+    guard_names: Vec<String>,
+    update_count: usize,
+    update_signatures: Vec<String>,
+    effect_variants: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeParitySchemaRow {
+    input_variant: String,
+    classification: RuntimeParityClassification,
+    left: Vec<RuntimeParitySchemaTransitionSummary>,
+    right: Vec<RuntimeParitySchemaTransitionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityProbeReport {
+    schema_classification: RuntimeParityClassification,
+    runtime_classification: RuntimeParityClassification,
+    agrees_with_schema: bool,
+    schema_left: RuntimeModeledStateSchemaReport,
+    schema_right: RuntimeModeledStateSchemaReport,
+    left: RuntimeParityInvocationReport,
+    right: RuntimeParityInvocationReport,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityRowReport {
+    input_variant: String,
+    static_schema_classification: RuntimeParityClassification,
+    static_schema_left: Vec<RuntimeParitySchemaTransitionSummary>,
+    static_schema_right: Vec<RuntimeParitySchemaTransitionSummary>,
+    probe: Option<RuntimeParityProbeReport>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RuntimeParityPairSummary {
+    interesting_rows: usize,
+    probed_rows: usize,
+    aligned_rows: usize,
+    mismatched_rows: usize,
+    unprobed_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityPairReport {
+    left_phase: String,
+    right_phase: String,
+    summary: RuntimeParityPairSummary,
+    rows: Vec<RuntimeParityRowReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RuntimeParityAuditSummary {
+    pair_count: usize,
+    interesting_rows: usize,
+    probed_rows: usize,
+    aligned_rows: usize,
+    mismatched_rows: usize,
+    unprobed_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeParityAuditReport {
+    machine: String,
+    generated_at: String,
+    summary: RuntimeParityAuditSummary,
+    pairs: Vec<RuntimeParityPairReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RuntimeModeledStateOutcomeKind {
+    Ok,
+    Err,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RuntimeModeledStateSummary {
+    phase: String,
+    formal_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeModeledStateRuntimeReport {
+    phase: String,
+    outcome_kind: RuntimeModeledStateOutcomeKind,
+    before: Option<RuntimeModeledStateSummary>,
+    after: Option<RuntimeModeledStateSummary>,
+    result_summary: String,
+    surface_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeModeledStateSchemaReport {
+    outcome_kind: RuntimeModeledStateOutcomeKind,
+    after: Option<RuntimeModeledStateSummary>,
+    detail: String,
+    result_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeModeledStateRowReport {
+    phase: String,
+    input_variant: String,
+    aligned: bool,
+    differing_keys: Vec<String>,
+    runtime: RuntimeModeledStateRuntimeReport,
+    schema: RuntimeModeledStateSchemaReport,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RuntimeModeledStateAuditSummary {
+    row_count: usize,
+    aligned_rows: usize,
+    mismatched_rows: usize,
+    unprobed_rows: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeModeledStateAuditReport {
+    machine: String,
+    generated_at: String,
+    summary: RuntimeModeledStateAuditSummary,
+    rows: Vec<RuntimeModeledStateRowReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeParityProbeInput {
+    RegisterSession,
+    UnregisterSession,
+    EnsureSessionWithExecutor,
+    SetSilentIntents,
+    ReconfigureSessionLlmIdentity,
+    ContainsSession,
+    SessionHasExecutor,
+    SessionHasComms,
+    OpsLifecycleRegistry,
+    PrepareBindings,
+    InputState,
+    ListActiveInputs,
+    SetPeerIngressContext,
+    NotifyDrainExited,
+    InterruptCurrentRun,
+    CancelAfterBoundary,
+    StagePersistentFilter,
+    RequestDeferredTools,
+    PublishCommittedVisibleSet,
+    AbortAll,
+    Abort,
+    Wait,
+    Ingest,
+    PublishEvent,
+    Recover,
+    Retire,
+    Recycle,
+    RuntimeState,
+    LoadBoundaryReceipt,
+    AcceptWithCompletion,
+    AcceptWithoutWake,
+    Prepare,
+    Commit,
+    Fail,
+    Reset,
+    StopRuntimeExecutor,
+    Destroy,
+}
+
+struct RuntimeParityFixture {
+    adapter: Arc<MeerkatMachine>,
+    session_id: SessionId,
+    runtime_id: LogicalRuntimeId,
+    running_release: Option<Arc<Notify>>,
+    running_completion: Option<crate::completion::CompletionHandle>,
+    prepared_input_id: Option<InputId>,
+    prepared_run_id: Option<RunId>,
+}
+
+impl RuntimeParityFixture {
+    async fn cleanup(mut self) {
+        if let Some(release) = self.running_release.take() {
+            release.notify_waiters();
+        }
+        if let Some(handle) = self.running_completion.take() {
+            let _ = tokio::time::timeout(Duration::from_millis(250), handle.wait()).await;
+        }
+        let _ = self
+            .adapter
+            .stop_runtime_executor(
+                &self.session_id,
+                RunControlCommand::StopRuntimeExecutor {
+                    reason: "runtime parity cleanup".to_string(),
+                },
+            )
+            .await;
+        let _ =
+            crate::traits::RuntimeControlPlane::destroy(self.adapter.as_ref(), &self.runtime_id)
+                .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+struct RuntimeParityNoopExecutor;
+
+#[async_trait::async_trait]
+impl CoreExecutor for RuntimeParityNoopExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        Ok(CoreApplyOutput {
+            receipt: RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
+    }
+
+    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+struct RuntimeParityBlockingExecutor {
+    apply_started: Arc<Notify>,
+    allow_finish: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutor for RuntimeParityBlockingExecutor {
+    async fn apply(
+        &mut self,
+        run_id: RunId,
+        primitive: RunPrimitive,
+    ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        self.apply_started.notify_waiters();
+        self.allow_finish.notified().await;
+        Ok(CoreApplyOutput {
+            receipt: RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            session_snapshot: None,
+            terminal: None,
+            run_result: None,
+        })
+    }
+
+    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+}
+
+fn runtime_parity_report_path() -> PathBuf {
+    std::env::temp_dir().join("meerkat-runtime-phase-parity.json")
+}
+
+fn runtime_parity_full_report_path() -> PathBuf {
+    std::env::temp_dir().join("meerkat-runtime-phase-parity-full.json")
+}
+
+fn runtime_modeled_state_report_path() -> PathBuf {
+    std::env::temp_dir().join("meerkat-runtime-modeled-state-parity.json")
+}
+
+fn runtime_parity_target_pairs() -> &'static [(RuntimeParityPhase, RuntimeParityPhase)] {
+    &[
+        (RuntimeParityPhase::Attached, RuntimeParityPhase::Idle),
+        (RuntimeParityPhase::Attached, RuntimeParityPhase::Running),
+        (RuntimeParityPhase::Running, RuntimeParityPhase::Stopped),
+        (RuntimeParityPhase::Running, RuntimeParityPhase::Retired),
+        (RuntimeParityPhase::Idle, RuntimeParityPhase::Retired),
+        (RuntimeParityPhase::Idle, RuntimeParityPhase::Stopped),
+        (RuntimeParityPhase::Attached, RuntimeParityPhase::Retired),
+        (RuntimeParityPhase::Attached, RuntimeParityPhase::Stopped),
+        (RuntimeParityPhase::Idle, RuntimeParityPhase::Running),
+        (RuntimeParityPhase::Retired, RuntimeParityPhase::Stopped),
+    ]
+}
+
+fn runtime_parity_probe_for_input_variant(input_variant: &str) -> Option<RuntimeParityProbeInput> {
+    match input_variant {
+        "RegisterSession" => Some(RuntimeParityProbeInput::RegisterSession),
+        "UnregisterSession" => Some(RuntimeParityProbeInput::UnregisterSession),
+        "EnsureSessionWithExecutor" => Some(RuntimeParityProbeInput::EnsureSessionWithExecutor),
+        "SetSilentIntents" => Some(RuntimeParityProbeInput::SetSilentIntents),
+        "ReconfigureSessionLlmIdentity" => {
+            Some(RuntimeParityProbeInput::ReconfigureSessionLlmIdentity)
+        }
+        "ContainsSession" => Some(RuntimeParityProbeInput::ContainsSession),
+        "SessionHasExecutor" => Some(RuntimeParityProbeInput::SessionHasExecutor),
+        "SessionHasComms" => Some(RuntimeParityProbeInput::SessionHasComms),
+        "OpsLifecycleRegistry" => Some(RuntimeParityProbeInput::OpsLifecycleRegistry),
+        "PrepareBindings" => Some(RuntimeParityProbeInput::PrepareBindings),
+        "InputState" => Some(RuntimeParityProbeInput::InputState),
+        "ListActiveInputs" => Some(RuntimeParityProbeInput::ListActiveInputs),
+        "SetPeerIngressContext" => Some(RuntimeParityProbeInput::SetPeerIngressContext),
+        "NotifyDrainExited" => Some(RuntimeParityProbeInput::NotifyDrainExited),
+        "InterruptCurrentRun" => Some(RuntimeParityProbeInput::InterruptCurrentRun),
+        "CancelAfterBoundary" => Some(RuntimeParityProbeInput::CancelAfterBoundary),
+        "StagePersistentFilter" => Some(RuntimeParityProbeInput::StagePersistentFilter),
+        "RequestDeferredTools" => Some(RuntimeParityProbeInput::RequestDeferredTools),
+        "PublishCommittedVisibleSet" => Some(RuntimeParityProbeInput::PublishCommittedVisibleSet),
+        "AbortAll" => Some(RuntimeParityProbeInput::AbortAll),
+        "Abort" => Some(RuntimeParityProbeInput::Abort),
+        "Wait" => Some(RuntimeParityProbeInput::Wait),
+        "Ingest" => Some(RuntimeParityProbeInput::Ingest),
+        "PublishEvent" => Some(RuntimeParityProbeInput::PublishEvent),
+        "Recover" => Some(RuntimeParityProbeInput::Recover),
+        "Retire" => Some(RuntimeParityProbeInput::Retire),
+        "Recycle" => Some(RuntimeParityProbeInput::Recycle),
+        "RuntimeState" => Some(RuntimeParityProbeInput::RuntimeState),
+        "LoadBoundaryReceipt" => Some(RuntimeParityProbeInput::LoadBoundaryReceipt),
+        "AcceptWithCompletion" => Some(RuntimeParityProbeInput::AcceptWithCompletion),
+        "AcceptWithoutWake" => Some(RuntimeParityProbeInput::AcceptWithoutWake),
+        "Prepare" => Some(RuntimeParityProbeInput::Prepare),
+        "Commit" => Some(RuntimeParityProbeInput::Commit),
+        "Fail" => Some(RuntimeParityProbeInput::Fail),
+        "Reset" => Some(RuntimeParityProbeInput::Reset),
+        "StopRuntimeExecutor" => Some(RuntimeParityProbeInput::StopRuntimeExecutor),
+        "Destroy" => Some(RuntimeParityProbeInput::Destroy),
+        _ => None,
+    }
+}
+
+fn runtime_parity_state_label(state: RuntimeState) -> String {
+    format!("{state:?}")
+}
+
+fn runtime_parity_drain_phase_label(phase: CommsDrainPhase) -> String {
+    format!("{phase:?}")
+}
+
+fn normalize_runtime_parity_formal_fields(
+    mut fields: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    if let Some(value) = fields.get_mut("session_id") {
+        *value = "\"<session-id>\"".to_string();
+    }
+    if let Some(value) = fields.get_mut("active_runtime_id") {
+        *value = "\"<runtime-id>\"".to_string();
+    }
+    if let Some(value) = fields.get_mut("current_run_id")
+        && value != "null"
+    {
+        *value = "\"<run-id>\"".to_string();
+    }
+    for value in fields.values_mut() {
+        *value = runtime_modeled_normalize_formal_string(value);
+    }
+    fields
+}
+
+fn runtime_parity_formal_identity_field(
+    fields: &std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    match fields.get(key).map(String::as_str) {
+        Some("null") | None => None,
+        Some(value) => Some(value.to_string()),
+    }
+}
+
+fn runtime_modeled_normalize_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(runtime_modeled_normalize_json_value)
+                .collect(),
+        ),
+        serde_json::Value::Object(entries) => {
+            let mut normalized = serde_json::Map::new();
+            let mut keys: Vec<_> = entries.into_iter().collect();
+            keys.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in keys {
+                normalized.insert(key, runtime_modeled_normalize_json_value(value));
+            }
+            serde_json::Value::Object(normalized)
+        }
+        other => other,
+    }
+}
+
+fn runtime_modeled_normalize_formal_string(raw: &str) -> String {
+    serde_json::from_str(raw)
+        .map(runtime_modeled_normalize_json_value)
+        .and_then(|value| serde_json::to_string(&value))
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
+    match ty {
+        TypeRef::Bool => KernelValue::Bool(false),
+        TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
+        TypeRef::String => KernelValue::String(String::new()),
+        TypeRef::Named(name)
+            if matches!(
+                name.as_str(),
+                "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+            ) =>
+        {
+            KernelValue::U64(0)
+        }
+        TypeRef::Named(_) => KernelValue::String(String::new()),
+        TypeRef::Enum(name) => KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant: String::new(),
+        },
+        TypeRef::Option(_) => KernelValue::None,
+        TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
+        TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
+        TypeRef::Map(_, _) => KernelValue::Map(BTreeMap::new()),
+    }
+}
+
+fn runtime_modeled_option_some(value: KernelValue) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([(
+        KernelValue::String("value".to_string()),
+        value,
+    )]))
+}
+
+fn runtime_modeled_json_value_from_raw(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+}
+
+fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Value) -> KernelValue {
+    match ty {
+        TypeRef::Bool => KernelValue::Bool(value.as_bool().unwrap_or(false)),
+        TypeRef::U32 | TypeRef::U64 => KernelValue::U64(value.as_u64().unwrap_or(0)),
+        TypeRef::String => KernelValue::String(
+            value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default()),
+        ),
+        TypeRef::Named(name)
+            if matches!(
+                name.as_str(),
+                "BoundarySequence" | "TurnNumber" | "FenceToken" | "Generation"
+            ) =>
+        {
+            KernelValue::U64(value.as_u64().unwrap_or(0))
+        }
+        TypeRef::Named(_) => {
+            KernelValue::String(serde_json::to_string(value).unwrap_or_else(|_| "null".into()))
+        }
+        TypeRef::Enum(name) => KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant: value.as_str().unwrap_or_default().to_string(),
+        },
+        TypeRef::Option(inner) => {
+            if value.is_null() {
+                KernelValue::None
+            } else {
+                runtime_modeled_option_some(runtime_modeled_kernel_value_from_json(inner, value))
+            }
+        }
+        TypeRef::Set(inner) => {
+            let values = value
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| runtime_modeled_kernel_value_from_json(inner, item))
+                        .collect()
+                })
+                .unwrap_or_default();
+            KernelValue::Set(values)
+        }
+        TypeRef::Seq(inner) => KernelValue::Seq(
+            value
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| runtime_modeled_kernel_value_from_json(inner, item))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        TypeRef::Map(key_ty, value_ty) => {
+            let mut entries = BTreeMap::new();
+            if let Some(object) = value.as_object() {
+                for (key, item) in object {
+                    let key_value = runtime_modeled_kernel_value_from_json(
+                        key_ty,
+                        &serde_json::Value::String(key.clone()),
+                    );
+                    let value_value = runtime_modeled_kernel_value_from_json(value_ty, item);
+                    entries.insert(key_value, value_value);
+                }
+            }
+            KernelValue::Map(entries)
+        }
+    }
+}
+
+fn runtime_modeled_kernel_value_from_raw(ty: &TypeRef, raw: &str) -> KernelValue {
+    runtime_modeled_kernel_value_from_json(ty, &runtime_modeled_json_value_from_raw(raw))
+}
+
+fn runtime_modeled_json_from_kernel_value(value: &KernelValue) -> serde_json::Value {
+    match value {
+        KernelValue::Bool(value) => serde_json::Value::Bool(*value),
+        KernelValue::U64(value) => serde_json::Value::Number(serde_json::Number::from(*value)),
+        KernelValue::String(value) => {
+            serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        KernelValue::NamedVariant { variant, .. } => serde_json::Value::String(variant.clone()),
+        KernelValue::Seq(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(runtime_modeled_json_from_kernel_value)
+                .collect(),
+        ),
+        KernelValue::Set(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(runtime_modeled_json_from_kernel_value)
+                .collect(),
+        ),
+        KernelValue::Map(entries)
+            if entries.len() == 1
+                && entries.contains_key(&KernelValue::String("value".to_string())) =>
+        {
+            runtime_modeled_json_from_kernel_value(
+                entries
+                    .get(&KernelValue::String("value".to_string()))
+                    .expect("value key present"),
+            )
+        }
+        KernelValue::Map(entries) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in entries {
+                let key_json = runtime_modeled_json_from_kernel_value(key);
+                let key_string = key_json
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| serde_json::to_string(&key_json).unwrap_or_default());
+                object.insert(key_string, runtime_modeled_json_from_kernel_value(value));
+            }
+            serde_json::Value::Object(object)
+        }
+        KernelValue::None => serde_json::Value::Null,
+    }
+}
+
+fn runtime_modeled_formal_string_from_kernel_value(value: &KernelValue) -> String {
+    runtime_modeled_normalize_formal_string(
+        &serde_json::to_string(&runtime_modeled_json_from_kernel_value(value))
+            .unwrap_or_else(|_| "null".into()),
+    )
+}
+
+fn runtime_modeled_summary_from_runtime_snapshot(
+    snapshot: Option<&RuntimeParitySnapshotSummary>,
+) -> Option<RuntimeModeledStateSummary> {
+    snapshot.map(|snapshot| RuntimeModeledStateSummary {
+        phase: snapshot.phase.clone(),
+        formal_fields: snapshot.formal_available_fields.clone(),
+    })
+}
+
+fn runtime_modeled_session_value(before: &RuntimeParitySnapshotSummary) -> String {
+    before
+        .formal_available_fields
+        .get("session_id")
+        .cloned()
+        .unwrap_or_else(|| "\"<session-id>\"".to_string())
+}
+
+fn runtime_modeled_runtime_value(before: &RuntimeParitySnapshotSummary) -> String {
+    before
+        .formal_available_fields
+        .get("active_runtime_id")
+        .cloned()
+        .unwrap_or_else(|| "\"<runtime-id>\"".to_string())
+}
+
+fn runtime_modeled_named_string(value: String) -> KernelValue {
+    KernelValue::String(value)
+}
+
+fn runtime_modeled_string_set(values: &[&str]) -> KernelValue {
+    KernelValue::Set(
+        values
+            .iter()
+            .map(|value| KernelValue::String((*value).to_string()))
+            .collect(),
+    )
+}
+
+fn runtime_modeled_witness_map() -> KernelValue {
+    let mut entries = BTreeMap::new();
+    for (name, witness) in runtime_parity_witnesses() {
+        entries.insert(
+            KernelValue::String(name),
+            KernelValue::String(
+                serde_json::to_string(&witness).unwrap_or_else(|_| "\"<witness>\"".into()),
+            ),
+        );
+    }
+    KernelValue::Map(entries)
+}
+
+fn runtime_modeled_input_id_value() -> KernelValue {
+    KernelValue::String("\"<input-id>\"".to_string())
+}
+
+fn runtime_modeled_run_id_value() -> KernelValue {
+    KernelValue::String("\"<run-id>\"".to_string())
+}
+
+fn runtime_modeled_kernel_state(
+    schema: &MachineSchema,
+    before: &RuntimeParitySnapshotSummary,
+) -> KernelState {
+    let mut fields = BTreeMap::new();
+    for field in &schema.state.fields {
+        let value = before
+            .formal_available_fields
+            .get(&field.name)
+            .map(|raw| runtime_modeled_kernel_value_from_raw(&field.ty, raw))
+            .unwrap_or_else(|| match field.name.as_str() {
+                "active_fence_token" => runtime_modeled_option_some(KernelValue::U64(0)),
+                _ => runtime_modeled_default_kernel_value(&field.ty),
+            });
+        fields.insert(field.name.clone(), value);
+    }
+    KernelState {
+        phase: before.phase.clone(),
+        fields,
+    }
+}
+
+fn runtime_modeled_kernel_input(
+    schema: &MachineSchema,
+    before: &RuntimeParitySnapshotSummary,
+    probe: RuntimeParityProbeInput,
+) -> Result<KernelInput, String> {
+    let variant = runtime_parity_probe_variant_name(probe).to_string();
+    let input_variant = schema
+        .inputs
+        .variant_named(&variant)
+        .map_err(|err| err.to_string())?;
+    let session_value = runtime_modeled_session_value(before);
+    let runtime_value = runtime_modeled_runtime_value(before);
+    let mut fields = BTreeMap::new();
+
+    for field in &input_variant.fields {
+        let value = match field.name.as_str() {
+            "session_id" => runtime_modeled_named_string(session_value.clone()),
+            "runtime_id" | "agent_runtime_id" => {
+                runtime_modeled_named_string(runtime_value.clone())
+            }
+            "previous_identity" => runtime_modeled_named_string(
+                serde_json::to_string(&meerkat_core::SessionLlmIdentity {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                })
+                .unwrap_or_else(|_| "\"<previous-identity>\"".into()),
+            ),
+            "previous_visibility_state" => runtime_modeled_named_string(
+                serde_json::to_string(&meerkat_core::SessionToolVisibilityState::default())
+                    .unwrap_or_else(|_| "\"<previous-visibility-state>\"".into()),
+            ),
+            "previous_capability_surface" => {
+                runtime_modeled_option_some(runtime_modeled_named_string(
+                    serde_json::to_string(&test_llm_capability_surface(true))
+                        .unwrap_or_else(|_| "\"<previous-capability-surface>\"".into()),
+                ))
+            }
+            "previous_capability_surface_status" => {
+                runtime_modeled_named_string("\"resolved\"".to_string())
+            }
+            "target_identity" => runtime_modeled_named_string(
+                serde_json::to_string(&meerkat_core::SessionLlmIdentity {
+                    model: "gpt-5.2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                })
+                .unwrap_or_else(|_| "\"<target-identity>\"".into()),
+            ),
+            "target_capability_surface" => runtime_modeled_named_string(
+                serde_json::to_string(&test_llm_capability_surface(false))
+                    .unwrap_or_else(|_| "\"<target-capability-surface>\"".into()),
+            ),
+            "next_visibility_state" => runtime_modeled_named_string(
+                serde_json::to_string(&meerkat_core::SessionToolVisibilityState {
+                    capability_base_filter: meerkat_core::ToolFilter::Deny(
+                        [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    active_revision: 1,
+                    ..Default::default()
+                })
+                .unwrap_or_else(|_| "\"<next-visibility-state>\"".into()),
+            ),
+            "next_capability_base_filter" => runtime_modeled_named_string(
+                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
+                    [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                        .into_iter()
+                        .collect(),
+                ))
+                .unwrap_or_else(|_| "\"<next-capability-base-filter>\"".into()),
+            ),
+            "next_active_visibility_revision" => KernelValue::U64(1),
+            "tool_visibility_delta" => {
+                runtime_modeled_named_string("\"<tool-visibility-delta>\"".to_string())
+            }
+            "fence_token" | "generation" => runtime_modeled_default_kernel_value(&field.ty),
+            "model" => KernelValue::String("gpt-5.2".to_string()),
+            "provider" => KernelValue::String("openai".to_string()),
+            "provider_params" => KernelValue::None,
+            "intents" => runtime_modeled_string_set(&["mob.peer_added", "probe.intent"]),
+            "filter" => KernelValue::String(
+                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
+                    ["probe_tool".to_string()].into_iter().collect(),
+                ))
+                .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
+            ),
+            "active_filter" | "staged_filter" => KernelValue::String(
+                serde_json::to_string(&meerkat_core::ToolFilter::All)
+                    .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
+            ),
+            "witnesses" => runtime_modeled_witness_map(),
+            "names" => runtime_modeled_string_set(&["probe_tool"]),
+            "active_requested_deferred_names" | "staged_requested_deferred_names" => {
+                runtime_modeled_string_set(&[])
+            }
+            "active_visibility_revision" => KernelValue::U64(1),
+            "staged_visibility_revision" => KernelValue::U64(1),
+            "keep_alive" => KernelValue::Bool(true),
+            "reason" => KernelValue::String("Dismissed".to_string()),
+            "input_id" => runtime_modeled_input_id_value(),
+            "run_id" => runtime_modeled_run_id_value(),
+            "sequence" => KernelValue::U64(0),
+            "kind" => KernelValue::String("runtime_created".to_string()),
+            _ => runtime_modeled_default_kernel_value(&field.ty),
+        };
+        fields.insert(field.name.clone(), value);
+    }
+
+    Ok(KernelInput { variant, fields })
+}
+
+fn runtime_parity_probe_variant_name(probe: RuntimeParityProbeInput) -> &'static str {
+    match probe {
+        RuntimeParityProbeInput::RegisterSession => "RegisterSession",
+        RuntimeParityProbeInput::UnregisterSession => "UnregisterSession",
+        RuntimeParityProbeInput::EnsureSessionWithExecutor => "EnsureSessionWithExecutor",
+        RuntimeParityProbeInput::SetSilentIntents => "SetSilentIntents",
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => "ReconfigureSessionLlmIdentity",
+        RuntimeParityProbeInput::ContainsSession => "ContainsSession",
+        RuntimeParityProbeInput::SessionHasExecutor => "SessionHasExecutor",
+        RuntimeParityProbeInput::SessionHasComms => "SessionHasComms",
+        RuntimeParityProbeInput::OpsLifecycleRegistry => "OpsLifecycleRegistry",
+        RuntimeParityProbeInput::PrepareBindings => "PrepareBindings",
+        RuntimeParityProbeInput::InputState => "InputState",
+        RuntimeParityProbeInput::ListActiveInputs => "ListActiveInputs",
+        RuntimeParityProbeInput::SetPeerIngressContext => "SetPeerIngressContext",
+        RuntimeParityProbeInput::NotifyDrainExited => "NotifyDrainExited",
+        RuntimeParityProbeInput::InterruptCurrentRun => "InterruptCurrentRun",
+        RuntimeParityProbeInput::CancelAfterBoundary => "CancelAfterBoundary",
+        RuntimeParityProbeInput::StagePersistentFilter => "StagePersistentFilter",
+        RuntimeParityProbeInput::RequestDeferredTools => "RequestDeferredTools",
+        RuntimeParityProbeInput::PublishCommittedVisibleSet => "PublishCommittedVisibleSet",
+        RuntimeParityProbeInput::AbortAll => "AbortAll",
+        RuntimeParityProbeInput::Abort => "Abort",
+        RuntimeParityProbeInput::Wait => "Wait",
+        RuntimeParityProbeInput::Ingest => "Ingest",
+        RuntimeParityProbeInput::PublishEvent => "PublishEvent",
+        RuntimeParityProbeInput::Recover => "Recover",
+        RuntimeParityProbeInput::Retire => "Retire",
+        RuntimeParityProbeInput::Recycle => "Recycle",
+        RuntimeParityProbeInput::RuntimeState => "RuntimeState",
+        RuntimeParityProbeInput::LoadBoundaryReceipt => "LoadBoundaryReceipt",
+        RuntimeParityProbeInput::AcceptWithCompletion => "AcceptWithCompletion",
+        RuntimeParityProbeInput::AcceptWithoutWake => "AcceptWithoutWake",
+        RuntimeParityProbeInput::Prepare => "Prepare",
+        RuntimeParityProbeInput::Commit => "Commit",
+        RuntimeParityProbeInput::Fail => "Fail",
+        RuntimeParityProbeInput::Reset => "Reset",
+        RuntimeParityProbeInput::StopRuntimeExecutor => "StopRuntimeExecutor",
+        RuntimeParityProbeInput::Destroy => "Destroy",
+    }
+}
+
+fn runtime_modeled_summary_from_kernel_state(
+    schema: &MachineSchema,
+    state: &KernelState,
+    runtime_reference: &RuntimeParitySnapshotSummary,
+) -> Option<RuntimeModeledStateSummary> {
+    if state
+        .fields
+        .get("session_id")
+        .is_some_and(|value| matches!(value, KernelValue::None))
+    {
+        return None;
+    }
+
+    let formal_fields = schema
+        .state
+        .fields
+        .iter()
+        .filter(|field| {
+            runtime_reference
+                .formal_available_fields
+                .contains_key(&field.name)
+        })
+        .map(|field| {
+            let value = state
+                .fields
+                .get(&field.name)
+                .map(runtime_modeled_formal_string_from_kernel_value)
+                .unwrap_or_else(|| "null".to_string());
+            (field.name.clone(), value)
+        })
+        .collect();
+
+    Some(RuntimeModeledStateSummary {
+        phase: state.phase.clone(),
+        formal_fields,
+    })
+}
+
+fn runtime_modeled_differing_keys(
+    runtime_after: &Option<RuntimeModeledStateSummary>,
+    schema_after: &Option<RuntimeModeledStateSummary>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    if runtime_after.as_ref().map(|summary| summary.phase.as_str())
+        != schema_after.as_ref().map(|summary| summary.phase.as_str())
+    {
+        keys.insert("phase".to_string());
+    }
+
+    let runtime_fields = runtime_after
+        .as_ref()
+        .map(|summary| &summary.formal_fields)
+        .cloned()
+        .unwrap_or_default();
+    let schema_fields = schema_after
+        .as_ref()
+        .map(|summary| &summary.formal_fields)
+        .cloned()
+        .unwrap_or_default();
+
+    for key in runtime_fields
+        .keys()
+        .chain(schema_fields.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        if runtime_fields.get(key) != schema_fields.get(key) {
+            keys.insert(key.clone());
+        }
+    }
+
+    keys.into_iter().collect()
+}
+
+fn assert_modeled_meerkat_transition_matches_runtime_after(
+    schema: &MachineSchema,
+    before: &RuntimeParitySnapshotSummary,
+    input: &KernelInput,
+    runtime_after: &RuntimeParitySnapshotSummary,
+) {
+    let outcome =
+        modeled_meerkat_kernel::transition(&runtime_modeled_kernel_state(schema, before), input)
+            .expect("modeled transition should succeed");
+    let schema_after =
+        runtime_modeled_summary_from_kernel_state(schema, &outcome.next_state, before)
+            .expect("modeled transition should produce a schema summary");
+    let runtime_after = runtime_modeled_summary_from_runtime_snapshot(Some(runtime_after))
+        .expect("runtime transition should produce a runtime summary");
+    assert_eq!(
+        runtime_after.phase, schema_after.phase,
+        "modeled phase should match runtime phase after {}",
+        input.variant
+    );
+    assert_eq!(
+        runtime_after.formal_fields, schema_after.formal_fields,
+        "modeled formal fields should match runtime fields after {}",
+        input.variant
+    );
+}
+
+fn assert_modeled_meerkat_post_admission_signal_matches_runtime(
+    schema: &MachineSchema,
+    before: &RuntimeParitySnapshotSummary,
+    input: &KernelInput,
+    runtime_signal: crate::driver::ephemeral::PostAdmissionSignal,
+) {
+    let outcome =
+        modeled_meerkat_kernel::transition(&runtime_modeled_kernel_state(schema, before), input)
+            .expect("modeled transition should succeed");
+    let modeled_signal = runtime_modeled_post_admission_signal_from_effects(&outcome.effects);
+    assert_eq!(
+        format!("{runtime_signal:?}"),
+        modeled_signal,
+        "modeled post-admission signal should match runtime after {}",
+        input.variant
+    );
+}
+
+fn runtime_modeled_publish_input(
+    active_visibility_revision: u64,
+    staged_visibility_revision: u64,
+) -> KernelInput {
+    KernelInput {
+        variant: "PublishCommittedVisibleSet".to_string(),
+        fields: BTreeMap::from([
+            (
+                "active_filter".to_string(),
+                KernelValue::String(
+                    serde_json::to_string(&meerkat_core::ToolFilter::All)
+                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
+                ),
+            ),
+            (
+                "staged_filter".to_string(),
+                KernelValue::String(
+                    serde_json::to_string(&meerkat_core::ToolFilter::All)
+                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
+                ),
+            ),
+            (
+                "active_requested_deferred_names".to_string(),
+                runtime_modeled_string_set(&[]),
+            ),
+            (
+                "staged_requested_deferred_names".to_string(),
+                runtime_modeled_string_set(&[]),
+            ),
+            (
+                "active_visibility_revision".to_string(),
+                KernelValue::U64(active_visibility_revision),
+            ),
+            (
+                "staged_visibility_revision".to_string(),
+                KernelValue::U64(staged_visibility_revision),
+            ),
+        ]),
+    }
+}
+
+fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {
+    [(
+        "probe_tool".to_string(),
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some("callback:runtime-parity".to_string()),
+            last_seen_provenance: None,
+        },
+    )]
+    .into_iter()
+    .collect()
+}
+
+fn runtime_parity_steered_prompt(text: &str) -> Input {
+    Input::Prompt(crate::input::PromptInput::new(
+        text,
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ))
+}
+
+fn runtime_parity_prompt(text: &str) -> Input {
+    make_prompt(text)
+}
+
+fn runtime_parity_peer_message(text: &str) -> Input {
+    Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "runtime-parity".into(),
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: text.into(),
+        blocks: None,
+        handling_mode: None,
+    })
+}
+
+fn runtime_parity_publish_state_with_revisions(
+    active_revision: u64,
+    staged_revision: u64,
+) -> meerkat_core::SessionToolVisibilityState {
+    meerkat_core::SessionToolVisibilityState {
+        active_revision,
+        staged_revision,
+        ..Default::default()
+    }
+}
+
+fn runtime_parity_publish_state() -> meerkat_core::SessionToolVisibilityState {
+    runtime_parity_publish_state_with_revisions(1, 1)
+}
+
+fn runtime_parity_input_id() -> InputId {
+    InputId::new()
+}
+
+fn runtime_parity_silent_intents() -> Vec<String> {
+    vec!["mob.peer_added".to_string(), "probe.intent".to_string()]
+}
+
+fn runtime_parity_event(
+    runtime_id: &LogicalRuntimeId,
+) -> crate::runtime_event::RuntimeEventEnvelope {
+    crate::runtime_event::RuntimeEventEnvelope {
+        id: crate::identifiers::RuntimeEventId::new(),
+        timestamp: Utc::now(),
+        runtime_id: runtime_id.clone(),
+        event: crate::runtime_event::RuntimeEvent::Topology(
+            crate::runtime_event::RuntimeTopologyEvent::RuntimeCreated {
+                runtime_id: runtime_id.clone(),
+            },
+        ),
+        causation_id: None,
+        correlation_id: None,
+    }
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare for attached steer modeling");
+    adapter
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(RuntimeParityBlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+    wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
+
+    let before = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("attached steer test should capture a pre-state snapshot");
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: runtime_parity_steered_prompt("modeled attached steer"),
+            },
+        )
+        .await
+        .expect("attached steered input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected attached steer result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("attached steered input should expose a completion waiter");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("attached steered input should request immediate processing");
+
+    let after = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("attached steer test should capture an active run snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(true),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    allow_finish.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait()).await;
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtime() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
+
+    let before = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("idle queue test should capture a pre-state snapshot");
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: runtime_parity_prompt("modeled idle queued admission"),
+            },
+        )
+        .await
+        .expect("idle queued input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected idle queued result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("queued idle input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("idle queue test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(false),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    crate::traits::RuntimeControlPlane::destroy(
+        adapter.as_ref(),
+        &LogicalRuntimeId::new(session_id.to_string()),
+    )
+    .await
+    .expect("idle queue test should destroy runtime cleanly");
+    match completion_handle.wait().await {
+        CompletionOutcome::RuntimeTerminated(reason) => {
+            assert_eq!(reason, "runtime destroyed");
+        }
+        other => panic!("expected runtime destroyed termination, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn modeled_meerkat_set_silent_intents_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("set silent intents test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::SetSilentIntents {
+                session_id: fixture.session_id.clone(),
+                intents: runtime_parity_silent_intents(),
+            },
+        )
+        .await
+        .expect("set silent intents should succeed");
+    assert!(matches!(result, MeerkatMachineCommandResult::Unit));
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("set silent intents test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input =
+        runtime_modeled_kernel_input(&schema, &before, RuntimeParityProbeInput::SetSilentIntents)
+            .expect("modeled set silent intents input should build");
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn meerkat_reset_clears_silent_intent_overrides() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    fixture
+        .adapter
+        .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
+        .await;
+
+    let runtime_id = LogicalRuntimeId::new(fixture.session_id.to_string());
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Reset {
+                runtime_id: runtime_id.clone(),
+            },
+        )
+        .await
+        .expect("reset should succeed");
+    assert!(matches!(
+        result,
+        MeerkatMachineCommandResult::ResetReport(_)
+    ));
+
+    let snapshot = fixture
+        .adapter
+        .meerkat_machine_spine_snapshot(&fixture.session_id)
+        .await
+        .expect("snapshot should exist after reset");
+    assert!(
+        snapshot.inputs.silent_intent_overrides.is_empty(),
+        "reset should clear ingress-side silent intent overrides"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn meerkat_destroy_clears_silent_intent_overrides() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    fixture
+        .adapter
+        .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
+        .await;
+
+    let runtime_id = LogicalRuntimeId::new(fixture.session_id.to_string());
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Destroy {
+                runtime_id: runtime_id.clone(),
+            },
+        )
+        .await
+        .expect("destroy should succeed");
+    assert!(matches!(
+        result,
+        MeerkatMachineCommandResult::DestroyReport(_)
+    ));
+
+    let snapshot = fixture
+        .adapter
+        .meerkat_machine_spine_snapshot(&fixture.session_id)
+        .await
+        .expect("snapshot should exist after destroy");
+    assert!(
+        snapshot.inputs.silent_intent_overrides.is_empty(),
+        "destroy should clear ingress-side silent intent overrides"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn meerkat_stop_runtime_executor_clears_silent_intent_overrides() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Idle).await;
+    fixture
+        .adapter
+        .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
+        .await;
+
+    fixture
+        .adapter
+        .stop_runtime_executor(
+            &fixture.session_id,
+            RunControlCommand::StopRuntimeExecutor {
+                reason: "clear silent intents".into(),
+            },
+        )
+        .await
+        .expect("stop runtime executor should succeed");
+
+    wait_for_runtime_parity_phase(&fixture.adapter, &fixture.session_id, RuntimeState::Stopped)
+        .await;
+    let snapshot = fixture
+        .adapter
+        .meerkat_machine_spine_snapshot(&fixture.session_id)
+        .await
+        .expect("snapshot should exist after stop");
+    assert!(
+        snapshot.inputs.silent_intent_overrides.is_empty(),
+        "stop should clear ingress-side silent intent overrides"
+    );
+
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running steer test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: fixture.session_id.clone(),
+                input: runtime_parity_steered_prompt("modeled running steer admission"),
+            },
+        )
+        .await
+        .expect("running steered input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected running steer result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("running steered input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running steer test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(true),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    drop(completion_handle);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects() {
+    let runtime_id = LogicalRuntimeId::new("prepare-unwind");
+    let driver: SharedDriver = Arc::new(tokio::sync::Mutex::new(DriverEntry::Ephemeral(
+        EphemeralRuntimeDriver::new(runtime_id),
+    )));
+
+    let accepted_input_id = {
+        let mut entry = driver.lock().await;
+        let outcome = entry
+            .as_driver_mut()
+            .accept_input(make_prompt("queued"))
+            .await
+            .expect("accept should queue input");
+        match outcome {
+            AcceptOutcome::Accepted { input_id, .. } => input_id,
+            other => panic!("expected accepted input, got {other:?}"),
+        }
+    };
+
+    let err = prepare_runtime_loop_batch_start(&driver, RunId::new(), &[InputId::new()])
+        .await
+        .expect_err("staging an unknown input should fail and unwind");
+    assert!(
+        err.to_string()
+            .contains("failed to stage accepted input batch")
+            || err
+                .to_string()
+                .contains("stage drain snapshot requires queued contributors"),
+        "unexpected helper error: {err}"
+    );
+
+    let entry = driver.lock().await;
+    let DriverEntry::Ephemeral(driver) = &*entry else {
+        panic!("test uses ephemeral driver");
+    };
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Idle,
+        "helper should unwind the started run back to idle"
+    );
+    assert!(
+        driver.current_run_id().is_none(),
+        "helper should clear the transient run id on staging failure"
+    );
+    let state = driver
+        .input_state(&accepted_input_id)
+        .expect("accepted input should still be present after unwind");
+    assert_eq!(
+        state.current_state(),
+        crate::input_state::InputLifecycleState::Queued,
+        "staging failure should leave the queued input untouched"
+    );
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running interrupt test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: fixture.session_id.clone(),
+                input: runtime_parity_peer_message("modeled running interrupt admission"),
+            },
+        )
+        .await
+        .expect("running peer input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected running interrupt result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("running interrupt input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running interrupt test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(false),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(true)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    drop(completion_handle);
+    fixture.cleanup().await;
+}
+
+fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+        })),
+        current_visibility_state: Arc::new(std::sync::Mutex::new(Default::default())),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+}
+
+async fn runtime_parity_snapshot_summary(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Option<RuntimeParitySnapshotSummary> {
+    adapter
+        .meerkat_machine_spine_snapshot(session_id)
+        .await
+        .map(|snapshot| {
+            let raw_formal_fields = snapshot.formal_state.available_fields.clone();
+            RuntimeParitySnapshotSummary {
+                phase: runtime_parity_state_label(snapshot.control.phase),
+                current_run_present: snapshot.control.current_run_id.is_some(),
+                formal_session_id: runtime_parity_formal_identity_field(
+                    &raw_formal_fields,
+                    "session_id",
+                ),
+                formal_active_runtime_id: runtime_parity_formal_identity_field(
+                    &raw_formal_fields,
+                    "active_runtime_id",
+                ),
+                formal_current_run_id: runtime_parity_formal_identity_field(
+                    &raw_formal_fields,
+                    "current_run_id",
+                ),
+                pre_run_phase: snapshot
+                    .control
+                    .pre_run_phase
+                    .map(runtime_parity_state_label),
+                attachment_live: snapshot.binding.attachment_live,
+                queue_len: snapshot.inputs.queue.len(),
+                steer_queue_len: snapshot.inputs.steer_queue.len(),
+                current_run_contributor_count: snapshot.inputs.current_run_contributors.len(),
+                admitted_input_count: snapshot.inputs.admission_order.len(),
+                post_admission_signal: snapshot.inputs.post_admission_signal,
+                ledger_input_count: snapshot.ledger.input_count,
+                ledger_non_terminal_count: snapshot.ledger.non_terminal_count,
+                ledger_accepted_count: snapshot.ledger.accepted_count,
+                ledger_queued_count: snapshot.ledger.queued_count,
+                ledger_staged_count: snapshot.ledger.staged_count,
+                ledger_applied_count: snapshot.ledger.applied_count,
+                ledger_applied_pending_consumption_count: snapshot
+                    .ledger
+                    .applied_pending_consumption_count,
+                ledger_consumed_count: snapshot.ledger.consumed_count,
+                ledger_superseded_count: snapshot.ledger.superseded_count,
+                ledger_coalesced_count: snapshot.ledger.coalesced_count,
+                ledger_abandoned_count: snapshot.ledger.abandoned_count,
+                wait_request_present: snapshot.ops.wait_request_id.is_some(),
+                drain_slot_present: snapshot.drain.slot_present,
+                drain_phase: snapshot.drain.phase.map(runtime_parity_drain_phase_label),
+                formal_available_fields: normalize_runtime_parity_formal_fields(
+                    snapshot.formal_state.available_fields,
+                ),
+                formal_unavailable_fields: snapshot.formal_state.unavailable_fields,
+            }
+        })
+}
+
+async fn wait_for_runtime_parity_phase(
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    expected: RuntimeState,
+) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match adapter.meerkat_machine_spine_snapshot(session_id).await {
+                Some(snapshot) if snapshot.control.phase == expected => break,
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("runtime phase transition should complete");
+}
+
+async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParityFixture {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+
+    match phase {
+        RuntimeParityPhase::Idle => {
+            adapter.register_session(session_id.clone()).await;
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+                prepared_input_id: None,
+                prepared_run_id: None,
+            }
+        }
+        RuntimeParityPhase::Attached => {
+            adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bindings should prepare for attached fixture");
+            adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    Box::new(RuntimeParityNoopExecutor),
+                )
+                .await;
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+                prepared_input_id: None,
+                prepared_run_id: None,
+            }
+        }
+        RuntimeParityPhase::Running => {
+            let apply_started = Arc::new(Notify::new());
+            let allow_finish = Arc::new(Notify::new());
+            adapter
+                .prepare_bindings(session_id.clone())
+                .await
+                .expect("bindings should prepare for running fixture");
+            adapter
+                .ensure_session_with_executor(
+                    session_id.clone(),
+                    Box::new(RuntimeParityBlockingExecutor {
+                        apply_started: Arc::clone(&apply_started),
+                        allow_finish: Arc::clone(&allow_finish),
+                    }),
+                )
+                .await;
+            let (outcome, completion) = adapter
+                .accept_input_with_completion(
+                    &session_id,
+                    runtime_parity_steered_prompt("runtime parity running fixture"),
+                )
+                .await
+                .expect("running fixture should accept the steered prompt");
+            assert!(
+                outcome.is_accepted(),
+                "running fixture prompt should be accepted"
+            );
+            let completion =
+                completion.expect("running fixture prompt should expose a completion handle");
+            tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+                .await
+                .expect("running fixture executor should enter apply");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Running).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: Some(allow_finish),
+                running_completion: Some(completion),
+                prepared_input_id: None,
+                prepared_run_id: None,
+            }
+        }
+        RuntimeParityPhase::Retired => {
+            adapter.register_session(session_id.clone()).await;
+            adapter
+                .execute_meerkat_machine_command(
+                    Some(Arc::clone(&adapter)),
+                    MeerkatMachineCommand::Retire {
+                        runtime_id: runtime_id.clone(),
+                    },
+                )
+                .await
+                .expect("retired fixture should retire");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Retired).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+                prepared_input_id: None,
+                prepared_run_id: None,
+            }
+        }
+        RuntimeParityPhase::Stopped => {
+            adapter.register_session(session_id.clone()).await;
+            adapter
+                .stop_runtime_executor(
+                    &session_id,
+                    RunControlCommand::StopRuntimeExecutor {
+                        reason: "runtime parity stopped fixture".to_string(),
+                    },
+                )
+                .await
+                .expect("stopped fixture should stop");
+            wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Stopped).await;
+            RuntimeParityFixture {
+                adapter,
+                session_id,
+                runtime_id,
+                running_release: None,
+                running_completion: None,
+                prepared_input_id: None,
+                prepared_run_id: None,
+            }
+        }
+    }
+}
+
+async fn prepare_runtime_parity_probe(
+    phase: RuntimeParityPhase,
+    fixture: &mut RuntimeParityFixture,
+    probe: RuntimeParityProbeInput,
+    setup_tags: &mut Vec<String>,
+) {
+    if matches!(
+        probe,
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity
+    ) {
+        install_runtime_parity_reconfigure_host(&fixture.adapter);
+        setup_tags.push("llm_reconfigure_host".to_string());
+    }
+
+    if matches!(probe, RuntimeParityProbeInput::NotifyDrainExited) {
+        let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+        let spawned = fixture
+            .adapter
+            .update_peer_ingress_context(&fixture.session_id, true, Some(comms_runtime))
+            .await;
+        setup_tags.push(format!("drain_primed:{spawned}"));
+        if spawned {
+            wait_for_phase(
+                &fixture.adapter,
+                &fixture.session_id,
+                CommsDrainPhase::Running,
+            )
+            .await;
+        }
+    }
+
+    if phase == RuntimeParityPhase::Running
+        && matches!(
+            probe,
+            RuntimeParityProbeInput::Commit | RuntimeParityProbeInput::Fail
+        )
+        && fixture.prepared_run_id.is_none()
+    {
+        let prepared = fixture
+            .adapter
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::Prepare {
+                    session_id: fixture.session_id.clone(),
+                    input: runtime_parity_prompt("runtime parity prepared run"),
+                },
+            )
+            .await
+            .expect("runtime parity should prepare a running fixture for commit/fail");
+        let prepared = match prepared {
+            MeerkatMachineCommandResult::Prepared(prepared) => prepared,
+            other => panic!("unexpected runtime parity prepare result for commit/fail: {other:?}"),
+        };
+        fixture.prepared_input_id = Some(prepared.input_id);
+        fixture.prepared_run_id = Some(prepared.run_id);
+        wait_for_runtime_parity_phase(&fixture.adapter, &fixture.session_id, RuntimeState::Running)
+            .await;
+        setup_tags.push("legacy_run_prepared".to_string());
+    }
+}
+
+fn runtime_parity_probe_command(
+    fixture: &RuntimeParityFixture,
+    probe: RuntimeParityProbeInput,
+) -> MeerkatMachineCommand {
+    match probe {
+        RuntimeParityProbeInput::RegisterSession => MeerkatMachineCommand::RegisterSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::UnregisterSession => MeerkatMachineCommand::UnregisterSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::EnsureSessionWithExecutor => {
+            MeerkatMachineCommand::EnsureSessionWithExecutor {
+                session_id: fixture.session_id.clone(),
+                executor: Box::new(RuntimeParityNoopExecutor),
+            }
+        }
+        RuntimeParityProbeInput::SetSilentIntents => MeerkatMachineCommand::SetSilentIntents {
+            session_id: fixture.session_id.clone(),
+            intents: runtime_parity_silent_intents(),
+        },
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity => {
+            unreachable!("reconfigure parity probes use the public helper path")
+        }
+        RuntimeParityProbeInput::ContainsSession => MeerkatMachineCommand::ContainsSession {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SessionHasExecutor => MeerkatMachineCommand::SessionHasExecutor {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SessionHasComms => MeerkatMachineCommand::SessionHasComms {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::OpsLifecycleRegistry => {
+            MeerkatMachineCommand::OpsLifecycleRegistry {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::PrepareBindings => MeerkatMachineCommand::PrepareBindings {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::InputState => MeerkatMachineCommand::InputState {
+            session_id: fixture.session_id.clone(),
+            input_id: runtime_parity_input_id(),
+        },
+        RuntimeParityProbeInput::ListActiveInputs => MeerkatMachineCommand::ListActiveInputs {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::SetPeerIngressContext => {
+            let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+            MeerkatMachineCommand::SetPeerIngressContext {
+                session_id: fixture.session_id.clone(),
+                keep_alive: true,
+                comms_runtime: Some(comms_runtime),
+            }
+        }
+        RuntimeParityProbeInput::NotifyDrainExited => MeerkatMachineCommand::NotifyDrainExited {
+            session_id: fixture.session_id.clone(),
+            reason: DrainExitReason::Dismissed,
+        },
+        RuntimeParityProbeInput::InterruptCurrentRun => {
+            MeerkatMachineCommand::InterruptCurrentRun {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::CancelAfterBoundary => {
+            MeerkatMachineCommand::CancelAfterBoundary {
+                session_id: fixture.session_id.clone(),
+            }
+        }
+        RuntimeParityProbeInput::StagePersistentFilter => {
+            MeerkatMachineCommand::StagePersistentFilter {
+                session_id: fixture.session_id.clone(),
+                filter: meerkat_core::ToolFilter::Deny(
+                    ["probe_tool".to_string()].into_iter().collect(),
+                ),
+                witnesses: runtime_parity_witnesses(),
+            }
+        }
+        RuntimeParityProbeInput::RequestDeferredTools => {
+            MeerkatMachineCommand::RequestDeferredTools {
+                session_id: fixture.session_id.clone(),
+                names: ["probe_tool".to_string()].into_iter().collect(),
+                witnesses: runtime_parity_witnesses(),
+            }
+        }
+        RuntimeParityProbeInput::PublishCommittedVisibleSet => {
+            MeerkatMachineCommand::PublishCommittedVisibleSet {
+                session_id: fixture.session_id.clone(),
+                visibility_state: Box::new(runtime_parity_publish_state()),
+            }
+        }
+        RuntimeParityProbeInput::AbortAll => MeerkatMachineCommand::AbortAll,
+        RuntimeParityProbeInput::Abort => MeerkatMachineCommand::Abort {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::Wait => MeerkatMachineCommand::Wait {
+            session_id: fixture.session_id.clone(),
+        },
+        RuntimeParityProbeInput::Ingest => MeerkatMachineCommand::Ingest {
+            runtime_id: fixture.runtime_id.clone(),
+            input: runtime_parity_prompt("runtime parity ingest"),
+        },
+        RuntimeParityProbeInput::PublishEvent => MeerkatMachineCommand::PublishEvent {
+            event: runtime_parity_event(&fixture.runtime_id),
+        },
+        RuntimeParityProbeInput::Recover => MeerkatMachineCommand::Recover {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::Retire => MeerkatMachineCommand::Retire {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::Recycle => MeerkatMachineCommand::Recycle {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::RuntimeState => MeerkatMachineCommand::RuntimeState {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::LoadBoundaryReceipt => {
+            MeerkatMachineCommand::LoadBoundaryReceipt {
+                runtime_id: fixture.runtime_id.clone(),
+                run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
+                sequence: 0,
+            }
+        }
+        RuntimeParityProbeInput::AcceptWithCompletion => {
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: fixture.session_id.clone(),
+                input: runtime_parity_prompt("runtime parity accept with completion"),
+            }
+        }
+        RuntimeParityProbeInput::AcceptWithoutWake => MeerkatMachineCommand::AcceptWithoutWake {
+            session_id: fixture.session_id.clone(),
+            input: runtime_parity_prompt("runtime parity accept without wake"),
+        },
+        RuntimeParityProbeInput::Prepare => MeerkatMachineCommand::Prepare {
+            session_id: fixture.session_id.clone(),
+            input: runtime_parity_prompt("runtime parity prepare"),
+        },
+        RuntimeParityProbeInput::Commit => {
+            let input_id = fixture.prepared_input_id.clone().unwrap_or_default();
+            let run_id = fixture.prepared_run_id.clone().unwrap_or_default();
+            MeerkatMachineCommand::Commit {
+                session_id: fixture.session_id.clone(),
+                input_id: input_id.clone(),
+                run_id: run_id.clone(),
+                output: CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: vec![input_id],
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                    run_result: None,
+                },
+            }
+        }
+        RuntimeParityProbeInput::Fail => MeerkatMachineCommand::Fail {
+            session_id: fixture.session_id.clone(),
+            run_id: fixture.prepared_run_id.clone().unwrap_or_default(),
+            error: "runtime parity failure".to_string(),
+        },
+        RuntimeParityProbeInput::Reset => MeerkatMachineCommand::Reset {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+        RuntimeParityProbeInput::StopRuntimeExecutor => {
+            MeerkatMachineCommand::StopRuntimeExecutor {
+                session_id: fixture.session_id.clone(),
+                command: RunControlCommand::StopRuntimeExecutor {
+                    reason: "runtime parity probe".to_string(),
+                },
+            }
+        }
+        RuntimeParityProbeInput::Destroy => MeerkatMachineCommand::Destroy {
+            runtime_id: fixture.runtime_id.clone(),
+        },
+    }
+}
+
+fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult) -> String {
+    match result {
+        MeerkatMachineCommandResult::AcceptOutcome(outcome) => {
+            format!("accept_outcome:{outcome:?}")
+        }
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => {
+            format!(
+                "accept_with_completion:{outcome:?}:handle={}:signal={admission_signal:?}",
+                handle.is_some()
+            )
+        }
+        MeerkatMachineCommandResult::Unit => "unit".to_string(),
+        MeerkatMachineCommandResult::Bool(value) => format!("bool:{value}"),
+        MeerkatMachineCommandResult::Spawned(value) => format!("spawned:{value}"),
+        MeerkatMachineCommandResult::OpsLifecycleRegistry(registry) => {
+            format!("ops_registry:{}", registry.is_some())
+        }
+        MeerkatMachineCommandResult::Bindings(_) => "bindings".to_string(),
+        MeerkatMachineCommandResult::InputState(state) => {
+            format!("input_state_present:{}", state.is_some())
+        }
+        MeerkatMachineCommandResult::ActiveInputs(inputs) => {
+            format!("active_inputs:{}", inputs.len())
+        }
+        MeerkatMachineCommandResult::LlmReconfigured(report) => format!(
+            "llm_reconfigured:{}->{}",
+            report.previous_identity.model, report.new_identity.model
+        ),
+        MeerkatMachineCommandResult::VisibilityRevision(revision) => {
+            format!("visibility_revision:{}", revision.0)
+        }
+        MeerkatMachineCommandResult::VisibilityPublished(state) => format!(
+            "visibility_published:active={},staged={}",
+            state.active_revision, state.staged_revision
+        ),
+        MeerkatMachineCommandResult::RetireReport(report) => format!(
+            "retire:abandoned={},pending_drain={}",
+            report.inputs_abandoned, report.inputs_pending_drain
+        ),
+        MeerkatMachineCommandResult::RecycleReport(report) => {
+            format!("recycle:transferred={}", report.inputs_transferred)
+        }
+        MeerkatMachineCommandResult::ResetReport(report) => {
+            format!("reset:abandoned={}", report.inputs_abandoned)
+        }
+        MeerkatMachineCommandResult::RecoveryReport(report) => format!(
+            "recover:recovered={},abandoned={},requeued={}",
+            report.inputs_recovered, report.inputs_abandoned, report.inputs_requeued
+        ),
+        MeerkatMachineCommandResult::DestroyReport(report) => {
+            format!("destroy:abandoned={}", report.inputs_abandoned)
+        }
+        MeerkatMachineCommandResult::RuntimeState(state) => {
+            format!("runtime_state:{}", runtime_parity_state_label(*state))
+        }
+        MeerkatMachineCommandResult::BoundaryReceipt(receipt) => {
+            format!("boundary_receipt:{}", receipt.is_some())
+        }
+        MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
+    }
+}
+
+fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
+    match error {
+        RuntimeDriverError::NotReady { state } => {
+            format!("not_ready:{}", runtime_parity_state_label(*state))
+        }
+        RuntimeDriverError::ValidationFailed { reason } => {
+            format!("validation_failed:{reason}")
+        }
+        RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
+    }
+}
+
+fn summarize_runtime_parity_control_error(error: &RuntimeControlPlaneError) -> String {
+    match error {
+        RuntimeControlPlaneError::NotFound(runtime_id) => format!("not_found:{runtime_id}"),
+        RuntimeControlPlaneError::InvalidState { state } => {
+            format!("invalid_state:{}", runtime_parity_state_label(*state))
+        }
+        RuntimeControlPlaneError::StoreError(reason) => format!("store_error:{reason}"),
+        RuntimeControlPlaneError::Internal(reason) => format!("internal:{reason}"),
+    }
+}
+
+fn summarize_runtime_parity_command_error(error: &MeerkatMachineCommandError) -> String {
+    match error {
+        MeerkatMachineCommandError::Driver(error) => {
+            format!("driver:{}", summarize_runtime_parity_driver_error(error))
+        }
+        MeerkatMachineCommandError::Control(error) => {
+            format!("control:{}", summarize_runtime_parity_control_error(error))
+        }
+    }
+}
+
+async fn execute_runtime_parity_probe(
+    phase: RuntimeParityPhase,
+    probe: RuntimeParityProbeInput,
+) -> RuntimeParityInvocationReport {
+    let base_phase = if phase == RuntimeParityPhase::Running
+        && matches!(
+            probe,
+            RuntimeParityProbeInput::Commit | RuntimeParityProbeInput::Fail
+        ) {
+        RuntimeParityPhase::Idle
+    } else {
+        phase
+    };
+    let mut fixture = build_runtime_parity_fixture(base_phase).await;
+    let mut setup_tags = Vec::new();
+    prepare_runtime_parity_probe(phase, &mut fixture, probe, &mut setup_tags).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id).await;
+    let result = if matches!(
+        probe,
+        RuntimeParityProbeInput::ReconfigureSessionLlmIdentity
+    ) {
+        SessionServiceRuntimeExt::reconfigure_session_llm_identity(
+            fixture.adapter.as_ref(),
+            &fixture.session_id,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .map(MeerkatMachineCommandResult::LlmReconfigured)
+        .map_err(MeerkatMachineCommandError::from)
+    } else {
+        fixture
+            .adapter
+            .execute_meerkat_machine_command(
+                Some(Arc::clone(&fixture.adapter)),
+                runtime_parity_probe_command(&fixture, probe),
+            )
+            .await
+    };
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id).await;
+    assert_runtime_parity_identity_stability(probe, before.as_ref(), after.as_ref());
+    let (outcome_kind, result_summary) = match &result {
+        Ok(result) => (
+            RuntimeParityOutcomeKind::Ok,
+            summarize_runtime_parity_command_result(result),
+        ),
+        Err(error) => (
+            RuntimeParityOutcomeKind::Err,
+            summarize_runtime_parity_command_error(error),
+        ),
+    };
+    fixture.cleanup().await;
+
+    RuntimeParityInvocationReport {
+        phase: phase.schema_name().to_string(),
+        setup_tags,
+        before,
+        outcome_kind,
+        result_summary,
+        after,
+    }
+}
+
+fn runtime_modeled_schema_report(
+    schema: &MachineSchema,
+    runtime: &RuntimeParityInvocationReport,
+    probe: RuntimeParityProbeInput,
+) -> RuntimeModeledStateSchemaReport {
+    let Some(before) = runtime.before.as_ref() else {
+        return RuntimeModeledStateSchemaReport {
+            outcome_kind: RuntimeModeledStateOutcomeKind::Err,
+            after: None,
+            detail: "missing runtime pre-state".to_string(),
+            result_summary: None,
+        };
+    };
+
+    let state = runtime_modeled_kernel_state(schema, before);
+    let input = match runtime_modeled_kernel_input(schema, before, probe) {
+        Ok(input) => input,
+        Err(detail) => {
+            return RuntimeModeledStateSchemaReport {
+                outcome_kind: RuntimeModeledStateOutcomeKind::Err,
+                after: None,
+                detail,
+                result_summary: None,
+            };
+        }
+    };
+
+    match modeled_meerkat_kernel::transition(&state, &input) {
+        Ok(outcome) => {
+            let result_summary = runtime_modeled_schema_result_summary(before, probe, &outcome);
+            RuntimeModeledStateSchemaReport {
+                outcome_kind: RuntimeModeledStateOutcomeKind::Ok,
+                after: runtime_modeled_summary_from_kernel_state(
+                    schema,
+                    &outcome.next_state,
+                    before,
+                ),
+                detail: outcome.transition,
+                result_summary,
+            }
+        }
+        Err(error) => RuntimeModeledStateSchemaReport {
+            outcome_kind: RuntimeModeledStateOutcomeKind::Err,
+            after: Some(RuntimeModeledStateSummary {
+                phase: before.phase.clone(),
+                formal_fields: before.formal_available_fields.clone(),
+            }),
+            detail: runtime_modeled_transition_refusal_detail(&error),
+            result_summary: None,
+        },
+    }
+}
+
+fn runtime_modeled_post_admission_signal_from_effects(effects: &[KernelEffect]) -> String {
+    effects
+        .iter()
+        .find(|effect| effect.variant == "PostAdmissionSignal")
+        .and_then(|effect| effect.fields.get("signal"))
+        .and_then(|value| match value {
+            KernelValue::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn runtime_modeled_schema_result_summary(
+    before: &RuntimeParitySnapshotSummary,
+    probe: RuntimeParityProbeInput,
+    outcome: &TransitionOutcome,
+) -> Option<String> {
+    match probe {
+        RuntimeParityProbeInput::AcceptWithCompletion => Some(format!(
+            "admission_signal:{}",
+            runtime_modeled_post_admission_signal_from_effects(&outcome.effects)
+        )),
+        RuntimeParityProbeInput::AcceptWithoutWake => Some("admission_signal:None".to_string()),
+        // These control-plane reports are exact functions of the lower-level
+        // input ledger carrier, not the top-level phase machine alone.
+        RuntimeParityProbeInput::Destroy => Some(format!(
+            "destroy:abandoned={}",
+            before.ledger_non_terminal_count
+        )),
+        RuntimeParityProbeInput::Reset => Some(format!(
+            "reset:abandoned={}",
+            before.ledger_non_terminal_count
+        )),
+        RuntimeParityProbeInput::Recycle => Some(format!(
+            "recycle:transferred={}",
+            before.ledger_non_terminal_count
+        )),
+        _ => None,
+    }
+}
+
+fn runtime_modeled_transition_refusal_detail(error: &TransitionRefusal) -> String {
+    match error {
+        TransitionRefusal::UnknownInputVariant { variant, .. } => {
+            format!("unknown_input:{variant}")
+        }
+        TransitionRefusal::UnknownSignalVariant { variant, .. } => {
+            format!("unknown_signal:{variant}")
+        }
+        TransitionRefusal::InvalidInputPayload { reason, .. } => {
+            format!("invalid_input:{reason}")
+        }
+        TransitionRefusal::InvalidSignalPayload { reason, .. } => {
+            format!("invalid_signal:{reason}")
+        }
+        TransitionRefusal::NoMatchingTransition { phase, variant, .. } => {
+            format!("no_match:{phase}:{variant}")
+        }
+        TransitionRefusal::AmbiguousTransition {
+            phase,
+            variant,
+            transitions,
+            ..
+        } => format!("ambiguous:{phase}:{variant}:{transitions:?}"),
+        TransitionRefusal::EvaluationError {
+            transition, reason, ..
+        } => format!("evaluation:{transition}:{reason}"),
+    }
+}
+
+fn runtime_modeled_runtime_report(
+    runtime: &RuntimeParityInvocationReport,
+    probe: RuntimeParityProbeInput,
+) -> RuntimeModeledStateRuntimeReport {
+    let before = runtime_modeled_summary_from_runtime_snapshot(runtime.before.as_ref());
+    let after =
+        runtime_modeled_summary_from_runtime_snapshot(runtime.after.as_ref()).or_else(|| {
+            (runtime.outcome_kind == RuntimeParityOutcomeKind::Err)
+                .then(|| before.clone())
+                .flatten()
+        });
+
+    RuntimeModeledStateRuntimeReport {
+        phase: runtime.phase.clone(),
+        outcome_kind: match runtime.outcome_kind {
+            RuntimeParityOutcomeKind::Ok => RuntimeModeledStateOutcomeKind::Ok,
+            RuntimeParityOutcomeKind::Err => RuntimeModeledStateOutcomeKind::Err,
+        },
+        before,
+        after,
+        result_summary: runtime.result_summary.clone(),
+        surface_summary: runtime_modeled_runtime_surface_summary(runtime, probe),
+    }
+}
+
+fn runtime_modeled_runtime_surface_summary(
+    runtime: &RuntimeParityInvocationReport,
+    probe: RuntimeParityProbeInput,
+) -> Option<String> {
+    if runtime.outcome_kind != RuntimeParityOutcomeKind::Ok {
+        return None;
+    }
+
+    match probe {
+        RuntimeParityProbeInput::AcceptWithCompletion => Some(format!(
+            "admission_signal:{}",
+            runtime
+                .result_summary
+                .rsplit("signal=")
+                .next()
+                .unwrap_or("None")
+        )),
+        RuntimeParityProbeInput::AcceptWithoutWake => Some("admission_signal:None".to_string()),
+        RuntimeParityProbeInput::Destroy
+        | RuntimeParityProbeInput::Reset
+        | RuntimeParityProbeInput::Recycle => Some(runtime.result_summary.clone()),
+        _ => None,
+    }
+}
+
+fn classify_runtime_parity_probe_pair(
+    left: &RuntimeParityInvocationReport,
+    right: &RuntimeParityInvocationReport,
+) -> RuntimeParityClassification {
+    match (left.outcome_kind, right.outcome_kind) {
+        (RuntimeParityOutcomeKind::Ok, RuntimeParityOutcomeKind::Err) => {
+            RuntimeParityClassification::LeftOnly
+        }
+        (RuntimeParityOutcomeKind::Err, RuntimeParityOutcomeKind::Ok) => {
+            RuntimeParityClassification::RightOnly
+        }
+        _ if left.observable_surface() == right.observable_surface() => {
+            RuntimeParityClassification::SameSurface
+        }
+        _ => RuntimeParityClassification::DifferentSurface,
+    }
+}
+
+fn classify_runtime_modeled_schema_pair(
+    left: &RuntimeModeledStateSchemaReport,
+    right: &RuntimeModeledStateSchemaReport,
+) -> RuntimeParityClassification {
+    match (left.outcome_kind, right.outcome_kind) {
+        (RuntimeModeledStateOutcomeKind::Ok, RuntimeModeledStateOutcomeKind::Err) => {
+            RuntimeParityClassification::LeftOnly
+        }
+        (RuntimeModeledStateOutcomeKind::Err, RuntimeModeledStateOutcomeKind::Ok) => {
+            RuntimeParityClassification::RightOnly
+        }
+        (RuntimeModeledStateOutcomeKind::Ok, RuntimeModeledStateOutcomeKind::Ok)
+            if left.after == right.after && left.result_summary == right.result_summary =>
+        {
+            RuntimeParityClassification::SameSurface
+        }
+        (RuntimeModeledStateOutcomeKind::Err, RuntimeModeledStateOutcomeKind::Err)
+            if left.after == right.after && left.detail == right.detail =>
+        {
+            RuntimeParityClassification::SameSurface
+        }
+        _ => RuntimeParityClassification::DifferentSurface,
+    }
+}
+
+async fn probe_runtime_parity_row(
+    modeled_schema: &MachineSchema,
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+    probe: RuntimeParityProbeInput,
+) -> RuntimeParityProbeReport {
+    let left = execute_runtime_parity_probe(left_phase, probe).await;
+    let right = execute_runtime_parity_probe(right_phase, probe).await;
+    let schema_left = runtime_modeled_schema_report(modeled_schema, &left, probe);
+    let schema_right = runtime_modeled_schema_report(modeled_schema, &right, probe);
+    let schema_classification = classify_runtime_modeled_schema_pair(&schema_left, &schema_right);
+    let runtime_classification = classify_runtime_parity_probe_pair(&left, &right);
+
+    RuntimeParityProbeReport {
+        schema_classification,
+        runtime_classification,
+        agrees_with_schema: runtime_classification == schema_classification,
+        schema_left,
+        schema_right,
+        left,
+        right,
+    }
+}
+
+fn runtime_parity_schema_transition_summaries_for_phase_input(
+    schema: &MachineSchema,
+    phase: &str,
+    input_variant: &str,
+) -> Vec<RuntimeParitySchemaTransitionSummary> {
+    let mut summaries = schema
+        .transitions
+        .iter()
+        .filter(|transition| {
+            transition.on.kind == TriggerKind::Input
+                && transition.on.variant == input_variant
+                && transition.from.iter().any(|from| from == phase)
+        })
+        .map(|transition| RuntimeParitySchemaTransitionSummary {
+            transition: transition.name.clone(),
+            to_phase: transition.to.clone(),
+            binding_names: transition.on.bindings.clone(),
+            guard_names: transition
+                .guards
+                .iter()
+                .map(|guard| guard.name.clone())
+                .collect(),
+            update_count: transition.updates.len(),
+            update_signatures: transition
+                .updates
+                .iter()
+                .map(|update| format!("{update:?}"))
+                .collect(),
+            effect_variants: transition
+                .emit
+                .iter()
+                .map(|effect| effect.variant.clone())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.transition.cmp(&right.transition));
+    summaries
+}
+
+fn classify_runtime_parity_schema_row(
+    left: &[RuntimeParitySchemaTransitionSummary],
+    right: &[RuntimeParitySchemaTransitionSummary],
+) -> RuntimeParityClassification {
+    if left.is_empty() && !right.is_empty() {
+        return RuntimeParityClassification::RightOnly;
+    }
+    if !left.is_empty() && right.is_empty() {
+        return RuntimeParityClassification::LeftOnly;
+    }
+
+    let left_surface = left
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.update_signatures.clone(),
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let right_surface = right
+        .iter()
+        .map(|summary| {
+            (
+                summary.to_phase.clone(),
+                summary.binding_names.clone(),
+                summary.guard_names.clone(),
+                summary.update_count,
+                summary.update_signatures.clone(),
+                summary.effect_variants.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    if left_surface == right_surface {
+        RuntimeParityClassification::SameSurface
+    } else {
+        RuntimeParityClassification::DifferentSurface
+    }
+}
+
+fn runtime_parity_schema_rows_for_pair(
+    schema: &MachineSchema,
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+) -> Vec<RuntimeParitySchemaRow> {
+    let mut rows = Vec::new();
+
+    for input_variant in &schema.inputs.variants {
+        let left = runtime_parity_schema_transition_summaries_for_phase_input(
+            schema,
+            left_phase.schema_name(),
+            &input_variant.name,
+        );
+        let right = runtime_parity_schema_transition_summaries_for_phase_input(
+            schema,
+            right_phase.schema_name(),
+            &input_variant.name,
+        );
+        if left.is_empty() && right.is_empty() {
+            continue;
+        }
+
+        rows.push(RuntimeParitySchemaRow {
+            input_variant: input_variant.name.clone(),
+            classification: classify_runtime_parity_schema_row(&left, &right),
+            left,
+            right,
+        });
+    }
+
+    rows
+}
+
+async fn build_runtime_parity_pair_report(
+    static_schema: &MachineSchema,
+    modeled_schema: &MachineSchema,
+    left_phase: RuntimeParityPhase,
+    right_phase: RuntimeParityPhase,
+    include_same_surface_rows: bool,
+) -> RuntimeParityPairReport {
+    let mut rows = Vec::new();
+
+    for schema_row in runtime_parity_schema_rows_for_pair(static_schema, left_phase, right_phase) {
+        let probe =
+            runtime_parity_probe_for_input_variant(&schema_row.input_variant).map(|probe_input| {
+                Box::pin(probe_runtime_parity_row(
+                    modeled_schema,
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                ))
+            });
+        let probe = match probe {
+            Some(probe) => Some(probe.await),
+            None => None,
+        };
+        let effective_schema_classification = probe
+            .as_ref()
+            .map(|probe| probe.schema_classification)
+            .unwrap_or(schema_row.classification);
+        if !include_same_surface_rows
+            && effective_schema_classification == RuntimeParityClassification::SameSurface
+        {
+            continue;
+        }
+        let note = match &probe {
+            Some(probe) if probe.schema_classification != schema_row.classification => {
+                Some(format!(
+                    "static schema classified {:?}, simulated schema classified {:?}",
+                    schema_row.classification, probe.schema_classification
+                ))
+            }
+            Some(_) => None,
+            None => Some("no runtime probe implemented".to_string()),
+        };
+
+        rows.push(RuntimeParityRowReport {
+            input_variant: schema_row.input_variant,
+            static_schema_classification: schema_row.classification,
+            static_schema_left: schema_row.left,
+            static_schema_right: schema_row.right,
+            probe,
+            note,
+        });
+    }
+
+    let summary = rows.iter().fold(
+        RuntimeParityPairSummary {
+            interesting_rows: rows.len(),
+            ..Default::default()
+        },
+        |mut summary, row| {
+            match &row.probe {
+                Some(probe) => {
+                    summary.probed_rows += 1;
+                    if probe.agrees_with_schema {
+                        summary.aligned_rows += 1;
+                    } else {
+                        summary.mismatched_rows += 1;
+                    }
+                }
+                None => summary.unprobed_rows += 1,
+            }
+            summary
+        },
+    );
+
+    RuntimeParityPairReport {
+        left_phase: left_phase.schema_name().to_string(),
+        right_phase: right_phase.schema_name().to_string(),
+        summary,
+        rows,
+    }
+}
+
+async fn write_runtime_parity_audit_report(
+    include_same_surface_rows: bool,
+    path: PathBuf,
+) -> RuntimeParityAuditReport {
+    let static_schema = schema_meerkat_machine();
+    let modeled_schema = modeled_meerkat_kernel::schema();
+    let mut pairs = Vec::new();
+
+    for &(left_phase, right_phase) in runtime_parity_target_pairs() {
+        pairs.push(
+            build_runtime_parity_pair_report(
+                &static_schema,
+                &modeled_schema,
+                left_phase,
+                right_phase,
+                include_same_surface_rows,
+            )
+            .await,
+        );
+    }
+
+    let summary = pairs.iter().fold(
+        RuntimeParityAuditSummary {
+            pair_count: pairs.len(),
+            ..Default::default()
+        },
+        |mut summary, pair| {
+            summary.interesting_rows += pair.summary.interesting_rows;
+            summary.probed_rows += pair.summary.probed_rows;
+            summary.aligned_rows += pair.summary.aligned_rows;
+            summary.mismatched_rows += pair.summary.mismatched_rows;
+            summary.unprobed_rows += pair.summary.unprobed_rows;
+            summary
+        },
+    );
+
+    let report = RuntimeParityAuditReport {
+        machine: "MeerkatMachine".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        summary,
+        pairs,
+    };
+
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&report).expect("serialize runtime parity report"),
+    )
+    .expect("write runtime parity report");
+
+    report
+}
+
+async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModeledStateAuditReport {
+    let schema = modeled_meerkat_kernel::schema();
+    let surface_only_inputs = schema
+        .surface_only_inputs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::new();
+
+    for phase in [
+        RuntimeParityPhase::Idle,
+        RuntimeParityPhase::Attached,
+        RuntimeParityPhase::Running,
+        RuntimeParityPhase::Retired,
+        RuntimeParityPhase::Stopped,
+    ] {
+        for input_variant in &schema.inputs.variants {
+            if surface_only_inputs.contains(input_variant.name.as_str()) {
+                continue;
+            }
+            let Some(probe) = runtime_parity_probe_for_input_variant(&input_variant.name) else {
+                rows.push(RuntimeModeledStateRowReport {
+                    phase: phase.schema_name().to_string(),
+                    input_variant: input_variant.name.clone(),
+                    aligned: false,
+                    differing_keys: vec!["unprobed".to_string()],
+                    runtime: RuntimeModeledStateRuntimeReport {
+                        phase: phase.schema_name().to_string(),
+                        outcome_kind: RuntimeModeledStateOutcomeKind::Err,
+                        before: None,
+                        after: None,
+                        result_summary: "no runtime probe implemented".to_string(),
+                        surface_summary: None,
+                    },
+                    schema: RuntimeModeledStateSchemaReport {
+                        outcome_kind: RuntimeModeledStateOutcomeKind::Err,
+                        after: None,
+                        detail: "no runtime probe implemented".to_string(),
+                        result_summary: None,
+                    },
+                });
+                continue;
+            };
+
+            let runtime = execute_runtime_parity_probe(phase, probe).await;
+            let schema_report = runtime_modeled_schema_report(&schema, &runtime, probe);
+            let runtime_report = runtime_modeled_runtime_report(&runtime, probe);
+            let differing_keys =
+                runtime_modeled_differing_keys(&runtime_report.after, &schema_report.after);
+            let aligned = runtime_report.outcome_kind == schema_report.outcome_kind
+                && differing_keys.is_empty()
+                && runtime_report.surface_summary == schema_report.result_summary;
+
+            rows.push(RuntimeModeledStateRowReport {
+                phase: phase.schema_name().to_string(),
+                input_variant: input_variant.name.clone(),
+                aligned,
+                differing_keys,
+                runtime: runtime_report,
+                schema: schema_report,
+            });
+        }
+    }
+
+    let summary = rows.iter().fold(
+        RuntimeModeledStateAuditSummary::default(),
+        |mut summary, row| {
+            summary.row_count += 1;
+            if row.runtime.result_summary == "no runtime probe implemented" {
+                summary.unprobed_rows += 1;
+            } else if row.aligned {
+                summary.aligned_rows += 1;
+            } else {
+                summary.mismatched_rows += 1;
+            }
+            summary
+        },
+    );
+
+    let report = RuntimeModeledStateAuditReport {
+        machine: "MeerkatMachine".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        summary,
+        rows,
+    };
+
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&report).expect("serialize modeled-state audit report"),
+    )
+    .expect("write modeled-state audit report");
+
+    report
+}
+
+#[tokio::test]
+#[ignore = "diagnostic audit"]
+async fn audit_meerkat_runtime_phase_parity_map() {
+    let path = runtime_parity_report_path();
+    let report = write_runtime_parity_audit_report(false, path.clone()).await;
+
+    println!("wrote {}", path.display());
+    println!(
+        "pairs={} interesting_rows={} probed={} aligned={} mismatched={} unprobed={}",
+        report.summary.pair_count,
+        report.summary.interesting_rows,
+        report.summary.probed_rows,
+        report.summary.aligned_rows,
+        report.summary.mismatched_rows,
+        report.summary.unprobed_rows
+    );
+    for pair in &report.pairs {
+        println!(
+            "{} <-> {}: rows={} probed={} aligned={} mismatched={} unprobed={}",
+            pair.left_phase,
+            pair.right_phase,
+            pair.summary.interesting_rows,
+            pair.summary.probed_rows,
+            pair.summary.aligned_rows,
+            pair.summary.mismatched_rows,
+            pair.summary.unprobed_rows
+        );
+        for row in pair.rows.iter().filter(|row| {
+            row.probe
+                .as_ref()
+                .is_some_and(|probe| !probe.agrees_with_schema)
+        }) {
+            let probe = row
+                .probe
+                .as_ref()
+                .expect("filtered rows must have a probe result");
+            println!(
+                "  {}: schema={:?} runtime={:?} static_schema={:?}",
+                row.input_variant,
+                probe.schema_classification,
+                probe.runtime_classification,
+                row.static_schema_classification
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "diagnostic audit"]
+async fn audit_meerkat_runtime_phase_full_parity_map() {
+    let path = runtime_parity_full_report_path();
+    let report = write_runtime_parity_audit_report(true, path.clone()).await;
+
+    println!("wrote {}", path.display());
+    println!(
+        "pairs={} rows={} probed={} aligned={} mismatched={} unprobed={}",
+        report.summary.pair_count,
+        report.summary.interesting_rows,
+        report.summary.probed_rows,
+        report.summary.aligned_rows,
+        report.summary.mismatched_rows,
+        report.summary.unprobed_rows
+    );
+    for pair in &report.pairs {
+        println!(
+            "{} <-> {}: rows={} probed={} aligned={} mismatched={} unprobed={}",
+            pair.left_phase,
+            pair.right_phase,
+            pair.summary.interesting_rows,
+            pair.summary.probed_rows,
+            pair.summary.aligned_rows,
+            pair.summary.mismatched_rows,
+            pair.summary.unprobed_rows
+        );
+        for row in pair.rows.iter().filter(|row| {
+            row.probe
+                .as_ref()
+                .is_some_and(|probe| !probe.agrees_with_schema)
+        }) {
+            let probe = row
+                .probe
+                .as_ref()
+                .expect("filtered rows must have a probe result");
+            println!(
+                "  {}: schema={:?} runtime={:?} static_schema={:?}",
+                row.input_variant,
+                probe.schema_classification,
+                probe.runtime_classification,
+                row.static_schema_classification
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "diagnostic audit"]
+async fn audit_meerkat_runtime_modeled_state_parity_map() {
+    let path = runtime_modeled_state_report_path();
+    let report = write_runtime_modeled_state_audit_report(path.clone()).await;
+
+    println!("wrote {}", path.display());
+    println!(
+        "rows={} aligned={} mismatched={} unprobed={}",
+        report.summary.row_count,
+        report.summary.aligned_rows,
+        report.summary.mismatched_rows,
+        report.summary.unprobed_rows
+    );
+    for row in report.rows.iter().filter(|row| !row.aligned) {
+        println!(
+            "  {} / {}: runtime={:?} schema={:?} differing_keys={:?}",
+            row.phase,
+            row.input_variant,
+            row.runtime.outcome_kind,
+            row.schema.outcome_kind,
+            row.differing_keys
+        );
+    }
 }

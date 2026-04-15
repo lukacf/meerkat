@@ -1,0 +1,151 @@
+---
+title: "Mini surfaces"
+description: "Use the shipped slim Meerkat binaries or compose your own smaller surface builds."
+icon: "boxes-stacked"
+---
+
+Meerkat now ships two official slim binaries alongside the full product surfaces:
+
+- `rkat-mini`
+- `rkat-rpc-mini`
+
+These are static, capability-gated builds of the existing CLI and RPC crates. They are not separate reimplementations, and they are not runtime-dynamic command subsets.
+
+## Shipped surface tiers
+
+| Surface | Purpose |
+|---------|---------|
+| `rkat` | Batteries-included terminal UX |
+| `rkat-mini` | Small task-first CLI for run/session/config workflows |
+| `rkat-rpc` | Full JSON-RPC surface used by the Python and TypeScript SDKs |
+| `rkat-rpc-mini` | Small JSON-RPC runtime for create/list/read/archive/start/interrupt/config/catalog/capabilities |
+| `rkat-rest` | Full REST surface |
+| `rkat-mcp` | Full MCP server surface |
+
+All shipped binaries keep the same provider support:
+
+- Anthropic
+- OpenAI
+- Gemini
+- configured self-hosted aliases and local model paths
+
+## `rkat-mini`
+
+`rkat-mini` is the small official CLI surface.
+
+Included commands:
+
+- `run`
+- `init`
+- `blob`
+- `skill`
+- `config`
+- `session`
+- `realm`
+- `models`
+- `capabilities`
+- `doctor`
+
+Omitted commands:
+
+- `mob`
+- `mcp`
+- peer/comms-facing UX
+- schedule-facing UX
+
+The built-in shell and patch tools are still available through `--tools workspace`.
+
+<Note>
+The CLI now gates command visibility by compiled capability features rather than by a special UI-only profile. That means `rkat-mini` still exposes core commands like `blob`, while capability-backed surfaces like `mob` and `mcp` disappear when their supporting features are not compiled in.
+</Note>
+
+### Why `skill` is in the shipped mini surface
+
+We gate `skill` with a stripped-binary size check on the canonical Linux release target. The current measurement stays within the 20% budget, so the shipped `rkat-mini` includes `skill`.
+
+### Using `rkat-mini`
+
+```bash
+rkat-mini "summarize this repository"
+rkat-mini run --resume "keep going"
+git diff | rkat-mini run --json "review these changes"
+rkat-mini run -t workspace "fix the failing test"
+rkat-mini skill list
+```
+
+## `rkat-rpc-mini`
+
+`rkat-rpc-mini` keeps a deliberately small JSON-RPC contract.
+
+Included methods:
+
+- `initialize`
+- `initialized`
+- `session/create`
+- `session/list`
+- `session/read`
+- `session/history`
+- `session/archive`
+- `turn/start`
+- `turn/interrupt`
+- `config/get`
+- `config/set`
+- `config/patch`
+- `models/catalog`
+- `capabilities/get`
+
+Omitted methods:
+
+- `runtime/*`
+- `input/*`
+- stream methods
+- `blob/get`
+- `session/external_event`
+- `session/inject_context`
+- `mob/*`
+- `comms/*`
+- `mcp/*`
+- `schedule/*`
+- `skills/*`
+
+<Note>
+`rkat-rpc` remains the SDK backend contract for Python and TypeScript. `rkat-rpc-mini` is a smaller shipped product surface, not the compatibility target for the SDK wrappers.
+</Note>
+
+## Building your own custom surface
+
+The official mini binaries are examples of the same shared surface seams you can use for custom builds.
+
+### Build `rkat-mini`
+
+```bash
+./scripts/repo-cargo build -p rkat --bin rkat-mini \
+  --no-default-features \
+  --features anthropic,openai,gemini,jsonl-store,session-store,skills
+```
+
+### Build an even smaller variant without `skill`
+
+```bash
+./scripts/repo-cargo build -p rkat --bin rkat-mini \
+  --no-default-features \
+  --features anthropic,openai,gemini,jsonl-store,session-store
+```
+
+### Build `rkat-rpc-mini`
+
+```bash
+./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini \
+  --no-default-features \
+  --features mini-surface
+```
+
+## Relationship to the shared surface layer
+
+These binaries exist because the shared surface/runtime work moved the product surfaces onto common composition seams:
+
+- embedded/minimal bootstrap
+- runtime-backed bootstrap
+- shared runtime materialization and binding helpers
+
+If you want to build a smaller surface than the official minis, start from those shared seams rather than forking the full batteries-included CLI.

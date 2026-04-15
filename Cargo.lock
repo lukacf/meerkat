@@ -2719,6 +2719,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -2758,6 +2759,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-machine-derive",
  "meerkat-machine-kernels",
+ "meerkat-machine-schema",
  "meerkat-runtime",
  "meerkat-session",
  "meerkat-store",
@@ -2905,6 +2907,8 @@ dependencies = [
  "indexmap",
  "meerkat-core",
  "meerkat-machine-derive",
+ "meerkat-machine-kernels",
+ "meerkat-machine-schema",
  "meerkat-store",
  "rusqlite",
  "serde",
@@ -3465,9 +3469,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.13"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31"
+checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",
@@ -3754,6 +3758,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3871,9 +3876,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -4070,6 +4075,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4221,6 +4232,19 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "surface-build-fixtures"
+version = "0.5.2"
+dependencies = [
+ "meerkat",
+ "meerkat-core",
+ "meerkat-runtime",
+ "meerkat-store",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "syn"
@@ -4696,6 +4720,7 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

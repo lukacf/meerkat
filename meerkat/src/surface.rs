@@ -2,6 +2,7 @@
 //!
 //! Cross-cutting helpers used by all protocol surfaces (RPC, REST, MCP Server).
 
+mod embedded;
 mod request_execution;
 #[cfg(feature = "session-store")]
 mod runtime_backed;
@@ -11,6 +12,9 @@ mod schedule_host;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdio_json;
 
+pub use embedded::{
+    build_embedded_service, build_embedded_service_from_builder, set_default_schedule_tools,
+};
 pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
     SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
@@ -26,8 +30,8 @@ pub use request_execution::{
 pub use runtime_backed::configure_peer_ingress;
 #[cfg(feature = "session-store")]
 pub use runtime_backed::{
-    PersistentRuntimeExecutor, SurfaceRuntimeMaterializeError, default_persistent_executor,
-    materialize_session, wire_runtime_bindings,
+    PersistentRuntimeExecutor, SurfaceRuntimeMaterializeError, build_runtime_backed_service,
+    default_persistent_executor, materialize_session, wire_runtime_bindings,
 };
 #[cfg(feature = "session-store")]
 pub use runtime_schedule_host::spawn_runtime_backed_schedule_host;

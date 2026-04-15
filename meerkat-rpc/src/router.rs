@@ -17,9 +17,11 @@ use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::SessionHistoryQuery;
+#[cfg(not(feature = "mini-surface"))]
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
+#[cfg(not(feature = "mini-surface"))]
 use serde::Deserialize;
 use serde_json::json;
 
@@ -42,6 +44,7 @@ enum SessionOwner {
     Mob,
 }
 
+#[cfg(not(feature = "mini-surface"))]
 #[derive(Debug, Deserialize)]
 struct BlobGetParams {
     blob_id: String,
@@ -98,6 +101,7 @@ impl NotificationSink {
     /// additional fields on the notification params alongside the event. This
     /// allows SDKs to distinguish delegated-branch and mob-member scoped events from
     /// direct session events.
+    #[cfg(not(feature = "mini-surface"))]
     async fn emit_session_stream_event(
         &self,
         stream_id: &Uuid,
@@ -214,6 +218,7 @@ struct StreamForwarder {
 
 #[derive(Clone)]
 enum StreamTerminal {
+    #[cfg(not(feature = "mini-surface"))]
     Session(SessionId),
     #[cfg(feature = "mob")]
     Mob,
@@ -283,9 +288,11 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    #[cfg(not(feature = "mini-surface"))]
     active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     /// Recently-closed stream IDs for idempotent close detection.
     /// Bounded to prevent unbounded growth on long-lived servers.
+    #[cfg(not(feature = "mini-surface"))]
     closed_session_streams: Arc<Mutex<ClosedStreamSet>>,
     #[cfg(feature = "mob")]
     mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
@@ -297,6 +304,7 @@ pub struct MethodRouter {
 }
 
 impl MethodRouter {
+    #[cfg(not(feature = "mini-surface"))]
     fn session_metadata_marks_archived(session: &Session) -> bool {
         session
             .metadata()
@@ -374,7 +382,9 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(not(feature = "mini-surface"))]
             closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             #[cfg(feature = "mob")]
             mob_state,
@@ -398,6 +408,7 @@ impl MethodRouter {
     }
 
     #[allow(clippy::result_large_err)]
+    #[cfg(not(feature = "mini-surface"))]
     fn session_id_from_runtime_params(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -431,6 +442,7 @@ impl MethodRouter {
             .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn ensure_runtime_session_registered(
         &self,
         session_id: &SessionId,
@@ -485,6 +497,7 @@ impl MethodRouter {
         Ok(())
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn handle_blob_get(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -533,7 +546,9 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(not(feature = "mini-surface"))]
             closed_session_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             mob_state,
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
@@ -670,39 +685,54 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "blob/get" => self.handle_blob_get(id, params).await,
             "session/archive" => self.handle_session_archive(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/external_event" => {
                 handlers::event::handle_external_event(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "session/stream_close" => self.handle_session_stream_close(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/create" => {
                 handlers::schedule::handle_create(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/get" => {
                 handlers::schedule::handle_get(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/list" => {
                 handlers::schedule::handle_list(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/update" => {
                 handlers::schedule::handle_update(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/pause" => {
                 handlers::schedule::handle_pause(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/resume" => {
                 handlers::schedule::handle_resume(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/delete" => {
                 handlers::schedule::handle_delete(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/occurrences" => {
                 handlers::schedule::handle_occurrences(id, params, self.runtime.clone()).await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/tools" => handlers::schedule::handle_tools(id).await,
+            #[cfg(not(feature = "mini-surface"))]
             "schedule/call" => {
                 handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
@@ -837,7 +867,9 @@ impl MethodRouter {
             "comms/send" => self.handle_comms_send(id, params).await,
             #[cfg(feature = "comms")]
             "comms/peers" => self.handle_comms_peers(id, params).await,
+            #[cfg(not(feature = "mini-surface"))]
             "skills/list" => handlers::skills::handle_list(id, &self.skill_runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "skills/inspect" => {
                 handlers::skills::handle_inspect(id, params, &self.skill_runtime).await
             }
@@ -873,9 +905,13 @@ impl MethodRouter {
                 )
                 .await
             }
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/state" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -901,6 +937,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/accept" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -926,6 +963,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/retire" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -951,6 +989,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "runtime/reset" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -976,6 +1015,7 @@ impl MethodRouter {
                     .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "input/state" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -993,6 +1033,7 @@ impl MethodRouter {
                         .await
                 }
             }
+            #[cfg(not(feature = "mini-surface"))]
             "input/list" => {
                 if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
                 {
@@ -1205,6 +1246,7 @@ impl MethodRouter {
         }
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn handle_session_inject_context(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -1450,6 +1492,7 @@ impl MethodRouter {
         RpcResponse::success(id, json!({"peers": entries}))
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn handle_session_stream_open(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -1630,6 +1673,7 @@ impl MethodRouter {
         )
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn handle_session_stream_close(
         &self,
         id: Option<crate::protocol::RpcId>,
@@ -1994,6 +2038,7 @@ impl MethodRouter {
                     .await;
                 false
             }
+            #[cfg(not(feature = "mini-surface"))]
             Some(StreamTerminal::Session(_)) => {
                 unreachable!("mob stream stored session terminal metadata")
             }
@@ -2216,6 +2261,7 @@ mod tests {
         (router, notif_rx)
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     async fn test_router_with_llm_and_notification_capacity(
         llm_client: Arc<dyn LlmClient>,
         notification_capacity: usize,
@@ -2596,6 +2642,7 @@ mod tests {
         assert_eq!(error_code(&create_resp), error::METHOD_NOT_FOUND);
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn session_stream_close_removes_forwarder_from_active_map() {
         let (router, mut notif_rx) = test_router().await;
@@ -2648,6 +2695,7 @@ mod tests {
         assert_eq!(notification.params["outcome"], "explicit_close");
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn session_stream_close_is_idempotent_after_explicit_close() {
         let (router, mut notif_rx) = test_router().await;
@@ -3029,7 +3077,7 @@ mod tests {
         assert!(history["messages"].is_array());
     }
 
-    #[cfg(feature = "mob")]
+    #[cfg(all(feature = "mob", not(feature = "mini-surface")))]
     #[tokio::test]
     async fn mob_spawned_session_id_supports_session_stream_open() {
         let (router, _notif_rx) = test_router().await;
@@ -3421,6 +3469,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn notification_sink_reports_overflow_for_stream_events() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -3451,6 +3500,7 @@ mod tests {
         assert_eq!(first.method, "session/stream_event");
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn session_stream_overflow_emits_terminal_error_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -3508,6 +3558,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn session_stream_router_overflow_emits_terminal_error_outcome() {
         let requests = Arc::new(std::sync::Mutex::new(Vec::<Vec<Message>>::new()));
@@ -3623,6 +3674,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "mini-surface"))]
     #[tokio::test]
     async fn archived_session_read_remains_available_and_mutations_reject() {
         let (router, _notif_rx) = test_router().await;
@@ -3895,7 +3947,7 @@ mod tests {
         assert_eq!(result_value(&archive_resp)["archived"], true);
     }
 
-    #[cfg(feature = "mob")]
+    #[cfg(all(feature = "mob", not(feature = "mini-surface")))]
     #[tokio::test]
     async fn session_stream_open_emits_terminal_notification_when_session_ends() {
         let (router, mut notif_rx) = test_router().await;

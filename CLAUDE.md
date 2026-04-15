@@ -29,6 +29,9 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 # Run deterministic end-to-end lane
 ./scripts/repo-cargo e2e-fast
 
+# Run explicit build/composition end-to-end lane (ignored by default)
+./scripts/repo-cargo test -p meerkat-integration-tests --test e2e_build_lane -- --ignored
+
 # Run real local-resource end-to-end lane
 ./scripts/repo-cargo e2e-system
 
@@ -43,6 +46,7 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 ./scripts/repo-cargo unit # Unit tests only
 ./scripts/repo-cargo int  # Integration-fast tests only
 ./scripts/repo-cargo e2e-fast    # Deterministic e2e lane
+./scripts/repo-cargo test -p meerkat-integration-tests --test e2e_build_lane -- --ignored  # Build/composition lane
 ./scripts/repo-cargo e2e-system  # Real binary / local resource lane
 ./scripts/repo-cargo e2e-live    # Targeted live-provider lane
 ./scripts/repo-cargo e2e-smoke   # Compound live-provider smoke lane

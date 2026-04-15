@@ -13,6 +13,17 @@ fn verified_witness() -> KernelValue {
     string("verified")
 }
 
+fn tool_filter_all() -> KernelValue {
+    KernelValue::String(
+        serde_json::to_string(&meerkat_core::ToolFilter::All)
+            .expect("tool filter should serialize"),
+    )
+}
+
+fn empty_string_set() -> KernelValue {
+    KernelValue::Set(Default::default())
+}
+
 fn input(variant: &str, fields: Vec<(&str, KernelValue)>) -> KernelInput {
     KernelInput {
         variant: variant.to_string(),
@@ -65,19 +76,27 @@ fn prepared_meerkat_state() -> meerkat_machine_kernels::KernelState {
 fn session_tool_visibility_kernel_publishes_committed_set_from_attached() {
     let attached = prepared_meerkat_state();
 
-    // PublishCommittedVisibleSet from Attached requires revision == active_visibility_revision.
-    // At init, active_visibility_revision == 0.
+    // PublishCommittedVisibleSet from Attached carries the active/staged owner
+    // revisions in the input, but the top-level machine no longer stores a
+    // separate active visibility mirror.
     let published = meerkat::transition(
         &attached,
         &input(
             "PublishCommittedVisibleSet",
-            vec![("revision", KernelValue::U64(0))],
+            vec![
+                ("active_filter", tool_filter_all()),
+                ("staged_filter", tool_filter_all()),
+                ("active_requested_deferred_names", empty_string_set()),
+                ("staged_requested_deferred_names", empty_string_set()),
+                ("active_visibility_revision", KernelValue::U64(0)),
+                ("staged_visibility_revision", KernelValue::U64(0)),
+            ],
         ),
     )
     .expect("publish committed visible set");
 
-    // PrepareBindings is a self-loop; state stays Idle after registration.
-    assert_eq!(published.next_state.phase, "Idle");
+    // PrepareBindings promotes an idle registered session to Attached.
+    assert_eq!(published.next_state.phase, "Attached");
     assert_eq!(published.effects.len(), 1);
     assert_eq!(published.effects[0].variant, "CommittedVisibleSetPublished");
 }
@@ -111,24 +130,25 @@ fn session_tool_visibility_kernel_stages_deferred_requests_without_touching_acti
     .expect("request deferred tools")
     .next_state;
 
-    assert_eq!(
-        requested.fields.get("staged_visibility_revision"),
-        Some(&KernelValue::U64(1))
+    assert!(
+        !requested.fields.contains_key("staged_visibility_revision"),
+        "top-level machine should no longer mirror staged visibility revision",
     );
-    assert_eq!(
-        requested.fields.get("active_visibility_revision"),
-        Some(&KernelValue::U64(0))
+    assert!(
+        !requested.fields.contains_key("active_visibility_revision"),
+        "top-level machine should no longer mirror active visibility revision",
     );
-    assert_eq!(
-        requested.fields.get("active_requested_deferred_names"),
-        Some(&KernelValue::Set(Default::default()))
+    assert!(
+        !requested
+            .fields
+            .contains_key("active_requested_deferred_names"),
+        "top-level machine should no longer mirror active requested names",
     );
 
-    match requested.fields.get("staged_requested_deferred_names") {
-        Some(KernelValue::Set(names)) => {
-            assert!(names.contains(&string("search")));
-            assert!(names.contains(&string("view_image")));
-        }
-        other => panic!("unexpected staged names shape: {other:?}"),
-    }
+    assert!(
+        !requested
+            .fields
+            .contains_key("staged_requested_deferred_names"),
+        "top-level machine should no longer mirror staged requested names",
+    );
 }

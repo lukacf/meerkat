@@ -1,31 +1,20 @@
 //! §22 RuntimeState — the runtime's public state projection.
 //!
-//! Canonical transition legality lives in `RuntimeControlAuthority`.
+//! Canonical live transition legality lives in the checked-in `MeerkatMachine`
+//! plus the runtime driver that realizes its coarse control transitions.
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 fn can_transition(from: &RuntimeState, next: &RuntimeState) -> bool {
-    use RuntimeState::{
-        Attached, Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped,
-    };
+    use RuntimeState::{Attached, Destroyed, Idle, Initializing, Retired, Running, Stopped};
 
     matches!(
         (from, next),
         (Initializing, Idle | Stopped | Destroyed)
-            | (
-                Idle,
-                Attached | Running | Retired | Recovering | Stopped | Destroyed
-            )
-            | (
-                Attached,
-                Running | Idle | Retired | Recovering | Stopped | Destroyed
-            )
-            | (
-                Running,
-                Idle | Attached | Recovering | Retired | Stopped | Destroyed
-            )
-            | (Recovering, Idle | Attached | Running | Stopped | Destroyed)
+            | (Idle, Attached | Running | Retired | Stopped | Destroyed)
+            | (Attached, Running | Idle | Retired | Stopped | Destroyed)
+            | (Running, Idle | Attached | Retired | Stopped | Destroyed)
             | (Retired, Running | Stopped | Destroyed)
             | (Stopped, Destroyed)
     )
@@ -44,8 +33,6 @@ pub enum RuntimeState {
     Attached,
     /// A run is in progress.
     Running,
-    /// Recovering from a crash or error.
-    Recovering,
     /// Retired — no longer accepting new input, draining existing.
     Retired,
     /// Permanently stopped (terminal).
@@ -84,6 +71,41 @@ impl RuntimeState {
     }
 }
 
+/// Classify the machine-owned coarse phase a run should return to after a
+/// terminal outcome.
+///
+/// The checked-in `MeerkatMachine` owns the return-phase semantics through its
+/// `current_run_id` / `pre_run_phase` state. Runtime helpers may realize that
+/// projection, but they should not invent the mapping themselves.
+pub fn run_return_phase_from_pre_run_phase(pre_run_phase: Option<RuntimeState>) -> RuntimeState {
+    match pre_run_phase {
+        Some(RuntimeState::Attached) => RuntimeState::Attached,
+        Some(RuntimeState::Retired) => RuntimeState::Retired,
+        Some(
+            RuntimeState::Idle
+            | RuntimeState::Initializing
+            | RuntimeState::Running
+            | RuntimeState::Stopped
+            | RuntimeState::Destroyed,
+        )
+        | None => RuntimeState::Idle,
+    }
+}
+
+/// Classify the machine-owned pre-run phase that should be remembered when a
+/// new run starts from the current coarse runtime phase.
+pub fn run_start_pre_phase_from_phase(
+    phase: RuntimeState,
+) -> Result<RuntimeState, RuntimeStateTransitionError> {
+    match phase {
+        RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Retired => Ok(phase),
+        from => Err(RuntimeStateTransitionError {
+            from,
+            to: RuntimeState::Running,
+        }),
+    }
+}
+
 impl std::fmt::Display for RuntimeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -91,7 +113,6 @@ impl std::fmt::Display for RuntimeState {
             Self::Idle => write!(f, "idle"),
             Self::Attached => write!(f, "attached"),
             Self::Running => write!(f, "running"),
-            Self::Recovering => write!(f, "recovering"),
             Self::Retired => write!(f, "retired"),
             Self::Stopped => write!(f, "stopped"),
             Self::Destroyed => write!(f, "destroyed"),
@@ -120,7 +141,6 @@ mod tests {
         assert!(!RuntimeState::Idle.is_terminal());
         assert!(!RuntimeState::Attached.is_terminal());
         assert!(!RuntimeState::Running.is_terminal());
-        assert!(!RuntimeState::Recovering.is_terminal());
         assert!(!RuntimeState::Retired.is_terminal());
     }
 
@@ -174,6 +194,55 @@ mod tests {
     }
 
     #[test]
+    fn run_return_phase_classifier_matches_machine_projection() {
+        assert_eq!(
+            run_return_phase_from_pre_run_phase(Some(RuntimeState::Idle)),
+            RuntimeState::Idle
+        );
+        assert_eq!(
+            run_return_phase_from_pre_run_phase(Some(RuntimeState::Attached)),
+            RuntimeState::Attached
+        );
+        assert_eq!(
+            run_return_phase_from_pre_run_phase(Some(RuntimeState::Retired)),
+            RuntimeState::Retired
+        );
+        assert_eq!(
+            run_return_phase_from_pre_run_phase(None),
+            RuntimeState::Idle
+        );
+    }
+
+    #[test]
+    fn run_start_pre_phase_classifier_matches_machine_projection() {
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Idle),
+                Ok(RuntimeState::Idle)
+            ),
+            "idle should be a legal run start phase"
+        );
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Attached),
+                Ok(RuntimeState::Attached)
+            ),
+            "attached should be a legal run start phase"
+        );
+        assert!(
+            matches!(
+                run_start_pre_phase_from_phase(RuntimeState::Retired),
+                Ok(RuntimeState::Retired)
+            ),
+            "retired should be a legal drain start phase"
+        );
+        assert!(
+            run_start_pre_phase_from_phase(RuntimeState::Stopped).is_err(),
+            "stopped should not be a legal run start phase"
+        );
+    }
+
+    #[test]
     fn transition_failure_shape_matches_runtime_error() {
         let result = if can_transition(&RuntimeState::Stopped, &RuntimeState::Idle) {
             Ok(())
@@ -201,7 +270,6 @@ mod tests {
             RuntimeState::Idle,
             RuntimeState::Attached,
             RuntimeState::Running,
-            RuntimeState::Recovering,
             RuntimeState::Retired,
             RuntimeState::Stopped,
             RuntimeState::Destroyed,

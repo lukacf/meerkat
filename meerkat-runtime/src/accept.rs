@@ -1,11 +1,49 @@
 //! §14 AcceptOutcome — result of accepting an input.
 
 use meerkat_core::lifecycle::InputId;
+use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::driver::PostAdmissionSignal;
+use crate::input::Input;
 use crate::input_state::InputState;
 use crate::policy::PolicyDecision;
+use crate::policy_table::DefaultPolicyTable;
+
+/// Machine-owned queue action for an admitted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionQueueAction {
+    None,
+    EnqueueTo { target: HandlingMode },
+    EnqueueFront { target: HandlingMode },
+}
+
+/// Machine-owned action against an existing queued input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExistingQueuedAdmissionAction {
+    Coalesce { existing_id: InputId },
+    Supersede { existing_id: InputId },
+}
+
+/// Machine-owned admission plan for an accepted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionPlan {
+    ConsumedOnAccept,
+    Queued {
+        persist_and_queue: bool,
+        queue_action: AdmissionQueueAction,
+        existing_action: Option<ExistingQueuedAdmissionAction>,
+    },
+}
+
+/// Machine-owned resolution of an accepted input's semantic admission path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAdmission {
+    pub policy: PolicyDecision,
+    pub handling_mode: HandlingMode,
+    pub admission_plan: AdmissionPlan,
+}
 
 /// Typed reason why an input was rejected at the accept boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +122,134 @@ impl AcceptOutcome {
     /// Check if the input was rejected.
     pub fn is_rejected(&self) -> bool {
         matches!(self, Self::Rejected { .. })
+    }
+}
+
+/// Classify the machine-owned admission disposition for an accepted input.
+///
+/// This is the semantic answer to “what happens to an accepted input?” Helpers
+/// should only apply the already-decided queue/lifecycle mutations.
+pub fn admission_plan_from_policy(
+    policy: &PolicyDecision,
+    handling_mode: HandlingMode,
+    existing_superseded_id: Option<InputId>,
+) -> AdmissionPlan {
+    if policy.apply_mode == crate::policy::ApplyMode::Ignore
+        && policy.consume_point == crate::policy::ConsumePoint::OnAccept
+    {
+        return AdmissionPlan::ConsumedOnAccept;
+    }
+
+    if policy.apply_mode == crate::policy::ApplyMode::Ignore {
+        return AdmissionPlan::Queued {
+            persist_and_queue: false,
+            queue_action: AdmissionQueueAction::None,
+            existing_action: None,
+        };
+    }
+
+    match policy.queue_mode {
+        crate::policy::QueueMode::Coalesce => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: existing_superseded_id
+                .map(|existing_id| ExistingQueuedAdmissionAction::Coalesce { existing_id }),
+        },
+        crate::policy::QueueMode::Supersede => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: existing_superseded_id
+                .map(|existing_id| ExistingQueuedAdmissionAction::Supersede { existing_id }),
+        },
+        crate::policy::QueueMode::Priority => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueFront {
+                target: handling_mode,
+            },
+            existing_action: None,
+        },
+        crate::policy::QueueMode::Fifo | crate::policy::QueueMode::None => AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action: AdmissionQueueAction::EnqueueTo {
+                target: handling_mode,
+            },
+            existing_action: None,
+        },
+    }
+}
+
+/// Derive the handling mode from a resolved policy decision.
+pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
+    match policy.routing_disposition {
+        crate::policy::RoutingDisposition::Steer => HandlingMode::Steer,
+        _ => HandlingMode::Queue,
+    }
+}
+
+/// Whether this input requests immediate processing after admission.
+///
+/// This remains narrower than "routes through the steer lane". Some inputs
+/// route through checkpoint/steer paths for batching, but only explicit steer
+/// intent should request in-turn processing.
+pub fn requests_immediate_processing(input: &Input) -> bool {
+    matches!(input.handling_mode(), Some(HandlingMode::Steer))
+}
+
+/// Resolve the machine-owned semantic admission path for an accepted input.
+///
+/// Runtime helpers may still perform mechanical queue lookups (for example,
+/// determining which existing queued input would be superseded), but the
+/// semantic decision about policy, routing, and admission disposition is owned
+/// here rather than inside the driver helper.
+pub fn resolve_admission(
+    input: &Input,
+    runtime_idle: bool,
+    silent_intents: &[String],
+    existing_superseded_id: Option<InputId>,
+) -> ResolvedAdmission {
+    let mut policy = DefaultPolicyTable::resolve(input, runtime_idle);
+    crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
+    let handling_mode = handling_mode_from_policy(&policy);
+    let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
+
+    ResolvedAdmission {
+        policy,
+        handling_mode,
+        admission_plan,
+    }
+}
+
+/// Classify the machine-owned post-admission control signal for a resolved
+/// accept outcome.
+///
+/// Admission-time wake / interrupt / immediate-processing semantics are owned
+/// by the checked-in Meerkat machine. The runtime helper may still carry other
+/// wake signals for non-admission bookkeeping, but plain accept classification
+/// should flow through this function.
+pub fn post_admission_signal_from_accept_outcome(
+    outcome: &AcceptOutcome,
+    request_immediate_processing: bool,
+) -> PostAdmissionSignal {
+    if !matches!(outcome, AcceptOutcome::Accepted { .. }) {
+        return PostAdmissionSignal::None;
+    }
+    if request_immediate_processing {
+        return PostAdmissionSignal::RequestImmediateProcessing;
+    }
+
+    match outcome {
+        AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
+            crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
+            crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
+            crate::WakeMode::None => PostAdmissionSignal::None,
+        },
+        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
+            PostAdmissionSignal::None
+        }
     }
 }
 

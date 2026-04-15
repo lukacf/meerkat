@@ -66,8 +66,8 @@ Once the alias is present in your active realm config:
 
 ```bash
 rkat run -m gemma-4-31b "Summarize the architecture of this repository"
-rkat resume last -m gemma-4-e4b "Keep going, but faster"
-rkat models catalog
+rkat run --resume -m gemma-4-e4b "Keep going, but faster"
+rkat models
 rkat doctor
 ```
 
@@ -250,7 +250,7 @@ Use vLLM when you want a self-managed server and the most control over deploymen
 
 ## Validation checklist
 
-- `rkat models catalog` shows a `self_hosted` provider group and your aliases
+- `rkat models` shows a `self_hosted` provider group and your aliases
 - `rkat doctor` reports the server as reachable
 - `rkat run -m gemma-4-31b "say hello"` works without `--provider`
 - The alias you configured matches the upstream `remote_model` shown by `/v1/models`

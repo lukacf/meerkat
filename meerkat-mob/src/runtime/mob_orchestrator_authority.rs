@@ -2,8 +2,8 @@
 //!
 //! This module provides typed enums and a sealed mutator trait that enforces
 //! all MobOrchestrator state mutations flow through the machine authority.
-//! Handwritten shell code calls [`MobOrchestratorAuthority::apply`] and executes
-//! returned effects; it cannot mutate canonical state directly.
+//! Handwritten shell code calls [`MobOrchestratorAuthority::apply_in_phase`] and
+//! executes returned effects; it cannot mutate canonical state directly.
 //!
 //! The transition table encoded here is the single source of truth, matching
 //! the machine schema in `meerkat-machine-schema/src/catalog/mob_orchestrator.rs`:
@@ -19,9 +19,6 @@
 //! - 6 effects: ActivateSupervisor, DeactivateSupervisor, FlowActivated,
 //!   FlowDeactivated, EmitOrchestratorNotice, MemberForceCancelled
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-
 use crate::error::MobError;
 use crate::runtime::MobState;
 
@@ -35,6 +32,7 @@ use crate::runtime::MobState;
 /// [`MobOrchestratorAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MobOrchestratorInput {
+    #[cfg(test)]
     InitializeOrchestrator,
     BindCoordinator,
     #[cfg_attr(
@@ -152,12 +150,12 @@ struct MobOrchestratorFields {
 }
 
 impl MobOrchestratorFields {
-    fn to_snapshot(&self, phase: MobState) -> MobOrchestratorSnapshot {
+    fn to_snapshot(&self, phase: MobState, active_flow_count: u32) -> MobOrchestratorSnapshot {
         MobOrchestratorSnapshot {
             phase,
             coordinator_bound: self.coordinator_bound,
             pending_spawn_count: self.pending_spawn_count,
-            active_flow_count: self.active_flow_count,
+            active_flow_count,
             topology_revision: self.topology_revision,
             supervisor_active: self.supervisor_active,
         }
@@ -168,15 +166,17 @@ impl MobOrchestratorFields {
 // Sealed mutator trait — only the authority implements this
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
 mod sealed {
     pub trait Sealed {}
 }
 
 /// Sealed trait for MobOrchestrator state mutation.
 ///
-/// Only [`MobOrchestratorAuthority`] implements this. Handwritten code cannot
-/// create alternative implementations, ensuring single-source-of-truth
-/// semantics for orchestrator state.
+/// Only [`MobOrchestratorAuthority`] implements this. Tests keep a
+/// phase-owning helper surface for direct table checks, but production code
+/// routes legality through [`MobOrchestratorAuthority::apply_in_phase`].
+#[cfg(test)]
 pub(crate) trait MobOrchestratorMutator: sealed::Sealed {
     /// Apply a typed input to the current machine state.
     ///
@@ -193,28 +193,39 @@ pub(crate) trait MobOrchestratorMutator: sealed::Sealed {
 /// The canonical authority for MobOrchestrator state.
 ///
 /// Holds the canonical phase + fields and delegates all transitions through
-/// the encoded transition table. Also maintains an `Arc<AtomicU8>` observable
-/// cache so that `MobHandle` can read the current phase lock-free.
+/// the encoded transition table.
 pub(crate) struct MobOrchestratorAuthority {
-    /// Canonical phase.
+    /// Test-only phase owner retained for direct authority table tests.
+    #[cfg(test)]
     phase: MobState,
     /// Canonical machine-owned fields.
     fields: MobOrchestratorFields,
-    /// Observable cache for lock-free reads.
-    /// Set by the authority after each transition — never written elsewhere.
-    observable: Arc<AtomicU8>,
 }
 
+#[cfg(test)]
 impl sealed::Sealed for MobOrchestratorAuthority {}
 
 impl MobOrchestratorAuthority {
+    #[cfg(test)]
     /// Create a new authority in Creating phase with default fields.
-    pub(crate) fn new(observable: Arc<AtomicU8>) -> Self {
-        observable.store(MobState::Creating as u8, Ordering::Release);
+    pub(crate) fn new() -> Self {
         Self {
+            #[cfg(test)]
             phase: MobState::Creating,
             fields: MobOrchestratorFields::default(),
-            observable,
+        }
+    }
+
+    /// Create a fresh authority directly in Running phase with the canonical
+    /// running-default fields used by live mob bootstrap.
+    pub(crate) fn new_running() -> Self {
+        Self {
+            #[cfg(test)]
+            phase: MobState::Running,
+            fields: MobOrchestratorFields {
+                supervisor_active: true,
+                ..MobOrchestratorFields::default()
+            },
         }
     }
 
@@ -222,64 +233,96 @@ impl MobOrchestratorAuthority {
     ///
     /// Used during resume to restore the authority to the persisted phase
     /// rather than always starting in Creating.
-    pub(crate) fn with_phase(observable: Arc<AtomicU8>, phase: MobState) -> Self {
-        observable.store(phase as u8, Ordering::Release);
+    pub(crate) fn with_phase(_phase: MobState) -> Self {
         Self {
-            phase,
+            #[cfg(test)]
+            phase: _phase,
             fields: MobOrchestratorFields::default(),
-            observable,
         }
     }
 
     /// Current phase (read from canonical state).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "authority inspection helper retained for schema-aligned orchestrator introspection"
-        )
-    )]
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn phase(&self) -> MobState {
         self.phase
     }
 
     /// Current snapshot of all fields.
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> MobOrchestratorSnapshot {
-        self.fields.to_snapshot(self.phase)
+        self.fields
+            .to_snapshot(self.phase, self.fields.active_flow_count)
+    }
+
+    /// Current snapshot projected onto an external phase owner.
+    pub(crate) fn snapshot_in_phase(
+        &self,
+        phase: MobState,
+        active_flow_count: u32,
+    ) -> MobOrchestratorSnapshot {
+        self.fields.to_snapshot(phase, active_flow_count)
     }
 
     /// Check if a transition is legal without applying it.
+    #[cfg(test)]
     pub(crate) fn can_accept(&self, input: MobOrchestratorInput) -> bool {
         self.evaluate(input).is_ok()
     }
 
+    /// Check legality using an externally owned top-level phase.
+    pub(crate) fn can_accept_in_phase(
+        &self,
+        phase: MobState,
+        active_flow_count: u32,
+        input: MobOrchestratorInput,
+    ) -> bool {
+        self.evaluate_in_phase(phase, active_flow_count, input)
+            .is_ok()
+    }
+
     /// Evaluate a transition without committing it.
+    #[cfg(test)]
     fn evaluate(
         &self,
         input: MobOrchestratorInput,
-    ) -> Result<(MobState, MobOrchestratorFields, Vec<MobOrchestratorEffect>), MobError> {
+    ) -> Result<
+        (
+            MobState,
+            MobOrchestratorFields,
+            u32,
+            Vec<MobOrchestratorEffect>,
+        ),
+        MobError,
+    > {
+        self.evaluate_in_phase(self.phase, self.fields.active_flow_count, input)
+    }
+
+    fn evaluate_in_phase(
+        &self,
+        phase: MobState,
+        active_flow_count: u32,
+        input: MobOrchestratorInput,
+    ) -> Result<
+        (
+            MobState,
+            MobOrchestratorFields,
+            u32,
+            Vec<MobOrchestratorEffect>,
+        ),
+        MobError,
+    > {
         use MobOrchestratorInput::{
             BindCoordinator, CompleteFlow, CompleteSpawn, DestroyOrchestrator, ForceCancelMember,
-            InitializeOrchestrator, MarkCompleted, ResumeOrchestrator, StageSpawn, StartFlow,
-            StopOrchestrator, UnbindCoordinator,
+            MarkCompleted, ResumeOrchestrator, StageSpawn, StartFlow, StopOrchestrator,
+            UnbindCoordinator,
         };
-        use MobState::{Completed, Creating, Destroyed, Running, Stopped};
+        use MobState::{Completed, Destroyed, Running, Stopped};
 
-        let phase = self.phase;
         let mut fields = self.fields.clone();
+        let mut next_active_flow_count = active_flow_count;
         let mut effects = Vec::new();
 
         let next_phase = match (phase, input) {
-            // InitializeOrchestrator: Creating -> Running
-            // Updates: supervisor_active = true
-            // Emits: ActivateSupervisor
-            (Creating, InitializeOrchestrator) => {
-                fields.supervisor_active = true;
-                effects.push(MobOrchestratorEffect::ActivateSupervisor);
-                Running
-            }
-
             // BindCoordinator: Running|Stopped|Completed -> Running
             // Guards: coordinator_is_not_bound
             // Updates: coordinator_bound = true, topology_revision += 1
@@ -359,7 +402,7 @@ impl MobOrchestratorAuthority {
                         "guard failed: coordinator is not bound (start flow requires bound coordinator)".into(),
                     ));
                 }
-                fields.active_flow_count = fields.active_flow_count.saturating_add(1);
+                next_active_flow_count = active_flow_count.saturating_add(1);
                 effects.push(MobOrchestratorEffect::FlowActivated);
                 effects.push(MobOrchestratorEffect::EmitOrchestratorNotice);
                 Running
@@ -370,12 +413,12 @@ impl MobOrchestratorAuthority {
             // Updates: active_flow_count -= 1
             // Emits: FlowDeactivated, EmitOrchestratorNotice
             (Running | Completed, CompleteFlow) => {
-                if fields.active_flow_count == 0 {
+                if active_flow_count == 0 {
                     return Err(MobError::Internal(
                         "guard failed: no active flows to complete".into(),
                     ));
                 }
-                fields.active_flow_count -= 1;
+                next_active_flow_count = active_flow_count - 1;
                 effects.push(MobOrchestratorEffect::FlowDeactivated);
                 effects.push(MobOrchestratorEffect::EmitOrchestratorNotice);
                 Running
@@ -387,7 +430,7 @@ impl MobOrchestratorAuthority {
             // topology_revision += 1 when unbinding the coordinator
             // Emits: DeactivateSupervisor, EmitOrchestratorNotice
             (Running | Completed, StopOrchestrator) => {
-                if fields.active_flow_count != 0 {
+                if active_flow_count != 0 {
                     return Err(MobError::Internal(
                         "guard failed: active flows exist (stop requires no active flows)".into(),
                     ));
@@ -421,7 +464,7 @@ impl MobOrchestratorAuthority {
             // Guards: no_active_flows, no_pending_spawns
             // Emits: EmitOrchestratorNotice
             (Running | Stopped, MarkCompleted) => {
-                if fields.active_flow_count != 0 {
+                if active_flow_count != 0 {
                     return Err(MobError::Internal(
                         "guard failed: active flows exist (mark completed requires no active flows)".into(),
                     ));
@@ -446,7 +489,7 @@ impl MobOrchestratorAuthority {
                             .into(),
                     ));
                 }
-                if fields.active_flow_count != 0 {
+                if active_flow_count != 0 {
                     return Err(MobError::Internal(
                         "guard failed: active flows exist (destroy requires no active flows)"
                             .into(),
@@ -476,14 +519,10 @@ impl MobOrchestratorAuthority {
             // All other combinations are illegal.
             _ => {
                 let target = match input {
-                    InitializeOrchestrator
-                    | BindCoordinator
-                    | ResumeOrchestrator
-                    | StageSpawn
-                    | CompleteSpawn
-                    | StartFlow
-                    | CompleteFlow
-                    | ForceCancelMember => Running,
+                    #[cfg(test)]
+                    MobOrchestratorInput::InitializeOrchestrator => Running,
+                    BindCoordinator | ResumeOrchestrator | StageSpawn | CompleteSpawn
+                    | StartFlow | CompleteFlow | ForceCancelMember => Running,
                     UnbindCoordinator | StopOrchestrator => Stopped,
                     MarkCompleted => Completed,
                     DestroyOrchestrator => Destroyed,
@@ -495,25 +534,45 @@ impl MobOrchestratorAuthority {
             }
         };
 
-        Ok((next_phase, fields, effects))
+        Ok((next_phase, fields, next_active_flow_count, effects))
+    }
+
+    pub(crate) fn apply_in_phase(
+        &mut self,
+        phase: MobState,
+        active_flow_count: u32,
+        input: MobOrchestratorInput,
+    ) -> Result<MobOrchestratorTransition, MobError> {
+        let (next_phase, next_fields, next_active_flow_count, effects) =
+            self.evaluate_in_phase(phase, active_flow_count, input)?;
+
+        self.fields = next_fields;
+        self.fields.active_flow_count = next_active_flow_count;
+
+        Ok(MobOrchestratorTransition {
+            next_phase,
+            snapshot: self.fields.to_snapshot(next_phase, next_active_flow_count),
+            effects,
+        })
     }
 }
 
+#[cfg(test)]
 impl MobOrchestratorMutator for MobOrchestratorAuthority {
     fn apply(
         &mut self,
         input: MobOrchestratorInput,
     ) -> Result<MobOrchestratorTransition, MobError> {
-        let (next_phase, next_fields, effects) = self.evaluate(input)?;
+        let (next_phase, next_fields, next_active_flow_count, effects) = self.evaluate(input)?;
 
-        // Commit: update canonical state and observable cache.
+        // Commit: update canonical state.
         self.phase = next_phase;
         self.fields = next_fields;
-        self.observable.store(next_phase as u8, Ordering::Release);
+        self.fields.active_flow_count = next_active_flow_count;
 
         Ok(MobOrchestratorTransition {
             next_phase,
-            snapshot: self.fields.to_snapshot(next_phase),
+            snapshot: self.fields.to_snapshot(next_phase, next_active_flow_count),
             effects,
         })
     }
@@ -528,27 +587,20 @@ mod tests {
     use super::*;
 
     fn make_authority() -> MobOrchestratorAuthority {
-        MobOrchestratorAuthority::new(Arc::new(AtomicU8::new(0)))
+        MobOrchestratorAuthority::new()
     }
 
     fn make_running_authority() -> MobOrchestratorAuthority {
-        let mut auth = make_authority();
-        auth.apply(MobOrchestratorInput::InitializeOrchestrator)
-            .expect("init");
-        auth
+        MobOrchestratorAuthority::new_running()
     }
 
     #[test]
-    fn initialize_transitions_to_running_and_activates_supervisor() {
+    fn initialize_from_creating_is_rejected() {
         let mut auth = make_authority();
-        let t = auth
-            .apply(MobOrchestratorInput::InitializeOrchestrator)
-            .expect("init should succeed from Creating");
-        assert_eq!(t.next_phase, MobState::Running);
-        assert!(t.snapshot.supervisor_active);
+        let result = auth.apply(MobOrchestratorInput::InitializeOrchestrator);
         assert!(
-            t.effects
-                .contains(&MobOrchestratorEffect::ActivateSupervisor)
+            result.is_err(),
+            "initialize should be rejected from Creating"
         );
     }
 
@@ -824,13 +876,18 @@ mod tests {
     }
 
     #[test]
-    fn observable_cache_updated_on_transition() {
-        let observable = Arc::new(AtomicU8::new(0));
-        let mut auth = MobOrchestratorAuthority::new(observable.clone());
-        assert_eq!(observable.load(Ordering::Acquire), MobState::Creating as u8);
-        auth.apply(MobOrchestratorInput::InitializeOrchestrator)
-            .expect("init");
-        assert_eq!(observable.load(Ordering::Acquire), MobState::Running as u8);
+    fn internal_phase_updated_on_transition() {
+        let mut auth = MobOrchestratorAuthority::new_running();
+        auth.apply(MobOrchestratorInput::StopOrchestrator)
+            .expect("stop");
+        assert_eq!(auth.phase(), MobState::Stopped);
+    }
+
+    #[test]
+    fn running_constructor_initializes_running_phase() {
+        let auth = MobOrchestratorAuthority::new_running();
+        assert_eq!(auth.phase(), MobState::Running);
+        assert!(auth.snapshot().supervisor_active);
     }
 
     #[test]
@@ -850,11 +907,8 @@ mod tests {
     }
 
     #[test]
-    fn full_lifecycle_creating_to_destroyed() {
-        let mut auth = make_authority();
-        // Creating -> Running
-        auth.apply(MobOrchestratorInput::InitializeOrchestrator)
-            .expect("init");
+    fn full_lifecycle_running_to_destroyed() {
+        let mut auth = make_running_authority();
         // Bind coordinator
         auth.apply(MobOrchestratorInput::BindCoordinator)
             .expect("bind");
@@ -879,19 +933,13 @@ mod tests {
 
     #[test]
     fn with_phase_initializes_to_given_phase() {
-        let observable = Arc::new(AtomicU8::new(0));
-        let auth = MobOrchestratorAuthority::with_phase(observable.clone(), MobState::Completed);
+        let auth = MobOrchestratorAuthority::with_phase(MobState::Completed);
         assert_eq!(auth.phase(), MobState::Completed);
-        assert_eq!(
-            observable.load(Ordering::Acquire),
-            MobState::Completed as u8
-        );
     }
 
     #[test]
     fn with_phase_stopped_accepts_resume() {
-        let observable = Arc::new(AtomicU8::new(0));
-        let mut auth = MobOrchestratorAuthority::with_phase(observable.clone(), MobState::Stopped);
+        let mut auth = MobOrchestratorAuthority::with_phase(MobState::Stopped);
         assert_eq!(auth.phase(), MobState::Stopped);
         let t = auth
             .apply(MobOrchestratorInput::ResumeOrchestrator)

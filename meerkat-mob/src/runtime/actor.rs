@@ -1,14 +1,12 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
-use super::mob_lifecycle_authority::{
-    MobLifecycleAuthority, MobLifecycleInput, MobLifecycleMutator,
-};
+use super::mob_lifecycle_authority::{MobLifecycleAuthority, MobLifecycleInput};
 use super::mob_member_bootstrap_authority::{
     MobMemberBootstrapAuthority, MobMemberBootstrapEffect, MobMemberBootstrapInput,
 };
 use super::mob_orchestrator_authority::{
-    MobOrchestratorAuthority, MobOrchestratorInput, MobOrchestratorMutator,
+    MobOrchestratorAuthority, MobOrchestratorInput, MobOrchestratorTransition,
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::mob_wiring_authority::{
@@ -25,7 +23,6 @@ use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::time_compat::SystemTime;
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -287,7 +284,7 @@ impl MobActor {
     }
 
     fn state(&self) -> MobState {
-        self.lifecycle_authority.phase()
+        MobState::from_u8(self.state.load(Ordering::Acquire))
     }
 
     fn mob_handle_for_tools(&self) -> MobHandle {
@@ -380,8 +377,141 @@ impl MobActor {
         Ok(true)
     }
 
-    fn expect_state(&self, expected: &[MobState], to: MobState) -> Result<(), MobError> {
-        self.lifecycle_authority.require_phase(expected, to)
+    fn machine_active_run_count(&self) -> u32 {
+        self.run_cancel_tokens.len() as u32
+    }
+
+    fn machine_orchestrator_snapshot(&self, phase: MobState) -> Option<MobOrchestratorSnapshot> {
+        self.orchestrator
+            .as_ref()
+            .map(|orch| orch.snapshot_in_phase(phase, self.machine_active_run_count()))
+    }
+
+    fn machine_orchestrator_can_accept(
+        &self,
+        phase: MobState,
+        input: MobOrchestratorInput,
+    ) -> bool {
+        self.orchestrator.as_ref().is_some_and(|orch| {
+            orch.can_accept_in_phase(phase, self.machine_active_run_count(), input)
+        })
+    }
+
+    fn machine_apply_orchestrator(
+        &mut self,
+        phase: MobState,
+        input: MobOrchestratorInput,
+    ) -> Result<Option<MobOrchestratorTransition>, MobError> {
+        let active_run_count = self.machine_active_run_count();
+        self.orchestrator
+            .as_mut()
+            .map(|orch| orch.apply_in_phase(phase, active_run_count, input))
+            .transpose()
+    }
+
+    fn machine_coordinator_bound(&self) -> bool {
+        self.machine_orchestrator_snapshot(self.state())
+            .is_none_or(|snapshot| snapshot.coordinator_bound)
+    }
+
+    fn require_mob_machine_stop(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            });
+        }
+        if self.machine_active_run_count() != 0 {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_mob_machine_resume(&self) -> Result<(), MobError> {
+        if self.state() == MobState::Stopped {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            })
+        }
+    }
+
+    fn require_mob_machine_complete(&self) -> Result<(), MobError> {
+        if self.state() == MobState::Running {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Completed,
+            })
+        }
+    }
+
+    fn require_mob_machine_destroy(&self) -> Result<(), MobError> {
+        if matches!(
+            self.state(),
+            MobState::Running | MobState::Stopped | MobState::Completed
+        ) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Destroyed,
+            })
+        }
+    }
+
+    fn require_mob_machine_reset(&self) -> Result<(), MobError> {
+        if matches!(
+            self.state(),
+            MobState::Running | MobState::Stopped | MobState::Completed
+        ) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            })
+        }
+    }
+
+    fn require_mob_machine_shutdown(&self) -> Result<(), MobError> {
+        if matches!(
+            self.state(),
+            MobState::Running | MobState::Stopped | MobState::Completed
+        ) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            })
+        }
+    }
+
+    fn require_mob_machine_spawn(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_mob_machine_run_flow(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            });
+        }
+        Ok(())
     }
 
     /// Guard that the mob is in one of the `allowed` phases.
@@ -390,7 +520,14 @@ impl MobActor {
     /// (retire, wire, external turn, etc.). The first allowed state is used
     /// as the `to` hint in the error.
     fn require_state(&self, allowed: &[MobState]) -> Result<(), MobError> {
-        self.lifecycle_authority.require_phase(allowed, allowed[0])
+        if allowed.contains(&self.state()) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: allowed[0],
+            })
+        }
     }
 
     async fn notify_orchestrator_lifecycle(&mut self, message: String) {
@@ -495,10 +632,11 @@ impl MobActor {
     }
 
     fn pending_spawn_alignment_violation(&self) -> Option<String> {
-        let expected = self
-            .orchestrator
-            .as_ref()
-            .map(|orchestrator| orchestrator.snapshot().pending_spawn_count as usize);
+        let expected = self.orchestrator.as_ref().map(|orchestrator| {
+            orchestrator
+                .snapshot_in_phase(self.state(), self.machine_active_run_count())
+                .pending_spawn_count as usize
+        });
         self.pending_spawns.alignment_violation(expected)
     }
 
@@ -579,8 +717,9 @@ impl MobActor {
 
     fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
         let mut topology_advanced = false;
-        if let Some(ref mut orch) = self.orchestrator {
-            orch.apply(MobOrchestratorInput::StageSpawn)?;
+        let phase = self.state();
+        if self.orchestrator.is_some() {
+            self.machine_apply_orchestrator(phase, MobOrchestratorInput::StageSpawn)?;
             topology_advanced = true;
         }
         if topology_advanced {
@@ -591,8 +730,9 @@ impl MobActor {
 
     fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
         let mut topology_advanced = false;
-        if let Some(ref mut orch) = self.orchestrator {
-            match orch.apply(MobOrchestratorInput::CompleteSpawn) {
+        let phase = self.state();
+        if self.orchestrator.is_some() {
+            match self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteSpawn) {
                 Ok(_) => {
                     topology_advanced = true;
                 }
@@ -1190,7 +1330,11 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+                if let Err(e) = self.lifecycle_authority.apply_in_phase(
+                    self.state(),
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::Stop,
+                ) {
                     tracing::warn!(error = %e, "authority rejected Stop");
                 }
             } else if let Err(error) = self.ensure_autonomous_runtimes_from_roster().await {
@@ -1213,7 +1357,11 @@ impl MobActor {
                         "failed cleaning up mcp servers after startup error"
                     );
                 }
-                if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+                if let Err(e) = self.lifecycle_authority.apply_in_phase(
+                    self.state(),
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::Stop,
+                ) {
                     tracing::warn!(error = %e, "authority rejected Stop");
                 }
             }
@@ -1234,8 +1382,7 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
-                    if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    if let Err(error) = self.require_mob_machine_spawn() {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -1267,11 +1414,7 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
+                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => {
                             let canceled = self.cancel_pending_spawns_for_member(
                                 &meerkat_id,
@@ -1295,19 +1438,14 @@ impl MobActor {
                     initial_message,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_mob_machine_spawn() {
                         Ok(()) => self.handle_respawn(meerkat_id, initial_message).await,
                         Err(error) => Err(super::handle::MobRespawnError::from(error)),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
+                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
                     };
@@ -1318,8 +1456,7 @@ impl MobActor {
                     target,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_wire(local, target).await,
                         Err(error) => Err(error),
                     };
@@ -1330,8 +1467,7 @@ impl MobActor {
                     target,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_unwire(local, target).await,
                         Err(error) => Err(error),
                     };
@@ -1344,8 +1480,7 @@ impl MobActor {
                     render_metadata,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             self.handle_external_turn(
                                 meerkat_id,
@@ -1364,8 +1499,7 @@ impl MobActor {
                     content,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_internal_turn(meerkat_id, content).await,
                         Err(error) => Err(error),
                     };
@@ -1391,7 +1525,7 @@ impl MobActor {
                     scoped_event_tx,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
+                    let result = match self.require_mob_machine_run_flow() {
                         Ok(()) => {
                             self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
                                 .await
@@ -1440,13 +1574,21 @@ impl MobActor {
                 }
                 #[cfg(test)]
                 MobCommand::OrchestratorSnapshot { reply_tx } => {
-                    let _ = reply_tx.send(self.orchestrator.as_ref().map_or_else(
-                        MobOrchestratorSnapshot::default,
-                        super::mob_orchestrator_authority::MobOrchestratorAuthority::snapshot,
-                    ));
+                    let phase = self.state();
+                    let _ = reply_tx.send(
+                        self.machine_orchestrator_snapshot(phase)
+                            .unwrap_or_default(),
+                    );
+                }
+                #[cfg(test)]
+                MobCommand::LifecycleSnapshot { reply_tx } => {
+                    let _ = reply_tx.send(
+                        self.lifecycle_authority
+                            .snapshot_in_phase(self.state(), self.machine_active_run_count()),
+                    );
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
+                    let result = match self.require_mob_machine_stop() {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
@@ -1485,8 +1627,12 @@ impl MobActor {
                             }
                             if stop_result.is_ok() {
                                 let mut topology_unbound = false;
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    match orch.apply(MobOrchestratorInput::StopOrchestrator) {
+                                let phase = self.state();
+                                if self.orchestrator.is_some() {
+                                    match self.machine_apply_orchestrator(
+                                        phase,
+                                        MobOrchestratorInput::StopOrchestrator,
+                                    ) {
                                         Ok(_) => {
                                             topology_unbound = true;
                                         }
@@ -1500,9 +1646,13 @@ impl MobActor {
                                 if topology_unbound {
                                     self.flow_engine.unbind_topology_coordinator();
                                 }
+                                let phase = self.state();
                                 if stop_result.is_ok()
-                                    && let Err(error) =
-                                        self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                                    && let Err(error) = self.lifecycle_authority.apply_in_phase(
+                                        phase,
+                                        self.machine_active_run_count(),
+                                        MobLifecycleInput::Stop,
+                                    )
                                 {
                                     stop_result = Err(MobError::Internal(format!(
                                         "lifecycle Stop transition failed during stop: {error}"
@@ -1520,7 +1670,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Stopped], MobState::Running) {
+                    let result = match self.require_mob_machine_resume() {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
@@ -1554,8 +1704,12 @@ impl MobActor {
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
                                 let mut topology_bound = false;
-                                if let Some(ref mut orch) = self.orchestrator {
-                                    match orch.apply(MobOrchestratorInput::ResumeOrchestrator) {
+                                let phase = self.state();
+                                if self.orchestrator.is_some() {
+                                    match self.machine_apply_orchestrator(
+                                        phase,
+                                        MobOrchestratorInput::ResumeOrchestrator,
+                                    ) {
                                         Ok(_) => {
                                             topology_bound = true;
                                         }
@@ -1569,9 +1723,13 @@ impl MobActor {
                                 if topology_bound {
                                     self.flow_engine.bind_topology_coordinator();
                                 }
+                                let phase = self.state();
                                 if resume_result.is_ok()
-                                    && let Err(error) =
-                                        self.lifecycle_authority.apply(MobLifecycleInput::Resume)
+                                    && let Err(error) = self.lifecycle_authority.apply_in_phase(
+                                        phase,
+                                        self.machine_active_run_count(),
+                                        MobLifecycleInput::Resume,
+                                    )
                                 {
                                     resume_result = Err(MobError::Internal(format!(
                                         "lifecycle Resume transition failed during resume: {error}"
@@ -1606,8 +1764,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Completed)
-                    {
+                    let result = match self.require_mob_machine_complete() {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is completing").await;
                             self.handle_complete().await
@@ -1617,17 +1774,8 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    // Shell guard: reject early if lifecycle authority would not accept
-                    // Destroy. This prevents fail_all_pending_spawns from running as a
-                    // side-effect when the transition is invalid (e.g. already Destroyed).
-                    if !self
-                        .lifecycle_authority
-                        .can_accept(MobLifecycleInput::Destroy)
-                    {
-                        let _ = reply_tx.send(Err(MobError::InvalidTransition {
-                            from: self.state(),
-                            to: MobState::Destroyed,
-                        }));
+                    if let Err(error) = self.require_mob_machine_destroy() {
+                        let _ = reply_tx.send(Err(error));
                         continue;
                     }
                     self.fail_all_pending_spawns("mob is destroying").await;
@@ -1644,13 +1792,7 @@ impl MobActor {
                     }
                 }
                 MobCommand::Reset { reply_tx } => {
-                    // Shell guard: reject early if lifecycle phase doesn't support Reset.
-                    // This prevents fail_all_pending_spawns from running as a side-effect
-                    // when the transition is invalid (e.g. Creating or Destroyed).
-                    if let Err(error) = self.lifecycle_authority.require_phase(
-                        &[MobState::Running, MobState::Stopped, MobState::Completed],
-                        MobState::Running,
-                    ) {
+                    if let Err(error) = self.require_mob_machine_reset() {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -1664,8 +1806,7 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             self.handle_task_create(subject, description, blocked_by)
                                 .await
@@ -1680,8 +1821,7 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_task_update(task_id, status, owner).await,
                         Err(error) => Err(error),
                     };
@@ -1803,8 +1943,7 @@ impl MobActor {
                     meerkat_id,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Creating])
-                    {
+                    let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_force_cancel(meerkat_id).await,
                         Err(error) => Err(error),
                     };
@@ -1815,6 +1954,10 @@ impl MobActor {
                     let _ = reply_tx.send(());
                 }
                 MobCommand::Shutdown { reply_tx } => {
+                    if let Err(error) = self.require_mob_machine_shutdown() {
+                        let _ = reply_tx.send(Err(error));
+                        continue;
+                    }
                     self.fail_all_pending_spawns("mob runtime is shutting down")
                         .await;
                     let mut result: Result<(), MobError> = Ok(());
@@ -1841,7 +1984,11 @@ impl MobActor {
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
                     if self.state() == MobState::Running
-                        && let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::Stop)
+                        && let Err(error) = self.lifecycle_authority.apply_in_phase(
+                            self.state(),
+                            self.machine_active_run_count(),
+                            MobLifecycleInput::Stop,
+                        )
                     {
                         tracing::warn!(error = %error, "authority rejected Stop");
                         if result.is_ok() {
@@ -2646,7 +2793,7 @@ impl MobActor {
                             actor.provisioner.clone(),
                         );
                         if let Err(error) = actor
-                            .require_state(&[MobState::Running, MobState::Creating])
+                            .require_state(&[MobState::Running])
                         {
                             if let Err(retire_error) = provision.rollback().await {
                                 Err(MobError::Internal(format!(
@@ -2839,7 +2986,7 @@ impl MobActor {
                 meerkat_id.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+            if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
                         "policy spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
@@ -3490,7 +3637,7 @@ impl MobActor {
                 meerkat_id.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running, MobState::Creating]) {
+            if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(meerkat_id.as_str()),
@@ -4242,21 +4389,6 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_complete preflight")
             .await?;
         self.cancel_all_flow_tasks().await?;
-        if !self
-            .lifecycle_authority
-            .can_accept(MobLifecycleInput::MarkCompleted)
-        {
-            return Err(MobError::Internal(
-                "lifecycle authority rejected MarkCompleted after flow cancellation".into(),
-            ));
-        }
-        if let Some(ref orch) = self.orchestrator
-            && !orch.can_accept(MobOrchestratorInput::MarkCompleted)
-        {
-            return Err(MobError::Internal(
-                "orchestrator authority rejected MarkCompleted after flow cancellation".into(),
-            ));
-        }
 
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
@@ -4270,16 +4402,21 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        if let Some(ref mut orch) = self.orchestrator {
-            orch.apply(MobOrchestratorInput::MarkCompleted)
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "orchestrator MarkCompleted transition failed during complete: {error}"
-                    ))
+        let phase = self.state();
+        if self.orchestrator.is_some() {
+            self.machine_apply_orchestrator(phase, MobOrchestratorInput::MarkCompleted)?
+                .ok_or_else(|| {
+                    MobError::Internal(
+                        "orchestrator missing during complete despite expected binding".into(),
+                    )
                 })?;
         }
         self.lifecycle_authority
-            .apply(MobLifecycleInput::MarkCompleted)
+            .apply_in_phase(
+                phase,
+                self.machine_active_run_count(),
+                MobLifecycleInput::MarkCompleted,
+            )
             .map_err(|error| {
                 MobError::Internal(format!(
                     "lifecycle MarkCompleted transition failed during complete: {error}"
@@ -4295,16 +4432,6 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_destroy preflight")?;
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await?;
-        // Gate via lifecycle authority — reject if current phase doesn't support Destroy.
-        if !self
-            .lifecycle_authority
-            .can_accept(MobLifecycleInput::Destroy)
-        {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Destroyed,
-            });
-        }
         self.cancel_all_flow_tasks().await?;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
@@ -4314,29 +4441,40 @@ impl MobActor {
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator then Destroy.
-        if let Some(ref mut orch) = self.orchestrator {
+        let phase = self.state();
+        if self.orchestrator.is_some() {
             let mut topology_unbound = false;
-            if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
-                orch.apply(MobOrchestratorInput::StopOrchestrator)
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "orchestrator StopOrchestrator transition failed during destroy: {error}"
-                        ))
+            let mut orchestrator_phase = phase;
+            if self.machine_orchestrator_can_accept(phase, MobOrchestratorInput::StopOrchestrator) {
+                let transition = self
+                    .machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)?
+                    .ok_or_else(|| {
+                        MobError::Internal(
+                            "orchestrator missing during destroy despite expected binding".into(),
+                        )
                     })?;
+                orchestrator_phase = transition.next_phase;
                 topology_unbound = true;
             }
             if topology_unbound {
                 self.flow_engine.unbind_topology_coordinator();
             }
-            orch.apply(MobOrchestratorInput::DestroyOrchestrator)
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "orchestrator DestroyOrchestrator transition failed during destroy: {error}"
-                    ))
-                })?;
+            self.machine_apply_orchestrator(
+                orchestrator_phase,
+                MobOrchestratorInput::DestroyOrchestrator,
+            )?
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "orchestrator missing during destroy despite expected binding".into(),
+                )
+            })?;
         }
         self.lifecycle_authority
-            .apply(MobLifecycleInput::Destroy)
+            .apply_in_phase(
+                phase,
+                self.machine_active_run_count(),
+                MobLifecycleInput::Destroy,
+            )
             .map_err(|error| {
                 MobError::Internal(format!(
                     "lifecycle Destroy transition failed during destroy: {error}"
@@ -4352,7 +4490,11 @@ impl MobActor {
     /// error paths after destructive steps have already been taken.
     async fn fail_reset_to_stopped(&mut self) {
         self.provisioner.cancel_all_checkpointers().await;
-        if let Err(e) = self.lifecycle_authority.apply(MobLifecycleInput::Stop) {
+        if let Err(e) = self.lifecycle_authority.apply_in_phase(
+            self.state(),
+            self.machine_active_run_count(),
+            MobLifecycleInput::Stop,
+        ) {
             tracing::warn!(error = %e, "authority rejected Stop in fail_reset_to_stopped");
         }
     }
@@ -4361,13 +4503,6 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_reset preflight")?;
         self.ensure_flow_tracker_alignment("handle_reset preflight")
             .await?;
-        // Gate via lifecycle authority — Reset is a multi-step process
-        // (Running→Stop→Resume, Stopped→Resume, Completed→BeginCleanup→FinishCleanup→Resume).
-        // Use require_phase to validate the current phase supports reset.
-        self.lifecycle_authority.require_phase(
-            &[MobState::Running, MobState::Stopped, MobState::Completed],
-            MobState::Running,
-        )?;
         let prior_state = self.state();
         let was_stopped = prior_state == MobState::Stopped;
         self.cancel_all_flow_tasks().await?;
@@ -4392,9 +4527,18 @@ impl MobActor {
             return Err(error);
         }
 
-        if self.lifecycle_authority.can_accept(MobLifecycleInput::Stop) {
+        let phase = self.state();
+        if self.lifecycle_authority.can_accept_in_phase(
+            phase,
+            self.machine_active_run_count(),
+            MobLifecycleInput::Stop,
+        ) {
             self.lifecycle_authority
-                .apply(MobLifecycleInput::Stop)
+                .apply_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::Stop,
+                )
                 .map_err(|error| {
                     MobError::Internal(format!(
                         "lifecycle Stop transition failed during reset: {error}"
@@ -4450,44 +4594,49 @@ impl MobActor {
             return Err(error);
         }
 
-        if let Some(ref mut orch) = self.orchestrator {
+        let mut phase = self.state();
+        if phase == MobState::Completed {
+            self.lifecycle_authority
+                .apply_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::FinishCleanup,
+                )
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "lifecycle FinishCleanup transition failed during reset from completed: {error}"
+                    ))
+                })?;
+            phase = MobState::Stopped;
+        }
+        if self.orchestrator.is_some() {
             let mut topology_unbound = false;
-            if orch.can_accept(MobOrchestratorInput::StopOrchestrator) {
-                orch.apply(MobOrchestratorInput::StopOrchestrator)
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "orchestrator StopOrchestrator transition failed during reset: {error}"
-                        ))
+            if self.machine_orchestrator_can_accept(phase, MobOrchestratorInput::StopOrchestrator) {
+                self.machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)?
+                    .ok_or_else(|| {
+                        MobError::Internal(
+                            "orchestrator missing during reset despite expected binding".into(),
+                        )
                     })?;
                 topology_unbound = true;
             }
             if topology_unbound {
                 self.flow_engine.unbind_topology_coordinator();
             }
-            orch.apply(MobOrchestratorInput::ResumeOrchestrator)
-                .map_err(|error| {
-                    MobError::Internal(format!(
-                        "orchestrator ResumeOrchestrator transition failed during reset: {error}"
-                    ))
+            self.machine_apply_orchestrator(phase, MobOrchestratorInput::ResumeOrchestrator)?
+                .ok_or_else(|| {
+                    MobError::Internal(
+                        "orchestrator missing during reset despite expected binding".into(),
+                    )
                 })?;
             self.flow_engine.bind_topology_coordinator();
         }
         self.lifecycle_authority
-            .apply(MobLifecycleInput::BeginCleanup)
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "lifecycle BeginCleanup transition failed during reset: {error}"
-                ))
-            })?;
-        self.lifecycle_authority
-            .apply(MobLifecycleInput::FinishCleanup)
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "lifecycle FinishCleanup transition failed during reset: {error}"
-                ))
-            })?;
-        self.lifecycle_authority
-            .apply(MobLifecycleInput::Resume)
+            .apply_in_phase(
+                phase,
+                self.machine_active_run_count(),
+                MobLifecycleInput::Resume,
+            )
             .map_err(|error| {
                 MobError::Internal(format!(
                     "lifecycle Resume transition failed during reset: {error}"
@@ -4655,10 +4804,13 @@ impl MobActor {
         };
 
         // Check external_addressable
-        let profile = self
-            .definition
-            .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
-            .await?;
+        let profile = if let Some(profile) = entry.effective_profile_override.clone() {
+            profile
+        } else {
+            self.definition
+                .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
+                .await?
+        };
 
         if !profile.external_addressable {
             return Err(MobError::NotExternallyAddressable(meerkat_id));
@@ -4715,62 +4867,6 @@ impl MobActor {
 
                 self.ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
                     .await?;
-
-                // Prefer runtime-owned durable peer ingress for ordinary
-                // autonomous member sends so callback-pending/running inputs
-                // survive restart. Render metadata still falls back to the
-                // legacy injector path because PeerInput has no render-metadata
-                // carrier today.
-                if render_metadata.is_none()
-                    && let Some(adapter) = self.runtime_adapter.as_ref()
-                {
-                    use meerkat_runtime::input::{
-                        Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
-                        PeerConvention, PeerInput,
-                    };
-
-                    let body = content.text_content();
-                    let blocks = if content.has_images() {
-                        Some(content.into_blocks())
-                    } else {
-                        None
-                    };
-                    let input = Input::Peer(PeerInput {
-                        header: InputHeader {
-                            id: meerkat_core::lifecycle::InputId::new(),
-                            timestamp: chrono::Utc::now(),
-                            source: InputOrigin::Peer {
-                                peer_id: "mob/member_send".to_string(),
-                                runtime_id: None,
-                            },
-                            durability: InputDurability::Durable,
-                            visibility: InputVisibility {
-                                transcript_eligible: true,
-                                operator_eligible: true,
-                            },
-                            idempotency_key: None,
-                            supersession_key: None,
-                            correlation_id: None,
-                        },
-                        convention: Some(PeerConvention::Message),
-                        body,
-                        blocks,
-                        handling_mode: match handling_mode {
-                            meerkat_core::types::HandlingMode::Queue => None,
-                            mode => Some(mode),
-                        },
-                    });
-                    adapter
-                        .accept_input(bridge_session_id, input)
-                        .await
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "autonomous dispatch runtime accept failed for '{}': {}",
-                                entry.meerkat_id, error
-                            ))
-                        })?;
-                    return Ok(bridge_session_id.clone());
-                }
 
                 let injector = self
                     .provisioner
@@ -4840,8 +4936,10 @@ impl MobActor {
             .flow_kernel
             .create_pending_run(&config, activation_params.clone())
             .await?;
-        if let Some(ref mut orch) = self.orchestrator
-            && let Err(error) = orch.apply(MobOrchestratorInput::StartFlow)
+        let phase = self.state();
+        if self.orchestrator.is_some()
+            && let Err(error) =
+                self.machine_apply_orchestrator(phase, MobOrchestratorInput::StartFlow)
         {
             let reason =
                 format!("orchestrator StartFlow transition failed during flow admission: {error}");
@@ -4856,10 +4954,15 @@ impl MobActor {
             }
             return Err(MobError::Internal(reason));
         }
-        if let Err(error) = self.lifecycle_authority.apply(MobLifecycleInput::StartRun) {
+        if let Err(error) = self.lifecycle_authority.apply_in_phase(
+            phase,
+            self.machine_active_run_count(),
+            MobLifecycleInput::StartRun,
+        ) {
             let mut details = Vec::new();
-            if let Some(ref mut orch) = self.orchestrator
-                && let Err(rollback_error) = orch.apply(MobOrchestratorInput::CompleteFlow)
+            if self.orchestrator.is_some()
+                && let Err(rollback_error) =
+                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteFlow)
             {
                 details.push(format!(
                     "orchestrator CompleteFlow rollback failed: {rollback_error}"
@@ -4968,13 +5071,14 @@ impl MobActor {
                 .await?
                 .as_ref()
                 .is_some_and(|run| run.status.is_terminal());
+            let phase = self.state();
             let authorities_expect_completion = self
-                .orchestrator
-                .as_ref()
-                .is_some_and(|orch| orch.can_accept(MobOrchestratorInput::CompleteFlow))
-                || self
-                    .lifecycle_authority
-                    .can_accept(MobLifecycleInput::FinishRun);
+                .machine_orchestrator_can_accept(phase, MobOrchestratorInput::CompleteFlow)
+                || self.lifecycle_authority.can_accept_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::FinishRun,
+                );
             if authorities_expect_completion && !run_terminal {
                 return Err(MobError::Internal(format!(
                     "{context}: received cleanup for run {run_id} with no local trackers while flow authorities still accept completion"
@@ -4988,16 +5092,21 @@ impl MobActor {
             return Ok(());
         }
 
-        if let Some(ref mut orch) = self.orchestrator {
-            orch.apply(MobOrchestratorInput::CompleteFlow)
-                .map_err(|error| {
+        let phase = self.state();
+        if self.orchestrator.is_some() {
+            self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteFlow)?
+                .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "{context}: orchestrator CompleteFlow transition failed for run {run_id}: {error}"
+                        "{context}: orchestrator missing during flow cleanup for run {run_id}"
                     ))
                 })?;
         }
         self.lifecycle_authority
-            .apply(MobLifecycleInput::FinishRun)
+            .apply_in_phase(
+                phase,
+                self.machine_active_run_count(),
+                MobLifecycleInput::FinishRun,
+            )
             .map_err(|error| {
                 MobError::Internal(format!(
                     "{context}: lifecycle FinishRun transition failed for run {run_id}: {error}"
@@ -5038,16 +5147,21 @@ impl MobActor {
             self.flow_kernel
                 .terminalize_canceled(run_id.clone(), flow_id)
                 .await?;
-            if let Some(ref mut orch) = self.orchestrator {
-                orch.apply(MobOrchestratorInput::CompleteFlow)
-                    .map_err(|error| {
+            let phase = self.state();
+            if self.orchestrator.is_some() {
+                self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteFlow)?
+                    .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "flow canceled cleanup (no task handle): orchestrator CompleteFlow transition failed for run {run_id}: {error}"
+                            "flow canceled cleanup (no task handle): orchestrator missing for run {run_id}"
                         ))
                     })?;
             }
             self.lifecycle_authority
-                .apply(MobLifecycleInput::FinishRun)
+                .apply_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::FinishRun,
+                )
                 .map_err(|error| {
                     MobError::Internal(format!(
                         "flow canceled cleanup (no task handle): lifecycle FinishRun transition failed for run {run_id}: {error}"
@@ -5151,16 +5265,21 @@ impl MobActor {
                 .terminalize_canceled(run_id.clone(), flow_id.clone())
                 .await?;
 
-            if let Some(ref mut orch) = self.orchestrator {
-                orch.apply(MobOrchestratorInput::CompleteFlow)
-                    .map_err(|error| {
+            let phase = self.state();
+            if self.orchestrator.is_some() {
+                self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteFlow)?
+                    .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "orchestrator CompleteFlow failed during bulk flow cancellation for run {run_id}: {error}"
+                            "orchestrator missing during bulk flow cancellation for run {run_id}"
                         ))
                     })?;
             }
             self.lifecycle_authority
-                .apply(MobLifecycleInput::FinishRun)
+                .apply_in_phase(
+                    phase,
+                    self.machine_active_run_count(),
+                    MobLifecycleInput::FinishRun,
+                )
                 .map_err(|error| {
                     MobError::Internal(format!(
                         "lifecycle FinishRun failed during bulk flow cancellation for run {run_id}: {error}"

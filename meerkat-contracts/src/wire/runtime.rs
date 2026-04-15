@@ -55,7 +55,6 @@ pub enum WireRuntimeState {
     Idle,
     Attached,
     Running,
-    Recovering,
     Retired,
     Stopped,
     Destroyed,

@@ -259,7 +259,7 @@ Runtime-mode behavior is shared across these surfaces because dispatch comes fro
 
 ```bash
 rkat run "Create a mob with one lead and three workers, wire lead to all workers, and report status."
-rkat resume <session_id> "Retire worker-2 and add worker-4, then summarize."
+rkat run --resume <session_id> "Retire worker-2 and add worker-4, then summarize."
 ```
 
 ### CLI direct commands (explicit operational)

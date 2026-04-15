@@ -16,6 +16,10 @@ categories.workspace = true
 name = "rkat"
 path = "src/main.rs"
 
+[[bin]]
+name = "rkat-mini"
+path = "src/main.rs"
+
 [[test]]
 name = "system_cli_init"
 path = "tests/system_cli_init.rs"
@@ -44,10 +48,10 @@ meerkat-client = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
-meerkat-mob = { workspace = true }
-meerkat-mob-pack = { workspace = true }
-meerkat-mob-mcp = { workspace = true }
-meerkat-rpc = { workspace = true, features = ["mob"] }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mob-pack = { workspace = true, optional = true }
+meerkat-mob-mcp = { workspace = true, optional = true }
+meerkat-rpc = { workspace = true, optional = true, features = ["mob"] }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -68,9 +72,10 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
 reqwest = { workspace = true }
+uuid = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule"]
+default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "mob"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
@@ -88,6 +93,12 @@ memory-store = ["meerkat/memory-store", "meerkat/memory-store-session"]
 memory-store-session = ["meerkat/memory-store-session"]
 
 # Subsystems
+mob = [
+    "dep:meerkat-mob",
+    "dep:meerkat-mob-pack",
+    "dep:meerkat-mob-mcp",
+    "dep:meerkat-rpc",
+]
 comms = ["dep:meerkat-comms", "meerkat/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
 schedule = ["meerkat/schedule"]

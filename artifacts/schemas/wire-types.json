@@ -2048,7 +2048,6 @@
           "idle",
           "attached",
           "running",
-          "recovering",
           "retired",
           "stopped",
           "destroyed"
@@ -5491,7 +5490,6 @@
       "idle",
       "attached",
       "running",
-      "recovering",
       "retired",
       "stopped",
       "destroyed"

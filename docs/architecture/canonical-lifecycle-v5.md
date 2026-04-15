@@ -861,7 +861,7 @@ pub enum RunEvent {
 
 ```rust
 pub enum RuntimeState {
-    Recovering,
+    Initializing,
     Idle,
     Running { run_id: RunId },
     Cancelling { run_id: RunId },
@@ -875,7 +875,7 @@ Required transitions:
 
 | From | Event | To |
 |---|---|---|
-| `Recovering` | durable input state loaded, derived input rebuilt, core bound | `Idle` |
+| `Initializing` | durable input state loaded, derived input rebuilt, core bound | `Idle` |
 | `Idle` | wakeable queued/staged input dispatched | `Running` |
 | `Running` | `RunCompleted` and more wakeable input exists | `Running` |
 | `Running` | `RunCompleted` and no wakeable input exists | `Idle` |

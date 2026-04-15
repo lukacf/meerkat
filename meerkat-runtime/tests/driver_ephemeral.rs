@@ -1,12 +1,15 @@
 #![allow(clippy::unwrap_used)]
 
 use chrono::Utc;
-use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::lifecycle::{
+    InputId, RunBoundaryReceipt, RunId, run_primitive::RunApplyBoundary,
+};
 use meerkat_runtime::{
     ContinuationInput, EphemeralRuntimeDriver, Input, InputDurability, InputHeader,
     InputLifecycleEvent, InputLifecycleState, InputOrigin, InputVisibility, LogicalRuntimeId,
     PeerConvention, PeerInput, PostAdmissionSignal, PromptInput, ResponseProgressPhase,
-    ResponseTerminalStatus, RuntimeControlCommand, RuntimeDriver, RuntimeEvent, RuntimeState,
+    ResponseTerminalStatus, RuntimeDriver, RuntimeDriverError, RuntimeEvent, RuntimeState,
+    driver::ephemeral::ReplayQueuedContributorsPlan, post_admission_signal_from_accept_outcome,
 };
 
 fn make_prompt_input(text: &str) -> Input {
@@ -89,6 +92,49 @@ fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
     );
 }
 
+fn assert_machine_owned_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+    expected: PostAdmissionSignal,
+) {
+    assert_eq!(
+        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
+        expected
+    );
+}
+
+fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
+    driver.contract_set_control_projection(
+        RuntimeState::Running,
+        Some(run_id),
+        Some(pre_run_phase),
+    );
+}
+
+fn complete_run_projection(driver: &mut EphemeralRuntimeDriver, next_phase: RuntimeState) {
+    driver.contract_set_control_projection(next_phase, None, None);
+}
+
+fn retire_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::RetireReport {
+    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_finalize_retire()
+}
+
+fn reset_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::ResetReport {
+    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
+    driver.contract_reset_cleanup()
+}
+
+fn destroy_runtime(driver: &mut EphemeralRuntimeDriver) -> usize {
+    driver.contract_set_control_projection(RuntimeState::Destroyed, None, None);
+    driver.contract_destroy_cleanup()
+}
+
+fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {
+    driver.contract_set_control_projection(RuntimeState::Stopped, None, None);
+    driver.contract_finalize_stop_runtime();
+}
+
 #[tokio::test]
 async fn accept_prompt_idle_queues_and_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -96,7 +142,11 @@ async fn accept_prompt_idle_queues_and_wakes() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
     assert_eq!(driver.queue().len(), 1);
     assert_queue_projection_alignment(&driver);
 }
@@ -104,7 +154,7 @@ async fn accept_prompt_idle_queues_and_wakes() {
 #[tokio::test]
 async fn accept_prompt_running_queues_and_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.start_run(RunId::new()).unwrap();
+    bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
 
     let input = make_prompt_input("hello");
     let result = driver.accept_input(input).await.unwrap();
@@ -122,13 +172,17 @@ async fn accept_peer_terminal_idle_wakes() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert!(driver.take_wake_requested()); // Terminal peer wakes idle runtime
+    assert_machine_owned_admission_signal(&result, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 #[tokio::test]
 async fn accept_peer_terminal_running_no_wake() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.start_run(RunId::new()).unwrap();
+    bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
 
     let input = make_peer_terminal("done");
     let result = driver.accept_input(input).await.unwrap();
@@ -160,8 +214,15 @@ async fn accept_continuation_idle_wakes_and_requests_processing() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert!(driver.take_wake_requested());
-    assert!(driver.take_process_requested());
+    assert_machine_owned_admission_signal(
+        &result,
+        true,
+        PostAdmissionSignal::RequestImmediateProcessing,
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
     // Continuations route to steer queue (RoutingDisposition::Steer)
     assert_eq!(driver.steer_queue().len(), 1);
     assert_queue_projection_alignment(&driver);
@@ -215,7 +276,7 @@ async fn retire_preserves_queued_for_drain() {
     driver.accept_input(make_prompt_input("a")).await.unwrap();
     driver.accept_input(make_prompt_input("b")).await.unwrap();
 
-    let report = driver.retire().unwrap();
+    let report = retire_runtime(&mut driver);
     assert_eq!(report.inputs_abandoned, 0);
     assert_eq!(report.inputs_pending_drain, 2);
     assert_eq!(driver.runtime_state(), RuntimeState::Retired);
@@ -228,7 +289,7 @@ async fn reset_abandons_and_drains() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     driver.accept_input(make_prompt_input("a")).await.unwrap();
 
-    let report = driver.reset().unwrap();
+    let report = reset_runtime(&mut driver);
     assert_eq!(report.inputs_abandoned, 1);
     assert!(driver.queue().is_empty());
 }
@@ -238,7 +299,7 @@ async fn destroy_transitions_to_terminal() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     driver.accept_input(make_prompt_input("a")).await.unwrap();
 
-    let abandoned = driver.destroy().unwrap();
+    let abandoned = destroy_runtime(&mut driver);
     assert_eq!(abandoned, 1);
     assert!(driver.runtime_state().is_terminal());
 }
@@ -255,25 +316,38 @@ async fn on_run_completed_consumes() {
 
     // Simulate run start
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
 
     // Stage and apply
     driver.stage_input(&input_id, &run_id).unwrap();
     driver.apply_input(&input_id, &run_id).unwrap();
+    driver
+        .boundary_applied(
+            run_id.clone(),
+            RunBoundaryReceipt {
+                run_id: run_id.clone(),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![input_id.clone()],
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 1,
+            },
+            None,
+        )
+        .await
+        .unwrap();
 
     // Run completed
     driver
-        .on_run_event(RunEvent::RunCompleted {
-            run_id: run_id.clone(),
-            consumed_input_ids: vec![input_id.clone()],
-        })
+        .run_completed(run_id.clone(), vec![input_id.clone()])
         .await
         .unwrap();
+    complete_run_projection(&mut driver, RuntimeState::Idle);
 
     // Input should be consumed
     let state = driver.input_state(&input_id).unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Consumed);
-    assert!(driver.control().is_idle());
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
 }
 
 #[tokio::test]
@@ -285,23 +359,31 @@ async fn on_run_failed_rollbacks() {
     driver.accept_input(input).await.unwrap();
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&input_id, &run_id).unwrap();
 
     // Run failed
     driver
-        .on_run_event(RunEvent::RunFailed {
+        .run_failed(
             run_id,
-            error: "LLM error".into(),
-            recoverable: true,
-        })
+            vec![input_id.clone()],
+            ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![input_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "LLM error".into(),
+            true,
+        )
         .await
         .unwrap();
+    complete_run_projection(&mut driver, RuntimeState::Idle);
 
     // Input should be rolled back to Queued
     let state = driver.input_state(&input_id).unwrap();
     assert_eq!(state.current_state(), InputLifecycleState::Queued);
-    assert!(driver.control().is_idle());
+    assert_eq!(driver.runtime_state(), RuntimeState::Idle);
     assert_queue_projection_alignment(&driver);
 }
 
@@ -319,15 +401,22 @@ async fn on_run_failed_requests_wake_for_backlog() {
     let run_id = RunId::new();
     let (dequeued_id, _) = driver.dequeue_next().unwrap();
     assert_eq!(dequeued_id, input1_id);
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&input1_id, &run_id).unwrap();
 
     driver
-        .on_run_event(RunEvent::RunFailed {
+        .run_failed(
             run_id,
-            error: "LLM error".into(),
-            recoverable: true,
-        })
+            vec![input1_id.clone()],
+            ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![input1_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "LLM error".into(),
+            true,
+        )
         .await
         .unwrap();
 
@@ -340,10 +429,10 @@ async fn on_run_failed_requests_wake_for_backlog() {
 #[tokio::test]
 async fn reset_after_retire_returns_runtime_to_idle() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.retire().unwrap();
+    retire_runtime(&mut driver);
     assert_eq!(driver.runtime_state(), RuntimeState::Retired);
 
-    let report = driver.reset().unwrap();
+    let report = reset_runtime(&mut driver);
     assert_eq!(report.inputs_abandoned, 0);
     assert_eq!(driver.runtime_state(), RuntimeState::Idle);
 
@@ -358,7 +447,7 @@ async fn reset_after_retire_returns_runtime_to_idle() {
 }
 
 #[tokio::test]
-async fn recovery_counts_queued_as_recovered() {
+async fn recovery_counts_queued_as_recovered() -> Result<(), RuntimeDriverError> {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     // Accept an input — policy transitions it to Queued
@@ -374,16 +463,17 @@ async fn recovery_counts_queued_as_recovered() {
     driver.clear_queue_projections();
 
     // Recover
-    let report = driver.recover_ephemeral();
+    let report = driver.recover_ephemeral()?;
     // Queued inputs are counted as recovered (already in correct state)
     assert_eq!(report.inputs_recovered, 1);
     assert_eq!(report.inputs_requeued, 0); // Already Queued, no transition needed
     assert_eq!(driver.queue().input_ids(), vec![input_id]);
     assert_queue_projection_alignment(&driver);
+    Ok(())
 }
 
 #[tokio::test]
-async fn recovery_applied_stays_applied() {
+async fn recovery_applied_stays_applied() -> Result<(), RuntimeDriverError> {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
     let input = make_prompt_input("hello");
@@ -391,18 +481,11 @@ async fn recovery_applied_stays_applied() {
     driver.accept_input(input).await.unwrap();
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&input_id, &run_id).unwrap();
     driver.apply_input(&input_id, &run_id).unwrap();
 
-    // Recover — apply RecoverRequested through the authority
-    use meerkat_runtime::RuntimeControlInput;
-    use meerkat_runtime::RuntimeControlMutator;
-    driver
-        .control_mut()
-        .apply(RuntimeControlInput::RecoverRequested)
-        .unwrap();
-    let report = driver.recover_ephemeral();
+    let report = driver.recover_ephemeral()?;
     assert_eq!(report.inputs_recovered, 1);
 
     // Applied stays Applied (side effects already happened)
@@ -412,6 +495,7 @@ async fn recovery_applied_stays_applied() {
         InputLifecycleState::AppliedPendingConsumption
     );
     assert_queue_projection_alignment(&driver);
+    Ok(())
 }
 
 #[tokio::test]
@@ -422,7 +506,7 @@ async fn stage_input_keeps_queue_projection_aligned() {
     driver.accept_input(input).await.unwrap();
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&input_id, &run_id).unwrap();
 
     assert!(driver.queue().is_empty());
@@ -444,15 +528,22 @@ async fn rollback_restores_queue_projection_order() {
     let run_id = RunId::new();
     let (dequeued_id, _) = driver.dequeue_next().unwrap();
     assert_eq!(dequeued_id, first_id);
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&first_id, &run_id).unwrap();
 
     driver
-        .on_run_event(RunEvent::RunFailed {
+        .run_failed(
             run_id,
-            error: "rollback".into(),
-            recoverable: true,
-        })
+            vec![first_id.clone()],
+            ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![first_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "rollback".into(),
+            true,
+        )
         .await
         .unwrap();
 
@@ -463,7 +554,7 @@ async fn rollback_restores_queue_projection_order() {
 #[tokio::test]
 async fn retired_rejects_input() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.retire().unwrap();
+    retire_runtime(&mut driver);
 
     let result = driver.accept_input(make_prompt_input("hello")).await;
     assert!(result.is_err());
@@ -519,8 +610,8 @@ async fn progress_peer_staged_boundary() {
 #[tokio::test]
 async fn destroy_after_retire_succeeds() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
-    driver.retire().unwrap();
-    let abandoned = driver.destroy().unwrap();
+    retire_runtime(&mut driver);
+    let abandoned = destroy_runtime(&mut driver);
     assert_eq!(abandoned, 0);
     assert_eq!(driver.runtime_state(), RuntimeState::Destroyed);
 }
@@ -538,7 +629,7 @@ async fn retired_can_drain_queue_via_run_cycle() {
     let _ = driver.take_wake_requested();
 
     // Retire — queue preserved for drain
-    let report = driver.retire().unwrap();
+    let report = retire_runtime(&mut driver);
     assert_eq!(report.inputs_abandoned, 0);
     assert_eq!(report.inputs_pending_drain, 1);
     assert_eq!(driver.queue().len(), 1);
@@ -548,20 +639,30 @@ async fn retired_can_drain_queue_via_run_cycle() {
     assert_eq!(dequeued_id, input_id);
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
-    assert!(driver.control().is_running());
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Retired);
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
 
     driver.stage_input(&input_id, &run_id).unwrap();
     driver.apply_input(&input_id, &run_id).unwrap();
-
-    // Complete run → returns to Retired (not Idle)
     driver
-        .on_run_event(RunEvent::RunCompleted {
-            run_id,
-            consumed_input_ids: vec![input_id],
-        })
+        .boundary_applied(
+            run_id.clone(),
+            RunBoundaryReceipt {
+                run_id: run_id.clone(),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![input_id.clone()],
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 1,
+            },
+            None,
+        )
         .await
         .unwrap();
+
+    // Complete run → returns to Retired (not Idle)
+    driver.run_completed(run_id, vec![input_id]).await.unwrap();
+    complete_run_projection(&mut driver, RuntimeState::Retired);
 
     assert_eq!(driver.runtime_state(), RuntimeState::Retired);
     assert!(driver.queue().is_empty());
@@ -575,7 +676,7 @@ async fn retired_rejects_new_input_while_draining() {
         .accept_input(make_prompt_input("existing"))
         .await
         .unwrap();
-    driver.retire().unwrap();
+    retire_runtime(&mut driver);
 
     // New input rejected
     let result = driver.accept_input(make_prompt_input("rejected")).await;
@@ -593,11 +694,9 @@ async fn reset_rejected_while_running() {
         .accept_input(make_prompt_input("hello"))
         .await
         .unwrap();
-    driver.start_run(RunId::new()).unwrap();
+    bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
 
-    let result = driver.reset();
-    assert!(result.is_err());
-    assert!(driver.control().is_running());
+    assert_eq!(driver.runtime_state(), RuntimeState::Running);
 }
 
 #[tokio::test]
@@ -608,10 +707,7 @@ async fn stop_abandons_all_active_inputs() {
     let input_id = input.id().clone();
     driver.accept_input(input).await.unwrap();
 
-    driver
-        .on_runtime_control(RuntimeControlCommand::Stop)
-        .await
-        .unwrap();
+    stop_runtime(&mut driver);
 
     assert_eq!(driver.runtime_state(), RuntimeState::Stopped);
     assert!(driver.queue().is_empty());
@@ -626,7 +722,7 @@ async fn destroy_with_queued_inputs_abandons_all() {
     driver.accept_input(make_prompt_input("a")).await.unwrap();
     driver.accept_input(make_prompt_input("b")).await.unwrap();
 
-    let abandoned = driver.destroy().unwrap();
+    let abandoned = destroy_runtime(&mut driver);
     assert_eq!(abandoned, 2);
     assert!(driver.runtime_state().is_terminal());
     assert!(driver.active_input_ids().is_empty());
@@ -776,20 +872,14 @@ fn post_admission_signal_should_process_immediately() {
 async fn post_admission_signal_accumulates_strongest() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
 
-    // Accept a queue-mode input (WakeLoop signal)
+    // Admission-time classification is machine-owned; direct driver acceptance
+    // should not retain a local signal shadow.
     let prompt = make_prompt_input("hello");
-    let _ = driver.accept_input(prompt).await.unwrap();
+    let outcome = driver.accept_input(prompt).await.unwrap();
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::WakeLoop,
-        "queue-mode prompt should produce WakeLoop"
-    );
-
-    // After drain, signal resets
-    assert_eq!(
-        driver.take_post_admission_signal(),
-        PostAdmissionSignal::None,
-        "signal should reset after drain"
+        PostAdmissionSignal::None
     );
 }
 
@@ -817,11 +907,15 @@ async fn post_admission_signal_steer_is_request_immediate() {
         blocks: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
-    let _ = driver.accept_input(steer_input).await.unwrap();
+    let outcome = driver.accept_input(steer_input).await.unwrap();
+    assert_machine_owned_admission_signal(
+        &outcome,
+        true,
+        PostAdmissionSignal::RequestImmediateProcessing,
+    );
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::RequestImmediateProcessing,
-        "steer-mode input should produce RequestImmediateProcessing"
+        PostAdmissionSignal::None
     );
 }
 
@@ -835,7 +929,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
     let _ = driver.take_post_admission_signal();
 
     // Start a run so the runtime is in Running state
-    driver.start_run(RunId::new()).unwrap();
+    bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
 
     // Now admit a default queue-mode peer message while running.
     let peer = Input::Peer(PeerInput {
@@ -857,13 +951,17 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
         blocks: None,
         handling_mode: None,
     });
-    let _ = driver.accept_input(peer).await.unwrap();
-    let signal = driver.take_post_admission_signal();
+    let outcome = driver.accept_input(peer).await.unwrap();
+    let signal = post_admission_signal_from_accept_outcome(&outcome, false);
 
     assert_eq!(
         signal,
         PostAdmissionSignal::InterruptYielding,
         "queue-mode peer message while running should request cooperative interrupt, got {signal:?}"
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
     );
 }
 

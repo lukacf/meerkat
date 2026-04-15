@@ -7,7 +7,7 @@
 //! - Input acceptance, validation, and queueing
 //! - InputState lifecycle tracking
 //! - Policy resolution (what to do with each input)
-//! - Runtime state machine (Idle ↔ Attached ↔ Running ↔ Recovering → Stopped/Destroyed)
+//! - Runtime state machine (Initializing ↔ Idle ↔ Attached ↔ Running ↔ Retired/Stopped/Destroyed)
 //! - Retire/recycle/reset lifecycle operations
 //! - RuntimeEvent observability
 //!
@@ -47,7 +47,6 @@ pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
-pub mod runtime_control_authority;
 pub mod runtime_event;
 pub mod runtime_ingress_authority;
 pub(crate) mod runtime_loop;
@@ -58,7 +57,7 @@ pub mod store;
 pub mod traits;
 
 // Re-exports for convenience
-pub use accept::{AcceptOutcome, RejectReason};
+pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};
 pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
     check_supersession, create_aggregate_input, is_coalescing_eligible,
@@ -86,6 +85,7 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
+pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
@@ -106,23 +106,18 @@ pub use policy::{
 };
 pub use policy_table::{DEFAULT_POLICY_VERSION, DefaultPolicyTable};
 pub use queue::InputQueue;
-pub use runtime_control_authority::{
-    HandlingMode, RuntimeControlAuthority, RuntimeControlEffect, RuntimeControlInput,
-    RuntimeControlMutator, RuntimeControlTransition,
-};
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
 };
 pub use runtime_ingress_authority::{
-    ContentShape, IngressPhase, RequestId, ReservationKey, RuntimeIngressAuthority,
-    RuntimeIngressEffect, RuntimeIngressError, RuntimeIngressInput, RuntimeIngressMutator,
-    RuntimeIngressTransition,
+    ContentShape, RequestId, ReservationKey, RuntimeIngressAuthority, RuntimeIngressEffect,
+    RuntimeIngressError, RuntimeIngressInput, RuntimeIngressMutator, RuntimeIngressTransition,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDelta};
 pub use traits::{
-    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlCommand,
-    RuntimeControlPlane, RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,
+    RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
 };

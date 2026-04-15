@@ -195,9 +195,6 @@ fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) 
         ("MeerkatMachine", "RuntimeDestroyed", "MobMachine") => {
             "ObserveRuntimeDestroyed".to_string()
         }
-        ("MeerkatMachine", "WorkCompleted", "MobMachine") => "ObserveWorkCompleted".to_string(),
-        ("MeerkatMachine", "WorkFailed", "MobMachine") => "ObserveWorkFailed".to_string(),
-        ("MeerkatMachine", "WorkCancelled", "MobMachine") => "ObserveWorkCancelled".to_string(),
         (
             "ScheduleLifecycleMachine",
             "SupersedePendingOccurrences",

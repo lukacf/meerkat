@@ -15,8 +15,26 @@ use crate::{
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
-#[cfg(all(test, feature = "jsonl-store"))]
-use meerkat_store::StoreAdapter;
+
+#[cfg(feature = "session-store")]
+pub fn build_runtime_backed_service(
+    mut builder: FactoryAgentBuilder,
+    max_sessions: usize,
+    persistence: crate::PersistenceBundle,
+) -> (
+    PersistentSessionService<FactoryAgentBuilder>,
+    Arc<MeerkatMachine>,
+) {
+    let runtime_adapter = persistence.runtime_adapter();
+    let (store, runtime_store, blob_store) = persistence.into_parts();
+    builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(Arc::clone(
+        &store,
+    ))));
+    let mut service =
+        PersistentSessionService::new(builder, max_sessions, store, runtime_store, blob_store);
+    wire_runtime_bindings(&mut service, &runtime_adapter);
+    (service, runtime_adapter)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SurfaceRuntimeMaterializeError {
@@ -286,7 +304,6 @@ mod tests {
         let persistence = build_default_persistence(temp.path().join("sessions"))
             .await
             .expect("build default persistence");
-        let runtime_adapter = persistence.runtime_adapter();
 
         let mut factory = crate::AgentFactory::new(temp.path().join("sessions"));
         #[cfg(feature = "comms")]
@@ -296,12 +313,7 @@ mod tests {
 
         let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
-        builder.default_session_store =
-            Some(Arc::new(StoreAdapter::new(persistence.session_store())));
-        let (store, runtime_store, blob_store) = persistence.into_parts();
-        let mut service =
-            PersistentSessionService::new(builder, 4, store, runtime_store, blob_store);
-        wire_runtime_bindings(&mut service, &runtime_adapter);
+        let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
         (Arc::new(service), runtime_adapter)
     }
 
@@ -425,19 +437,12 @@ mod tests {
         let persistence = build_default_persistence(temp.path().join("sessions"))
             .await
             .expect("build default persistence");
-        let adapter = persistence.runtime_adapter();
         let mut builder = FactoryAgentBuilder::new(
             crate::AgentFactory::new(temp.path().join("sessions")),
             crate::Config::default(),
         );
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
-        builder.default_session_store =
-            Some(Arc::new(StoreAdapter::new(persistence.session_store())));
-        let (store, runtime_store, blob_store) = persistence.into_parts();
-        let mut service =
-            PersistentSessionService::new(builder, 4, store, runtime_store, blob_store);
-
-        wire_runtime_bindings(&mut service, &adapter);
+        let (service, _adapter) = build_runtime_backed_service(builder, 4, persistence);
 
         let session_id = service
             .create_session(make_request(SessionBuildOptions::default()))

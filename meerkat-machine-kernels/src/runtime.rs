@@ -524,6 +524,18 @@ impl GeneratedMachineKernel {
                 map.insert(key, value);
                 state.fields.insert(field.clone(), KernelValue::Map(map));
             }
+            Update::MapRemove { field, key } => {
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                let mut map = state
+                    .fields
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(KernelValue::Map(BTreeMap::new()))
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                map.remove(&key);
+                state.fields.insert(field.clone(), KernelValue::Map(map));
+            }
             Update::SetInsert { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut set = state
@@ -1190,18 +1202,10 @@ mod tests {
     fn mob_spawn_and_submit_work_transitions_execute() {
         let kernel = GeneratedMachineKernel::new(mob_machine());
         let state = kernel.initial_state().expect("initial state");
+        assert_eq!(state.phase, "Running");
         let running = kernel
-            .transition_signal(
-                &state,
-                &KernelSignal {
-                    variant: "Start".into(),
-                    fields: BTreeMap::new(),
-                },
-            )
-            .expect("start");
-        let spawned = kernel
             .transition(
-                &running.next_state,
+                &state,
                 &KernelInput {
                     variant: "Spawn".into(),
                     fields: BTreeMap::from([
@@ -1215,21 +1219,22 @@ mod tests {
                         ),
                         ("fence_token".into(), KernelValue::U64(41)),
                         ("generation".into(), KernelValue::U64(2)),
+                        ("external_addressable".into(), KernelValue::Bool(false)),
                     ]),
                 },
             )
             .expect("spawn member");
-        assert_eq!(spawned.transition, "SpawnRunning");
-        assert_eq!(spawned.next_state.phase, "Running");
+        assert_eq!(running.transition, "SpawnRunning");
+        assert_eq!(running.next_state.phase, "Running");
         assert!(
-            spawned
+            running
                 .effects
                 .iter()
                 .any(|effect| effect.variant == "RequestRuntimeBinding")
         );
         let submitted = kernel
             .transition(
-                &spawned.next_state,
+                &running.next_state,
                 &KernelInput {
                     variant: "SubmitWork".into(),
                     fields: BTreeMap::from([
@@ -1239,11 +1244,12 @@ mod tests {
                         ),
                         ("fence_token".into(), KernelValue::U64(41)),
                         ("work_id".into(), KernelValue::String("work-1".into())),
+                        ("origin".into(), KernelValue::String("Internal".into())),
                     ]),
                 },
             )
             .expect("submit work");
-        assert_eq!(submitted.transition, "SubmitWorkRunning");
+        assert_eq!(submitted.transition, "SubmitWorkRunningInternal");
         // SubmitMemberWork effect was removed (unimplemented route to MeerkatMachine).
         assert!(
             !submitted
@@ -1253,7 +1259,7 @@ mod tests {
         );
         assert_eq!(
             submitted.next_state.fields.get("active_run_count"),
-            Some(&KernelValue::U64(1))
+            Some(&KernelValue::U64(0))
         );
     }
 

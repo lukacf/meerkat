@@ -23,10 +23,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Initialize`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RegisterSession`
+- `RegisterSessionIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `UnregisterSession`
+- `RegisterSessionAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RegisterSessionRunning`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RegisterSessionRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RegisterSessionStopped`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `UnregisterSessionIdle`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `UnregisterSessionAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `UnregisterSessionRunning`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `UnregisterSessionRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `UnregisterSessionStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `ReconfigureSessionLlmIdentityAttached`
@@ -35,22 +59,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReconfigureSessionLlmIdentityRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `StagePersistentFilterAttached`
+- `StagePersistentFilterIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `StagePersistentFilterIdle`
+- `StagePersistentFilterAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `StagePersistentFilterRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RequestDeferredToolsAttached`
+- `StagePersistentFilterRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `StagePersistentFilterStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `RequestDeferredToolsIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RequestDeferredToolsAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `RequestDeferredToolsRunning`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RequestDeferredToolsRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `RequestDeferredToolsStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PrepareBindingsInitializing`
@@ -60,9 +96,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PrepareBindingsAttached`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `PrepareBindingsRecovering`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PrepareBindingsRunning`
@@ -83,9 +116,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SetPeerIngressContextRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `SetPeerIngressContextRecovering`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `SetPeerIngressContextRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
@@ -101,25 +131,25 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `NotifyDrainExitedRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `NotifyDrainExitedRecovering`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `NotifyDrainExitedRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `NotifyDrainExitedStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `InterruptCurrentRunAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `InterruptCurrentRun`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `CancelAfterBoundaryAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `CancelAfterBoundary`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BoundaryAppliedPromote`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BoundaryAppliedNoop`
+- `BoundaryAppliedPublish`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PublishCommittedVisibleSetIdle`
@@ -131,31 +161,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishCommittedVisibleSetRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RunCompleted`
+- `PublishCommittedVisibleSetRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RunFailed`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RunCancelled`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromIdle`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromAttached`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromRecovering`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromRetired`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromStopped`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverFromInitializing`
+- `PublishCommittedVisibleSetStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `RetireRequestedFromIdle`
@@ -164,7 +173,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Reset`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `StopRuntimeExecutor`
+- `StopRuntimeExecutorUnbound`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `StopRuntimeExecutorAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `StopRuntimeExecutorRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `Destroy`
@@ -173,25 +188,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EnsureSessionWithExecutorIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `EnsureSessionWithExecutorAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `EnsureSessionWithExecutorRunning`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `EnsureSessionWithExecutorRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `EnsureSessionWithExecutorStopped`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `SetSilentIntentsIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ContainsSessionIdle`
+- `SetSilentIntentsAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `SessionHasExecutorIdle`
+- `SetSilentIntentsRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `SessionHasCommsIdle`
+- `SetSilentIntentsRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `OpsLifecycleRegistryIdle`
+- `SetSilentIntentsStopped`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `InputStateIdle`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ListActiveInputsIdle`
+- `AbortIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `AbortAttached`
@@ -200,19 +224,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbortRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AbortRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AbortStopped`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `WaitIdle`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `WaitAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `WaitRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `WaitRetired`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `WaitStopped`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AbortAllIdle`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `AbortAllAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `AbortAllRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AbortAllRecovering`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `AbortAllRetired`
@@ -227,10 +266,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EnsureDrainRunningRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `IngestIdle`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `IngestAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `IngestRunning`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `PublishEventIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PublishEventAttached`
@@ -239,10 +284,34 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishEventRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AcceptWithCompletionAttached`
+- `PublishEventRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AcceptWithCompletionRunning`
+- `PublishEventStopped`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionIdleQueued`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionIdleImmediate`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionAttachedImmediate`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionAttachedQueued`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionRunningQueuedPassive`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionRunningInterruptYielding`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithCompletionRunningImmediate`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `AcceptWithoutWakeIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `AcceptWithoutWakeAttached`
@@ -263,22 +332,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyPlainEventRunning`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RuntimeStateAttached`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RuntimeStateRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `LoadBoundaryReceiptAttached`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `LoadBoundaryReceiptRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PrepareIdle`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `PrepareAttached`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `DrainQueuedRunRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `StartConversationRunAttached`
@@ -302,136 +362,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FailRunningToAttached`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AdmitQueuedRunning`
+- `CommitRunningToRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AdmitConsumedOnAcceptRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `StageDrainSnapshotRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `SupersedeQueuedInputRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CoalesceQueuedInputsRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `SetSilentIntentOverridesRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `PrimitiveAppliedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `LlmReturnedToolCallsRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `LlmReturnedTerminalRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RegisterPendingOpsRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ToolCallsResolvedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `OpsBarrierSatisfiedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BoundaryContinueRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BoundaryCompleteRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RecoverableFailureRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `FatalFailureRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RetryRequestedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CancelNowRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CancellationObservedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AcknowledgeTerminalRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `TurnLimitReachedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BudgetExhaustedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `TimeBudgetExceededRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `EnterExtractionRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ExtractionValidationPassedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ExtractionValidationFailedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ExtractionStartRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ForceCancelNoRunRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RegisterOperationRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ProvisioningSucceededRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ProvisioningFailedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `AbortProvisioningRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `PeerReadyRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RegisterWatcherRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `ProgressReportedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CompleteOperationRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `FailOperationRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CancelOperationRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RetireRequestedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `RetireCompletedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CollectTerminalRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `OwnerTerminatedRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `BeginWaitAllRunning`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `CancelWaitAllRunning`
+- `FailRunningToRetired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `StageAddAttached`
@@ -523,15 +457,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeDestroyed`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `WorkCompleted`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `WorkFailed`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `WorkCancelled`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `RequestCancellationAtBoundary`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
@@ -563,6 +488,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `IngressAccepted`
+  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
+  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
+- `PostAdmissionSignal`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 - `ReadyForRun`
@@ -639,25 +567,13 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 
 ### Invariants
-- `bound_runtime_has_fence`
+- `fence_requires_bound_runtime`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `destroyed_has_no_active_work`
+- `running_has_current_run`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `drain_requires_ingress_context`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `active_visibility_revision_not_ahead_of_staged`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `active_requested_names_subset_of_staged`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `equal_visibility_revision_means_equal_active_and_staged_state`
-  - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
-  - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
-- `committed_visibility_not_ahead_of_active`
+- `current_run_only_while_running_or_retired`
   - anchors: `meerkat_machine`, `meerkat_public_surface`, `peer_directory_reachability_authority`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `peer_reachability_probe`
 

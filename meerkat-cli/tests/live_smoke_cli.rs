@@ -192,7 +192,8 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
-                "resume",
+                "run",
+                "--resume",
                 &session_id,
                 "What is my name? Reply with just the name.",
             ])
@@ -202,7 +203,7 @@ async fn inner_e2e_cli_run_resume_persistence() -> Result<(), Box<dyn std::error
 
     if !output.status.success() {
         return Err(format!(
-            "rkat resume failed (exit {:?}): {}",
+            "rkat run --resume failed (exit {:?}): {}",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         )

@@ -4,6 +4,7 @@
 //! the supporting command/result enums and the durable diagnostic snapshots that
 //! remain useful after cutover.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexSet;
@@ -32,10 +33,11 @@ use crate::input_state::InputLifecycleState;
 use crate::input_state::InputState;
 use crate::input_state::InputTerminalOutcome;
 use crate::runtime_event::RuntimeEventEnvelope;
-use crate::runtime_ingress_authority::{ContentShape, IngressPhase, RequestId, ReservationKey};
+use crate::runtime_ingress_authority::{ContentShape, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
-    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeDriverError,
+    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
+    RuntimeControlPlaneError, RuntimeDriverError,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,10 +143,22 @@ pub trait SessionLlmReconfigureHost: Send + Sync {
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError>;
 }
 
-/// Public Meerkat lifecycle/control mutations that now route through the
-/// top-level Meerkat machine seam instead of bespoke adapter entrypoints.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MeerkatMachineCommandError {
+    #[error(transparent)]
+    Driver(#[from] RuntimeDriverError),
+    #[error(transparent)]
+    Control(#[from] RuntimeControlPlaneError),
+}
+
+/// Unified internal Meerkat machine command surface.
+///
+/// This replaces the old per-domain dispatch split (session, drain,
+/// drain-local, control, ingress, legacy-run) while keeping the public helper
+/// methods and external runtime/machine surface unchanged.
 #[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineSessionCommand {
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum MeerkatMachineCommand {
     RegisterSession {
         session_id: SessionId,
     },
@@ -193,7 +207,16 @@ pub(crate) enum MeerkatMachineSessionCommand {
     },
     ReconfigureSessionLlmIdentity {
         session_id: SessionId,
-        request: Box<SessionLlmReconfigureRequest>,
+        previous_identity: Box<meerkat_core::SessionLlmIdentity>,
+        previous_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
+        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+        previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        target_identity: Box<meerkat_core::SessionLlmIdentity>,
+        target_capability_surface: Box<SessionLlmCapabilitySurface>,
+        next_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
+        next_capability_base_filter: meerkat_core::ToolFilter,
+        next_active_visibility_revision: u64,
+        tool_visibility_delta: Box<SessionToolVisibilityDelta>,
     },
     StagePersistentFilter {
         session_id: SessionId,
@@ -214,26 +237,6 @@ pub(crate) enum MeerkatMachineSessionCommand {
         session_id: SessionId,
         visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
     },
-}
-
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineSessionCommandResult {
-    Unit,
-    Bool(bool),
-    OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
-    Bindings(meerkat_core::SessionRuntimeBindings),
-    InputState(Option<InputState>),
-    ActiveInputs(Vec<InputId>),
-    LlmReconfigured(SessionLlmReconfigureReport),
-    VisibilityRevision(meerkat_core::ToolScopeRevision),
-    VisibilityPublished(meerkat_core::SessionToolVisibilityState),
-}
-
-/// Public comms-drain mutations that now route through the Meerkat machine
-/// instead of a wrapper/helper split.
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineDrainCommand {
     SetPeerIngressContext {
         session_id: SessionId,
         keep_alive: bool,
@@ -243,25 +246,13 @@ pub(crate) enum MeerkatMachineDrainCommand {
         session_id: SessionId,
         reason: DrainExitReason,
     },
-}
-
-pub(crate) enum MeerkatMachineDrainCommandResult {
-    Spawned(bool),
-    Notified,
-}
-
-/// Public comms-drain local lifecycle helpers that do not require `Arc<Self>`
-/// task-spawn authority.
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineDrainLocalCommand {
     AbortAll,
-    Abort { session_id: SessionId },
-    Wait { session_id: SessionId },
-}
-
-#[derive(CommandManifest)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineControlCommand {
+    Abort {
+        session_id: SessionId,
+    },
+    Wait {
+        session_id: SessionId,
+    },
     Ingest {
         runtime_id: LogicalRuntimeId,
         input: Input,
@@ -292,61 +283,14 @@ pub(crate) enum MeerkatMachineControlCommand {
         run_id: LifecycleRunId,
         sequence: u64,
     },
-}
-
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineIngressCommand {
-    AcceptWithCompletion { session_id: SessionId, input: Input },
-    AcceptWithoutWake { session_id: SessionId, input: Input },
-}
-
-pub(crate) enum MeerkatMachineIngressCommandResult {
     AcceptWithCompletion {
-        outcome: AcceptOutcome,
-        handle: Option<crate::completion::CompletionHandle>,
+        session_id: SessionId,
+        input: Input,
     },
-    AcceptOutcome(AcceptOutcome),
-}
-
-#[doc(hidden)]
-#[must_use]
-pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
-    let mut variants = IndexSet::new();
-    variants.extend(
-        MeerkatMachineSessionCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineControlCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineDrainCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineDrainLocalCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineIngressCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants.extend(
-        MeerkatMachineLegacyRunCommand::command_manifest()
-            .iter()
-            .copied(),
-    );
-    variants
-}
-
-#[derive(CommandManifest)]
-pub(crate) enum MeerkatMachineLegacyRunCommand {
+    AcceptWithoutWake {
+        session_id: SessionId,
+        input: Input,
+    },
     Prepare {
         session_id: SessionId,
         input: Input,
@@ -364,23 +308,33 @@ pub(crate) enum MeerkatMachineLegacyRunCommand {
     },
 }
 
+#[derive(Debug)]
 pub(crate) struct MeerkatMachineLegacyRunPrepared {
     pub input_id: InputId,
     pub run_id: RunId,
     pub primitive: RunPrimitive,
 }
 
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineLegacyRunCommandResult {
-    Prepared(MeerkatMachineLegacyRunPrepared),
-    Unit,
-}
-
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum MeerkatMachineControlCommandResult {
+pub(crate) enum MeerkatMachineCommandResult {
     AcceptOutcome(AcceptOutcome),
+    AcceptWithCompletion {
+        outcome: AcceptOutcome,
+        handle: Option<crate::completion::CompletionHandle>,
+        #[allow(dead_code)]
+        admission_signal: crate::driver::ephemeral::PostAdmissionSignal,
+    },
     Unit,
+    Bool(bool),
+    Spawned(bool),
+    OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
+    Bindings(meerkat_core::SessionRuntimeBindings),
+    InputState(Option<InputState>),
+    ActiveInputs(Vec<InputId>),
+    LlmReconfigured(SessionLlmReconfigureReport),
+    VisibilityRevision(meerkat_core::ToolScopeRevision),
+    VisibilityPublished(meerkat_core::SessionToolVisibilityState),
     RetireReport(RetireReport),
     RecycleReport(RecycleReport),
     ResetReport(ResetReport),
@@ -388,6 +342,16 @@ pub(crate) enum MeerkatMachineControlCommandResult {
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
+    Prepared(MeerkatMachineLegacyRunPrepared),
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+    MeerkatMachineCommand::command_manifest()
+        .iter()
+        .copied()
+        .collect()
 }
 
 /// Snapshot of completion waiters registered for one input.
@@ -446,8 +410,6 @@ pub struct MeerkatControlSnapshot {
     pub phase: RuntimeState,
     pub current_run_id: Option<RunId>,
     pub pre_run_phase: Option<RuntimeState>,
-    pub wake_pending: bool,
-    pub process_pending: bool,
 }
 
 /// Snapshot of one admitted runtime input.
@@ -468,15 +430,33 @@ pub struct MeerkatAdmittedInputSnapshot {
 /// Snapshot of runtime ingress truth for one session.
 #[derive(Debug, Clone)]
 pub struct MeerkatInputsSnapshot {
-    pub ingress_phase: IngressPhase,
     pub admission_order: Vec<MeerkatAdmittedInputSnapshot>,
     pub queue: Vec<InputId>,
     pub steer_queue: Vec<InputId>,
     pub current_run_id: Option<RunId>,
     pub current_run_contributors: Vec<InputId>,
-    pub wake_requested: bool,
-    pub process_requested: bool,
+    pub post_admission_signal: String,
     pub silent_intent_overrides: Vec<String>,
+}
+
+/// Snapshot of the canonical input-ledger carrier for one session.
+///
+/// These counts sit below the top-level Meerkat phase machine, but they drive
+/// the exact values returned by control-plane reports such as
+/// `DestroyReport.inputs_abandoned`.
+#[derive(Debug, Clone)]
+pub struct MeerkatLedgerSnapshot {
+    pub input_count: usize,
+    pub non_terminal_count: usize,
+    pub accepted_count: usize,
+    pub queued_count: usize,
+    pub staged_count: usize,
+    pub applied_count: usize,
+    pub applied_pending_consumption_count: usize,
+    pub consumed_count: usize,
+    pub superseded_count: usize,
+    pub coalesced_count: usize,
+    pub abandoned_count: usize,
 }
 
 /// Snapshot of runtime-owned async operation truth for one session.
@@ -502,6 +482,20 @@ pub struct MeerkatDrainSnapshot {
     pub handle_present: bool,
 }
 
+/// Schema-aligned projection of the Meerkat formal state derived from the
+/// live runtime.
+///
+/// This stays diagnostic and intentionally stringifies field values so the
+/// parity harness can compare full field vectors even where the runtime does
+/// not expose a first-class Rust type for every formal field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeerkatFormalStateProjection {
+    /// Formal fields that have a live runtime-backed projection today.
+    pub available_fields: BTreeMap<String, String>,
+    /// Formal fields that still have no canonical runtime source.
+    pub unavailable_fields: Vec<String>,
+}
+
 /// Diagnostic snapshot of the current Meerkat runtime spine.
 ///
 /// This is an observational scaffold over the existing runtime-owned Meerkat
@@ -511,9 +505,11 @@ pub struct MeerkatMachineSpineSnapshot {
     pub binding: MeerkatBindingSnapshot,
     pub control: MeerkatControlSnapshot,
     pub inputs: MeerkatInputsSnapshot,
+    pub ledger: MeerkatLedgerSnapshot,
     pub completion_waiters: MeerkatCompletionWaitersSnapshot,
     pub ops: MeerkatOpsSnapshot,
     pub drain: MeerkatDrainSnapshot,
+    pub formal_state: MeerkatFormalStateProjection,
 }
 
 impl MeerkatMachineSpineSnapshot {
@@ -618,14 +614,22 @@ impl MeerkatMachineSpineSnapshot {
             }
         }
 
-        // ContributorLifecycleInvariant: all current_run_contributors must have lifecycle=Staged
+        // ContributorLifecycleInvariant: all current_run_contributors must
+        // still belong to the active run lifecycle slice.
         for cid in &self.inputs.current_run_contributors {
             if let Some(snap) = self
                 .inputs
                 .admission_order
                 .iter()
                 .find(|a| &a.input_id == cid)
-                && snap.lifecycle != Some(InputLifecycleState::Staged)
+                && !matches!(
+                    snap.lifecycle,
+                    Some(
+                        InputLifecycleState::Staged
+                            | InputLifecycleState::Applied
+                            | InputLifecycleState::AppliedPendingConsumption
+                    )
+                )
             {
                 violations.push(format!(
                     "ContributorLifecycleInvariant: contributor {cid} has lifecycle {:?}",
@@ -659,13 +663,24 @@ impl MeerkatMachineSpineSnapshot {
                 .push("CurrentRunContributorsInvariant: active run but no contributors".into());
         }
 
-        // RunIdsAlignedInvariant: ~HasActiveRun \/ RunIdsAligned
-        if self.control.current_run_id.is_some()
-            && self.control.current_run_id != self.inputs.current_run_id
-        {
-            violations.push(
-                "RunIdsAlignedInvariant: control.current_run_id != inputs.current_run_id".into(),
-            );
+        // ContributorRunIdentityInvariant: when control owns an active run,
+        // every current contributor must point at that same run in the
+        // ingress bookkeeping.
+        if let Some(control_run_id) = &self.control.current_run_id {
+            for cid in &self.inputs.current_run_contributors {
+                if let Some(snap) = self
+                    .inputs
+                    .admission_order
+                    .iter()
+                    .find(|a| &a.input_id == cid)
+                    && snap.last_run_id.as_ref() != Some(control_run_id)
+                {
+                    violations.push(format!(
+                        "ContributorRunIdentityInvariant: contributor {cid} has last_run_id {:?}, expected {:?}",
+                        snap.last_run_id, control_run_id
+                    ));
+                }
+            }
         }
 
         // --- Ops invariants ---

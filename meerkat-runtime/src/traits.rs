@@ -2,7 +2,7 @@
 //!
 //! These define the interface between surfaces and the runtime control-plane.
 
-use meerkat_core::lifecycle::{InputId, RunEvent, RunId};
+use meerkat_core::lifecycle::{InputId, RunId};
 use serde::{Deserialize, Serialize};
 
 use crate::accept::AcceptOutcome;
@@ -52,16 +52,6 @@ pub enum RuntimeControlPlaneError {
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
-}
-
-/// Runtime control commands (distinct from RunControlCommand which is core-level).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
-pub enum RuntimeControlCommand {
-    /// Stop the runtime gracefully.
-    Stop,
-    /// Resume the runtime after recovery.
-    Resume,
 }
 
 /// Report from a recovery operation.
@@ -125,26 +115,8 @@ pub trait RuntimeDriver: Send + Sync {
         event: RuntimeEventEnvelope,
     ) -> Result<(), RuntimeDriverError>;
 
-    /// Handle a run event (from core).
-    async fn on_run_event(&mut self, event: RunEvent) -> Result<(), RuntimeDriverError>;
-
-    /// Handle a runtime control command.
-    async fn on_runtime_control(
-        &mut self,
-        command: RuntimeControlCommand,
-    ) -> Result<(), RuntimeDriverError>;
-
     /// Recover from a crash/restart.
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError>;
-
-    /// Retire the runtime (no new input, abandon pending).
-    async fn retire(&mut self) -> Result<RetireReport, RuntimeDriverError>;
-
-    /// Reset the runtime (abandon all pending input, drain queue).
-    async fn reset(&mut self) -> Result<ResetReport, RuntimeDriverError>;
-
-    /// Destroy the runtime (terminal state, abandon all pending input).
-    async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError>;
 
     /// Get the current runtime state.
     fn runtime_state(&self) -> RuntimeState;
@@ -226,17 +198,6 @@ mod tests {
     // Verify traits are object-safe
     fn _assert_driver_object_safe(_: &dyn RuntimeDriver) {}
     fn _assert_control_plane_object_safe(_: &dyn RuntimeControlPlane) {}
-
-    #[test]
-    fn runtime_control_command_serde() {
-        let cmd = RuntimeControlCommand::Stop;
-        let json = serde_json::to_value(&cmd).unwrap();
-        assert_eq!(json["command"], "stop");
-
-        let cmd = RuntimeControlCommand::Resume;
-        let json = serde_json::to_value(&cmd).unwrap();
-        assert_eq!(json["command"], "resume");
-    }
 
     #[test]
     fn runtime_driver_error_display() {

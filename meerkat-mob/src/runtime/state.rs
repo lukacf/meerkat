@@ -1,4 +1,7 @@
 #[cfg(test)]
+#[cfg(test)]
+use super::mob_lifecycle_authority::MobLifecycleSnapshot;
+#[cfg(test)]
 use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
@@ -138,6 +141,10 @@ pub(super) enum MobCommand {
     #[cfg(test)]
     OrchestratorSnapshot {
         reply_tx: oneshot::Sender<MobOrchestratorSnapshot>,
+    },
+    #[cfg(test)]
+    LifecycleSnapshot {
+        reply_tx: oneshot::Sender<MobLifecycleSnapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

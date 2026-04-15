@@ -364,6 +364,7 @@ pub fn flow_run_machine() -> MachineSchema {
                 variant("TerminalizeCanceled"),
             ],
         },
+        surface_only_inputs: vec![],
         signals: EnumSchema {
             name: "FlowRunSignal".into(),
             variants: vec![],

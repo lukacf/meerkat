@@ -20,9 +20,29 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
 use meerkat_runtime::input_state::InputLifecycleState;
 use meerkat_runtime::policy_table::DefaultPolicyTable;
+use meerkat_runtime::post_admission_signal_from_accept_outcome;
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::traits::RuntimeDriver;
 use uuid::Uuid;
+
+fn assert_machine_owned_admission_signal(
+    outcome: &meerkat_runtime::AcceptOutcome,
+    request_immediate_processing: bool,
+    expected: PostAdmissionSignal,
+) {
+    assert_eq!(
+        post_admission_signal_from_accept_outcome(outcome, request_immediate_processing),
+        expected
+    );
+}
+
+fn bind_running(driver: &mut EphemeralRuntimeDriver) {
+    driver.contract_set_control_projection(
+        RuntimeState::Running,
+        Some(meerkat_core::lifecycle::RunId::new()),
+        Some(RuntimeState::Idle),
+    );
+}
 
 fn iid() -> InteractionId {
     InteractionId(Uuid::now_v7())
@@ -124,7 +144,11 @@ async fn completed_response_idle_wakes() {
     // Verify driver behavior
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +187,11 @@ async fn accepted_response_no_wake() {
     // Verify driver: accepted but no wake, queued (not immediately consumed)
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(!driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::None);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 
     // Input should be queued (StageRunBoundary queues for boundary application)
     if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome {
@@ -197,7 +225,11 @@ async fn failed_response_idle_wakes() {
     // Verify: terminal response + idle → wake
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,16 +242,21 @@ async fn response_with_passthrough_message_both_queued() {
     // Accept a completed response
     let resp = make_response("peer-1", ResponseStatus::Completed);
     let input1 = interaction_to_peer_input(&resp, &rid());
-    driver.accept_input(input1).await.unwrap();
+    let outcome1 = driver.accept_input(input1).await.unwrap();
 
     // Accept a message
     let msg = make_message("peer-2", "hello");
     let input2 = interaction_to_peer_input(&msg, &rid());
-    driver.accept_input(input2).await.unwrap();
+    let outcome2 = driver.accept_input(input2).await.unwrap();
 
     // Both should be queued
     assert_eq!(driver.queue().len(), 2);
-    assert!(driver.take_wake_requested()); // Terminal response woke it
+    assert_machine_owned_admission_signal(&outcome1, false, PostAdmissionSignal::WakeLoop);
+    assert_machine_owned_admission_signal(&outcome2, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +267,8 @@ async fn response_after_completed_turn_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Simulate a completed run by starting and completing
-    let run_id = meerkat_core::lifecycle::RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
-    driver.complete_run().unwrap();
+    bind_running(&mut driver);
+    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);
@@ -240,7 +276,11 @@ async fn response_after_completed_turn_wakes() {
     let outcome = driver.accept_input(input).await.unwrap();
 
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested()); // Should wake idle runtime
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +366,11 @@ async fn non_silent_intent_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +390,11 @@ async fn message_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
     assert_eq!(driver.queue().len(), 1);
 }
 
@@ -362,7 +410,11 @@ async fn request_triggers_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 #[tokio::test]
@@ -423,9 +475,7 @@ async fn message_while_running_requests_cooperative_interrupt() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Start a run
-    driver
-        .start_run(meerkat_core::lifecycle::RunId::new())
-        .unwrap();
+    bind_running(&mut driver);
 
     let interaction = make_message("peer-1", "hello");
     let input = interaction_to_peer_input(&interaction, &rid());
@@ -441,10 +491,13 @@ async fn message_while_running_requests_cooperative_interrupt() {
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
     assert_eq!(
-        driver.take_post_admission_signal(),
+        post_admission_signal_from_accept_outcome(&outcome, false),
         PostAdmissionSignal::InterruptYielding
     );
-    assert!(!driver.take_wake_requested());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -454,9 +507,7 @@ async fn message_while_running_requests_cooperative_interrupt() {
 async fn terminal_response_while_running_no_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
-    driver
-        .start_run(meerkat_core::lifecycle::RunId::new())
-        .unwrap();
+    bind_running(&mut driver);
 
     let interaction = make_response("peer-1", ResponseStatus::Completed);
     let input = interaction_to_peer_input(&interaction, &rid());
@@ -468,7 +519,11 @@ async fn terminal_response_while_running_no_wake() {
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(!driver.take_wake_requested());
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::None);
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -550,12 +605,18 @@ async fn terminal_response_with_steer_policy_while_running() {
 
     // Verify driver behavior while running.
     let mut driver = EphemeralRuntimeDriver::new(rid());
-    driver
-        .start_run(meerkat_core::lifecycle::RunId::new())
-        .unwrap();
+    bind_running(&mut driver);
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(
+        &outcome,
+        true,
+        PostAdmissionSignal::RequestImmediateProcessing,
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -591,5 +652,13 @@ async fn terminal_response_with_steer_policy_while_idle() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert!(driver.take_wake_requested());
+    assert_machine_owned_admission_signal(
+        &outcome,
+        true,
+        PostAdmissionSignal::RequestImmediateProcessing,
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }

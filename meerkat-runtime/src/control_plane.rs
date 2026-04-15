@@ -10,7 +10,7 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use crate::meerkat_machine::{SharedCompletionRegistry, SharedDriver};
 use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::mpsc;
-use crate::traits::{RuntimeControlCommand, RuntimeDriverError};
+use crate::traits::RuntimeDriverError;
 
 async fn mark_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriverError> {
     let mut driver = driver.lock().await;
@@ -21,10 +21,8 @@ async fn mark_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriver
         return Ok(());
     }
 
-    driver
-        .as_driver_mut()
-        .on_runtime_control(RuntimeControlCommand::Stop)
-        .await
+    driver.set_control_projection(RuntimeState::Stopped, None, None);
+    driver.finalize_stop_runtime().await
 }
 
 /// Deliver one executor control command and report whether the runtime loop

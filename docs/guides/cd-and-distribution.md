@@ -7,7 +7,7 @@ icon: "truck-fast"
 # CD and Distribution Rulebook
 
 This document captures the publication model for Meerkat binaries and SDKs
-(`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`, Python SDK,
+(`rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, `rkat-mcp`, Python SDK,
 and TypeScript SDK).
 
 ## Goals
@@ -45,7 +45,9 @@ Version and contract compatibility must already be in sync via:
 Release artifacts are built for each surface binary:
 
 - `rkat` (CLI)
+- `rkat-mini`
 - `rkat-rpc`
+- `rkat-rpc-mini`
 - `rkat-rest`
 - `rkat-mcp`
 

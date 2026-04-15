@@ -241,7 +241,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     assert!(matches!(
         state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
-            reason: InputAbandonReason::Destroyed,
+            reason: InputAbandonReason::Stopped,
         })
     ));
 }

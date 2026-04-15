@@ -286,7 +286,7 @@ class MobUnwireResult:
 @dataclass
 class RuntimeStateResult:
     """Response payload for `runtime/state`."""
-    state: Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed'] = None
+    state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed'] = None
 
 
 @dataclass
@@ -457,7 +457,7 @@ WireRenderClass = Literal['user_prompt', 'peer_message', 'peer_request', 'peer_r
 WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 
 # Public runtime state projection used by RPC surfaces.
-WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'recovering', 'retired', 'stopped', 'destroyed']
+WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
 
 # Discriminator for `runtime/accept` responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']

@@ -116,6 +116,8 @@ pub use handle::{
     MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
     SpawnResult,
 };
+#[cfg(test)]
+pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
 pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};

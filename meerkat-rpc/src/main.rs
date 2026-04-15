@@ -7,9 +7,10 @@ use meerkat_core::{
 use meerkat_store::{RealmBackend, RealmOrigin};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
-#[command(name = "rkat-rpc", version = env!("CARGO_PKG_VERSION"))]
+#[command(name = env!("CARGO_BIN_NAME"), version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Meerkat JSON-RPC stdio server")]
 struct Cli {
     /// Explicit realm ID to join.
@@ -57,8 +58,12 @@ impl From<RealmBackendArg> for RealmBackend {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let cli = Cli::parse();

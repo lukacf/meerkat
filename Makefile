@@ -12,7 +12,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all build test test-unit test-int e2e-fast e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
+.PHONY: all build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit ci ci-smoke release-preflight release-preflight-smoke publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory deprecated-backend-gate deprecated-backend-inventory verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift rmat-audit
 
 # Default target
 all: ci
@@ -46,6 +46,10 @@ test-int:
 e2e-fast:
 	@echo "$(GREEN)Running e2e-fast lane...$(NC)"
 	$(CARGO) e2e-fast
+
+e2e-build:
+	@echo "$(YELLOW)Running e2e-build lane (ignored by default)...$(NC)"
+	$(CARGO) test -p meerkat-integration-tests --test e2e_build_lane -- --ignored
 
 # Real local resources only (binaries, sockets, filesystems; no live providers)
 e2e-system:
@@ -121,12 +125,15 @@ test-feature-matrix-surface:
 	@echo "$(GREEN)Running surface feature matrix checks...$(NC)"
 	$(CARGO) check -p meerkat-rpc --no-default-features
 	$(CARGO) check -p meerkat-rpc --no-default-features --features comms,mcp
+	$(CARGO) check -p meerkat-rpc --bin rkat-rpc-mini --no-default-features --features mini-surface
 	$(CARGO) check -p meerkat-rest --no-default-features
 	$(CARGO) check -p meerkat-rest --no-default-features --features comms
 	$(CARGO) check -p meerkat-mcp-server --no-default-features
 	$(CARGO) check -p meerkat-mcp-server --no-default-features --features comms
 	$(CARGO) check -p rkat --no-default-features --features session-store
 	$(CARGO) check -p rkat --no-default-features --features session-store,mcp
+	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store
+	$(CARGO) check -p rkat --bin rkat-mini --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
 	$(CARGO) nextest run -p rkat --no-default-features --features session-store,mcp --no-capture
 	$(CARGO) check -p rkat --no-default-features --features session-store,comms,mcp
 
@@ -331,6 +338,9 @@ verify-sdk-wrapper-freshness:
 check-rust-release-packaging:
 	@scripts/check-rust-release-packaging.sh
 
+check-mini-skill-size:
+	@scripts/check-mini-skill-size.sh
+
 # Bump Python + TypeScript SDK versions to match Cargo workspace version
 bump-sdk-versions:
 	@scripts/bump-sdk-versions.sh
@@ -344,7 +354,7 @@ regen-schemas:
 	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
 
 # Full pre-release checklist
-release-preflight: ci verify-schema-freshness check-rust-release-packaging
+release-preflight: ci verify-schema-freshness check-rust-release-packaging check-mini-skill-size
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist:$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
@@ -362,7 +372,7 @@ release-preflight: ci verify-schema-freshness check-rust-release-packaging
 
 # Smoke pre-release checklist.
 # Useful for local iteration; skips full feature-matrix expansion.
-release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-packaging
+release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-packaging check-mini-skill-size
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist (smoke):$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"

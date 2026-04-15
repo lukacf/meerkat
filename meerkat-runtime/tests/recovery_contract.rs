@@ -10,7 +10,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
-use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunEvent, RunId};
+use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
@@ -130,6 +130,21 @@ fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
     let mut ids = ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
     ids.sort();
     ids
+}
+
+fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
+    driver.contract_set_control_projection(
+        RuntimeState::Running,
+        Some(run_id),
+        Some(pre_run_phase),
+    );
+}
+
+async fn retire_runtime(
+    driver: &mut PersistentRuntimeDriver,
+) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
+    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_finalize_retire().await
 }
 
 #[tokio::test]
@@ -334,7 +349,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
             harness.name
         );
 
-        let retire_report = driver.retire().await.unwrap();
+        let retire_report = retire_runtime(&mut driver).await.unwrap();
         assert_eq!(
             retire_report.inputs_pending_drain, 2,
             "{}: retire should preserve the replayable contributors for later drain",
@@ -510,22 +525,16 @@ async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of
     );
 
     let run_id = RunId::new();
-    driver.start_run(run_id.clone()).unwrap();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
     driver.stage_input(&first_id, &run_id).unwrap();
     driver.stage_input(&second_id, &run_id).unwrap();
     driver
-        .on_run_event(RunEvent::BoundaryApplied {
-            run_id: run_id.clone(),
-            receipt: make_receipt(run_id, vec![first_id.clone(), second_id.clone()], 0),
-            session_snapshot: Some(make_session_snapshot()),
-        })
+        .boundary_applied(
+            run_id.clone(),
+            make_receipt(run_id, vec![first_id.clone(), second_id.clone()], 0),
+            Some(make_session_snapshot()),
+        )
         .await
-        .unwrap();
-
-    use meerkat_runtime::{RuntimeControlInput, RuntimeControlMutator};
-    driver
-        .control_mut()
-        .apply(RuntimeControlInput::RecoverRequested)
         .unwrap();
 
     let report = driver.recover().await.unwrap();

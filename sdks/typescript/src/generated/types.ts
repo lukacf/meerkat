@@ -206,7 +206,7 @@ export type WireRenderClass = "user_prompt" | "peer_message" | "peer_request" | 
 
 export type WireRenderSalience = "background" | "normal" | "important" | "urgent";
 
-export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "recovering" | "retired" | "stopped" | "destroyed";
+export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
@@ -238,7 +238,7 @@ export interface MobUnwireResult {
 }
 
 export interface RuntimeStateResult {
-  state: "initializing" | "idle" | "attached" | "running" | "recovering" | "retired" | "stopped" | "destroyed";
+  state: "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 }
 
 export interface RuntimeAcceptResult {

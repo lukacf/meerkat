@@ -490,15 +490,13 @@ impl ToolScope {
                 )
             })
             .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
-        // Capture pre-promotion visibility state for change detection,
-        // then promote staged → active.
-        let pre_promotion = self.visibility_owner.visibility_state()?;
+        let previous_visibility_state = self.visibility_owner.visibility_state()?;
         let visibility_state = self.promote_staged_visibility()?;
         self.apply_staged_projection_with_previous(
             new_base_tools,
             control_tool_names,
             deferred_tool_names,
-            &pre_promotion,
+            &previous_visibility_state,
             &visibility_state,
         )
     }
@@ -528,7 +526,7 @@ impl ToolScope {
         )
     }
 
-    fn apply_staged_projection_with_previous(
+    pub(crate) fn apply_staged_projection_with_previous(
         &self,
         new_base_tools: Arc<[Arc<ToolDef>]>,
         control_tool_names: HashSet<String>,
@@ -1351,6 +1349,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["visible".to_string()]
         );
+    }
+
+    #[test]
+    fn boundary_projection_uses_pre_promotion_visibility_for_change_detection() {
+        let scope = ToolScope::new(tools(&["visible", "secret"]));
+        let handle = scope.handle();
+
+        handle
+            .stage_external_filter(ToolFilter::Deny(set(&["secret"])))
+            .unwrap();
+
+        let previous_visibility_state = scope.visibility_state().unwrap();
+        let promoted_visibility_state = scope.promote_staged_visibility().unwrap();
+        let applied = scope
+            .apply_staged_projection_with_previous(
+                tools(&["visible", "secret"]),
+                HashSet::new(),
+                HashSet::new(),
+                &previous_visibility_state,
+                &promoted_visibility_state,
+            )
+            .expect("projection refresh should detect the promoted visibility change");
+
+        assert!(applied.visible_changed());
+        assert_eq!(applied.previous_visible_names, vec!["visible", "secret"]);
+        assert_eq!(applied.visible_names, vec!["visible"]);
+        assert_eq!(applied.previous_active_revision, ToolScopeRevision(0));
+        assert_eq!(applied.applied_revision, ToolScopeRevision(1));
     }
 
     #[test]

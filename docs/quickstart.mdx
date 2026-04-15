@@ -29,6 +29,7 @@ meerkat = "0.5"
     ```bash
     cargo install --path meerkat-cli
     ```
+    <Note>`rkat-mini` ships as an official slim binary in release artifacts. For source builds, see [Mini surfaces](/guides/mini-surfaces).</Note>
   </Tab>
 </Tabs>
 
@@ -88,6 +89,7 @@ meerkat = "0.5"
     ```bash
     export ANTHROPIC_API_KEY=sk-...
     rkat run "What is the capital of France?"
+    rkat-mini "What is the capital of France?"
     ```
   </Tab>
 </Tabs>
@@ -128,5 +130,6 @@ The agent completes its current turn when a limit is hit, then stops.
 ## What's next
 
 - [Examples](/examples/sessions) -- every feature shown across surfaces
+- [Mini surfaces](/guides/mini-surfaces) -- shipped slim binaries and custom-build guidance
 - [Providers](/concepts/providers) -- model tables and provider parameters
 - [Rust SDK](/rust/overview) / [Python SDK](/sdks/python/overview) / [TypeScript SDK](/sdks/typescript/overview) -- full API reference

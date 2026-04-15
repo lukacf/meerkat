@@ -10,10 +10,20 @@ use meerkat_runtime::input::{
 };
 use meerkat_runtime::policy_table::DefaultPolicyTable;
 use meerkat_runtime::traits::RuntimeDriver;
-use meerkat_runtime::{ApplyMode, RoutingDisposition, WakeMode};
+use meerkat_runtime::{
+    ApplyMode, RoutingDisposition, WakeMode, post_admission_signal_from_accept_outcome,
+};
 
 fn runtime_id() -> LogicalRuntimeId {
     LogicalRuntimeId::new("peer-handling-mode-contract")
+}
+
+fn bind_running(driver: &mut EphemeralRuntimeDriver) {
+    driver.contract_set_control_projection(
+        meerkat_runtime::RuntimeState::Running,
+        Some(RunId::new()),
+        Some(meerkat_runtime::RuntimeState::Idle),
+    );
 }
 
 fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
@@ -41,7 +51,7 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
 #[tokio::test]
 async fn running_queue_peer_message_interrupts_yielding() {
     let mut driver = EphemeralRuntimeDriver::new(runtime_id());
-    driver.start_run(RunId::new()).expect("start run");
+    bind_running(&mut driver);
 
     let input = peer_message_input(None);
     let policy = DefaultPolicyTable::resolve(&input, false);
@@ -52,16 +62,19 @@ async fn running_queue_peer_message_interrupts_yielding() {
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
     assert_eq!(
-        driver.take_post_admission_signal(),
+        post_admission_signal_from_accept_outcome(&outcome, false),
         PostAdmissionSignal::InterruptYielding
     );
-    assert!(!driver.take_wake_requested());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }
 
 #[tokio::test]
 async fn running_steer_peer_message_requests_immediate_processing() {
     let mut driver = EphemeralRuntimeDriver::new(runtime_id());
-    driver.start_run(RunId::new()).expect("start run");
+    bind_running(&mut driver);
 
     let input = peer_message_input(Some(HandlingMode::Steer));
     let policy = DefaultPolicyTable::resolve(&input, false);
@@ -71,7 +84,11 @@ async fn running_steer_peer_message_requests_immediate_processing() {
 
     let outcome = driver.accept_input(input).await.expect("accept input");
     assert!(outcome.is_accepted());
-    let signal = driver.take_post_admission_signal();
+    let signal = post_admission_signal_from_accept_outcome(&outcome, true);
     assert_eq!(signal, PostAdmissionSignal::RequestImmediateProcessing);
     assert!(signal.should_wake());
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
 }

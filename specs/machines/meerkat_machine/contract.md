@@ -70,6 +70,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListActiveInputs`
 - `RuntimeState`
 - `LoadBoundaryReceipt`
+- `Recover`
 
 ## Signals
 - `Initialize`
@@ -517,36 +518,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `equal_revision_requires_equal_active_and_staged_input`
 - Emits: `CommittedVisibleSetPublished`
 - To: `Stopped`
-
-### `RecoverFromIdle`
-- From: `Idle`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Idle`
-
-### `RecoverFromAttached`
-- From: `Attached`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Attached`
-
-### `RecoverFromRetired`
-- From: `Retired`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Retired`
-
-### `RecoverFromStopped`
-- From: `Stopped`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Stopped`
-
-### `RecoverFromInitializing`
-- From: `Initializing`
-- On: `Recover`()
-- Emits: `RuntimeNotice`
-- To: `Initializing`
 
 ### `RetireRequestedFromIdle`
 - From: `Idle`, `Attached`, `Running`

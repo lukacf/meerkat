@@ -35,6 +35,7 @@ use crate::runtime::MobState;
 /// [`MobOrchestratorAuthority::apply`]. The authority decides transition legality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MobOrchestratorInput {
+    #[cfg_attr(not(test), allow(dead_code))]
     InitializeOrchestrator,
     BindCoordinator,
     #[cfg_attr(
@@ -208,6 +209,7 @@ pub(crate) struct MobOrchestratorAuthority {
 impl sealed::Sealed for MobOrchestratorAuthority {}
 
 impl MobOrchestratorAuthority {
+    #[cfg_attr(not(test), allow(dead_code))]
     /// Create a new authority in Creating phase with default fields.
     pub(crate) fn new(observable: Arc<AtomicU8>) -> Self {
         observable.store(MobState::Creating as u8, Ordering::Release);

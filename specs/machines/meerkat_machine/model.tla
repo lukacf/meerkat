@@ -621,41 +621,6 @@ PublishCommittedVisibleSetStopped(active_filter, staged_filter, arg_active_reque
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides >>
 
 
-RecoverFromIdle ==
-    /\ phase = "Idle"
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
-
-
-RecoverFromAttached ==
-    /\ phase = "Attached"
-    /\ phase' = "Attached"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
-
-
-RecoverFromRetired ==
-    /\ phase = "Retired"
-    /\ phase' = "Retired"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
-
-
-RecoverFromStopped ==
-    /\ phase = "Stopped"
-    /\ phase' = "Stopped"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
-
-
-RecoverFromInitializing ==
-    /\ phase = "Initializing"
-    /\ phase' = "Initializing"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, silent_intent_overrides, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
-
-
 RetireRequestedFromIdle ==
     /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Running"
     /\ phase' = "Retired"
@@ -1522,11 +1487,6 @@ Next ==
     \/ \E active_filter \in ToolFilterValues : \E staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetRunning(active_filter, staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
     \/ \E active_filter \in ToolFilterValues : \E staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetRetired(active_filter, staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
     \/ \E active_filter \in ToolFilterValues : \E staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetStopped(active_filter, staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
-    \/ RecoverFromIdle
-    \/ RecoverFromAttached
-    \/ RecoverFromRetired
-    \/ RecoverFromStopped
-    \/ RecoverFromInitializing
     \/ RetireRequestedFromIdle
     \/ Reset
     \/ StopRuntimeExecutorDetached

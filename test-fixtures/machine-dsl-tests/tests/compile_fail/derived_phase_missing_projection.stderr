@@ -1,0 +1,5 @@
+error: derived-phase machines require a `phase_projection` block
+ --> tests/compile_fail/derived_phase_missing_projection.rs:4:13
+  |
+4 |     machine Bad {
+  |             ^^^

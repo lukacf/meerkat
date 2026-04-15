@@ -1,0 +1,11 @@
+error: terminal phase `NonexistentPhase` is not in the phase enum
+  --> tests/compile_fail/unknown_phase_in_terminal.rs:16:19
+   |
+16 |         terminal [NonexistentPhase]
+   |                   ^^^^^^^^^^^^^^^^
+
+error: derived-phase machines require a `phase_projection` block
+ --> tests/compile_fail/unknown_phase_in_terminal.rs:4:13
+  |
+4 |     machine Bad {
+  |             ^^^

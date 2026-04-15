@@ -12,5 +12,8 @@ meerkat-machine-kernels = { path = "../../meerkat-machine-kernels" }
 meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
 indexmap = "2"
 
+[dev-dependencies]
+trybuild = "1"
+
 [lints]
 workspace = true

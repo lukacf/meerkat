@@ -42,7 +42,6 @@ pub enum RuntimeControlInput {
     ResumeRequested,
     ExternalToolDeltaReceived,
     RecycleRequested,
-    RecycleSucceeded,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +58,6 @@ pub enum RuntimeControlEffect {
     EmitRuntimeNotice { kind: String, detail: String },
     ResolveCompletionAsTerminated { reason: String },
     ApplyControlPlaneCommand { command: String },
-    InitiateRecycle,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,9 +205,8 @@ impl RuntimeControlAuthority {
     > {
         use RuntimeControlInput::{
             AttachExecutor, BeginRun, DestroyRequested, DetachExecutor, ExternalToolDeltaReceived,
-            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
-            ResetRequested, ResumeRequested, RetireRequested, RunCancelled, RunCompleted,
-            RunFailed, StopRequested,
+            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, ResetRequested,
+            ResumeRequested, RetireRequested, RunCancelled, RunCompleted, RunFailed, StopRequested,
         };
         use RuntimeState::{
             Attached, Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped,
@@ -467,28 +464,30 @@ impl RuntimeControlAuthority {
                 Attached
             }
 
-            // RecycleRequested from Retired/Idle/Attached (guard: no_active_run)
-            (Retired | Idle | Attached, RecycleRequested) => {
+            // RecycleRequested collapses directly to the post-recycle control phase.
+            // The checked-in Meerkat machine already models recycle as a direct
+            // top-level transition; the old Recovering hop here was helper-only.
+            (Retired | Idle, RecycleRequested) => {
                 if fields.current_run_id.is_some() {
                     return Err(RuntimeStateTransitionError {
                         from: phase,
-                        to: Recovering,
+                        to: Idle,
                     });
                 }
-                fields.pre_run_state = Some(phase);
-                effects.push(RuntimeControlEffect::InitiateRecycle);
-                Recovering
-            }
-
-            // RecycleSucceeded from Recovering
-            (Recovering, RecycleSucceeded) => {
                 fields.current_run_id = None;
                 fields.pre_run_state = None;
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "Recycle".into(),
-                    detail: "Succeeded".into(),
-                });
                 Idle
+            }
+            (Attached, RecycleRequested) => {
+                if fields.current_run_id.is_some() {
+                    return Err(RuntimeStateTransitionError {
+                        from: phase,
+                        to: Attached,
+                    });
+                }
+                fields.current_run_id = None;
+                fields.pre_run_state = None;
+                Attached
             }
 
             // All other combinations are illegal.
@@ -535,9 +534,8 @@ impl RuntimeControlAuthority {
     fn infer_target(&self, input: &RuntimeControlInput) -> RuntimeState {
         use RuntimeControlInput::{
             AttachExecutor, BeginRun, DestroyRequested, DetachExecutor, ExternalToolDeltaReceived,
-            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
-            ResetRequested, ResumeRequested, RetireRequested, RunCancelled, RunCompleted,
-            RunFailed, StopRequested,
+            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, ResetRequested,
+            ResumeRequested, RetireRequested, RunCancelled, RunCompleted, RunFailed, StopRequested,
         };
         match input {
             Initialize => RuntimeState::Idle,
@@ -548,10 +546,12 @@ impl RuntimeControlAuthority {
                 self.resolve_run_return(&self.fields)
             }
             ExternalToolDeltaReceived => self.phase,
-            RecoverRequested | RecycleRequested => RuntimeState::Recovering,
-            RecoverySucceeded | RecycleSucceeded | ResumeRequested | ResetRequested => {
-                RuntimeState::Idle
-            }
+            RecoverRequested => RuntimeState::Recovering,
+            RecycleRequested => match self.phase {
+                RuntimeState::Attached => RuntimeState::Attached,
+                _ => RuntimeState::Idle,
+            },
+            RecoverySucceeded | ResumeRequested | ResetRequested => RuntimeState::Idle,
             RetireRequested => RuntimeState::Retired,
             StopRequested => RuntimeState::Stopped,
             DestroyRequested => RuntimeState::Destroyed,
@@ -1068,25 +1068,25 @@ mod tests {
         let mut auth = make_idle();
         auth.apply(RuntimeControlInput::RetireRequested).unwrap();
         let t = auth.apply(RuntimeControlInput::RecycleRequested).unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Recovering);
-        assert_eq!(auth.pre_run_state(), Some(RuntimeState::Retired));
-        assert!(t.effects.contains(&RuntimeControlEffect::InitiateRecycle));
+        assert_eq!(t.next_phase, RuntimeState::Idle);
+        assert_eq!(auth.pre_run_state(), None);
+        assert!(auth.current_run_id().is_none());
     }
 
     #[test]
     fn recycle_from_idle() {
         let mut auth = make_idle();
         let t = auth.apply(RuntimeControlInput::RecycleRequested).unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Recovering);
-        assert_eq!(auth.pre_run_state(), Some(RuntimeState::Idle));
+        assert_eq!(t.next_phase, RuntimeState::Idle);
+        assert_eq!(auth.pre_run_state(), None);
     }
 
     #[test]
     fn recycle_from_attached() {
         let mut auth = make_attached();
         let t = auth.apply(RuntimeControlInput::RecycleRequested).unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Recovering);
-        assert_eq!(auth.pre_run_state(), Some(RuntimeState::Attached));
+        assert_eq!(t.next_phase, RuntimeState::Attached);
+        assert_eq!(auth.pre_run_state(), None);
     }
 
     #[test]
@@ -1095,23 +1095,6 @@ mod tests {
         // Complete the run first to get to idle, then manually set run_id
         // to simulate a bad state. Actually, Running is not in from list.
         assert!(auth.apply(RuntimeControlInput::RecycleRequested).is_err());
-    }
-
-    // --- RecycleSucceeded ---
-
-    #[test]
-    fn recycle_succeeded_from_recovering() {
-        let mut auth = make_idle();
-        auth.apply(RuntimeControlInput::RecycleRequested).unwrap();
-        let t = auth.apply(RuntimeControlInput::RecycleSucceeded).unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert!(auth.current_run_id().is_none());
-        assert!(auth.pre_run_state().is_none());
-        assert!(matches!(
-            &t.effects[0],
-            RuntimeControlEffect::EmitRuntimeNotice { kind, detail }
-                if kind == "Recycle" && detail == "Succeeded"
-        ));
     }
 
     // --- Full cycles ---

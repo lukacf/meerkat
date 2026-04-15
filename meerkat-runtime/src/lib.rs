@@ -7,7 +7,8 @@
 //! - Input acceptance, validation, and queueing
 //! - InputState lifecycle tracking
 //! - Policy resolution (what to do with each input)
-//! - Runtime state machine (Idle ↔ Attached ↔ Running ↔ Recovering → Stopped/Destroyed)
+//! - Runtime state machine (Idle ↔ Attached ↔ Running ↔ Retired/Stopped/Destroyed,
+//!   with compatibility-facing `Recovering` still present in `RuntimeState`)
 //! - Retire/recycle/reset lifecycle operations
 //! - RuntimeEvent observability
 //!

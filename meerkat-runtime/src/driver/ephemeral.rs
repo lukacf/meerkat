@@ -965,10 +965,12 @@ impl EphemeralRuntimeDriver {
             .control
             .apply(RuntimeControlInput::RecycleRequested)
             .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
+        if transition.from_phase != transition.next_phase {
+            self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                from: transition.from_phase,
+                to: transition.next_phase,
+            }));
+        }
 
         let transferred = self.ledger.active_input_ids().len();
         let runtime_id = self.runtime_id.clone();
@@ -984,15 +986,6 @@ impl EphemeralRuntimeDriver {
         self.control = control;
 
         let _ = self.recover_ephemeral();
-
-        let transition = self
-            .control
-            .apply(RuntimeControlInput::RecycleSucceeded)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        self.emit_event(RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
-            from: transition.from_phase,
-            to: transition.next_phase,
-        }));
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
 

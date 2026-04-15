@@ -88,6 +88,11 @@ Current state:
   `RuntimeIngressAuthority`, while the live runtime loop and exact audits were
   already driven by emitted wake/process effects plus the typed
   `post_admission_signal`
+- live recycle no longer detours through a handwritten control-side
+  `Recovering` hop: the runtime helper now realizes recycle as the same direct
+  control projection the checked-in Meerkat machine already models
+  (`Idle/Retired -> Idle`, `Attached -> Attached`), and exact parity stayed
+  green after removing the extra helper-only recycle completion transition
 - the top-level Meerkat machine no longer carries the filter mirror pair
   `active_filter` / `staged_filter`; the authoritative
   `MachineToolVisibilityOwner` still owns the real filter state, exact parity
@@ -142,6 +147,11 @@ Current exact-parity state:
   coarse control reducer for internal `Recovering` / recycle paths and the
   duplicated run-return bookkeeping that the checked-in machine now models as
   `current_run_id` / `pre_run_phase`
+- after the recycle alignment, that remaining gap is narrower than before:
+  the helper still carries the dead `RecoverRequested` /
+  `RecoverySucceeded` / `ResumeRequested` compatibility branch plus the
+  duplicated run-return bookkeeping, but live recycle no longer depends on an
+  internal helper `Recovering` detour
 - the dead top-level active-work slice is also gone: `active_work_id` never
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed

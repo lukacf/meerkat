@@ -58,7 +58,7 @@ use crate::meerkat_machine_types::{
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 use crate::policy::PolicyDecision;
-use crate::runtime_ingress_authority::ContentShape;
+use crate::runtime_ingress_authority::{ContentShape, RuntimeIngressMutator};
 use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 use crate::store::RuntimeStore;
@@ -752,7 +752,7 @@ pub(crate) fn machine_build_recovered_ingress_entry(
     let handling_mode = state
         .policy
         .as_ref()
-        .map(|policy| crate::driver::ephemeral::handling_mode_from_policy(&policy.decision))
+        .map(|policy| crate::accept::handling_mode_from_policy(&policy.decision))
         .unwrap_or(HandlingMode::Queue);
     let content_shape = state
         .persisted_input
@@ -797,6 +797,159 @@ pub(crate) fn machine_realize_recovered_runtime_state(
         }
         _ => {}
     }
+}
+
+pub(crate) fn machine_recover_ephemeral_driver(
+    driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
+) -> Result<RecoveryReport, RuntimeDriverError> {
+    let mut recovered = 0;
+    let mut abandoned = 0;
+    let mut requeued = 0;
+
+    let active_ids: Vec<InputId> = driver
+        .ledger()
+        .iter_non_terminal()
+        .map(|(input_id, _)| input_id.clone())
+        .collect();
+
+    for input_id in &active_ids {
+        let Some(state) = driver.ledger_mut().get_mut(input_id) else {
+            continue;
+        };
+        let delta = machine_apply_recovered_input_normalization(state, None);
+        recovered += delta.recovered;
+        abandoned += delta.abandoned;
+        requeued += delta.requeued;
+    }
+
+    let mut rebuilt_ingress = crate::runtime_ingress_authority::RuntimeIngressAuthority::new();
+    let recovered_entries: Vec<_> = driver
+        .ledger()
+        .iter()
+        .filter_map(|(input_id, state)| {
+            machine_build_recovered_ingress_entry(state).map(|entry| {
+                (
+                    input_id.clone(),
+                    entry.content_shape,
+                    entry.handling_mode,
+                    entry.is_prompt,
+                    entry.lifecycle_state,
+                    entry.policy,
+                )
+            })
+        })
+        .collect();
+
+    for (input_id, content_shape, handling_mode, is_prompt, lifecycle_state, policy) in
+        recovered_entries
+    {
+        rebuilt_ingress
+            .apply(
+                crate::runtime_ingress_authority::RuntimeIngressInput::AdmitRecovered {
+                    work_id: input_id.clone(),
+                    content_shape,
+                    handling_mode,
+                    is_prompt,
+                    lifecycle_state,
+                    policy,
+                    request_id: None,
+                    reservation_key: None,
+                },
+            )
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "ingress authority rejected rebuilt recovered input '{input_id}': {err}"
+                ))
+            })?;
+    }
+
+    driver.replace_ingress(rebuilt_ingress);
+    driver.rebuild_queue_projections_after_recovery();
+
+    Ok(RecoveryReport {
+        inputs_recovered: recovered,
+        inputs_abandoned: abandoned,
+        inputs_requeued: requeued,
+        details: Vec::new(),
+    })
+}
+
+pub(crate) async fn machine_recover_persistent_driver(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
+) -> Result<RecoveryReport, RuntimeDriverError> {
+    let stored_states = store
+        .load_input_states(runtime_id)
+        .await
+        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+
+    let mut recovered_payloads = Vec::new();
+
+    for state in stored_states {
+        let state = machine_normalize_recovered_input_state(store, runtime_id, state).await?;
+
+        if driver.input_state(&state.input_id).is_none() {
+            let Some(entry) = machine_build_recovered_ingress_entry(&state) else {
+                driver.ledger_mut().recover(state);
+                continue;
+            };
+
+            let inserted = driver.ledger_mut().recover(state.clone());
+            if !inserted {
+                continue;
+            }
+
+            if let Some(input) = state.persisted_input.clone() {
+                recovered_payloads.push((state.input_id.clone(), input));
+            }
+
+            driver.admit_recovered_to_ingress(
+                state.input_id.clone(),
+                entry.content_shape,
+                entry.handling_mode,
+                entry.is_prompt,
+                state.current_state(),
+                entry.policy,
+                None,
+                None,
+            )?;
+        }
+    }
+
+    let report = machine_recover_ephemeral_driver(driver)?;
+
+    for (input_id, _input) in recovered_payloads {
+        let should_requeue = driver.input_state(&input_id).is_some_and(|state| {
+            state.current_state() == crate::input_state::InputLifecycleState::Queued
+        });
+        if should_requeue && !driver.has_queued_input(&input_id) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "persistent recover left queued input '{input_id}' out of the runtime queue projection"
+            )));
+        }
+    }
+
+    if let Some(runtime_state) = store
+        .load_runtime_state(runtime_id)
+        .await
+        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+    {
+        machine_realize_recovered_runtime_state(driver, runtime_state);
+
+        if runtime_state.is_terminal() {
+            let active = driver.active_input_ids();
+            if !active.is_empty() {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "store corruption: terminal runtime '{}' has {} active inputs",
+                    runtime_state,
+                    active.len()
+                )));
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 fn machine_build_replay_plan(
@@ -2142,7 +2295,7 @@ impl MeerkatMachine {
                 }
 
                 let request_immediate_processing =
-                    crate::driver::ephemeral::requests_immediate_processing(&input);
+                    crate::accept::requests_immediate_processing(&input);
                 let (outcome, signal) = {
                     let mut drv = driver.lock().await;
                     let result = drv
@@ -2419,7 +2572,7 @@ impl MeerkatMachine {
                 }
 
                 let request_immediate_processing =
-                    crate::driver::ephemeral::requests_immediate_processing(&input);
+                    crate::accept::requests_immediate_processing(&input);
                 let (outcome, signal, handle) = {
                     let mut driver = driver.lock().await;
                     let result = driver
@@ -2519,7 +2672,7 @@ impl MeerkatMachine {
                 }
 
                 let request_immediate_processing =
-                    crate::driver::ephemeral::requests_immediate_processing(&input);
+                    crate::accept::requests_immediate_processing(&input);
                 let outcome = {
                     let mut driver = driver.lock().await;
                     let result = driver

@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::driver::PostAdmissionSignal;
+use crate::input::Input;
 use crate::input_state::InputState;
 use crate::policy::PolicyDecision;
+use crate::policy_table::DefaultPolicyTable;
 
 /// Machine-owned queue action for an admitted input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,14 @@ pub enum AdmissionPlan {
         queue_action: AdmissionQueueAction,
         existing_action: Option<ExistingQueuedAdmissionAction>,
     },
+}
+
+/// Machine-owned resolution of an accepted input's semantic admission path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAdmission {
+    pub policy: PolicyDecision,
+    pub handling_mode: HandlingMode,
+    pub admission_plan: AdmissionPlan,
 }
 
 /// Typed reason why an input was rejected at the accept boundary.
@@ -169,6 +179,47 @@ pub fn admission_plan_from_policy(
             },
             existing_action: None,
         },
+    }
+}
+
+/// Derive the handling mode from a resolved policy decision.
+pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
+    match policy.routing_disposition {
+        crate::policy::RoutingDisposition::Steer => HandlingMode::Steer,
+        _ => HandlingMode::Queue,
+    }
+}
+
+/// Whether this input requests immediate processing after admission.
+///
+/// This remains narrower than "routes through the steer lane". Some inputs
+/// route through checkpoint/steer paths for batching, but only explicit steer
+/// intent should request in-turn processing.
+pub fn requests_immediate_processing(input: &Input) -> bool {
+    matches!(input.handling_mode(), Some(HandlingMode::Steer))
+}
+
+/// Resolve the machine-owned semantic admission path for an accepted input.
+///
+/// Runtime helpers may still perform mechanical queue lookups (for example,
+/// determining which existing queued input would be superseded), but the
+/// semantic decision about policy, routing, and admission disposition is owned
+/// here rather than inside the driver helper.
+pub fn resolve_admission(
+    input: &Input,
+    runtime_idle: bool,
+    silent_intents: &[String],
+    existing_superseded_id: Option<InputId>,
+) -> ResolvedAdmission {
+    let mut policy = DefaultPolicyTable::resolve(input, runtime_idle);
+    crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
+    let handling_mode = handling_mode_from_policy(&policy);
+    let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
+
+    ResolvedAdmission {
+        policy,
+        handling_mode,
+        admission_plan,
     }
 }
 

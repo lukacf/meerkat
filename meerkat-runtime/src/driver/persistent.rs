@@ -14,10 +14,6 @@ use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::{Input, externalize_input_images};
 use crate::input_state::{InputAbandonReason, InputState};
-use crate::meerkat_machine::{
-    machine_build_recovered_ingress_entry, machine_normalize_recovered_input_state,
-    machine_realize_recovered_runtime_state,
-};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
@@ -561,107 +557,12 @@ impl RuntimeDriver for PersistentRuntimeDriver {
     }
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        // §24 full recovery: load durable InputState from store
-        let stored_states = self
-            .store
-            .load_input_states(&self.runtime_id)
-            .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
-        let mut recovered_payloads = Vec::new();
-
-        // Inject stored states into the ephemeral driver's ledger.
-        // Uses recover() which also rebuilds the idempotency index for
-        // dedup correctness and filters out Ephemeral inputs.
-        for state in stored_states {
-            let state = machine_normalize_recovered_input_state(
-                self.store.as_ref(),
-                &self.runtime_id,
-                state,
-            )
-            .await?;
-
-            // Admit to ingress authority so Recover can see this input.
-            if self.inner.input_state(&state.input_id).is_none() {
-                let Some(entry) = machine_build_recovered_ingress_entry(&state) else {
-                    // No policy and no payload — load into ledger for dedup but
-                    // skip ingress admission (nothing to route).
-                    self.inner.ledger_mut().recover(state);
-                    continue;
-                };
-                let request_id = None;
-                let reservation_key = None;
-
-                let inserted = self.inner.ledger_mut().recover(state.clone());
-                if !inserted {
-                    // Filtered by ledger recover (e.g. ephemeral durability): do not
-                    // admit to ingress, otherwise ingress queue truth can outlive
-                    // canonical ledger truth.
-                    continue;
-                }
-
-                if let Some(input) = state.persisted_input.clone() {
-                    recovered_payloads.push((state.input_id.clone(), input));
-                }
-
-                let lifecycle_state = state.current_state();
-
-                if let Err(err) = self.inner.admit_recovered_to_ingress(
-                    state.input_id.clone(),
-                    entry.content_shape,
-                    entry.handling_mode,
-                    entry.is_prompt,
-                    lifecycle_state,
-                    entry.policy,
-                    request_id,
-                    reservation_key,
-                ) {
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "failed to admit recovered input '{}' to ingress authority: {err}",
-                        state.input_id
-                    )));
-                }
-            }
-        }
-
-        // Then run ephemeral recovery logic to finalize ingress recovery,
-        // execute any remaining per-input recovery effects, and rebuild the
-        // physical queue projections from canonical ingress truth.
-        let report = self.inner.recover().await?;
-
-        for (input_id, _input) in recovered_payloads {
-            let should_requeue = self.inner.input_state(&input_id).is_some_and(|state| {
-                state.current_state() == crate::input_state::InputLifecycleState::Queued
-            });
-            if should_requeue && !self.inner.has_queued_input(&input_id) {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "persistent recover left queued input '{input_id}' out of the runtime queue projection"
-                )));
-            }
-        }
-
-        if let Some(runtime_state) = self
-            .store
-            .load_runtime_state(&self.runtime_id)
-            .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-        {
-            machine_realize_recovered_runtime_state(&mut self.inner, runtime_state);
-
-            // Terminal states must not have active inputs. If persisted state
-            // is terminal but active inputs exist, fail closed as store
-            // corruption instead of mutating queue projections in shell code.
-            if runtime_state.is_terminal() {
-                let active = self.inner.active_input_ids();
-                if !active.is_empty() {
-                    return Err(RuntimeDriverError::Internal(format!(
-                        "store corruption: terminal runtime '{}' has {} active inputs",
-                        runtime_state,
-                        active.len()
-                    )));
-                }
-            }
-        }
+        let report = crate::meerkat_machine::machine_recover_persistent_driver(
+            self.store.as_ref(),
+            &self.runtime_id,
+            &mut self.inner,
+        )
+        .await?;
 
         // Persist recovered state atomically
         let input_states = self.inner.input_states_snapshot();

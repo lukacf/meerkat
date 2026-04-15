@@ -19,8 +19,7 @@ use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
-use crate::policy::{PolicyDecision, RoutingDisposition};
-use crate::policy_table::DefaultPolicyTable;
+use crate::policy::PolicyDecision;
 use crate::queue::InputQueue;
 use crate::runtime_event::{
     InputLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope, RuntimeStateChangeEvent,
@@ -97,23 +96,6 @@ pub struct ReplayQueuedContributorsPlan {
     pub steer_work_ids: Vec<InputId>,
     pub wake_runtime: bool,
     pub notice_kind: &'static str,
-}
-
-/// Derive the handling mode from a policy decision's routing disposition.
-pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
-    match policy.routing_disposition {
-        RoutingDisposition::Steer => HandlingMode::Steer,
-        _ => HandlingMode::Queue,
-    }
-}
-
-/// Whether this input should request immediate processing after admission.
-///
-/// This is intentionally narrower than "routes through the steer lane".
-/// `ResponseProgress` uses checkpoint routing for boundary batching, but it
-/// must remain passive unless the input kind explicitly carries steer intent.
-pub(crate) fn requests_immediate_processing(input: &Input) -> bool {
-    matches!(input.handling_mode(), Some(HandlingMode::Steer))
 }
 
 /// Ephemeral runtime driver -- all state in-memory.
@@ -240,6 +222,15 @@ impl EphemeralRuntimeDriver {
     fn rebuild_queue_projections(&mut self) {
         self.queue = self.build_projection_queue(self.ingress.queue(), "queue");
         self.steer_queue = self.build_projection_queue(self.ingress.steer_queue(), "steer_queue");
+    }
+
+    pub(crate) fn replace_ingress(&mut self, ingress: RuntimeIngressAuthority) {
+        self.ingress = ingress;
+    }
+
+    pub(crate) fn rebuild_queue_projections_after_recovery(&mut self) {
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
     }
 
     fn debug_assert_queue_projection_alignment(&self) {
@@ -892,76 +883,7 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn recover_ephemeral(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
-        let mut recovered = 0;
-        let mut abandoned = 0;
-        let mut requeued = 0;
-
-        let active_ids: Vec<InputId> = self
-            .ledger
-            .iter_non_terminal()
-            .map(|(input_id, _)| input_id.clone())
-            .collect();
-
-        for input_id in &active_ids {
-            let Some(state) = self.ledger.get_mut(input_id) else {
-                continue;
-            };
-            let delta =
-                crate::meerkat_machine::machine_apply_recovered_input_normalization(state, None);
-            recovered += delta.recovered;
-            abandoned += delta.abandoned;
-            requeued += delta.requeued;
-        }
-
-        let mut rebuilt_ingress = RuntimeIngressAuthority::new();
-        let recovered_entries: Vec<_> = self
-            .ledger
-            .iter()
-            .filter_map(|(input_id, state)| {
-                crate::meerkat_machine::machine_build_recovered_ingress_entry(state).map(|entry| {
-                    (
-                        input_id.clone(),
-                        entry.content_shape,
-                        entry.handling_mode,
-                        entry.is_prompt,
-                        entry.lifecycle_state,
-                        entry.policy,
-                    )
-                })
-            })
-            .collect();
-
-        for (input_id, content_shape, handling_mode, is_prompt, lifecycle_state, policy) in
-            recovered_entries
-        {
-            rebuilt_ingress
-                .apply(RuntimeIngressInput::AdmitRecovered {
-                    work_id: input_id.clone(),
-                    content_shape,
-                    handling_mode,
-                    is_prompt,
-                    lifecycle_state,
-                    policy,
-                    request_id: None,
-                    reservation_key: None,
-                })
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(format!(
-                        "ingress authority rejected rebuilt recovered input '{input_id}': {err}"
-                    ))
-                })?;
-        }
-
-        self.ingress = rebuilt_ingress;
-        self.rebuild_queue_projections();
-        self.debug_assert_queue_projection_alignment();
-
-        Ok(RecoveryReport {
-            inputs_recovered: recovered,
-            inputs_abandoned: abandoned,
-            inputs_requeued: requeued,
-            details: Vec::new(),
-        })
+        crate::meerkat_machine::machine_recover_ephemeral_driver(self)
     }
 
     pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
@@ -1211,16 +1133,17 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
             self.ledger.accept(state.clone());
         }
         let runtime_idle = self.runtime_state().is_idle_or_attached();
-        let mut policy = DefaultPolicyTable::resolve(&input, runtime_idle);
-        crate::silent_intent::apply_silent_intent_override(
+        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
+        let resolved = crate::accept::resolve_admission(
             &input,
+            runtime_idle,
             &self.silent_comms_intents,
-            &mut policy,
+            existing_superseded_id,
         );
         if let Some(s) = self.ledger.get_mut(&input_id) {
             s.policy = Some(PolicySnapshot {
-                version: policy.policy_version,
-                decision: policy.clone(),
+                version: resolved.policy.policy_version,
+                decision: resolved.policy.clone(),
             });
         }
         self.emit_event(RuntimeEvent::InputLifecycle(
@@ -1232,23 +1155,17 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         // All mechanical lookups happen here, but the checked-in admission
         // plan now decides the semantic path (consume-on-accept, queue,
         // priority, coalesce, supersede). The helper only applies that plan.
-        let handling_mode = handling_mode_from_policy(&policy);
+        let handling_mode = resolved.handling_mode;
         let content_shape = ContentShape(input.kind_id().to_string());
         let is_prompt = matches!(input, Input::Prompt(_));
-        let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
-        let admission_plan = crate::accept::admission_plan_from_policy(
-            &policy,
-            handling_mode,
-            existing_superseded_id,
-        );
-        let ingress_input = match admission_plan {
+        let ingress_input = match resolved.admission_plan {
             crate::accept::AdmissionPlan::ConsumedOnAccept => {
                 RuntimeIngressInput::AdmitConsumedOnAccept {
                     work_id: input_id.clone(),
                     content_shape,
                     request_id: None,
                     reservation_key: None,
-                    policy: policy.clone(),
+                    policy: resolved.policy.clone(),
                 }
             }
             crate::accept::AdmissionPlan::Queued {
@@ -1262,7 +1179,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 is_prompt,
                 request_id: None,
                 reservation_key: None,
-                policy: policy.clone(),
+                policy: resolved.policy.clone(),
                 persist_and_queue,
                 queue_action,
                 existing_action,
@@ -1281,7 +1198,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
         Ok(AcceptOutcome::Accepted {
             input_id,
-            policy,
+            policy: resolved.policy,
             state: final_state,
         })
     }

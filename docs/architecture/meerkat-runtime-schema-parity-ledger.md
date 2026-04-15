@@ -396,6 +396,22 @@ Interpretation:
   admission, while `EphemeralRuntimeDriver::accept_input()` now assumes the
   caller has already passed that coarse lifecycle gate and focuses on
   durability/policy/ledger mechanics
+- accepted-input semantic classification is no longer helper-owned either:
+  policy resolution, silent-intent override, handling-mode derivation, and
+  admission-plan derivation now flow through the machine-owned
+  `accept.rs::resolve_admission(...)` helper. The driver still performs the
+  mechanical pieces it uniquely owns (durability/idempotency checks,
+  supersession lookup, ingress effect application, and final ledger
+  realization), but it no longer decides the semantic admission disposition on
+  its own
+- recover normalization/report semantics are no longer split across the
+  drivers either: `machine_recover_ephemeral_driver(...)` and
+  `machine_recover_persistent_driver(...)` now own recovery normalization,
+  ingress rebuild, runtime-state realization, and report synthesis in the
+  checked-in machine module. `EphemeralRuntimeDriver` and
+  `PersistentRuntimeDriver` still perform the mechanics they uniquely own
+  (store I/O and final durability commit for the persistent case), but they no
+  longer each define their own recovery meaning below the machine boundary
 - the formal seam is no longer missing the forward Mob -> Meerkat ingress
   request: `SubmitWork` now emits `RequestRuntimeIngress`, the composition
   routes that effect into Meerkat `Ingest`, and that route now carries the
@@ -602,11 +618,11 @@ Outcome:
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in
    [`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
-6. The remaining Meerkat edge is now narrower and mostly admission/terminal
+6. The remaining Meerkat edge is now narrower and mostly terminal/batch
    mechanics. `RuntimeIngressAuthority` no longer treats contributor staging,
-   boundary application, run completion, or replay rollback as ingress-machine
-   inputs; those paths are now direct lower-level mutators driven by
-   machine-owned legality.
+   boundary application, run completion, replay rollback, or admission
+   disposition as helper-owned transition classification; recovery
+   normalization/report semantics are also machine-owned now.
 7. Recovery semantics are also less split than before: persistent and
    ephemeral drivers now share the same machine-owned per-input recovery
    classifier, so Accepted/Staged/Applied recovery normalization no longer

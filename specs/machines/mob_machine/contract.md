@@ -10,7 +10,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
-- `active_member_count`: `u32`
 - `active_run_count`: `u32`
 - `pending_spawn_count`: `u32`
 - `coordinator_bound`: `Bool`

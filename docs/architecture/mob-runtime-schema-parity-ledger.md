@@ -97,6 +97,11 @@ Current state:
   not exact edge-count semantics, so removing the top-level count collapsed the
   truthful Mob baseline from raw/phase/full `207 / 209 / 2238` to
   `132 / 134 / 1181`
+- the formal machine also no longer carries `active_member_count`; the live
+  runtime already derives roster size from the roster itself, while top-level
+  machine legality only needed member presence, which is already captured by
+  `live_runtime_ids != {}`. Removing the counter collapsed the truthful Mob
+  baseline again from raw/phase/full `132 / 134 / 1181` to `102 / 104 / 861`
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 - external-turn legality now honors the roster's
@@ -242,9 +247,8 @@ Current state:
 - The latest init-state parity hardening corrected the bootstrap truth without
   changing the remaining intrinsic quotient, which is why the reachable space
   rose while the raw quotient stayed flat.
-- The dominant mixed block (`558` states) is now split primarily by
+- The dominant mixed block (`372` states) is now split primarily by
   `runtime_fence_tokens`, `pending_spawn_count`, `active_run_count`,
-  `active_member_count`,
   `externally_addressable_runtime_ids`, `coordinator_bound`, and
   `live_runtime_ids`.
 

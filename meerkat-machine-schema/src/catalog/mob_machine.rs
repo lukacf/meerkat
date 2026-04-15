@@ -44,7 +44,6 @@ pub fn mob_machine() -> MachineSchema {
                         Box::new(TypeRef::Named("FenceToken".into())),
                     ),
                 ),
-                field("active_member_count", TypeRef::U32),
                 field("active_run_count", TypeRef::U32),
                 field("pending_spawn_count", TypeRef::U32),
                 field("coordinator_bound", TypeRef::Bool),
@@ -55,7 +54,6 @@ pub fn mob_machine() -> MachineSchema {
                     init("live_runtime_ids", Expr::EmptySet),
                     init("externally_addressable_runtime_ids", Expr::EmptySet),
                     init("runtime_fence_tokens", Expr::EmptyMap),
-                    init("active_member_count", Expr::U64(0)),
                     init("active_run_count", Expr::U64(0)),
                     init("pending_spawn_count", Expr::U64(0)),
                     init("coordinator_bound", Expr::Bool(true)),
@@ -160,10 +158,6 @@ pub fn mob_machine() -> MachineSchema {
                             value: Expr::Binding("fence_token".into()),
                         },
                     ]);
-                    updates.push(Update::Assign {
-                        field: "active_member_count".into(),
-                        expr: Expr::U64(1),
-                    });
                     updates
                 },
                 to: "Running".into(),
@@ -300,10 +294,6 @@ pub fn mob_machine() -> MachineSchema {
                             value: Expr::Binding("fence_token".into()),
                         },
                     ]);
-                    updates.push(Update::Assign {
-                        field: "active_member_count".into(),
-                        expr: Expr::U64(1),
-                    });
                     updates
                 },
                 to: "Running".into(),
@@ -351,10 +341,6 @@ pub fn mob_machine() -> MachineSchema {
                             value: Expr::Binding("fence_token".into()),
                         },
                     ]);
-                    updates.push(Update::Assign {
-                        field: "active_member_count".into(),
-                        expr: Expr::U64(1),
-                    });
                     updates
                 },
                 to: "Running".into(),
@@ -1155,10 +1141,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             },
             guards: retire_guards.clone(),
             updates: vec![
-                Update::Decrement {
-                    field: "active_member_count".into(),
-                    amount: 1,
-                },
                 Update::SetRemove {
                     field: "live_runtime_ids".into(),
                     value: Expr::Binding("agent_runtime_id".into()),
@@ -1185,10 +1167,6 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
             },
             guards: vec![],
             updates: vec![
-                Update::Assign {
-                    field: "active_member_count".into(),
-                    expr: Expr::U64(0),
-                },
                 Update::Assign {
                     field: "live_runtime_ids".into(),
                     expr: Expr::EmptySet,
@@ -1219,16 +1197,10 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
                 Box::new(Expr::U64(0)),
             ),
         }],
-        updates: vec![
-            Update::Decrement {
-                field: "pending_spawn_count".into(),
-                amount: 1,
-            },
-            Update::Increment {
-                field: "active_member_count".into(),
-                amount: 1,
-            },
-        ],
+        updates: vec![Update::Decrement {
+            field: "pending_spawn_count".into(),
+            amount: 1,
+        }],
         to: "Running".into(),
         emit: vec![lifecycle_notice_emit("spawned")],
     });
@@ -1350,9 +1322,9 @@ fn mob_trigger_kind(variant: &str) -> TriggerKind {
 fn active_members_present_guard() -> Guard {
     Guard {
         name: "active_members_present".into(),
-        expr: Expr::Gt(
-            Box::new(Expr::Field("active_member_count".into())),
-            Box::new(Expr::U64(0)),
+        expr: Expr::Neq(
+            Box::new(Expr::Field("live_runtime_ids".into())),
+            Box::new(Expr::EmptySet),
         ),
     }
 }
@@ -1509,10 +1481,6 @@ fn destroy_mob_projection_updates() -> Vec<Update> {
         },
         set_bool("coordinator_bound", false),
     ]);
-    updates.extend(vec![Update::Assign {
-        field: "active_member_count".into(),
-        expr: Expr::U64(0),
-    }]);
     updates
 }
 

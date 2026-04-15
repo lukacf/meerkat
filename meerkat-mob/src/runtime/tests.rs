@@ -17911,10 +17911,6 @@ async fn mob_runtime_parity_snapshot_summary(
         serde_json::to_string(&runtime_fence_tokens).expect("serialize runtime_fence_tokens"),
     );
     formal_available_fields.insert(
-        "active_member_count".into(),
-        serde_json::to_string(&active_members.len()).expect("serialize active_member_count"),
-    );
-    formal_available_fields.insert(
         "active_run_count".into(),
         serde_json::to_string(
             &lifecycle
@@ -18005,9 +18001,6 @@ fn mob_runtime_parity_field_value(
         )),
         "runtime_fence_tokens" => Some(MobRuntimeParityExprValue::Map(
             snapshot.runtime_fence_tokens.clone(),
-        )),
-        "active_member_count" => Some(MobRuntimeParityExprValue::U64(
-            snapshot.active_member_count as u64,
         )),
         "active_run_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.active_flow_count.unwrap_or_default() as u64,

@@ -309,7 +309,8 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Mob stale-binding truth should stay formally owned in `MobMachine` | passed / landed | Restored `live_runtime_ids` plus `runtime_fence_tokens`, added formal `MapRemove`, and modeled stale-fence invalidation exactly where the public handle enforces it. Exact Mob parity stayed green on all three layers, and the truthful quotient moved to `1323 -> 207 / 209 / 1323`, showing that the restored binding table is real machine behavior rather than a representative shadow. |
 | Mob `SubmitWork` origin can stay as handle/actor-only semantics | rejected / landed | Added `externally_addressable_runtime_ids` to `MobMachine` and split `SubmitWork` into explicit external vs internal origin guards. The truthful Mob state space rose from `1,323` to `2,238` while the quotient stayed flat at `207 / 209`, which is the expected signature for lifting a real legality distinction into the machine instead of hiding it below the boundary. |
 | Mob top-level `cleanup_pending` should remain machine-owned lifecycle truth | rejected / landed | Removed `cleanup_pending` from the checked-in top-level `MobMachine` after confirming it is only lower-authority cleanup bookkeeping inside `MobLifecycleAuthority`. The truthful Mob baseline stayed flat at `2238 -> 207 / 209 / 2238`, which is the expected signature for deleting an overlapping top-level mirror rather than collapsing real behavior. |
-| Mob top-level `wiring_edge_count` should remain machine-owned wiring truth | rejected / landed | Removed `wiring_edge_count` from the checked-in top-level `MobMachine` after confirming the live runtime only uses concrete roster adjacency and idempotent wire/unwire plans, not exact count semantics. The truthful Mob baseline collapsed from `2238 -> 207 / 209 / 2238` to `1181 -> 132 / 134 / 1181`, which is the strongest Mob Phase 2 reduction so far and shows the count had been an overlapping top-level summary rather than real machine-owned behavior. |
+| Mob top-level `wiring_edge_count` should remain machine-owned wiring truth | rejected / landed | Removed `wiring_edge_count` from the checked-in top-level `MobMachine` after confirming the live runtime only uses concrete roster adjacency and idempotent wire/unwire plans, not exact count semantics. The truthful Mob baseline collapsed from `2238 -> 207 / 209 / 2238` to `1181 -> 132 / 134 / 1181`, which showed the count had been an overlapping top-level summary rather than real machine-owned behavior. |
+| Mob top-level `active_member_count` should remain machine-owned member truth | rejected / landed | Removed `active_member_count` from the checked-in top-level `MobMachine` after confirming it was only a manually maintained cardinality summary of `live_runtime_ids`, while the runtime already derives roster size from the roster itself. The truthful Mob baseline collapsed again from `1181 -> 132 / 134 / 1181` to `861 -> 102 / 104 / 861`, proving the counter was overlapping top-level summary state rather than real machine-owned behavior. |
 | Mob `retiring_member_count` should not stay as top-level formal state | passed / landed | Removed the dead retire counter; exact Mob parity stayed green and the truthful Hopcroft/TLC readout stayed flat at `770 -> 138 / 140 / 770`, proving the counter was not carrying independent formal behavior. |
 | Mob public `Stop` should reject active flows | passed / landed | Added `no_active_runs` to `StopRunning` after a focused runtime/schema probe showed `handle.stop()` rejects while flows are still active; the lifecycle-triangle parity audit stayed exact and truthful TLC generated states fell from `25,943` to `25,767` with the quotient unchanged. |
 | Mob bootstrap should start with coordinator bound | passed / landed | Changed the formal init state from `Running + coordinator_bound=false` to `Running + coordinator_bound=true` to match the live runtime bootstrap snapshot; the lifecycle-triangle parity audit stayed exact and the truthful quotient held at `138 / 140` while reachable states rose from `770` to `813`, proving the old bootstrap state had been under-modeled rather than behavior-bearing. |
@@ -402,9 +403,9 @@ We ran three observation modes for each machine:
 
 | Machine | Observation | Reachable states | Quotient states | Reduction | Reading |
 |---|---|---:|---:|---:|---|
-| MobMachine | `none` | 1181 | 132 | 88.8% | After removing both `cleanup_pending` and then `wiring_edge_count`, the truthful graph is much closer to the real Mob lifecycle/orchestration core. The remaining state is machine-owned binding/origin/run/coordinator truth rather than overlapping cleanup or wiring summaries. |
-| MobMachine | `phase` | 1181 | 134 | 88.7% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection even after the stale-binding restoration, forward ingress route, origin-sensitive submit-work legality, and the wiring-summary collapse. |
-| MobMachine | `full` | 1181 | 1181 | 0.0% | Once the remaining authoritative binding/origin/run/coordinator fields are preserved, every reachable Mob snapshot is still distinct. |
+| MobMachine | `none` | 861 | 102 | 88.2% | After removing `cleanup_pending`, `wiring_edge_count`, and then `active_member_count`, the truthful graph is much closer to the real Mob lifecycle/orchestration core. The remaining state is machine-owned binding/origin/run/coordinator truth rather than overlapping cleanup, wiring, or member-cardinality summaries. |
+| MobMachine | `phase` | 861 | 104 | 87.9% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection even after the stale-binding restoration, forward ingress route, origin-sensitive submit-work legality, and the summary-field collapses. |
+| MobMachine | `full` | 861 | 861 | 0.0% | Once the remaining authoritative binding/origin/run/coordinator fields are preserved, every reachable Mob snapshot is still distinct. |
 | MeerkatMachine | `none` | 474 | 133 | 71.9% | After collapsing the visibility stack and the top-level attachment bit, the truthful graph is smaller again and the quotient is now down to 133 blocks. The remaining largest mixed block is driven by `silent_intent_overrides`, `pre_run_phase`, run identity, and runtime binding. |
 | MeerkatMachine | `phase` | 474 | 138 | 70.9% | Preserving phase still adds only five quotient blocks, so phase remains almost entirely projection even after the attachment collapse. |
 | MeerkatMachine | `full` | 474 | 455 | 4.0% | Preserving the full snapshot still keeps most remaining Meerkat states distinct, but what survives is now almost entirely real machine-owned binding / run-return / interrupt policy truth. |
@@ -665,8 +666,8 @@ Current result:
 - TLC: `41,202 generated / 1,323 distinct / depth 7`
 - dominant mixed block: `668` states spanning `Running`, `Stopped`, and
   `Completed`
-- dominant block tuples: `351`
-- tuples reused across multiple phases: `127`
+- dominant block tuples: `236`
+- tuples reused across multiple phases: `80`
 - maximum phases sharing one tuple: `3`
 
 The dominant Mob block is now being split primarily by the remaining
@@ -675,7 +676,6 @@ table:
 
 - `pending_spawn_count`
 - `active_run_count`
-- `active_member_count`
 - `coordinator_bound`
 - `runtime_fence_tokens`
 - `live_runtime_ids`

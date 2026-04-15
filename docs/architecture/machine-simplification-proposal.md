@@ -133,6 +133,11 @@ Hopcroft-style behavioral quotient over the reachable graph.
   Meerkat machine now transitions `Attached -> Running` and binds the fresh
   run identity instead of collapsing that runtime behavior into the queue-only
   attached self-loop.
+- Modeled the running queued `InterruptYielding` accept path explicitly:
+  queued `AcceptWithCompletion` while already `Running` is no longer flattened
+  to a single passive self-loop, and the checked-in Meerkat machine now emits
+  the same typed `PostAdmissionSignal("InterruptYielding")` branch that the
+  runtime uses for running peer-message admission.
 - Taught the generated closed-world composition models to reject queued
   external entry packets that are no longer admissible for the current machine
   state, which removes seam deadlocks without widening the machine transition
@@ -193,6 +198,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | Behavior-bearing runtime-control state should stay outside MeerkatMachine | rejected | `current_run_id` is now absorbed back into the checked-in Meerkat machine, and the stricter audit shows the live wake/process carrier currently runs through ingress + `post_admission_signal` rather than through the stale handwritten control booleans alone. The remaining work is to decide which of those lower-authority admission carriers should be lifted into the two-machine model, not to keep punting them to handwritten shell state. |
 | Active run identity can stay outside the checked-in Meerkat machine | rejected / landed | Absorbed `current_run_id` into the top-level Meerkat state and wired the same prepare/commit/fail/control clears as the runtime. Exact audited parity stayed green, TLC moved to `1,068,719 generated / 11,858 distinct / depth 9`, and Hopcroft stayed at raw/phase/full `385 / 390 / 11,469`, which is the expected signature for lifting a real control truth into the model without changing the core quotient. |
 | Attached steered accept can stay collapsed into the queue-only accept surface | rejected / landed | The live runtime can synchronously jump `Attached -> Running` during `AcceptWithCompletion` when admission requests immediate processing. The Meerkat catalog now models that payload-sensitive path explicitly with a run binding, and the targeted runtime/model regression is green. |
+| Running interrupt-bearing accept can stay collapsed into the passive queued accept surface | rejected / landed | The live runtime can request `InterruptYielding` during running queued `AcceptWithCompletion` even when it does not request immediate processing. The checked-in Meerkat machine now models that typed `PostAdmissionSignal("InterruptYielding")` branch explicitly, and both the targeted regression and the exact parity audits stayed green. |
 | Meerkat `Stopped` vs `Retired` can merge internally | rejected | The top-level transition sets diverge in load-bearing ways: `Retired` still accepts `Reset`, `StopRuntimeExecutor`, and `Recycle`, while `Stopped` does not, and the retire path carries archival/drain semantics that phase 1 should keep explicit. |
 | Meerkat `Idle` vs `Attached` can merge internally | rejected | In the current formal model, phase identity still carries load-bearing "executor attached" semantics that are not derivable from the existing Meerkat extended state. Several absorbed transitions are phase-gated without a field-level attachment witness, so phase-1 collapse would require introducing a replacement attachment bit plus a new public projection layer rather than actually simplifying the model. |
 
@@ -243,7 +249,7 @@ We ran three observation modes for each machine:
 | MobMachine | `none` | 813 | 138 | 83.0% | After the bootstrap parity correction, the truthful graph grew slightly while the raw quotient stayed flat, confirming the old `coordinator_bound=false` init was under-modeled bootstrap truth rather than behavior-bearing structure. |
 | MobMachine | `phase` | 813 | 140 | 82.8% | Preserving phase still adds only two quotient blocks; `Running` / `Stopped` / `Completed` remain mostly projection. |
 | MobMachine | `full` | 813 | 813 | 0.0% | Once the remaining authoritative counters are preserved, every reachable Mob snapshot is still distinct. |
-| MeerkatMachine | `none` | 11,858 | 385 | 96.8% | After absorbing `current_run_id` and modeling attached steered acceptance, the truthful graph rises slightly while the raw quotient stays flat, which is the expected signature for lifting real control truth into the checked-in machine without changing its core behavioral complexity. |
+| MeerkatMachine | `none` | 11,858 | 385 | 96.8% | After absorbing `current_run_id` and modeling the live attached-steer plus running-interrupt acceptance branches, the truthful graph rises slightly while the raw quotient stays flat, which is the expected signature for lifting real control truth into the checked-in machine without changing its core behavioral complexity. |
 | MeerkatMachine | `phase` | 11,858 | 390 | 96.7% | Preserving phase still adds only five quotient blocks, so phase remains almost entirely projection here too. |
 | MeerkatMachine | `full` | 11,858 | 11,469 | 3.3% | Preserving the full snapshot still keeps nearly every remaining Meerkat state distinct, but the extra structure now lives in revisions, deferred-name sets, runtime binding, and pre-run restoration rather than in the removed filter mirrors. |
 
@@ -637,10 +643,11 @@ The important read is now sharper than the earlier partial dump story:
   authority state; once those mirrors were removed, the truthful graph dropped
   back to the lower five-figure range without changing the quotient or exact
   parity surface
-- absorbing `current_run_id` and modeling attached steered acceptance raised
-  the truthful graph only slightly while keeping the quotient flat, which is
-  the expected signature for lifting real control truth into the checked-in
-  machine instead of papering over it with shell state
+- absorbing `current_run_id` and modeling the live attached-steer plus
+  running-interrupt acceptance branches raised the truthful graph only
+  slightly while keeping the quotient flat, which is the expected signature
+  for lifting real control truth into the checked-in machine instead of
+  papering over it with shell state
 - the next Meerkat gap is no longer "maybe filter mirrors are real"; it is the
   stronger authority-boundary and payload-sensitivity question of which live
   ingress/post-admission mechanics belong in the two-machine model
@@ -654,23 +661,23 @@ We then extended the always-on Hopcroft summary to project the largest
 mixed-phase block onto its extended-state fields. On the current truthful
 Meerkat run, that yields:
 
-- dominant mixed block: `4,669` states
-- distinct extended-state tuples inside that block: `1,971`
-- tuples reused across multiple phases: `1,566`
+- dominant mixed block: `4,711` states
+- distinct extended-state tuples inside that block: `2,169`
+- tuples reused across multiple phases: `1,644`
 - maximum phases sharing one tuple: `5`
 
 That is the strongest concrete evidence so far that the current phase surface
 is layered on top of a smaller field-driven machine instead of acting as the
 primary semantic axis. The most discriminating fields inside the block are now:
 
-- `staged_visibility_revision` (`8` value buckets; largest bucket `1,141`)
-- `active_visibility_revision` (`3` buckets; largest bucket `1,866`)
+- `staged_visibility_revision` (`8` value buckets; largest bucket `1,165`)
+- `active_visibility_revision` (`3` buckets; largest bucket `1,882`)
 - `pre_run_phase` (`3` buckets; largest bucket `2,436`)
-- `attachment_live` (`2` buckets; split `2,675 / 1,994`)
-- `peer_ingress_configured` (`2` buckets; split `2,768 / 1,901`)
-- `staged_requested_deferred_names` (`2` buckets; split `2,904 / 1,765`)
-- `active_requested_deferred_names` (`2` buckets; split `3,079 / 1,590`)
-- `active_fence_token` (`2` buckets; split `3,128 / 1,541`)
+- `attachment_live` (`2` buckets; split `2,715 / 1,996`)
+- `current_run_id` (`2` buckets; split `2,716 / 1,995`)
+- `peer_ingress_configured` (`2` buckets; split `2,772 / 1,939`)
+- `staged_requested_deferred_names` (`2` buckets; split `2,924 / 1,787`)
+- `active_requested_deferred_names` (`2` buckets; split `3,109 / 1,602`)
 
 The read is strikingly consistent with the earlier field-ablation pass: the
 largest Meerkat block is now dominated by visibility-staging, runtime binding,

@@ -53,7 +53,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
-- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, run_id: RunId)
+- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
@@ -110,6 +110,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
+- `PostAdmissionSignal`(signal: String)
 - `ReadyForRun`
 - `InputLifecycleNotice`
 - `CompletionResolved`
@@ -826,38 +827,74 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressNotice`
 - To: `Stopped`
 
-### `AcceptWithCompletionIdle`
+### `AcceptWithCompletionIdleQueued`
 - From: `Idle`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
   - `session_registered`
-- Emits: `IngressAccepted`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
+- To: `Idle`
+
+### `AcceptWithCompletionIdleImmediate`
+- From: `Idle`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Idle`
 
 ### `AcceptWithCompletionAttachedImmediate`
 - From: `Attached`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
-- Emits: `IngressAccepted`, `SubmitRunPrimitive`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`, `SubmitRunPrimitive`
 - To: `Running`
 
 ### `AcceptWithCompletionAttachedQueued`
 - From: `Attached`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
-- Emits: `IngressAccepted`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Attached`
 
-### `AcceptWithCompletionRunning`
+### `AcceptWithCompletionRunningQueuedPassive`
 - From: `Running`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
   - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
 - Emits: `IngressAccepted`
+- To: `Running`
+
+### `AcceptWithCompletionRunningInterruptYielding`
+- From: `Running`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
+- To: `Running`
+
+### `AcceptWithCompletionRunningImmediate`
+- From: `Running`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
 ### `AcceptWithoutWakeIdle`

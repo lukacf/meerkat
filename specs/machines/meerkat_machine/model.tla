@@ -990,18 +990,31 @@ PublishEventStopped(kind) ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
 
 
-AcceptWithCompletionIdle(input_id, request_immediate_processing, run_id) ==
+AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Idle"
     /\ (session_id # None)
+    /\ (request_immediate_processing = FALSE)
+    /\ (interrupt_yielding = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
 
 
-AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, run_id) ==
+AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ (request_immediate_processing = TRUE)
+    /\ (interrupt_yielding = FALSE)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
+
+
+AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ (request_immediate_processing = TRUE)
+    /\ (interrupt_yielding = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
@@ -1009,18 +1022,41 @@ AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, ru
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
 
 
-AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, run_id) ==
+AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ (request_immediate_processing = FALSE)
+    /\ (interrupt_yielding = FALSE)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
 
 
-AcceptWithCompletionRunning(input_id, request_immediate_processing, run_id) ==
+AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Running"
     /\ (session_id # None)
+    /\ (request_immediate_processing = FALSE)
+    /\ (interrupt_yielding = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
+
+
+AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ (request_immediate_processing = FALSE)
+    /\ (interrupt_yielding = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
+
+
+AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ (request_immediate_processing = TRUE)
+    /\ (interrupt_yielding = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, current_run_id, pre_run_phase, peer_ingress_configured, drain_running, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision >>
@@ -1485,10 +1521,13 @@ Next ==
     \/ \E kind \in StringValues : PublishEventRunning(kind)
     \/ \E kind \in StringValues : PublishEventRetired(kind)
     \/ \E kind \in StringValues : PublishEventStopped(kind)
-    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionIdle(input_id, request_immediate_processing, run_id)
-    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, run_id)
-    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, run_id)
-    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionRunning(input_id, request_immediate_processing, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_processing, interrupt_yielding, run_id)
+    \/ \E input_id \in InputIdValues : \E request_immediate_processing \in BOOLEAN : \E interrupt_yielding \in BOOLEAN : \E run_id \in RunIdValues : AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id)
     \/ \E input_id \in InputIdValues : AcceptWithoutWakeIdle(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithoutWakeAttached(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithoutWakeRunning(input_id)

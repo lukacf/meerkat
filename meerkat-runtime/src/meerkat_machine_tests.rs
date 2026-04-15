@@ -17,7 +17,9 @@ use meerkat_core::ops_lifecycle::{
     OperationKind, OperationProgressUpdate, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
-use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue, TransitionRefusal};
+use meerkat_machine_kernels::{
+    KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,
+};
 use meerkat_machine_schema::{
     MachineSchema, TriggerKind, TypeRef, meerkat_machine as schema_meerkat_machine,
 };
@@ -11458,6 +11460,7 @@ struct RuntimeModeledStateRuntimeReport {
     before: Option<RuntimeModeledStateSummary>,
     after: Option<RuntimeModeledStateSummary>,
     result_summary: String,
+    surface_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -12263,6 +12266,24 @@ fn assert_modeled_meerkat_transition_matches_runtime_after(
     );
 }
 
+fn assert_modeled_meerkat_post_admission_signal_matches_runtime(
+    schema: &MachineSchema,
+    before: &RuntimeParitySnapshotSummary,
+    input: &KernelInput,
+    runtime_signal: crate::driver::ephemeral::PostAdmissionSignal,
+) {
+    let outcome =
+        modeled_meerkat_kernel::transition(&runtime_modeled_kernel_state(schema, before), input)
+            .expect("modeled transition should succeed");
+    let modeled_signal = runtime_modeled_post_admission_signal_from_effects(&outcome.effects);
+    assert_eq!(
+        format!("{runtime_signal:?}"),
+        modeled_signal,
+        "modeled post-admission signal should match runtime after {}",
+        input.variant
+    );
+}
+
 fn runtime_modeled_publish_input(
     active_visibility_revision: u64,
     staged_visibility_revision: u64,
@@ -12332,6 +12353,28 @@ fn runtime_parity_prompt(text: &str) -> Input {
     make_prompt(text)
 }
 
+fn runtime_parity_peer_message(text: &str) -> Input {
+    Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "runtime-parity".into(),
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: text.into(),
+        blocks: None,
+        handling_mode: None,
+    })
+}
+
 fn runtime_parity_publish_state_with_revisions(
     active_revision: u64,
     staged_revision: u64,
@@ -12397,13 +12440,24 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
     let before = runtime_parity_snapshot_summary(&adapter, &session_id)
         .await
         .expect("attached steer test should capture a pre-state snapshot");
-    let (outcome, completion_handle) = adapter
-        .accept_input_with_completion(
-            &session_id,
-            runtime_parity_steered_prompt("modeled attached steer"),
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: runtime_parity_steered_prompt("modeled attached steer"),
+            },
         )
         .await
         .expect("attached steered input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected attached steer result: {other:?}"),
+    };
     assert!(outcome.is_accepted());
     let completion_handle =
         completion_handle.expect("attached steered input should expose a completion waiter");
@@ -12424,13 +12478,207 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 "request_immediate_processing".to_string(),
                 KernelValue::Bool(true),
             ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
             ("run_id".to_string(), runtime_modeled_run_id_value()),
         ]),
     };
     assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
 
     allow_finish.notify_waiters();
     let _ = tokio::time::timeout(Duration::from_secs(1), completion_handle.wait()).await;
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtime() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Idle).await;
+
+    let before = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("idle queue test should capture a pre-state snapshot");
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: session_id.clone(),
+                input: runtime_parity_prompt("modeled idle queued admission"),
+            },
+        )
+        .await
+        .expect("idle queued input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected idle queued result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("queued idle input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&adapter, &session_id)
+        .await
+        .expect("idle queue test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(false),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    crate::traits::RuntimeControlPlane::destroy(
+        adapter.as_ref(),
+        &LogicalRuntimeId::new(session_id.to_string()),
+    )
+    .await
+    .expect("idle queue test should destroy runtime cleanly");
+    match completion_handle.wait().await {
+        CompletionOutcome::RuntimeTerminated(reason) => {
+            assert_eq!(reason, "runtime destroyed");
+        }
+        other => panic!("expected runtime destroyed termination, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running steer test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: fixture.session_id.clone(),
+                input: runtime_parity_steered_prompt("modeled running steer admission"),
+            },
+        )
+        .await
+        .expect("running steered input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected running steer result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("running steered input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running steer test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(true),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    drop(completion_handle);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches_runtime() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+    let before = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running interrupt test should capture a pre-state snapshot");
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id: fixture.session_id.clone(),
+                input: runtime_parity_peer_message("modeled running interrupt admission"),
+            },
+        )
+        .await
+        .expect("running peer input should be accepted");
+    let (outcome, completion_handle, admission_signal) = match result {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => (outcome, handle, admission_signal),
+        other => panic!("unexpected running interrupt result: {other:?}"),
+    };
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("running interrupt input should expose a completion waiter");
+
+    let after = runtime_parity_snapshot_summary(&fixture.adapter, &fixture.session_id)
+        .await
+        .expect("running interrupt test should capture a post-state snapshot");
+    let schema = modeled_meerkat_kernel::schema();
+    let input = KernelInput {
+        variant: "AcceptWithCompletion".to_string(),
+        fields: BTreeMap::from([
+            ("input_id".to_string(), runtime_modeled_input_id_value()),
+            (
+                "request_immediate_processing".to_string(),
+                KernelValue::Bool(false),
+            ),
+            ("interrupt_yielding".to_string(), KernelValue::Bool(true)),
+            ("run_id".to_string(), runtime_modeled_run_id_value()),
+        ]),
+    };
+    assert_modeled_meerkat_transition_matches_runtime_after(&schema, &before, &input, &after);
+    assert_modeled_meerkat_post_admission_signal_matches_runtime(
+        &schema,
+        &before,
+        &input,
+        admission_signal,
+    );
+
+    drop(completion_handle);
+    fixture.cleanup().await;
 }
 
 fn install_runtime_parity_reconfigure_host(adapter: &Arc<MeerkatMachine>) {
@@ -12901,9 +13149,13 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         MeerkatMachineCommandResult::AcceptOutcome(outcome) => {
             format!("accept_outcome:{outcome:?}")
         }
-        MeerkatMachineCommandResult::AcceptWithCompletion { outcome, handle } => {
+        MeerkatMachineCommandResult::AcceptWithCompletion {
+            outcome,
+            handle,
+            admission_signal,
+        } => {
             format!(
-                "accept_with_completion:{outcome:?}:handle={}",
+                "accept_with_completion:{outcome:?}:handle={}:signal={admission_signal:?}",
                 handle.is_some()
             )
         }
@@ -13086,12 +13338,19 @@ fn runtime_modeled_schema_report(
     };
 
     match modeled_meerkat_kernel::transition(&state, &input) {
-        Ok(outcome) => RuntimeModeledStateSchemaReport {
-            outcome_kind: RuntimeModeledStateOutcomeKind::Ok,
-            after: runtime_modeled_summary_from_kernel_state(schema, &outcome.next_state, before),
-            detail: outcome.transition,
-            result_summary: runtime_modeled_schema_result_summary(before, probe),
-        },
+        Ok(outcome) => {
+            let result_summary = runtime_modeled_schema_result_summary(before, probe, &outcome);
+            RuntimeModeledStateSchemaReport {
+                outcome_kind: RuntimeModeledStateOutcomeKind::Ok,
+                after: runtime_modeled_summary_from_kernel_state(
+                    schema,
+                    &outcome.next_state,
+                    before,
+                ),
+                detail: outcome.transition,
+                result_summary,
+            }
+        }
         Err(error) => RuntimeModeledStateSchemaReport {
             outcome_kind: RuntimeModeledStateOutcomeKind::Err,
             after: Some(RuntimeModeledStateSummary {
@@ -13104,11 +13363,29 @@ fn runtime_modeled_schema_report(
     }
 }
 
+fn runtime_modeled_post_admission_signal_from_effects(effects: &[KernelEffect]) -> String {
+    effects
+        .iter()
+        .find(|effect| effect.variant == "PostAdmissionSignal")
+        .and_then(|effect| effect.fields.get("signal"))
+        .and_then(|value| match value {
+            KernelValue::String(value) => Some(value.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "None".to_string())
+}
+
 fn runtime_modeled_schema_result_summary(
     before: &RuntimeParitySnapshotSummary,
     probe: RuntimeParityProbeInput,
+    outcome: &TransitionOutcome,
 ) -> Option<String> {
     match probe {
+        RuntimeParityProbeInput::AcceptWithCompletion => Some(format!(
+            "admission_signal:{}",
+            runtime_modeled_post_admission_signal_from_effects(&outcome.effects)
+        )),
+        RuntimeParityProbeInput::AcceptWithoutWake => Some("admission_signal:None".to_string()),
         // These control-plane reports are exact functions of the lower-level
         // input ledger carrier, not the top-level phase machine alone.
         RuntimeParityProbeInput::Destroy => Some(format!(
@@ -13158,6 +13435,7 @@ fn runtime_modeled_transition_refusal_detail(error: &TransitionRefusal) -> Strin
 
 fn runtime_modeled_runtime_report(
     runtime: &RuntimeParityInvocationReport,
+    probe: RuntimeParityProbeInput,
 ) -> RuntimeModeledStateRuntimeReport {
     let before = runtime_modeled_summary_from_runtime_snapshot(runtime.before.as_ref());
     let after =
@@ -13176,6 +13454,32 @@ fn runtime_modeled_runtime_report(
         before,
         after,
         result_summary: runtime.result_summary.clone(),
+        surface_summary: runtime_modeled_runtime_surface_summary(runtime, probe),
+    }
+}
+
+fn runtime_modeled_runtime_surface_summary(
+    runtime: &RuntimeParityInvocationReport,
+    probe: RuntimeParityProbeInput,
+) -> Option<String> {
+    if runtime.outcome_kind != RuntimeParityOutcomeKind::Ok {
+        return None;
+    }
+
+    match probe {
+        RuntimeParityProbeInput::AcceptWithCompletion => Some(format!(
+            "admission_signal:{}",
+            runtime
+                .result_summary
+                .rsplit("signal=")
+                .next()
+                .unwrap_or("None")
+        )),
+        RuntimeParityProbeInput::AcceptWithoutWake => Some("admission_signal:None".to_string()),
+        RuntimeParityProbeInput::Destroy
+        | RuntimeParityProbeInput::Reset
+        | RuntimeParityProbeInput::Recycle => Some(runtime.result_summary.clone()),
+        _ => None,
     }
 }
 
@@ -13529,6 +13833,7 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
                         before: None,
                         after: None,
                         result_summary: "no runtime probe implemented".to_string(),
+                        surface_summary: None,
                     },
                     schema: RuntimeModeledStateSchemaReport {
                         outcome_kind: RuntimeModeledStateOutcomeKind::Err,
@@ -13542,11 +13847,12 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
 
             let runtime = execute_runtime_parity_probe(phase, probe).await;
             let schema_report = runtime_modeled_schema_report(&schema, &runtime, probe);
-            let runtime_report = runtime_modeled_runtime_report(&runtime);
+            let runtime_report = runtime_modeled_runtime_report(&runtime, probe);
             let differing_keys =
                 runtime_modeled_differing_keys(&runtime_report.after, &schema_report.after);
             let aligned = runtime_report.outcome_kind == schema_report.outcome_kind
-                && differing_keys.is_empty();
+                && differing_keys.is_empty()
+                && runtime_report.surface_summary == schema_report.result_summary;
 
             rows.push(RuntimeModeledStateRowReport {
                 phase: phase.schema_name().to_string(),

@@ -1593,6 +1593,7 @@ fn absorbed_meerkat_input_variants() -> Vec<VariantSchema> {
             fields: vec![
                 field("input_id", named("InputId")),
                 field("request_immediate_processing", TypeRef::Bool),
+                field("interrupt_yielding", TypeRef::Bool),
                 field("run_id", named("RunId")),
             ],
         },
@@ -1819,13 +1820,54 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     // Input admission through the helper surface currently accepts from Idle,
     // Attached, and Running, while Retired/Stopped/Destroyed reject.
     transitions.push(self_loop_transition_with(
-        "AcceptWithCompletionIdle",
+        "AcceptWithCompletionIdleQueued",
         "Idle",
         "AcceptWithCompletion",
-        vec!["input_id", "request_immediate_processing", "run_id"],
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
         vec![],
-        vec![simple_emit("IngressAccepted")],
-        vec![session_registered_guard()],
+        vec![
+            simple_emit("IngressAccepted"),
+            post_admission_signal_emit("WakeLoop"),
+        ],
+        vec![
+            session_registered_guard(),
+            bool_binding_guard(
+                "request_immediate_processing",
+                "request_immediate_processing",
+                false,
+            ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
+        ],
+    ));
+    transitions.push(self_loop_transition_with(
+        "AcceptWithCompletionIdleImmediate",
+        "Idle",
+        "AcceptWithCompletion",
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
+        vec![],
+        vec![
+            simple_emit("IngressAccepted"),
+            post_admission_signal_emit("RequestImmediateProcessing"),
+        ],
+        vec![
+            session_registered_guard(),
+            bool_binding_guard(
+                "request_immediate_processing",
+                "request_immediate_processing",
+                true,
+            ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
+        ],
     ));
     transitions.push(TransitionSchema {
         name: "AcceptWithCompletionAttachedImmediate".into(),
@@ -1836,6 +1878,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
             bindings: vec![
                 "input_id".into(),
                 "request_immediate_processing".into(),
+                "interrupt_yielding".into(),
                 "run_id".into(),
             ],
         },
@@ -1846,6 +1889,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
                 "request_immediate_processing",
                 true,
             ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
         ],
         updates: vec![
             assign_some("current_run_id", "run_id"),
@@ -1857,6 +1901,7 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         to: "Running".into(),
         emit: vec![
             simple_emit("IngressAccepted"),
+            post_admission_signal_emit("RequestImmediateProcessing"),
             simple_emit("SubmitRunPrimitive"),
         ],
     });
@@ -1864,7 +1909,37 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
         "AcceptWithCompletionAttachedQueued",
         "Attached",
         "AcceptWithCompletion",
-        vec!["input_id", "request_immediate_processing", "run_id"],
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
+        vec![],
+        vec![
+            simple_emit("IngressAccepted"),
+            post_admission_signal_emit("WakeLoop"),
+        ],
+        vec![
+            session_registered_guard(),
+            bool_binding_guard(
+                "request_immediate_processing",
+                "request_immediate_processing",
+                false,
+            ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
+        ],
+    ));
+    transitions.push(self_loop_transition_with(
+        "AcceptWithCompletionRunningQueuedPassive",
+        "Running",
+        "AcceptWithCompletion",
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
         vec![],
         vec![simple_emit("IngressAccepted")],
         vec![
@@ -1874,16 +1949,58 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
                 "request_immediate_processing",
                 false,
             ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
         ],
     ));
     transitions.push(self_loop_transition_with(
-        "AcceptWithCompletionRunning",
+        "AcceptWithCompletionRunningInterruptYielding",
         "Running",
         "AcceptWithCompletion",
-        vec!["input_id", "request_immediate_processing", "run_id"],
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
         vec![],
-        vec![simple_emit("IngressAccepted")],
-        vec![session_registered_guard()],
+        vec![
+            simple_emit("IngressAccepted"),
+            post_admission_signal_emit("InterruptYielding"),
+        ],
+        vec![
+            session_registered_guard(),
+            bool_binding_guard(
+                "request_immediate_processing",
+                "request_immediate_processing",
+                false,
+            ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", true),
+        ],
+    ));
+    transitions.push(self_loop_transition_with(
+        "AcceptWithCompletionRunningImmediate",
+        "Running",
+        "AcceptWithCompletion",
+        vec![
+            "input_id",
+            "request_immediate_processing",
+            "interrupt_yielding",
+            "run_id",
+        ],
+        vec![],
+        vec![
+            simple_emit("IngressAccepted"),
+            post_admission_signal_emit("RequestImmediateProcessing"),
+        ],
+        vec![
+            session_registered_guard(),
+            bool_binding_guard(
+                "request_immediate_processing",
+                "request_immediate_processing",
+                true,
+            ),
+            bool_binding_guard("interrupt_yielding", "interrupt_yielding", false),
+        ],
     ));
 
     for phase in ["Idle", "Attached", "Running"] {
@@ -2162,6 +2279,13 @@ fn simple_emit(variant: &str) -> EffectEmit {
     }
 }
 
+fn post_admission_signal_emit(signal: &str) -> EffectEmit {
+    EffectEmit {
+        variant: "PostAdmissionSignal".into(),
+        fields: IndexMap::from([("signal".into(), Expr::String(signal.into()))]),
+    }
+}
+
 fn absorbed_meerkat_effect_variants() -> Vec<VariantSchema> {
     vec![
         variant("ResolveAdmission"),
@@ -2171,6 +2295,10 @@ fn absorbed_meerkat_effect_variants() -> Vec<VariantSchema> {
         variant("ApplyControlPlaneCommand"),
         variant("InitiateRecycle"),
         variant("IngressAccepted"),
+        VariantSchema {
+            name: "PostAdmissionSignal".into(),
+            fields: vec![field("signal", TypeRef::String)],
+        },
         variant("ReadyForRun"),
         variant("InputLifecycleNotice"),
         variant("CompletionResolved"),
@@ -2214,6 +2342,7 @@ fn absorbed_meerkat_effect_dispositions() -> Vec<EffectDispositionRule> {
         local_disposition("ApplyControlPlaneCommand"),
         local_disposition("InitiateRecycle"),
         external_disposition("IngressAccepted"),
+        local_disposition("PostAdmissionSignal"),
         local_disposition("ReadyForRun"),
         external_disposition("InputLifecycleNotice"),
         local_disposition("CompletionResolved"),

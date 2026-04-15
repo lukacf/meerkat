@@ -1651,7 +1651,11 @@ impl MeerkatMachine {
                     );
                 }
 
-                Ok(MeerkatMachineCommandResult::AcceptWithCompletion { outcome, handle })
+                Ok(MeerkatMachineCommandResult::AcceptWithCompletion {
+                    outcome,
+                    handle,
+                    admission_signal: signal,
+                })
             }
             MeerkatMachineCommand::AcceptWithoutWake { session_id, input } => {
                 let driver = {
@@ -3071,9 +3075,11 @@ impl MeerkatMachine {
             .await
             .map_err(MeerkatMachine::driver_error_from_command_error)?
         {
-            MeerkatMachineCommandResult::AcceptWithCompletion { outcome, handle } => {
-                Ok((outcome, handle))
-            }
+            MeerkatMachineCommandResult::AcceptWithCompletion {
+                outcome,
+                handle,
+                admission_signal: _,
+            } => Ok((outcome, handle)),
             other => Err(RuntimeDriverError::Internal(format!(
                 "unexpected command result for accept_input_with_completion: {other:?}"
             ))),

@@ -322,6 +322,8 @@ pub(crate) enum MeerkatMachineCommandResult {
     AcceptWithCompletion {
         outcome: AcceptOutcome,
         handle: Option<crate::completion::CompletionHandle>,
+        #[allow(dead_code)]
+        admission_signal: crate::driver::ephemeral::PostAdmissionSignal,
     },
     Unit,
     Bool(bool),

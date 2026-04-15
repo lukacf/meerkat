@@ -82,6 +82,10 @@ Current state:
   self-loop in the formal model: when `request_immediate_processing=true`, the
   checked-in Meerkat machine now models the runtime’s `Attached -> Running`
   jump and binds the fresh `current_run_id` / `pre_run_phase`
+- running queued `AcceptWithCompletion` is no longer flattened to a passive
+  self-loop either: the checked-in Meerkat machine now distinguishes the live
+  `InterruptYielding` admission branch from the passive queued branch, and the
+  targeted runtime/model regression for running peer-message admission is green
 - the top-level Meerkat machine no longer carries the filter mirror pair
   `active_filter` / `staged_filter`; the authoritative
   `MachineToolVisibilityOwner` still owns the real filter state, exact parity
@@ -134,8 +138,11 @@ Current exact-parity state:
   question: the stale handwritten control booleans remain outside the catalog,
   while the live wake/process carrier now runs through ingress +
   `post_admission_signal`; the pair audit says those carriers do not create
-  hidden phase distinctions, but payload-sensitive admission semantics still
-  need to be lifted deliberately where they change top-level Meerkat behavior
+  hidden phase distinctions, and the first two payload-sensitive helper paths
+  (`Attached -> Running` immediate acceptance and running
+  `InterruptYielding`) are now lifted into the top-level Meerkat model; the
+  remaining work is to keep pulling up only the live ingress/control carriers
+  that actually change checked-in machine behavior
 - the dead top-level active-work slice is also gone: `active_work_id` never
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed
@@ -331,7 +338,7 @@ Outcome:
 3. Use the trustworthy post-parity Hopcroft rerun as the Meerkat
    simplification baseline after the visibility-boundary,
    LLM/capability-boundary, dead active-work, `current_run_id`, and attached
-   steered-accept cuts:
+   steered/interrupt-bearing accept cuts:
    raw `11,858 -> 385`, phase `11,858 -> 390`, full `11,858 -> 11,469`,
    TLC `1,068,719 generated / 11,858 distinct / depth 9`.
 4. Read that baseline together with the largest-block field projection from
@@ -343,6 +350,7 @@ Outcome:
    ledger in
    [`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
 6. Use the next loop to target payload-sensitive Meerkat admission semantics
-   beyond the attached-steer case, especially the question of which live
-   ingress/post-admission carriers belong in the two-machine model versus
-   which should stay below it as lower-authority mechanics.
+   beyond the now-modeled attached-steer and running-interrupt cases,
+   especially the question of which live ingress/post-admission carriers
+   belong in the two-machine model versus which should stay below it as
+   lower-authority mechanics.

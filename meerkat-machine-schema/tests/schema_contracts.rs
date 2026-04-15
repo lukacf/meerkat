@@ -238,6 +238,7 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "ResolveAdmission",
         "SubmitAdmittedIngressEffect",
         "SubmitRunPrimitive",
+        "PostAdmissionSignal",
         "SubmitOpEvent",
         "EnqueueClassifiedEntry",
         "SpawnDrainTask",
@@ -296,7 +297,9 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         "EnsureDrainRunningRunning",
         "AcceptWithCompletionAttachedQueued",
         "AcceptWithCompletionAttachedImmediate",
-        "AcceptWithCompletionRunning",
+        "AcceptWithCompletionRunningQueuedPassive",
+        "AcceptWithCompletionRunningInterruptYielding",
+        "AcceptWithCompletionRunningImmediate",
         "AcceptWithoutWakeAttached",
         "AcceptWithoutWakeRunning",
         "IngestAttached",
@@ -331,7 +334,11 @@ fn meerkat_machine_merges_turn_admission_tool_visibility_and_peer_directory_stat
         );
     }
 
-    for required in ["WakeInterrupt", "CommittedVisibleSetPublished"] {
+    for required in [
+        "WakeInterrupt",
+        "PostAdmissionSignal",
+        "CommittedVisibleSetPublished",
+    ] {
         assert!(
             effect_names.iter().any(|name| name == &required),
             "MeerkatMachine should retain absorbed effect {required}"

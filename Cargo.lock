@@ -4241,7 +4241,6 @@ dependencies = [
  "meerkat-core",
  "meerkat-runtime",
  "meerkat-store",
- "serde",
  "serde_json",
  "tempfile",
  "tokio",

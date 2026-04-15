@@ -373,6 +373,19 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
     let content;
     braced!(content in input);
 
+    // optional per_phase [Phase1, Phase2, ...]
+    let per_phase = if content.peek(Ident)
+        && content
+            .fork()
+            .parse::<Ident>()
+            .map_or(false, |id| id == "per_phase")
+    {
+        let _kw: Ident = content.parse()?;
+        Some(parse_ident_list(&content)?)
+    } else {
+        None
+    };
+
     // on input/signal Variant { bindings }
     let on_kw: Ident = content.parse()?;
     if on_kw != "on" {
@@ -431,6 +444,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
 
     Ok(TransitionDef {
         name,
+        per_phase,
         trigger,
         guard,
         updates,

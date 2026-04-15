@@ -357,7 +357,8 @@ fn validate_expr(
         | ExprDef::EmptySet
         | ExprDef::EmptyMap
         | ExprDef::CurrentPhase
-        | ExprDef::Phase(_) => {}
+        | ExprDef::Phase(_)
+        | ExprDef::NamedVariant { .. } => {}
     }
 }
 

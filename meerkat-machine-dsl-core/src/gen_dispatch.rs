@@ -317,10 +317,10 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             FieldPrefix::DirectSelf => quote! { self.phase() },
         },
         ExprDef::Phase(variant) => {
-            // Phase enum is referenced as a type alias in scope
-            // The generated code wraps in a module, so we need the actual phase enum
-            // For now, rely on the variant being in scope via use
             quote! { Phase::#variant }
+        }
+        ExprDef::NamedVariant { enum_name, variant } => {
+            quote! { #enum_name::#variant }
         }
         ExprDef::Not(inner) => {
             let e = gen_expr(inner, prefix);

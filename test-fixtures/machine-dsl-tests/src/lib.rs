@@ -7,5 +7,6 @@
 pub use meerkat_machine_schema;
 
 mod occurrence_lifecycle;
+mod schedule_lifecycle;
 #[cfg(test)]
 mod tests;

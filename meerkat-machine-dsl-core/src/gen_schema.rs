@@ -248,6 +248,11 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let v = variant.to_string();
             quote! { Expr::Phase(#v.into()) }
         }
+        ExprDef::NamedVariant { enum_name, variant } => {
+            let e = enum_name.to_string();
+            let v = variant.to_string();
+            quote! { Expr::NamedVariant { enum_name: #e.into(), variant: #v.into() } }
+        }
         ExprDef::Not(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Not(Box::new(#inner_e)) }
@@ -483,7 +488,7 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                         .iter()
                         .map(|(fname, fval)| {
                             let fn_str = fname.to_string();
-                            let val = gen_schema_expr(fval);
+                            let val = gen_schema_expr_for(def, fval);
                             quote! { (#fn_str.into(), #val) }
                         })
                         .collect();

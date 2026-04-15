@@ -194,6 +194,11 @@ pub enum ExprDef {
     Binding(Ident),
     CurrentPhase,
     Phase(Ident),
+    /// Typed enum variant literal: `EnumName::Variant`
+    NamedVariant {
+        enum_name: Ident,
+        variant: Ident,
+    },
 
     // Boolean operators
     Not(Box<ExprDef>),

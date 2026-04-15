@@ -97,6 +97,11 @@ fn gen_init_value(expr: &crate::ast::ExprDef) -> TokenStream {
         }
         ExprDef::EmptySet => quote! { std::collections::BTreeSet::new() },
         ExprDef::EmptyMap => quote! { std::collections::BTreeMap::new() },
+        ExprDef::NamedVariant { enum_name, variant } => quote! { #enum_name::#variant },
+        ExprDef::Phase(variant) => {
+            // Phase variant in init — for stored-phase machines
+            quote! { Phase::#variant }
+        }
         _ => quote! { Default::default() },
     }
 }

@@ -783,6 +783,15 @@ fn parse_primary_expr(input: ParseStream) -> Result<ExprDef> {
             })
         }
         _ => {
+            // EnumName::Variant — named variant literal
+            if input.peek(Token![::]) {
+                let _: Token![::] = input.parse()?;
+                let variant: Ident = input.parse()?;
+                return Ok(ExprDef::NamedVariant {
+                    enum_name: ident,
+                    variant,
+                });
+            }
             // Could be a helper call: name(args) or just a binding
             if input.peek(syn::token::Paren) {
                 let paren;

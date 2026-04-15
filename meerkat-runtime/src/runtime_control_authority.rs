@@ -1,24 +1,16 @@
-//! RMAT/MTAS sealed authority for the RuntimeControl machine.
+//! Sealed authority for the runtime's coarse control lifecycle.
 //!
-//! This module provides typed enums and a sealed mutator trait that enforces
-//! all RuntimeControl state mutations flow through the machine authority.
-//! Handwritten shell code calls [`RuntimeControlAuthority::apply`] and executes
-//! returned effects; it cannot mutate canonical state directly.
+//! This helper owns the live run-lifecycle and control-plane bookkeeping that
+//! still exists below the checked-in `MeerkatMachine` model. In particular, it
+//! tracks the active run identity and pre-run return phase used by the
+//! executor/control shell.
 //!
-//! The transition table encoded here is the single source of truth, matching
-//! the machine schema in `meerkat-machine-schema/src/catalog/runtime_control.rs`:
-//!
-//! - 8 states: Initializing, Idle, Attached, Running, Recovering, Retired, Stopped, Destroyed
-//! - 20 input variants (Initialize, AttachExecutor, DetachExecutor, BeginRun,
-//!   RunCompleted/Failed/Cancelled, SubmitWork, AdmissionAccepted/Rejected/Deduplicated,
-//!   RecoverRequested, RecoverySucceeded, RetireRequested, ResetRequested,
-//!   StopRequested, DestroyRequested, ResumeRequested, ExternalToolDeltaReceived,
-//!   RecycleRequested, RecycleSucceeded)
-//! - 4 fields: current_run_id, pre_run_state, wake_pending, process_pending
-//! - 2 invariants: running_implies_active_run, active_run_only_while_running_or_retired
-//! - 8 effects: ResolveAdmission, SubmitAdmittedIngressEffect, SubmitRunPrimitive,
-//!   SignalWake, SignalImmediateProcess, EmitRuntimeNotice,
-//!   ResolveCompletionAsTerminated, ApplyControlPlaneCommand, InitiateRecycle
+//! Importantly, this module does **not** own the runtime's input-admission or
+//! wake/process semantics anymore. Those behaviors now live in the checked-in
+//! `MeerkatMachine` + `RuntimeIngressAuthority` path and the driver-owned typed
+//! `post_admission_signal`. The old handwritten admission/wake branch here had
+//! become dead code, so this helper is intentionally narrower than the legacy
+//! transition table it replaced.
 
 use meerkat_core::lifecycle::RunId;
 
@@ -37,33 +29,10 @@ pub enum RuntimeControlInput {
     Initialize,
     AttachExecutor,
     DetachExecutor,
-    BeginRun {
-        run_id: RunId,
-    },
-    RunCompleted {
-        run_id: RunId,
-    },
-    RunFailed {
-        run_id: RunId,
-    },
-    RunCancelled {
-        run_id: RunId,
-    },
-    SubmitWork {
-        work_id: String,
-    },
-    AdmissionAccepted {
-        work_id: String,
-        handling_mode: HandlingMode,
-    },
-    AdmissionRejected {
-        work_id: String,
-        reason: String,
-    },
-    AdmissionDeduplicated {
-        work_id: String,
-        existing_work_id: String,
-    },
+    BeginRun { run_id: RunId },
+    RunCompleted { run_id: RunId },
+    RunFailed { run_id: RunId },
+    RunCancelled { run_id: RunId },
     RecoverRequested,
     RecoverySucceeded,
     RetireRequested,
@@ -76,13 +45,6 @@ pub enum RuntimeControlInput {
     RecycleSucceeded,
 }
 
-/// Handling mode for admitted work — determines wake/process signaling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandlingMode {
-    Queue,
-    Steer,
-}
-
 // ---------------------------------------------------------------------------
 // Typed effect enum — mirrors the machine schema's effect variants
 // ---------------------------------------------------------------------------
@@ -93,28 +55,10 @@ pub enum HandlingMode {
 /// responsible for executing the side effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeControlEffect {
-    ResolveAdmission {
-        work_id: String,
-    },
-    SubmitAdmittedIngressEffect {
-        work_id: String,
-        handling_mode: HandlingMode,
-    },
-    SubmitRunPrimitive {
-        run_id: RunId,
-    },
-    SignalWake,
-    SignalImmediateProcess,
-    EmitRuntimeNotice {
-        kind: String,
-        detail: String,
-    },
-    ResolveCompletionAsTerminated {
-        reason: String,
-    },
-    ApplyControlPlaneCommand {
-        command: String,
-    },
+    SubmitRunPrimitive { run_id: RunId },
+    EmitRuntimeNotice { kind: String, detail: String },
+    ResolveCompletionAsTerminated { reason: String },
+    ApplyControlPlaneCommand { command: String },
     InitiateRecycle,
 }
 
@@ -142,8 +86,6 @@ pub struct RuntimeControlTransition {
 struct RuntimeControlFields {
     current_run_id: Option<RunId>,
     pre_run_state: Option<RuntimeState>,
-    wake_pending: bool,
-    process_pending: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,8 +138,6 @@ impl RuntimeControlAuthority {
             fields: RuntimeControlFields {
                 current_run_id: None,
                 pre_run_state: None,
-                wake_pending: false,
-                process_pending: false,
             },
         }
     }
@@ -209,8 +149,6 @@ impl RuntimeControlAuthority {
             fields: RuntimeControlFields {
                 current_run_id: None,
                 pre_run_state: None,
-                wake_pending: false,
-                process_pending: false,
             },
         }
     }
@@ -228,16 +166,6 @@ impl RuntimeControlAuthority {
     /// Pre-run state from canonical state.
     pub fn pre_run_state(&self) -> Option<RuntimeState> {
         self.fields.pre_run_state
-    }
-
-    /// Whether a wake is pending.
-    pub fn wake_pending(&self) -> bool {
-        self.fields.wake_pending
-    }
-
-    /// Whether immediate processing is pending.
-    pub fn process_pending(&self) -> bool {
-        self.fields.process_pending
     }
 
     /// Check if the runtime is in the Idle state.
@@ -278,11 +206,10 @@ impl RuntimeControlAuthority {
         RuntimeStateTransitionError,
     > {
         use RuntimeControlInput::{
-            AdmissionAccepted, AdmissionDeduplicated, AdmissionRejected, AttachExecutor, BeginRun,
-            DestroyRequested, DetachExecutor, ExternalToolDeltaReceived, Initialize,
-            RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
+            AttachExecutor, BeginRun, DestroyRequested, DetachExecutor, ExternalToolDeltaReceived,
+            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
             ResetRequested, ResumeRequested, RetireRequested, RunCancelled, RunCompleted,
-            RunFailed, StopRequested, SubmitWork,
+            RunFailed, StopRequested,
         };
         use RuntimeState::{
             Attached, Destroyed, Idle, Initializing, Recovering, Retired, Running, Stopped,
@@ -312,8 +239,6 @@ impl RuntimeControlAuthority {
                 }
                 fields.current_run_id = Some(run_id.clone());
                 fields.pre_run_state = Some(Idle);
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -330,8 +255,6 @@ impl RuntimeControlAuthority {
                 }
                 fields.current_run_id = Some(run_id.clone());
                 fields.pre_run_state = Some(Attached);
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -348,8 +271,6 @@ impl RuntimeControlAuthority {
                 }
                 fields.current_run_id = Some(run_id.clone());
                 fields.pre_run_state = Some(Retired);
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -366,8 +287,6 @@ impl RuntimeControlAuthority {
                 }
                 fields.current_run_id = Some(run_id.clone());
                 fields.pre_run_state = Some(Recovering);
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::SubmitRunPrimitive {
                     run_id: run_id.clone(),
                 });
@@ -422,137 +341,6 @@ impl RuntimeControlAuthority {
                 Retired
             }
 
-            // SubmitWork from Idle/Running/Attached — stays in same phase, emits ResolveAdmission
-            (Idle, SubmitWork { work_id }) => {
-                effects.push(RuntimeControlEffect::ResolveAdmission {
-                    work_id: work_id.clone(),
-                });
-                Idle
-            }
-            (Running, SubmitWork { work_id }) => {
-                effects.push(RuntimeControlEffect::ResolveAdmission {
-                    work_id: work_id.clone(),
-                });
-                Running
-            }
-            (Attached, SubmitWork { work_id }) => {
-                effects.push(RuntimeControlEffect::ResolveAdmission {
-                    work_id: work_id.clone(),
-                });
-                Attached
-            }
-
-            // AdmissionAccepted — stays in same phase, emits SubmitAdmittedIngressEffect + signals
-            (
-                Idle,
-                AdmissionAccepted {
-                    work_id,
-                    handling_mode,
-                },
-            ) => {
-                let process_immediately = *handling_mode == HandlingMode::Steer;
-                // Idle/Attached => wake_when_idle = true
-                fields.wake_pending = true;
-                fields.process_pending = process_immediately;
-                effects.push(RuntimeControlEffect::SubmitAdmittedIngressEffect {
-                    work_id: work_id.clone(),
-                    handling_mode: *handling_mode,
-                });
-                effects.push(RuntimeControlEffect::SignalWake);
-                if process_immediately {
-                    effects.push(RuntimeControlEffect::SignalImmediateProcess);
-                }
-                Idle
-            }
-            (
-                Attached,
-                AdmissionAccepted {
-                    work_id,
-                    handling_mode,
-                },
-            ) => {
-                let process_immediately = *handling_mode == HandlingMode::Steer;
-                // Attached => wake_when_idle = true
-                fields.wake_pending = true;
-                fields.process_pending = process_immediately;
-                effects.push(RuntimeControlEffect::SubmitAdmittedIngressEffect {
-                    work_id: work_id.clone(),
-                    handling_mode: *handling_mode,
-                });
-                effects.push(RuntimeControlEffect::SignalWake);
-                if process_immediately {
-                    effects.push(RuntimeControlEffect::SignalImmediateProcess);
-                }
-                Attached
-            }
-            (
-                Running,
-                AdmissionAccepted {
-                    work_id,
-                    handling_mode,
-                },
-            ) => {
-                let process_immediately = *handling_mode == HandlingMode::Steer;
-                // Running => wake_when_idle = false
-                fields.wake_pending = process_immediately;
-                fields.process_pending = process_immediately;
-                effects.push(RuntimeControlEffect::SubmitAdmittedIngressEffect {
-                    work_id: work_id.clone(),
-                    handling_mode: *handling_mode,
-                });
-                if process_immediately {
-                    effects.push(RuntimeControlEffect::SignalWake);
-                    effects.push(RuntimeControlEffect::SignalImmediateProcess);
-                }
-                Running
-            }
-
-            // AdmissionRejected — stays in same phase, emits EmitRuntimeNotice
-            (Idle, AdmissionRejected { reason, .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionRejected".into(),
-                    detail: reason.clone(),
-                });
-                Idle
-            }
-            (Running, AdmissionRejected { reason, .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionRejected".into(),
-                    detail: reason.clone(),
-                });
-                Running
-            }
-            (Attached, AdmissionRejected { reason, .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionRejected".into(),
-                    detail: reason.clone(),
-                });
-                Attached
-            }
-
-            // AdmissionDeduplicated — stays in same phase, emits EmitRuntimeNotice
-            (Idle, AdmissionDeduplicated { .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionDeduplicated".into(),
-                    detail: "ExistingInputLinked".into(),
-                });
-                Idle
-            }
-            (Running, AdmissionDeduplicated { .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionDeduplicated".into(),
-                    detail: "ExistingInputLinked".into(),
-                });
-                Running
-            }
-            (Attached, AdmissionDeduplicated { .. }) => {
-                effects.push(RuntimeControlEffect::EmitRuntimeNotice {
-                    kind: "AdmissionDeduplicated".into(),
-                    detail: "ExistingInputLinked".into(),
-                });
-                Attached
-            }
-
             // RecoverRequested from Idle
             (Idle, RecoverRequested) => {
                 fields.pre_run_state = Some(Idle);
@@ -574,8 +362,6 @@ impl RuntimeControlAuthority {
             (Recovering, RecoverySucceeded) => {
                 fields.current_run_id = None;
                 fields.pre_run_state = None;
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 Idle
             }
 
@@ -603,8 +389,6 @@ impl RuntimeControlAuthority {
             (Initializing | Idle | Attached | Recovering | Retired, ResetRequested) => {
                 fields.current_run_id = None;
                 fields.pre_run_state = None;
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::ApplyControlPlaneCommand {
                     command: "Reset".into(),
                 });
@@ -700,8 +484,6 @@ impl RuntimeControlAuthority {
             (Recovering, RecycleSucceeded) => {
                 fields.current_run_id = None;
                 fields.pre_run_state = None;
-                fields.wake_pending = false;
-                fields.process_pending = false;
                 effects.push(RuntimeControlEffect::EmitRuntimeNotice {
                     kind: "Recycle".into(),
                     detail: "Succeeded".into(),
@@ -752,11 +534,10 @@ impl RuntimeControlAuthority {
     /// Infer a target state for error reporting when a transition is illegal.
     fn infer_target(&self, input: &RuntimeControlInput) -> RuntimeState {
         use RuntimeControlInput::{
-            AdmissionAccepted, AdmissionDeduplicated, AdmissionRejected, AttachExecutor, BeginRun,
-            DestroyRequested, DetachExecutor, ExternalToolDeltaReceived, Initialize,
-            RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
+            AttachExecutor, BeginRun, DestroyRequested, DetachExecutor, ExternalToolDeltaReceived,
+            Initialize, RecoverRequested, RecoverySucceeded, RecycleRequested, RecycleSucceeded,
             ResetRequested, ResumeRequested, RetireRequested, RunCancelled, RunCompleted,
-            RunFailed, StopRequested, SubmitWork,
+            RunFailed, StopRequested,
         };
         match input {
             Initialize => RuntimeState::Idle,
@@ -766,11 +547,7 @@ impl RuntimeControlAuthority {
             RunCompleted { .. } | RunFailed { .. } | RunCancelled { .. } => {
                 self.resolve_run_return(&self.fields)
             }
-            SubmitWork { .. }
-            | AdmissionAccepted { .. }
-            | AdmissionRejected { .. }
-            | AdmissionDeduplicated { .. }
-            | ExternalToolDeltaReceived => self.phase,
+            ExternalToolDeltaReceived => self.phase,
             RecoverRequested | RecycleRequested => RuntimeState::Recovering,
             RecoverySucceeded | RecycleSucceeded | ResumeRequested | ResetRequested => {
                 RuntimeState::Idle
@@ -1097,172 +874,6 @@ mod tests {
         assert_eq!(t.next_phase, RuntimeState::Attached);
     }
 
-    // --- SubmitWork ---
-
-    #[test]
-    fn submit_work_idle_emits_resolve_admission() {
-        let mut auth = make_idle();
-        let t = auth
-            .apply(RuntimeControlInput::SubmitWork {
-                work_id: "w1".into(),
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert_eq!(t.effects.len(), 1);
-        assert!(matches!(
-            &t.effects[0],
-            RuntimeControlEffect::ResolveAdmission { work_id } if work_id == "w1"
-        ));
-    }
-
-    #[test]
-    fn submit_work_running_stays_running() {
-        let (mut auth, _) = make_running_from_idle();
-        let t = auth
-            .apply(RuntimeControlInput::SubmitWork {
-                work_id: "w1".into(),
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Running);
-    }
-
-    #[test]
-    fn submit_work_attached_stays_attached() {
-        let mut auth = make_attached();
-        let t = auth
-            .apply(RuntimeControlInput::SubmitWork {
-                work_id: "w1".into(),
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Attached);
-    }
-
-    // --- AdmissionAccepted ---
-
-    #[test]
-    fn admission_accepted_idle_queue_signals_wake() {
-        let mut auth = make_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionAccepted {
-                work_id: "w1".into(),
-                handling_mode: HandlingMode::Queue,
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert!(auth.wake_pending());
-        assert!(!auth.process_pending());
-        assert!(t.effects.contains(&RuntimeControlEffect::SignalWake));
-        assert!(
-            !t.effects
-                .contains(&RuntimeControlEffect::SignalImmediateProcess)
-        );
-    }
-
-    #[test]
-    fn admission_accepted_idle_steer_signals_wake_and_process() {
-        let mut auth = make_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionAccepted {
-                work_id: "w1".into(),
-                handling_mode: HandlingMode::Steer,
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert!(auth.wake_pending());
-        assert!(auth.process_pending());
-        assert!(t.effects.contains(&RuntimeControlEffect::SignalWake));
-        assert!(
-            t.effects
-                .contains(&RuntimeControlEffect::SignalImmediateProcess)
-        );
-    }
-
-    #[test]
-    fn admission_accepted_running_queue_no_signals() {
-        let (mut auth, _) = make_running_from_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionAccepted {
-                work_id: "w1".into(),
-                handling_mode: HandlingMode::Queue,
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Running);
-        assert!(!auth.wake_pending());
-        assert!(!auth.process_pending());
-        assert!(!t.effects.contains(&RuntimeControlEffect::SignalWake));
-    }
-
-    #[test]
-    fn admission_accepted_running_steer_signals() {
-        let (mut auth, _) = make_running_from_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionAccepted {
-                work_id: "w1".into(),
-                handling_mode: HandlingMode::Steer,
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Running);
-        assert!(auth.wake_pending());
-        assert!(auth.process_pending());
-        assert!(t.effects.contains(&RuntimeControlEffect::SignalWake));
-        assert!(
-            t.effects
-                .contains(&RuntimeControlEffect::SignalImmediateProcess)
-        );
-    }
-
-    #[test]
-    fn admission_accepted_attached_queue_signals_wake() {
-        let mut auth = make_attached();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionAccepted {
-                work_id: "w1".into(),
-                handling_mode: HandlingMode::Queue,
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Attached);
-        assert!(auth.wake_pending());
-        assert!(!auth.process_pending());
-    }
-
-    // --- AdmissionRejected ---
-
-    #[test]
-    fn admission_rejected_emits_notice() {
-        let mut auth = make_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionRejected {
-                work_id: "w1".into(),
-                reason: "quota".into(),
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert!(matches!(
-            &t.effects[0],
-            RuntimeControlEffect::EmitRuntimeNotice { kind, detail }
-                if kind == "AdmissionRejected" && detail == "quota"
-        ));
-    }
-
-    // --- AdmissionDeduplicated ---
-
-    #[test]
-    fn admission_deduplicated_emits_notice() {
-        let mut auth = make_idle();
-        let t = auth
-            .apply(RuntimeControlInput::AdmissionDeduplicated {
-                work_id: "w1".into(),
-                existing_work_id: "w0".into(),
-            })
-            .unwrap();
-        assert_eq!(t.next_phase, RuntimeState::Idle);
-        assert!(matches!(
-            &t.effects[0],
-            RuntimeControlEffect::EmitRuntimeNotice { kind, .. }
-                if kind == "AdmissionDeduplicated"
-        ));
-    }
-
     // --- RecoverRequested ---
 
     #[test]
@@ -1300,8 +911,6 @@ mod tests {
         assert_eq!(t.next_phase, RuntimeState::Idle);
         assert!(auth.current_run_id().is_none());
         assert!(auth.pre_run_state().is_none());
-        assert!(!auth.wake_pending());
-        assert!(!auth.process_pending());
     }
 
     // --- RetireRequested ---

@@ -86,6 +86,7 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
 };
 pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
+pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
@@ -107,8 +108,8 @@ pub use policy::{
 pub use policy_table::{DEFAULT_POLICY_VERSION, DefaultPolicyTable};
 pub use queue::InputQueue;
 pub use runtime_control_authority::{
-    HandlingMode, RuntimeControlAuthority, RuntimeControlEffect, RuntimeControlInput,
-    RuntimeControlMutator, RuntimeControlTransition,
+    RuntimeControlAuthority, RuntimeControlEffect, RuntimeControlInput, RuntimeControlMutator,
+    RuntimeControlTransition,
 };
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,

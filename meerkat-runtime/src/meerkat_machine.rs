@@ -3287,8 +3287,6 @@ impl MeerkatMachine {
             phase: control.phase(),
             current_run_id: control.current_run_id().cloned(),
             pre_run_phase: control.pre_run_state(),
-            wake_pending: control.wake_pending(),
-            process_pending: control.process_pending(),
         };
 
         let admission_order = ingress

@@ -410,8 +410,6 @@ pub struct MeerkatControlSnapshot {
     pub phase: RuntimeState,
     pub current_run_id: Option<RunId>,
     pub pre_run_phase: Option<RuntimeState>,
-    pub wake_pending: bool,
-    pub process_pending: bool,
 }
 
 /// Snapshot of one admitted runtime input.

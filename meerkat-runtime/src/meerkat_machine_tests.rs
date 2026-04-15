@@ -11289,8 +11289,6 @@ struct RuntimeParitySnapshotSummary {
     current_run_present: bool,
     pre_run_phase: Option<String>,
     attachment_live: bool,
-    control_wake_pending: bool,
-    control_process_pending: bool,
     queue_len: usize,
     steer_queue_len: usize,
     current_run_contributor_count: usize,
@@ -12696,8 +12694,6 @@ async fn runtime_parity_snapshot_summary(
                 .pre_run_phase
                 .map(runtime_parity_state_label),
             attachment_live: snapshot.binding.attachment_live,
-            control_wake_pending: snapshot.control.wake_pending,
-            control_process_pending: snapshot.control.process_pending,
             queue_len: snapshot.inputs.queue.len(),
             steer_queue_len: snapshot.inputs.steer_queue.len(),
             current_run_contributor_count: snapshot.inputs.current_run_contributors.len(),

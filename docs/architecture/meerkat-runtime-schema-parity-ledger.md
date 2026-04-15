@@ -66,15 +66,13 @@ Current state:
   mirrors: `wake_pending` and `process_pending` were constant `FALSE` across
   the truthful reachable graph and their removal kept the exact parity surface
   unchanged
-- this does **not** mean wake/process behavior is solved everywhere in the
-  checked-in catalog: the stale handwritten `RuntimeControlAuthority`
-  booleans are still outside the formal model, but the live runtime path now
-  actually carries wake/process intent through `RuntimeIngressAuthority` plus
-  the driver-owned typed `post_admission_signal`
-- the parity snapshot now includes `control.wake_pending`,
-  `control.process_pending`, and the typed `post_admission_signal`; adding
-  those carriers to the exact full-row pair audit did **not** create any new
-  public-phase mismatches on the current 10-pair frontier
+- the stale handwritten `RuntimeControlAuthority` wake/process branch is now
+  gone too: `SubmitWork`, `AdmissionAccepted`, `AdmissionRejected`,
+  `AdmissionDeduplicated`, `wake_pending`, and `process_pending` were dead
+  helper-only control semantics that the live runtime no longer exercised
+- the parity snapshot now carries the remaining live typed
+  `post_admission_signal` carrier without the deleted control booleans, and
+  exact full-row pair parity stayed green across the current 10-pair frontier
 - `current_run_id` is now absorbed back into the top-level Meerkat formal
   state and clears on the same terminal/control paths as the live runtime
 - attached steered `AcceptWithCompletion` is no longer treated as a queue-only
@@ -135,18 +133,15 @@ Current exact-parity state:
   runtime-owned and exact in the live runtime, but they are no longer modeled
   as top-level Meerkat machine state because they do not affect command
   legality, phase changes, or routed effect identity
-- the old wake/process pending bits are also gone from the top-level formal
-  machine; the truthful graph never drove those mirrors away from `FALSE`,
-  and exact parity stayed green after the cut
-- that top-level cut does not close the deeper admission/wake modeling
-  question: the stale handwritten control booleans remain outside the catalog,
-  while the live wake/process carrier now runs through ingress +
-  `post_admission_signal`; the pair audit says those carriers do not create
-  hidden phase distinctions, and the first two payload-sensitive helper paths
-  (`Attached -> Running` immediate acceptance and running
-  `InterruptYielding`) are now lifted into the top-level Meerkat model; the
-  remaining work is to keep pulling up only the live ingress/control carriers
-  that actually change checked-in machine behavior
+- the old wake/process pending bits are also gone from both the top-level
+  formal machine and the handwritten runtime-control helper; the truthful
+  graph never drove those mirrors away from `FALSE`, and exact parity stayed
+  green after both cuts
+- that closes the stale handwritten wake/process branch, but not every
+  lower-authority control question: the remaining helper still owns the live
+  coarse control reducer for internal `Recovering` / recycle paths and the
+  duplicated run-return bookkeeping that the checked-in machine now models as
+  `current_run_id` / `pre_run_phase`
 - the dead top-level active-work slice is also gone: `active_work_id` never
   became `Some(...)` in the truthful graph, the old `has_active_work`-gated
   completion/operation slice had zero reachable edges, and exact parity stayed

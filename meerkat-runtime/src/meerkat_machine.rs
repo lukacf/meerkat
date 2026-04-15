@@ -43,7 +43,7 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_lifecycle_authority::InputLifecycleError;
+use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
 use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
 };
@@ -624,85 +624,118 @@ pub(crate) async fn machine_normalize_recovered_input_state(
     runtime_id: &LogicalRuntimeId,
     mut state: InputState,
 ) -> Result<InputState, RuntimeDriverError> {
-    if matches!(
+    let applied_boundary_committed = if matches!(
         state.current_state(),
         InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
     ) {
-        let has_receipt = match (state.last_run_id().cloned(), state.last_boundary_sequence()) {
-            (Some(run_id), Some(sequence)) => store
-                .load_boundary_receipt(runtime_id, &run_id, sequence)
-                .await
-                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                .is_some(),
-            _ => false,
-        };
-        let now = Utc::now();
-        let from = state.current_state();
-        let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
-            if has_receipt {
-                InputLifecycleState::Consumed
-            } else {
-                InputLifecycleState::Queued
+        Some(
+            match (state.last_run_id().cloned(), state.last_boundary_sequence()) {
+                (Some(run_id), Some(sequence)) => store
+                    .load_boundary_receipt(runtime_id, &run_id, sequence)
+                    .await
+                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                    .is_some(),
+                _ => false,
             },
-            if has_receipt {
-                Some(InputTerminalOutcome::Consumed)
+        )
+    } else {
+        None
+    };
+
+    let _ = machine_apply_recovered_input_normalization(&mut state, applied_boundary_committed);
+
+    Ok(state)
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct MachineRecoveryDelta {
+    pub recovered: usize,
+    pub abandoned: usize,
+    pub requeued: usize,
+}
+
+pub(crate) fn machine_apply_recovered_input_normalization(
+    state: &mut InputState,
+    applied_boundary_committed: Option<bool>,
+) -> MachineRecoveryDelta {
+    let mut delta = MachineRecoveryDelta::default();
+
+    match state.current_state() {
+        InputLifecycleState::Accepted => {
+            let consume_on_accept = state
+                .policy
+                .as_ref()
+                .map(|policy| {
+                    policy.decision.apply_mode == crate::policy::ApplyMode::Ignore
+                        && policy.decision.consume_point == crate::policy::ConsumePoint::OnAccept
+                })
+                .unwrap_or(false);
+            if consume_on_accept {
+                let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
+                delta.abandoned += 1;
             } else {
-                None
-            },
-            state.last_run_id().cloned(),
-            state.last_boundary_sequence(),
-            state.attempt_count(),
-            {
-                let mut h = state.history().to_vec();
-                h.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from,
-                    to: if has_receipt {
+                let _ = state.apply(InputLifecycleInput::QueueAccepted);
+                delta.requeued += 1;
+            }
+            delta.recovered += 1;
+        }
+        InputLifecycleState::Staged => {
+            let _ = state.apply(InputLifecycleInput::RollbackStaged);
+            delta.requeued += 1;
+            delta.recovered += 1;
+        }
+        InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption => {
+            if let Some(has_receipt) = applied_boundary_committed {
+                let now = Utc::now();
+                let from = state.current_state();
+                let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
+                    if has_receipt {
                         InputLifecycleState::Consumed
                     } else {
                         InputLifecycleState::Queued
                     },
-                    reason: Some(if has_receipt {
-                        "recovery: boundary receipt already committed".into()
+                    if has_receipt {
+                        Some(InputTerminalOutcome::Consumed)
                     } else {
-                        "recovery: missing boundary receipt".into()
-                    }),
-                });
-                h
-            },
-            now,
-        );
-        *state.authority_mut() = auth;
+                        None
+                    },
+                    state.last_run_id().cloned(),
+                    state.last_boundary_sequence(),
+                    state.attempt_count(),
+                    {
+                        let mut h = state.history().to_vec();
+                        h.push(InputStateHistoryEntry {
+                            timestamp: now,
+                            from,
+                            to: if has_receipt {
+                                InputLifecycleState::Consumed
+                            } else {
+                                InputLifecycleState::Queued
+                            },
+                            reason: Some(if has_receipt {
+                                "recovery: boundary receipt already committed".into()
+                            } else {
+                                "recovery: missing boundary receipt".into()
+                            }),
+                        });
+                        h
+                    },
+                    now,
+                );
+                *state.authority_mut() = auth;
+            }
+            delta.recovered += 1;
+        }
+        InputLifecycleState::Queued => {
+            delta.recovered += 1;
+        }
+        InputLifecycleState::Consumed
+        | InputLifecycleState::Superseded
+        | InputLifecycleState::Coalesced
+        | InputLifecycleState::Abandoned => {}
     }
 
-    if matches!(
-        state.current_state(),
-        InputLifecycleState::Accepted | InputLifecycleState::Staged
-    ) {
-        let now = Utc::now();
-        let from = state.current_state();
-        let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
-            InputLifecycleState::Queued,
-            None,
-            state.last_run_id().cloned(),
-            state.last_boundary_sequence(),
-            state.attempt_count(),
-            {
-                let mut h = state.history().to_vec();
-                h.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from,
-                    to: InputLifecycleState::Queued,
-                    reason: Some("recovery: pre-run state normalized to queued".into()),
-                });
-                h
-            },
-            now,
-        );
-        *state.authority_mut() = auth;
-    }
-
-    Ok(state)
+    delta
 }
 
 pub(crate) struct RecoveredIngressEntry {

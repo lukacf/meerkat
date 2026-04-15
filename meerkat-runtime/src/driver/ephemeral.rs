@@ -906,40 +906,11 @@ impl EphemeralRuntimeDriver {
             let Some(state) = self.ledger.get_mut(input_id) else {
                 continue;
             };
-            match state.current_state() {
-                InputLifecycleState::Accepted => {
-                    let consume_on_accept = state
-                        .policy
-                        .as_ref()
-                        .map(|p| {
-                            p.decision.apply_mode == crate::policy::ApplyMode::Ignore
-                                && p.decision.consume_point == crate::policy::ConsumePoint::OnAccept
-                        })
-                        .unwrap_or(false);
-                    if consume_on_accept {
-                        let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
-                        abandoned += 1;
-                    } else {
-                        let _ = state.apply(InputLifecycleInput::QueueAccepted);
-                        requeued += 1;
-                    }
-                    recovered += 1;
-                }
-                InputLifecycleState::Staged => {
-                    let _ = state.apply(InputLifecycleInput::RollbackStaged);
-                    requeued += 1;
-                    recovered += 1;
-                }
-                InputLifecycleState::Queued
-                | InputLifecycleState::Applied
-                | InputLifecycleState::AppliedPendingConsumption => {
-                    recovered += 1;
-                }
-                InputLifecycleState::Consumed
-                | InputLifecycleState::Superseded
-                | InputLifecycleState::Coalesced
-                | InputLifecycleState::Abandoned => {}
-            }
+            let delta =
+                crate::meerkat_machine::machine_apply_recovered_input_normalization(state, None);
+            recovered += delta.recovered;
+            abandoned += delta.abandoned;
+            requeued += delta.requeued;
         }
 
         let mut rebuilt_ingress = RuntimeIngressAuthority::new();

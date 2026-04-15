@@ -606,15 +606,17 @@ Outcome:
    mechanics. `RuntimeIngressAuthority` no longer treats contributor staging,
    boundary application, run completion, or replay rollback as ingress-machine
    inputs; those paths are now direct lower-level mutators driven by
-   machine-owned legality. The remaining helper-owned surface is dedup,
-   recovered-input seeding, and terminal reconciliation below the checked-in
-   machine boundary.
-7. The next remaining formal seam question after that is Mob-side rather than
+   machine-owned legality.
+7. Recovery semantics are also less split than before: persistent and
+   ephemeral drivers now share the same machine-owned per-input recovery
+   classifier, so Accepted/Staged/Applied recovery normalization no longer
+   lives as duplicated handwritten logic in both drivers.
+8. The next remaining formal seam question after that is Mob-side rather than
    composition-side: the forward Mob -> Meerkat route now carries opaque
    `work_id` plus `origin`, but `MobMachine` still treats `SubmitWork` as one
    origin-insensitive self-loop even though runtime gives `origin` real
    external-vs-internal turn semantics before ingress.
-8. The refreshed fast-loop review rechecked the dominant remaining Meerkat
+9. The refreshed fast-loop review rechecked the dominant remaining Meerkat
    splitters (`silent_intent_overrides`, `pre_run_phase`, `current_run_id`,
    `active_runtime_id`, `active_fence_token`, and internal `Attached`) and did
    not find another honest high-impact collapse on the current design. The

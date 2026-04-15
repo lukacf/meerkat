@@ -367,6 +367,7 @@ impl MobBuilder {
                 warning.message
             );
         }
+        #[allow(unused_mut)]
         let mut mob_events: Vec<_> = all_events
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
@@ -614,6 +615,7 @@ impl MobBuilder {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn normalize_runtime_mode_for_member_ref(
         runtime_mode: crate::MobRuntimeMode,
         member_ref: Option<&crate::event::MemberRef>,
@@ -626,6 +628,7 @@ impl MobBuilder {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn sessionless_member_ref(
         member_ref: &crate::event::MemberRef,
     ) -> Option<crate::event::MemberRef> {

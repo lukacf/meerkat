@@ -41,6 +41,7 @@ impl InitialTurnHandle {
 
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
 const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = MAX_PARALLEL_HOST_LOOP_OPS;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
@@ -229,6 +230,7 @@ struct FinalizeSpawnOutcome {
     failed_restore_peer_ids: Vec<MeerkatId>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct RemoteDestroyOutcome {
     identity: AgentIdentity,
     force_destroyed: bool,
@@ -401,6 +403,7 @@ impl MobActor {
             .await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn revoke_supervisor_for_binding(
         &self,
         binding: &crate::RuntimeBinding,
@@ -4919,6 +4922,7 @@ impl MobActor {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn remote_destroy_cleanup_deadline(remote_member_count: usize) -> std::time::Duration {
         let batches = remote_member_count
             .saturating_add(MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS.saturating_sub(1))

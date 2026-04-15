@@ -196,6 +196,101 @@ impl MemberRespawnReceipt {
     }
 }
 
+/// Report returned after rotating a mob-owned supervisor authority.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct SupervisorRotationReport {
+    /// Supervisor epoch before rotation.
+    pub previous_epoch: u64,
+    /// Supervisor epoch after rotation.
+    pub current_epoch: u64,
+    /// Public peer id for the new supervisor keypair.
+    pub public_peer_id: String,
+}
+
+/// Structured report returned from mob destroy.
+#[derive(Debug, Clone, Default, Serialize)]
+#[non_exhaustive]
+pub struct MobDestroyReport {
+    /// Members that required force-destroy semantics during cleanup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub force_destroyed_members: Vec<AgentIdentity>,
+    /// Remote members whose cleanup could not be completed before destroy ended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphaned_remote_members: Vec<AgentIdentity>,
+    /// Whether aggregate remote cleanup exceeded its deadline.
+    #[serde(default)]
+    pub remote_cleanup_deadline_exceeded: bool,
+    /// Whether runtime metadata was scrubbed.
+    #[serde(default)]
+    pub metadata_scrubbed: bool,
+    /// Whether persisted mob events were cleared.
+    #[serde(default)]
+    pub events_cleared: bool,
+    /// Whether namespace cleanup completed.
+    #[serde(default)]
+    pub namespace_cleaned: bool,
+    /// Human-readable cleanup errors captured while destroying.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl MobDestroyReport {
+    pub(crate) fn push_error(&mut self, error: impl Into<String>) {
+        self.errors.push(error.into());
+    }
+
+    fn error_summary(&self) -> String {
+        if self.errors.is_empty() {
+            "destroy cleanup did not complete".to_string()
+        } else {
+            self.errors.join("; ")
+        }
+    }
+}
+
+/// Structured error returned by mob destroy.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobDestroyError {
+    /// Destroy performed partial cleanup but could not finish the full contract.
+    #[error("destroy incomplete: {}", report.error_summary())]
+    Incomplete { report: MobDestroyReport },
+
+    /// A preflight or actor-level mob error occurred before partial reporting.
+    #[error(transparent)]
+    Mob(#[from] MobError),
+}
+
+/// Structured evidence captured when respawn cannot prove the old member is gone.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct PreviousMemberCleanupReport {
+    /// Stable member identity.
+    pub identity: AgentIdentity,
+    /// Runtime id of the incarnation being replaced.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token of the incarnation being replaced.
+    pub fence_token: FenceToken,
+    /// Whether graceful retire was attempted.
+    pub retire_attempted: bool,
+    /// Error returned from the graceful retire attempt, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retire_error: Option<String>,
+    /// Whether a confirmatory observation probe was attempted.
+    #[serde(default)]
+    pub confirmatory_observation_attempted: bool,
+    /// Observation probe detail, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmatory_observation: Option<String>,
+    /// Whether force-destroy was attempted.
+    #[serde(default)]
+    pub destroy_attempted: bool,
+    /// Error returned from the force-destroy attempt, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy_error: Option<String>,
+}
+
 /// Receipt returned by a successful member spawn.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -245,9 +340,9 @@ pub(crate) struct CanonicalOpsOwnerContext {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MobRespawnError {
-    /// Member has no current session bridge to retire.
-    #[error("no current session bridge for member {identity}")]
-    NoSessionBridge { identity: AgentIdentity },
+    /// Member has no runtime control channel for replacement.
+    #[error("no runtime control channel for member {identity}")]
+    NoRuntimeControl { identity: AgentIdentity },
 
     /// Spawn failed after the old member was retired.
     #[error("spawn failed after retire for member {identity}: {reason}")]
@@ -263,6 +358,11 @@ pub enum MobRespawnError {
         receipt: MemberRespawnReceipt,
         failed_peer_ids: Vec<AgentIdentity>,
     },
+
+    /// Retire cleanup progressed far enough that the old member may still exist,
+    /// but respawn could not prove it was fully cleaned up.
+    #[error("previous member cleanup ambiguous for member {}", report.identity)]
+    PreviousMemberCleanupAmbiguous { report: PreviousMemberCleanupReport },
 
     /// An underlying mob error occurred before mutation.
     #[error(transparent)]
@@ -405,7 +505,7 @@ pub struct MobHandle {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RestoreFailureDiagnostic {
-    pub(crate) bridge_session_id: SessionId,
+    pub(crate) bridge_session_id: Option<SessionId>,
     pub(crate) reason: String,
 }
 
@@ -743,29 +843,27 @@ impl MobHandle {
                 handling_mode,
                 render_metadata,
             } => {
-                let bridge_session_id = self
-                    .send_actor_command(|reply_tx| MobCommand::ExternalTurn {
-                        meerkat_id,
-                        content,
-                        handling_mode,
-                        render_metadata,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::BridgeSessionId(bridge_session_id))
+                self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
+                    meerkat_id,
+                    content,
+                    handling_mode,
+                    render_metadata,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::InternalTurn {
                 meerkat_id,
                 content,
             } => {
-                let bridge_session_id = self
-                    .send_actor_command(|reply_tx| MobCommand::InternalTurn {
-                        meerkat_id,
-                        content,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::BridgeSessionId(bridge_session_id))
+                self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
+                    meerkat_id,
+                    content,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::SubmitWork {
                 runtime_id,
@@ -788,7 +886,7 @@ impl MobHandle {
                     });
                 }
                 let content = meerkat_core::types::ContentInput::from(spec.content);
-                let bridge_session_id = match spec.origin {
+                match spec.origin {
                     WorkOrigin::External => {
                         self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
                             meerkat_id,
@@ -808,7 +906,6 @@ impl MobHandle {
                         .await??
                     }
                 };
-                let _ = bridge_session_id;
                 Ok(MobMachineCommandResult::WorkReceipt { work_ref })
             }
             MobMachineCommand::CancelWork { work_ref } => {
@@ -862,9 +959,16 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Destroy => {
-                self.send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
-                    .await??;
-                Ok(MobMachineCommandResult::Unit)
+                let reply = self
+                    .send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
+                    .await?;
+                match reply {
+                    Ok(report) => Ok(MobMachineCommandResult::DestroyReport(report)),
+                    Err(MobDestroyError::Mob(error)) => Err(error),
+                    Err(MobDestroyError::Incomplete { report }) => Err(MobError::Internal(
+                        format!("destroy incomplete: {}", report.error_summary()),
+                    )),
+                }
             }
             MobMachineCommand::TaskCreate {
                 subject,
@@ -957,7 +1061,7 @@ impl MobHandle {
             MobMachineCommand::SubscribeAllAgentEvents => {
                 let streams = self
                     .send_actor_command(|reply_tx| MobCommand::SubscribeAllAgentEvents { reply_tx })
-                    .await?;
+                    .await??;
                 Ok(MobMachineCommandResult::AllAgentEventStreams(streams))
             }
             MobMachineCommand::SubscribeMobEvents { config } => {
@@ -1048,6 +1152,27 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+        }
+    }
+
+    async fn execute_destroy_machine_command(
+        &self,
+        command: MobMachineCommand,
+    ) -> Result<MobMachineCommandResult, MobDestroyError> {
+        match command {
+            MobMachineCommand::Destroy => {
+                let reply = self
+                    .send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
+                    .await
+                    .map_err(MobDestroyError::from)?;
+                match reply {
+                    Ok(report) => Ok(MobMachineCommandResult::DestroyReport(report)),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Err(MobDestroyError::from(MobError::Internal(
+                "unsupported destroy machine command".into(),
+            ))),
         }
     }
 
@@ -1365,7 +1490,7 @@ impl MobHandle {
                     .as_ref()
                     .map(|e| e.fence_token)
                     .unwrap_or(FenceToken::new(0)),
-                current_bridge_session_id: Some(diag.bridge_session_id),
+                current_bridge_session_id: diag.bridge_session_id,
                 peer_connectivity: None,
                 kickoff: roster_entry
                     .as_ref()
@@ -1388,10 +1513,17 @@ impl MobHandle {
                 kickoff: None,
             }),
             (Some(roster_state), None) => {
+                let session_observation = match roster_entry.as_ref().map(|entry| &entry.member_ref)
+                {
+                    Some(MemberRef::BackendPeer {
+                        session_id: None, ..
+                    }) => CanonicalSessionObservation::Unknown,
+                    _ => CanonicalSessionObservation::Missing,
+                };
                 MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     roster_state: Some(roster_state),
-                    session_observation: CanonicalSessionObservation::Missing,
+                    session_observation,
                     restore_failure: None,
                     output_preview: None,
                     tokens_used: 0,
@@ -1590,20 +1722,24 @@ impl MobHandle {
     /// Returns one stream per active member that has a live bridge binding. Members
     /// spawned after this call are not included — use [`subscribe_mob_events`]
     /// for a continuously updated view.
-    pub async fn subscribe_all_agent_events(&self) -> Vec<(AgentIdentity, EventStream)> {
+    pub async fn subscribe_all_agent_events(
+        &self,
+    ) -> Result<Vec<(AgentIdentity, EventStream)>, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAllAgentEvents)
             .await
         {
-            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => streams
+            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => Ok(streams
                 .into_iter()
                 .map(|(mid, stream)| (AgentIdentity::from(mid.as_str()), stream))
-                .collect(),
+                .collect()),
             Ok(_) => {
                 tracing::error!("unexpected command result variant");
-                Default::default()
+                Err(MobError::Internal(
+                    "unexpected command result variant".into(),
+                ))
             }
-            Err(_) => Vec::new(),
+            Err(error) => Err(error),
         }
     }
 
@@ -1939,6 +2075,12 @@ impl MobHandle {
         }
     }
 
+    /// Rotate the persisted mob supervisor authority.
+    pub async fn rotate_supervisor(&self) -> Result<SupervisorRotationReport, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RotateSupervisor { reply_tx })
+            .await?
+    }
+
     /// Wire a local member to either another local member or an external peer.
     pub async fn wire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -2004,40 +2146,28 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::ExternalTurn {
-                meerkat_id,
-                content: message,
-                handling_mode,
-                render_metadata,
-            })
-            .await?
-        {
-            MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
+    ) -> Result<(), MobError> {
+        self.execute_machine_command(MobMachineCommand::ExternalTurn {
+            meerkat_id,
+            content: message,
+            handling_mode,
+            render_metadata,
+        })
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn internal_turn_for_member(
         &self,
         meerkat_id: MeerkatId,
         message: meerkat_core::types::ContentInput,
-    ) -> Result<SessionId, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::InternalTurn {
-                meerkat_id,
-                content: message,
-            })
-            .await?
-        {
-            MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
+    ) -> Result<(), MobError> {
+        self.execute_machine_command(MobMachineCommand::InternalTurn {
+            meerkat_id,
+            content: message,
+        })
+        .await?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -2171,15 +2301,15 @@ impl MobHandle {
     }
 
     /// Retire active members, clear persisted mob storage, and terminate the actor.
-    pub async fn destroy(&self) -> Result<(), MobError> {
+    pub async fn destroy(&self) -> Result<MobDestroyReport, MobDestroyError> {
         match self
-            .execute_machine_command(MobMachineCommand::Destroy)
+            .execute_destroy_machine_command(MobMachineCommand::Destroy)
             .await?
         {
-            MobMachineCommandResult::Unit => Ok(()),
-            _ => Err(MobError::Internal(
+            MobMachineCommandResult::DestroyReport(report) => Ok(report),
+            _ => Err(MobDestroyError::from(MobError::Internal(
                 "unexpected command result variant".into(),
-            )),
+            ))),
         }
     }
 

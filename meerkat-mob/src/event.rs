@@ -76,7 +76,8 @@ pub struct NewMobEvent {
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MemberRef {
+#[doc(hidden)]
+pub enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.

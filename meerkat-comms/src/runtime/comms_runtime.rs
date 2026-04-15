@@ -1030,6 +1030,15 @@ impl CommsRuntime {
         silent_intents: Arc<HashSet<String>>,
     ) -> Result<Self, CommsRuntimeError> {
         let keypair = Keypair::generate();
+        Self::inproc_only_with_keypair_and_silent_intents(name, namespace, keypair, silent_intents)
+    }
+
+    pub fn inproc_only_with_keypair_and_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        keypair: Keypair,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));

@@ -41,6 +41,7 @@ pub mod lifecycle_ops;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
+pub mod mob_runtime_bridge;
 pub mod ops_lifecycle;
 pub(crate) mod ops_lifecycle_authority;
 pub mod peer_handling_mode;

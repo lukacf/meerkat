@@ -222,6 +222,25 @@ mod tests {
     }
 
     #[test]
+    fn unknown_active_sessionless_member_stays_non_terminal() {
+        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+            member_present: true,
+            roster_state: Some(MemberState::Active),
+            session_observation: CanonicalSessionObservation::Unknown,
+            restore_failure: None,
+            output_preview: None,
+            tokens_used: 0,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            fence_token: FenceToken::new(0),
+            current_bridge_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+        });
+        assert_eq!(material.status, CanonicalMemberStatus::Active);
+        assert!(!MobMemberLifecycleAuthority::is_terminal(&material));
+    }
+
+    #[test]
     fn retiring_member_is_non_terminal_even_if_session_missing() {
         let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
             member_present: true,

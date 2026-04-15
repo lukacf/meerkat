@@ -23,6 +23,7 @@ use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::time_compat::SystemTime;
+use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -40,7 +41,21 @@ impl InitialTurnHandle {
 
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
 const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
+const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = MAX_PARALLEL_HOST_LOOP_OPS;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
+
+#[derive(Clone)]
+enum WiringEndpoint {
+    Local {
+        entry: RosterEntry,
+        comms: Arc<dyn CoreCommsRuntime>,
+        spec: TrustedPeerSpec,
+        comms_name: String,
+    },
+    PeerOnly {
+        spec: TrustedPeerSpec,
+    },
+}
 
 /// Resolve the runtime binding for a spawn request.
 ///
@@ -64,6 +79,16 @@ fn resolve_binding(
         crate::MobBackendKind::External => Err(MobError::WiringError(format!(
             "external backend requires explicit RuntimeBinding for '{meerkat_id}'"
         ))),
+    }
+}
+
+fn normalize_runtime_mode_for_binding(
+    runtime_mode: crate::MobRuntimeMode,
+    binding: &crate::RuntimeBinding,
+) -> crate::MobRuntimeMode {
+    match binding {
+        crate::RuntimeBinding::External { .. } => crate::MobRuntimeMode::TurnDriven,
+        crate::RuntimeBinding::Session => runtime_mode,
     }
 }
 
@@ -186,8 +211,9 @@ struct RespawnSnapshot {
     profile_name: ProfileName,
     runtime_mode: crate::MobRuntimeMode,
     labels: std::collections::BTreeMap<String, String>,
+    old_runtime_id: crate::ids::AgentRuntimeId,
     old_fence_token: crate::ids::FenceToken,
-    /// Generation of the member being respawned (preserved across respawn).
+    /// Generation of the member being respawned.
     generation: crate::ids::Generation,
     restore_wiring: RestoreWiringPlan,
     /// Runtime binding extracted from the old roster entry's member_ref.
@@ -201,6 +227,13 @@ struct RespawnSnapshot {
 struct FinalizeSpawnOutcome {
     receipt: super::handle::MemberSpawnReceipt,
     failed_restore_peer_ids: Vec<MeerkatId>,
+}
+
+struct RemoteDestroyOutcome {
+    identity: AgentIdentity,
+    force_destroyed: bool,
+    orphaned: bool,
+    errors: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +278,8 @@ pub(super) struct MobActor {
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
+    pub(super) runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+    pub(super) supervisor_bridge: Arc<super::MobSupervisorBridge>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) lifecycle_authority: MobLifecycleAuthority,
@@ -253,6 +288,186 @@ pub(super) struct MobActor {
 }
 
 impl MobActor {
+    fn peer_only_member_control_error(
+        runtime_mode: crate::MobRuntimeMode,
+        action: &str,
+    ) -> MobError {
+        MobError::UnsupportedForMode {
+            mode: runtime_mode,
+            reason: format!("{action} is not supported for peer-only members in phase 1"),
+        }
+    }
+
+    fn peer_only_spec_from_parts(
+        peer_id: &str,
+        address: &str,
+        context: &'static str,
+    ) -> Result<TrustedPeerSpec, MobError> {
+        TrustedPeerSpec::new(
+            address
+                .strip_prefix("inproc://")
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
+            peer_id.to_string(),
+            address.to_string(),
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "{context}: invalid peer-only runtime spec: {error}"
+            ))
+        })
+    }
+
+    fn peer_only_spec_for_binding(
+        binding: &crate::RuntimeBinding,
+        context: &'static str,
+    ) -> Result<TrustedPeerSpec, MobError> {
+        match binding {
+            crate::RuntimeBinding::External { peer_id, address } => {
+                Self::peer_only_spec_from_parts(peer_id, address, context)
+            }
+            crate::RuntimeBinding::Session => Err(MobError::Internal(format!(
+                "{context}: peer-only runtime spec requested for session binding"
+            ))),
+        }
+    }
+
+    async fn bridge_supervisor_payload(
+        &self,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let spec = self.supervisor_bridge.supervisor_spec().await?;
+        Ok(super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: spec.into(),
+            epoch: authority.epoch,
+            protocol_version: authority.protocol_version,
+        })
+    }
+
+    async fn ensure_supervisor_authorized(&self, peer: &TrustedPeerSpec) -> Result<(), MobError> {
+        let payload = self.bridge_supervisor_payload().await?;
+        let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
+        let value = self
+            .supervisor_bridge
+            .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
+            .await?;
+        let _ack: super::bridge_protocol::BridgeAck =
+            serde_json::from_value(value).map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to decode authorize supervisor response: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
+    async fn send_bridge_command_typed<R: DeserializeOwned>(
+        &self,
+        peer: &TrustedPeerSpec,
+        command: &super::bridge_protocol::BridgeCommand,
+        timeout: std::time::Duration,
+    ) -> Result<R, MobError> {
+        let value = self
+            .supervisor_bridge
+            .send_bridge_command(peer, command, timeout)
+            .await?;
+        serde_json::from_value(value).map_err(|error| {
+            MobError::Internal(format!("failed to decode bridge command response: {error}"))
+        })
+    }
+
+    async fn observe_peer_only_binding(
+        &self,
+        binding: &crate::RuntimeBinding,
+        timeout: std::time::Duration,
+    ) -> Result<super::bridge_protocol::BridgeObservationResponse, MobError> {
+        let peer = Self::peer_only_spec_for_binding(binding, "observe_peer_only_binding")?;
+        self.ensure_supervisor_authorized(&peer).await?;
+        let payload = self.bridge_supervisor_payload().await?;
+        let command = super::bridge_protocol::BridgeCommand::ObserveMember(payload);
+        self.send_bridge_command_typed(&peer, &command, timeout)
+            .await
+    }
+
+    async fn destroy_peer_only_binding(
+        &self,
+        binding: &crate::RuntimeBinding,
+        timeout: std::time::Duration,
+    ) -> Result<super::bridge_protocol::BridgeDestroyResponse, MobError> {
+        let peer = Self::peer_only_spec_for_binding(binding, "destroy_peer_only_binding")?;
+        self.ensure_supervisor_authorized(&peer).await?;
+        let payload = self.bridge_supervisor_payload().await?;
+        let command = super::bridge_protocol::BridgeCommand::DestroyMember(payload);
+        self.send_bridge_command_typed(&peer, &command, timeout)
+            .await
+    }
+
+    async fn revoke_supervisor_for_binding(
+        &self,
+        binding: &crate::RuntimeBinding,
+        timeout: std::time::Duration,
+    ) -> Result<(), MobError> {
+        let peer = Self::peer_only_spec_for_binding(binding, "revoke_supervisor_for_binding")?;
+        self.ensure_supervisor_authorized(&peer).await?;
+        let payload = self.bridge_supervisor_payload().await?;
+        let command = super::bridge_protocol::BridgeCommand::RevokeSupervisor(payload);
+        let _ack: super::bridge_protocol::BridgeAck = self
+            .send_bridge_command_typed(&peer, &command, timeout)
+            .await?;
+        Ok(())
+    }
+
+    async fn wire_peer_only_recipient(
+        &self,
+        recipient: &TrustedPeerSpec,
+        peer_spec: &TrustedPeerSpec,
+        timeout: std::time::Duration,
+    ) -> Result<(), MobError> {
+        self.ensure_supervisor_authorized(recipient).await?;
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let command = super::bridge_protocol::BridgeCommand::WireMember(
+            super::bridge_protocol::BridgePeerWiringPayload {
+                supervisor: sup_spec.into(),
+                epoch: authority.epoch,
+                protocol_version: authority.protocol_version,
+                peer_spec: peer_spec.clone().into(),
+            },
+        );
+        let _ack: super::bridge_protocol::BridgeAck = self
+            .send_bridge_command_typed(recipient, &command, timeout)
+            .await?;
+        Ok(())
+    }
+
+    async fn unwire_peer_only_recipient(
+        &self,
+        recipient: &TrustedPeerSpec,
+        peer_spec: &TrustedPeerSpec,
+        timeout: std::time::Duration,
+    ) -> Result<(), MobError> {
+        self.ensure_supervisor_authorized(recipient).await?;
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let command = super::bridge_protocol::BridgeCommand::UnwireMember(
+            super::bridge_protocol::BridgePeerWiringPayload {
+                supervisor: sup_spec.into(),
+                epoch: authority.epoch,
+                protocol_version: authority.protocol_version,
+                peer_spec: peer_spec.clone().into(),
+            },
+        );
+        let _ack: super::bridge_protocol::BridgeAck = self
+            .send_bridge_command_typed(recipient, &command, timeout)
+            .await?;
+        Ok(())
+    }
+
+    fn observation_is_terminal(
+        observation: &super::bridge_protocol::BridgeObservationResponse,
+    ) -> bool {
+        super::bridge::observation_is_terminal(observation)
+    }
+
     /// Issue a strictly increasing fence token.
     fn issue_fence_token(&self) -> crate::ids::FenceToken {
         let val = self
@@ -1775,7 +1990,22 @@ impl MobActor {
                 }
                 MobCommand::Destroy { reply_tx } => {
                     if let Err(error) = self.require_mob_machine_destroy() {
-                        let _ = reply_tx.send(Err(error));
+                        let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(error)));
+                        continue;
+                    }
+                    // Reject before side effects like pending-spawn failure if the
+                    // lifecycle authority would not accept Destroy in the current phase.
+                    if !self.lifecycle_authority.can_accept_in_phase(
+                        self.state(),
+                        self.machine_active_run_count(),
+                        MobLifecycleInput::Destroy,
+                    ) {
+                        let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(
+                            MobError::InvalidTransition {
+                                from: self.state(),
+                                to: MobState::Destroyed,
+                            },
+                        )));
                         continue;
                     }
                     self.fail_all_pending_spawns("mob is destroying").await;
@@ -1850,13 +2080,21 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = async {
-                        let session_id = self
+                        let entry = self
                             .roster
                             .read()
                             .await
                             .entry(&meerkat_id)
-                            .and_then(|entry| entry.member_ref.bridge_session_id().cloned())
                             .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                        let session_id = match entry.member_ref.bridge_session_id().cloned() {
+                            Some(session_id) => session_id,
+                            None => {
+                                return Err(MobError::UnsupportedForMode {
+                                    mode: entry.runtime_mode,
+                                    reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
+                                });
+                            }
+                        };
                         crate::runtime::session_service::MobSessionService::subscribe_session_events(
                             self.session_service.as_ref(),
                             &session_id,
@@ -1872,32 +2110,40 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubscribeAllAgentEvents { reply_tx } => {
-                    let entries: Vec<_> = self
-                        .roster
-                        .read()
-                        .await
-                        .list()
-                        .filter_map(|entry| {
-                            entry
-                                .member_ref
-                                .bridge_session_id()
-                                .cloned()
-                                .map(|session_id| (entry.meerkat_id.clone(), session_id))
-                        })
-                        .collect();
-                    let mut streams = Vec::with_capacity(entries.len());
-                    for (meerkat_id, session_id) in entries {
-                        if let Ok(stream) =
-                            crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                    let result = async {
+                        let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
+                        if let Some(peer_only_entry) = entries
+                            .iter()
+                            .find(|entry| entry.member_ref.bridge_session_id().is_none())
+                        {
+                            return Err(MobError::UnsupportedForMode {
+                                mode: peer_only_entry.runtime_mode,
+                                reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
+                            });
+                        }
+                        let mut streams = Vec::with_capacity(entries.len());
+                        for entry in entries {
+                            let Some(session_id) = entry.member_ref.bridge_session_id().cloned()
+                            else {
+                                continue;
+                            };
+                            if let Ok(stream) = crate::runtime::session_service::MobSessionService::subscribe_session_events(
                                 self.session_service.as_ref(),
                                 &session_id,
                             )
                             .await
-                        {
-                            streams.push((meerkat_id, stream));
+                            {
+                                streams.push((entry.meerkat_id.clone(), stream));
+                            }
                         }
+                        Ok(streams)
                     }
-                    let _ = reply_tx.send(streams);
+                    .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::RotateSupervisor { reply_tx } => {
+                    let result = self.handle_rotate_supervisor().await;
+                    let _ = reply_tx.send(result);
                 }
                 MobCommand::PollEvents {
                     after_cursor,
@@ -2371,6 +2617,8 @@ impl MobActor {
                         self.definition.backend.default,
                         &meerkat_id,
                     )?;
+                    let selected_runtime_mode =
+                        normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
                     let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
@@ -2504,6 +2752,8 @@ impl MobActor {
                 self.definition.backend.default,
                 &meerkat_id,
             )?;
+            let selected_runtime_mode =
+                normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
             let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
@@ -3463,13 +3713,6 @@ impl MobActor {
                 .get(&meerkat_id)
                 .cloned()
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
-            entry
-                .member_ref
-                .bridge_session_id()
-                .cloned()
-                .ok_or_else(|| MobRespawnError::NoSessionBridge {
-                    identity: AgentIdentity::from(meerkat_id.as_str()),
-                })?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id, address, ..
@@ -3483,6 +3726,7 @@ impl MobActor {
                 profile_name: entry.role.clone(),
                 runtime_mode: entry.runtime_mode,
                 labels: entry.labels.clone(),
+                old_runtime_id: entry.agent_runtime_id.clone(),
                 old_fence_token: entry.fence_token,
                 generation: entry.generation,
                 restore_wiring: RestoreWiringPlan {
@@ -3502,8 +3746,84 @@ impl MobActor {
             }
         };
 
+        let replacement_generation = snapshot.generation.next();
+
         // 2. Retire the existing member (archives the session, removes from roster).
-        self.handle_retire(meerkat_id.clone()).await?;
+        if let Err(error) = self.handle_retire(meerkat_id.clone()).await {
+            let roster_still_contains_member = {
+                let roster = self.roster.read().await;
+                roster.get(&meerkat_id).is_some()
+            };
+            if roster_still_contains_member {
+                return Err(MobRespawnError::from(error));
+            }
+            let mut cleanup_report = super::handle::PreviousMemberCleanupReport {
+                identity: AgentIdentity::from(meerkat_id.as_str()),
+                agent_runtime_id: snapshot.old_runtime_id.clone(),
+                fence_token: snapshot.old_fence_token,
+                retire_attempted: true,
+                retire_error: Some(error.to_string()),
+                confirmatory_observation_attempted: false,
+                confirmatory_observation: None,
+                destroy_attempted: false,
+                destroy_error: None,
+            };
+
+            match &snapshot.binding {
+                crate::RuntimeBinding::External { .. } => {
+                    cleanup_report.confirmatory_observation_attempted = true;
+                    match self
+                        .observe_peer_only_binding(
+                            &snapshot.binding,
+                            std::time::Duration::from_millis(750),
+                        )
+                        .await
+                    {
+                        Ok(observation) => {
+                            cleanup_report.confirmatory_observation =
+                                Some(format!("state={}", observation.state));
+                            if !Self::observation_is_terminal(&observation) {
+                                cleanup_report.destroy_attempted = true;
+                                if let Err(destroy_error) = self
+                                    .destroy_peer_only_binding(
+                                        &snapshot.binding,
+                                        std::time::Duration::from_secs(5),
+                                    )
+                                    .await
+                                {
+                                    cleanup_report.destroy_error = Some(destroy_error.to_string());
+                                    return Err(MobRespawnError::PreviousMemberCleanupAmbiguous {
+                                        report: cleanup_report,
+                                    });
+                                }
+                            }
+                        }
+                        Err(observe_error) => {
+                            cleanup_report.confirmatory_observation =
+                                Some(observe_error.to_string());
+                            cleanup_report.destroy_attempted = true;
+                            if let Err(destroy_error) = self
+                                .destroy_peer_only_binding(
+                                    &snapshot.binding,
+                                    std::time::Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                cleanup_report.destroy_error = Some(destroy_error.to_string());
+                                return Err(MobRespawnError::PreviousMemberCleanupAmbiguous {
+                                    report: cleanup_report,
+                                });
+                            }
+                        }
+                    }
+                }
+                crate::RuntimeBinding::Session => {
+                    return Err(MobRespawnError::PreviousMemberCleanupAmbiguous {
+                        report: cleanup_report,
+                    });
+                }
+            }
+        }
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
         let prompt = initial_message.unwrap_or_else(|| {
@@ -3668,7 +3988,7 @@ impl MobActor {
                 .finalize_spawn_from_pending(
                 &snapshot.profile_name,
                 &meerkat_id,
-                snapshot.generation,
+                replacement_generation,
                 respawn_fence,
                 snapshot.runtime_mode,
                 prompt,
@@ -3696,7 +4016,7 @@ impl MobActor {
                         AgentIdentity::from(meerkat_id.as_str()),
                         crate::ids::AgentRuntimeId::new(
                             AgentIdentity::from(meerkat_id.as_str()),
-                            snapshot.generation,
+                            replacement_generation,
                         ),
                         snapshot.old_fence_token,
                         respawn_fence,
@@ -3724,7 +4044,7 @@ impl MobActor {
             AgentIdentity::from(meerkat_id.as_str()),
             crate::ids::AgentRuntimeId::new(
                 AgentIdentity::from(meerkat_id.as_str()),
-                snapshot.generation,
+                replacement_generation,
             ),
             snapshot.old_fence_token,
             self.roster
@@ -3746,12 +4066,13 @@ impl MobActor {
         meerkat_id: &MeerkatId,
         entry: &RosterEntry,
     ) -> DisposalContext {
-        let retiring_comms = self.provisioner_comms(&entry.member_ref).await;
-        let retiring_key = retiring_comms.as_ref().and_then(|comms| comms.public_key());
+        let retiring_key = self
+            .provisioner_comms(&entry.member_ref)
+            .await
+            .and_then(|comms| comms.public_key());
         DisposalContext {
             meerkat_id: meerkat_id.clone(),
             entry: entry.clone(),
-            retiring_comms,
             retiring_key,
         }
     }
@@ -3823,19 +4144,17 @@ impl MobActor {
     /// Iterates the full `wired_to` set internally; skips absent peers.
     /// Returns the first error encountered, if any.
     async fn dispose_notify_peers(&self, ctx: &DisposalContext) -> Result<(), MobError> {
-        let Some(retiring_comms) = &ctx.retiring_comms else {
+        let Some(retiring_comms) = self.sender_runtime_for_entry(&ctx.entry).await else {
             return Ok(());
         };
         let mut first_error: Option<MobError> = None;
         for peer_identity in &ctx.entry.wired_to {
             // Resolve identity to bridge MeerkatId; skip absent peers (already retired).
-            let peer_meerkat_id = {
+            let peer_entry = {
                 let roster = self.roster.read().await;
-                roster
-                    .get_by_identity(peer_identity)
-                    .map(|e| e.meerkat_id.clone())
+                roster.get_by_identity(peer_identity).cloned()
             };
-            let Some(peer_meerkat_id) = peer_meerkat_id else {
+            let Some(peer_entry) = peer_entry else {
                 tracing::debug!(
                     mob_id = %self.definition.id,
                     meerkat_id = %ctx.meerkat_id,
@@ -3844,13 +4163,19 @@ impl MobActor {
                 );
                 continue;
             };
+            let recipient_spec = match self
+                .resolve_wiring_endpoint(&peer_entry, "dispose_notify_peers")
+                .await?
+            {
+                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+            };
 
             if let Err(error) = self
                 .notify_peer_retired(
-                    &peer_meerkat_id,
+                    &recipient_spec,
                     &ctx.meerkat_id,
                     &ctx.entry,
-                    retiring_comms,
+                    &retiring_comms,
                 )
                 .await
                 && first_error.is_none()
@@ -3869,7 +4194,16 @@ impl MobActor {
     /// Iterates the full `wired_to` set; skips absent peers and peers
     /// missing comms.
     async fn dispose_remove_trust_edges(&self, ctx: &DisposalContext) -> Result<(), MobError> {
-        let Some(retiring_key) = &ctx.retiring_key else {
+        let retiring_peer_id = if let Some(retiring_key) = &ctx.retiring_key {
+            retiring_key.clone()
+        } else if let MemberRef::BackendPeer {
+            peer_id,
+            session_id: None,
+            ..
+        } = &ctx.entry.member_ref
+        {
+            peer_id.clone()
+        } else {
             return Ok(());
         };
         let mut first_error: Option<MobError> = None;
@@ -3892,7 +4226,7 @@ impl MobActor {
             let Some(peer_comms) = self.provisioner_comms(&peer_member_ref).await else {
                 continue;
             };
-            if let Err(error) = peer_comms.remove_trusted_peer(retiring_key).await
+            if let Err(error) = peer_comms.remove_trusted_peer(&retiring_peer_id).await
                 && first_error.is_none()
             {
                 first_error = Some(error.into());
@@ -4166,41 +4500,35 @@ impl MobActor {
                 "unwire found non-canonical roster projection; applying full unwire path"
             );
         }
-
-        // Get comms and keys for both sides (required for unwire).
-        let comms_a = self
-            .provisioner_comms(&entry_a.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!("unwire requires comms runtime for '{a}'"))
-            })?;
-        let comms_b = self
-            .provisioner_comms(&entry_b.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!("unwire requires comms runtime for '{b}'"))
-            })?;
-        let key_a = comms_a.public_key().ok_or_else(|| {
-            MobError::WiringError(format!("unwire requires public key for '{a}'"))
-        })?;
-        let key_b = comms_b.public_key().ok_or_else(|| {
-            MobError::WiringError(format!("unwire requires public key for '{b}'"))
-        })?;
-        let comms_name_a = self.comms_name_for(&entry_a);
-        let comms_name_b = self.comms_name_for(&entry_b);
-        let spec_a = self
-            .provisioner
-            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
-            .await?;
-        let spec_b = self
-            .provisioner
-            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
-            .await?;
+        let endpoint_a = self.resolve_wiring_endpoint(&entry_a, "unwire").await?;
+        let endpoint_b = self.resolve_wiring_endpoint(&entry_b, "unwire").await?;
 
         match MobWiringAuthority::plan_local_unwire(a, b, a_has_b_edge, b_has_a_edge)? {
             LocalUnwirePlan::NoOp => {
-                let _ = comms_a.remove_trusted_peer(&key_b).await?;
-                let _ = comms_b.remove_trusted_peer(&key_a).await?;
+                match (&endpoint_a, &endpoint_b) {
+                    (
+                        WiringEndpoint::Local { comms: comms_a, .. },
+                        WiringEndpoint::Local { spec: spec_b, .. },
+                    ) => {
+                        let _ = comms_a.remove_trusted_peer(&spec_b.peer_id).await?;
+                    }
+                    _ => {}
+                }
+                match (&endpoint_a, &endpoint_b) {
+                    (
+                        WiringEndpoint::Local { spec: spec_a, .. },
+                        WiringEndpoint::Local { comms: comms_b, .. },
+                    ) => {
+                        let _ = comms_b.remove_trusted_peer(&spec_a.peer_id).await?;
+                    }
+                    (
+                        WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                        WiringEndpoint::Local { comms: comms_b, .. },
+                    ) => {
+                        let _ = comms_b.remove_trusted_peer(&spec_a.peer_id).await?;
+                    }
+                    _ => {}
+                }
                 self.edge_locks.remove(a.as_str(), b.as_str()).await;
                 self.debug_assert_roster_edge_symmetric(a, b, "handle_unwire/noop")
                     .await;
@@ -4209,80 +4537,245 @@ impl MobActor {
             LocalUnwirePlan::Remove => {}
         }
 
-        let mut rollback = LifecycleRollback::new("unwire");
-
-        // Notify both peers BEFORE removing trust (need trust to send).
-        // Send FROM a TO b: notify b that a is being unwired
-        self.notify_peer_unwired(b, a, &entry_a, &comms_a).await?;
-        rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
-            let comms_a = comms_a.clone();
-            let comms_name_b = comms_name_b.clone();
-            let a = a.clone();
-            let entry_a = entry_a.clone();
-            move || async move {
-                self.notify_peer_added(&comms_a, &comms_name_b, &a, &entry_a)
-                    .await
-            }
-        });
-        // Send FROM b TO a: notify a that b is being unwired
-        if let Err(second_notification_error) =
-            self.notify_peer_unwired(a, b, &entry_b, &comms_b).await
-        {
-            return Err(rollback.fail(second_notification_error).await);
-        }
-        rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
-            let comms_b = comms_b.clone();
-            let comms_name_a = comms_name_a.clone();
-            let b = b.clone();
-            let entry_b = entry_b.clone();
-            move || async move {
-                self.notify_peer_added(&comms_b, &comms_name_a, &b, &entry_b)
-                    .await
-            }
-        });
-
-        // Remove trust on both sides (required)
-        if let Err(remove_a_error) = comms_a.remove_trusted_peer(&key_b).await {
-            return Err(rollback.fail(remove_a_error.into()).await);
-        }
-        rollback.defer(format!("restore trust '{a}' -> '{b}'"), {
-            let comms_a = comms_a.clone();
-            let spec_b = spec_b.clone();
-            move || async move {
-                comms_a.add_trusted_peer(spec_b).await?;
-                Ok(())
-            }
-        });
-
-        if let Err(remove_b_error) = comms_b.remove_trusted_peer(&key_a).await {
-            return Err(rollback.fail(remove_b_error.into()).await);
-        }
-        rollback.defer(format!("restore trust '{b}' -> '{a}'"), {
-            let comms_b = comms_b.clone();
-            let spec_a = spec_a.clone();
-            move || async move {
-                comms_b.add_trusted_peer(spec_a).await?;
-                Ok(())
-            }
-        });
-
-        // Emit PeersUnwired event
-        if let Err(append_error) = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MembersUnwired {
-                    a: AgentIdentity::from(a.as_str()),
-                    b: AgentIdentity::from(b.as_str()),
+        match (&endpoint_a, &endpoint_b) {
+            (
+                WiringEndpoint::Local {
+                    comms: comms_a,
+                    spec: spec_a,
+                    comms_name: _comms_name_a,
+                    entry: entry_a,
                 },
-            })
-            .await
-        {
-            return Err(rollback.fail(MobError::from(append_error)).await);
+                WiringEndpoint::Local {
+                    comms: comms_b,
+                    spec: spec_b,
+                    comms_name: _comms_name_b,
+                    entry: entry_b,
+                },
+            ) => {
+                let mut rollback = LifecycleRollback::new("unwire");
+
+                self.notify_peer_unwired(spec_b, a, entry_a, comms_a)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
+                    let comms_a = comms_a.clone();
+                    let spec_b = spec_b.clone();
+                    let a = a.clone();
+                    let entry_a = entry_a.clone();
+                    move || async move {
+                        self.notify_peer_added(&comms_a, &spec_b, &a, &entry_a)
+                            .await
+                    }
+                });
+
+                if let Err(second_notification_error) =
+                    self.notify_peer_unwired(spec_a, b, entry_b, comms_b).await
+                {
+                    return Err(rollback.fail(second_notification_error).await);
+                }
+                rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
+                    let comms_b = comms_b.clone();
+                    let spec_a = spec_a.clone();
+                    let b = b.clone();
+                    let entry_b = entry_b.clone();
+                    move || async move {
+                        self.notify_peer_added(&comms_b, &spec_a, &b, &entry_b)
+                            .await
+                    }
+                });
+
+                if let Err(remove_a_error) = comms_a.remove_trusted_peer(&spec_b.peer_id).await {
+                    return Err(rollback.fail(remove_a_error.into()).await);
+                }
+                rollback.defer(format!("restore trust '{a}' -> '{b}'"), {
+                    let comms_a = comms_a.clone();
+                    let spec_b = spec_b.clone();
+                    move || async move {
+                        comms_a.add_trusted_peer(spec_b).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(remove_b_error) = comms_b.remove_trusted_peer(&spec_a.peer_id).await {
+                    return Err(rollback.fail(remove_b_error.into()).await);
+                }
+                rollback.defer(format!("restore trust '{b}' -> '{a}'"), {
+                    let comms_b = comms_b.clone();
+                    let spec_a = spec_a.clone();
+                    move || async move {
+                        comms_b.add_trusted_peer(spec_a).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersUnwired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::Local {
+                    comms,
+                    spec: spec_a,
+                    entry: entry_a,
+                    ..
+                },
+                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+            ) => {
+                let mut rollback = LifecycleRollback::new("unwire");
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.notify_peer_unwired(spec_a, b, &entry_b, &supervisor_sender)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_a = spec_a.clone();
+                    let entry_b = entry_b.clone();
+                    let b = b.clone();
+                    move || async move {
+                        self.notify_peer_added(&supervisor_sender, &spec_a, &b, &entry_b)
+                            .await
+                    }
+                });
+                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_b = spec_b.clone();
+                    let entry_a = entry_a.clone();
+                    let a = a.clone();
+                    move || async move {
+                        self.notify_peer_added(&supervisor_sender, &spec_b, &a, &entry_a)
+                            .await
+                    }
+                });
+                if let Err(error) = comms.remove_trusted_peer(&spec_b.peer_id).await {
+                    return Err(rollback.fail(error.into()).await);
+                }
+                rollback.defer(format!("restore trust '{a}' -> '{b}'"), {
+                    let comms = comms.clone();
+                    let spec_b = spec_b.clone();
+                    move || async move {
+                        comms.add_trusted_peer(spec_b).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersUnwired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                WiringEndpoint::Local {
+                    comms,
+                    spec: spec_b,
+                    entry: entry_b,
+                    ..
+                },
+            ) => {
+                let mut rollback = LifecycleRollback::new("unwire");
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_b = spec_b.clone();
+                    let entry_a = entry_a.clone();
+                    let a = a.clone();
+                    move || async move {
+                        self.notify_peer_added(&supervisor_sender, &spec_b, &a, &entry_a)
+                            .await
+                    }
+                });
+                self.notify_peer_unwired(spec_a, b, &entry_b, &supervisor_sender)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_added '{b}' -> '{a}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_a = spec_a.clone();
+                    let entry_b = entry_b.clone();
+                    let b = b.clone();
+                    move || async move {
+                        self.notify_peer_added(&supervisor_sender, &spec_a, &b, &entry_b)
+                            .await
+                    }
+                });
+                if let Err(error) = comms.remove_trusted_peer(&spec_a.peer_id).await {
+                    return Err(rollback.fail(error.into()).await);
+                }
+                rollback.defer(format!("restore trust '{b}' -> '{a}'"), {
+                    let comms = comms.clone();
+                    let spec_a = spec_a.clone();
+                    move || async move {
+                        comms.add_trusted_peer(spec_a).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersUnwired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+            ) => {
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.unwire_peer_only_recipient(spec_a, spec_b, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_unwired(spec_a, b, &entry_b, &supervisor_sender)
+                    .await?;
+                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
+                    .await?;
+                self.events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersUnwired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await?;
+            }
         }
 
-        // Update roster
         {
             let mut roster = self.roster.write().await;
             roster.unwire_members(a, b);
@@ -4428,17 +4921,291 @@ impl MobActor {
         Ok(())
     }
 
-    async fn handle_destroy(&mut self) -> Result<(), MobError> {
-        self.ensure_pending_spawn_alignment("handle_destroy preflight")?;
+    fn remote_destroy_cleanup_deadline(remote_member_count: usize) -> std::time::Duration {
+        let batches = remote_member_count
+            .saturating_add(MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS.saturating_sub(1))
+            / MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS.max(1);
+        let deadline_secs = std::cmp::min(90, 5 + (batches as u64) * 17);
+        std::time::Duration::from_secs(deadline_secs)
+    }
+
+    fn push_unique_identity(target: &mut Vec<AgentIdentity>, identity: AgentIdentity) {
+        if !target.iter().any(|existing| existing == &identity) {
+            target.push(identity);
+        }
+    }
+
+    fn runtime_binding_for_entry(entry: &RosterEntry) -> Option<crate::RuntimeBinding> {
+        match &entry.member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id: None,
+            } => Some(crate::RuntimeBinding::External {
+                peer_id: peer_id.clone(),
+                address: address.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    async fn destroy_remote_member_for_destroy(&self, entry: RosterEntry) -> RemoteDestroyOutcome {
+        let identity = entry.agent_identity.clone();
+        let meerkat_id = entry.meerkat_id.clone();
+        let mut outcome = RemoteDestroyOutcome {
+            identity: identity.clone(),
+            force_destroyed: false,
+            orphaned: false,
+            errors: Vec::new(),
+        };
+        let Some(binding) = Self::runtime_binding_for_entry(&entry) else {
+            outcome
+                .errors
+                .push("remote destroy requested for non peer-only member".to_string());
+            outcome.orphaned = true;
+            return outcome;
+        };
+
+        match self
+            .retire_event_exists(&meerkat_id, &entry.member_ref)
+            .await
+        {
+            Ok(false) => {
+                if let Err(error) = self
+                    .append_retire_event(&meerkat_id, &entry.role, &entry.member_ref)
+                    .await
+                {
+                    outcome
+                        .errors
+                        .push(format!("retire event append failed: {error}"));
+                }
+            }
+            Ok(true) => {}
+            Err(error) => outcome
+                .errors
+                .push(format!("retire event lookup failed: {error}")),
+        }
+
+        {
+            let mut roster = self.roster.write().await;
+            roster.mark_retiring(&meerkat_id);
+        }
+
+        let ctx = self.disposal_context_from_entry(&meerkat_id, &entry).await;
+        let mut policy = BulkBestEffort;
+        let disposal = self.dispose_member(&ctx, &mut policy).await;
+
+        let archive_error = disposal
+            .skipped
+            .iter()
+            .find(|(step, _)| *step == DisposalStep::ArchiveSession)
+            .map(|(_, error)| error.to_string())
+            .or_else(|| {
+                disposal.aborted_at.as_ref().and_then(|(step, error)| {
+                    (*step == DisposalStep::ArchiveSession).then(|| error.to_string())
+                })
+            });
+
+        let mut remote_cleanup_complete = archive_error.is_none();
+        if let Some(error) = archive_error {
+            outcome
+                .errors
+                .push(format!("graceful retire failed: {error}"));
+
+            match self
+                .observe_peer_only_binding(&binding, std::time::Duration::from_millis(750))
+                .await
+            {
+                Ok(observation) => {
+                    if Self::observation_is_terminal(&observation) {
+                        remote_cleanup_complete = true;
+                    } else {
+                        outcome.errors.push(format!(
+                            "confirmatory observation reported non-terminal state {}",
+                            observation.state
+                        ));
+                    }
+                }
+                Err(error) => outcome
+                    .errors
+                    .push(format!("confirmatory observation failed: {error}")),
+            }
+
+            if !remote_cleanup_complete {
+                match self
+                    .destroy_peer_only_binding(&binding, std::time::Duration::from_secs(5))
+                    .await
+                {
+                    Ok(_) => {
+                        remote_cleanup_complete = true;
+                        outcome.force_destroyed = true;
+                    }
+                    Err(error) => outcome
+                        .errors
+                        .push(format!("force destroy failed: {error}")),
+                }
+            }
+        }
+
+        if let Err(error) = self
+            .revoke_supervisor_for_binding(&binding, std::time::Duration::from_secs(5))
+            .await
+        {
+            outcome
+                .errors
+                .push(format!("supervisor revoke failed: {error}"));
+        }
+
+        outcome.orphaned = !remote_cleanup_complete
+            || outcome
+                .errors
+                .iter()
+                .any(|error| error.starts_with("supervisor revoke failed"));
+        outcome
+    }
+
+    async fn destroy_remote_members_for_destroy(
+        &self,
+        remote_entries: Vec<RosterEntry>,
+        report: &mut super::handle::MobDestroyReport,
+    ) {
+        if remote_entries.is_empty() {
+            return;
+        }
+
+        let deadline = Self::remote_destroy_cleanup_deadline(remote_entries.len());
+        let deadline_at = tokio::time::Instant::now() + deadline;
+        let mut remaining = VecDeque::from(remote_entries);
+        let mut in_flight = FuturesUnordered::new();
+        let mut outstanding = HashSet::new();
+
+        for _ in 0..MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS {
+            let Some(entry) = remaining.pop_front() else {
+                break;
+            };
+            outstanding.insert(entry.agent_identity.clone());
+            in_flight.push(self.destroy_remote_member_for_destroy(entry));
+        }
+
+        while !in_flight.is_empty() {
+            let next = tokio::time::timeout_at(deadline_at, in_flight.next()).await;
+            let Some(outcome) = (match next {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    report.remote_cleanup_deadline_exceeded = true;
+                    for identity in outstanding.drain() {
+                        Self::push_unique_identity(&mut report.orphaned_remote_members, identity);
+                    }
+                    for entry in remaining {
+                        Self::push_unique_identity(
+                            &mut report.orphaned_remote_members,
+                            entry.agent_identity.clone(),
+                        );
+                    }
+                    break;
+                }
+            }) else {
+                break;
+            };
+
+            outstanding.remove(&outcome.identity);
+            if outcome.force_destroyed {
+                Self::push_unique_identity(
+                    &mut report.force_destroyed_members,
+                    outcome.identity.clone(),
+                );
+            }
+            if outcome.orphaned {
+                Self::push_unique_identity(
+                    &mut report.orphaned_remote_members,
+                    outcome.identity.clone(),
+                );
+            }
+            for error in outcome.errors {
+                report.push_error(format!("{}: {error}", outcome.identity));
+            }
+
+            if let Some(entry) = remaining.pop_front() {
+                outstanding.insert(entry.agent_identity.clone());
+                in_flight.push(self.destroy_remote_member_for_destroy(entry));
+            }
+        }
+    }
+
+    async fn handle_destroy(
+        &mut self,
+    ) -> Result<super::handle::MobDestroyReport, super::handle::MobDestroyError> {
+        use super::handle::{MobDestroyError, MobDestroyReport};
+
+        let mut report = MobDestroyReport::default();
+
+        self.ensure_pending_spawn_alignment("handle_destroy preflight")
+            .map_err(MobDestroyError::from)?;
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
-            .await?;
-        self.cancel_all_flow_tasks().await?;
+            .await
+            .map_err(MobDestroyError::from)?;
+        if !self.lifecycle_authority.can_accept_in_phase(
+            self.state(),
+            self.machine_active_run_count(),
+            MobLifecycleInput::Destroy,
+        ) {
+            return Err(MobDestroyError::from(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Destroyed,
+            }));
+        }
+        self.cancel_all_flow_tasks()
+            .await
+            .map_err(MobDestroyError::from)?;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;
-        self.retire_all_members("destroy").await?;
-        self.stop_mcp_servers().await?;
-        self.events.clear().await?;
-        self.cleanup_namespace().await?;
+        let entries = {
+            let roster = self.roster.read().await;
+            roster.list_all().cloned().collect::<Vec<_>>()
+        };
+        let (remote_entries, local_entries): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
+
+        for entry in local_entries {
+            if let Err(error) = self.handle_retire_inner(&entry.meerkat_id, true).await {
+                report.push_error(error.to_string());
+                return Err(MobDestroyError::Incomplete { report });
+            }
+        }
+        self.destroy_remote_members_for_destroy(remote_entries, &mut report)
+            .await;
+        if let Err(error) = self.stop_mcp_servers().await {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        if let Err(error) = self
+            .runtime_metadata
+            .delete_external_binding_overlays(&self.definition.id)
+            .await
+        {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        if let Err(error) = self
+            .runtime_metadata
+            .delete_supervisor_authority(&self.definition.id)
+            .await
+        {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        report.metadata_scrubbed = true;
+        if let Err(error) = self.events.clear().await {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        report.events_cleared = true;
+        if let Err(error) = self.cleanup_namespace().await {
+            report.push_error(error.to_string());
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        report.namespace_cleaned = true;
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator then Destroy.
         let phase = self.state();
@@ -4447,11 +5214,21 @@ impl MobActor {
             let mut orchestrator_phase = phase;
             if self.machine_orchestrator_can_accept(phase, MobOrchestratorInput::StopOrchestrator) {
                 let transition = self
-                    .machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)?
+                    .machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)
+                    .map_err(|error| {
+                        let mut report = report.clone();
+                        report.push_error(format!(
+                            "orchestrator StopOrchestrator transition failed during destroy: {error}"
+                        ));
+                        MobDestroyError::Incomplete { report }
+                    })?
                     .ok_or_else(|| {
-                        MobError::Internal(
-                            "orchestrator missing during destroy despite expected binding".into(),
-                        )
+                        let mut report = report.clone();
+                        report.push_error(
+                            "orchestrator missing during destroy despite expected binding"
+                                .to_string(),
+                        );
+                        MobDestroyError::Incomplete { report }
                     })?;
                 orchestrator_phase = transition.next_phase;
                 topology_unbound = true;
@@ -4462,11 +5239,20 @@ impl MobActor {
             self.machine_apply_orchestrator(
                 orchestrator_phase,
                 MobOrchestratorInput::DestroyOrchestrator,
-            )?
+            )
+            .map_err(|error| {
+                let mut report = report.clone();
+                report.push_error(format!(
+                    "orchestrator DestroyOrchestrator transition failed during destroy: {error}"
+                ));
+                MobDestroyError::Incomplete { report }
+            })?
             .ok_or_else(|| {
-                MobError::Internal(
-                    "orchestrator missing during destroy despite expected binding".into(),
-                )
+                let mut report = report.clone();
+                report.push_error(
+                    "orchestrator missing during destroy despite expected binding".to_string(),
+                );
+                MobDestroyError::Incomplete { report }
             })?;
         }
         self.lifecycle_authority
@@ -4475,15 +5261,98 @@ impl MobActor {
                 self.machine_active_run_count(),
                 MobLifecycleInput::Destroy,
             )
+            .map_err(|error| MobDestroyError::Incomplete {
+                report: {
+                    let mut report = report.clone();
+                    report.push_error(format!(
+                        "lifecycle Destroy transition failed during destroy: {error}"
+                    ));
+                    report
+                },
+            })?;
+        self.ensure_pending_spawn_alignment("handle_destroy completion")
             .map_err(|error| {
+                let mut report = report.clone();
+                report.push_error(error.to_string());
+                MobDestroyError::Incomplete { report }
+            })?;
+        self.ensure_flow_tracker_alignment("handle_destroy completion")
+            .await
+            .map_err(|error| {
+                let mut report = report.clone();
+                report.push_error(error.to_string());
+                MobDestroyError::Incomplete { report }
+            })?;
+        if report.remote_cleanup_deadline_exceeded
+            || !report.orphaned_remote_members.is_empty()
+            || !report.errors.is_empty()
+        {
+            return Err(MobDestroyError::Incomplete { report });
+        }
+        Ok(report)
+    }
+
+    async fn handle_rotate_supervisor(
+        &self,
+    ) -> Result<super::handle::SupervisorRotationReport, MobError> {
+        let current = self
+            .runtime_metadata
+            .load_supervisor_authority(&self.definition.id)
+            .await?
+            .ok_or_else(|| {
                 MobError::Internal(format!(
-                    "lifecycle Destroy transition failed during destroy: {error}"
+                    "cannot rotate supervisor for mob '{}': missing supervisor runtime metadata",
+                    self.definition.id
                 ))
             })?;
-        self.ensure_pending_spawn_alignment("handle_destroy completion")?;
-        self.ensure_flow_tracker_alignment("handle_destroy completion")
+        let mut next = crate::store::SupervisorAuthorityRecord::generate(current.protocol_version);
+        next.epoch = current.epoch + 1;
+        let remote_bindings = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter_map(Self::runtime_binding_for_entry)
+                .collect::<Vec<_>>()
+        };
+        if !remote_bindings.is_empty() {
+            let next_sup_spec: super::bridge_protocol::BridgePeerSpec =
+                meerkat_core::comms::TrustedPeerSpec::new(
+                    format!("{}/__mob_supervisor__", self.definition.id),
+                    next.public_peer_id.clone(),
+                    format!("inproc://{}/__mob_supervisor__", self.definition.id),
+                )
+                .map_err(|error| {
+                    MobError::WiringError(format!("invalid rotated supervisor spec: {error}"))
+                })?
+                .into();
+            let next_command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                super::bridge_protocol::BridgeSupervisorPayload {
+                    supervisor: next_sup_spec,
+                    epoch: next.epoch,
+                    protocol_version: next.protocol_version,
+                },
+            );
+            for binding in remote_bindings {
+                let peer = Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")?;
+                let _ack: super::bridge_protocol::BridgeAck = self
+                    .send_bridge_command_typed(
+                        &peer,
+                        &next_command,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await?;
+            }
+        }
+        let public_peer_id = next.public_peer_id.clone();
+        self.runtime_metadata
+            .put_supervisor_authority(&self.definition.id, &next)
             .await?;
-        Ok(())
+        self.supervisor_bridge.rotate(next.clone()).await?;
+        Ok(super::handle::SupervisorRotationReport {
+            previous_epoch: current.epoch,
+            current_epoch: next.epoch,
+            public_peer_id,
+        })
     }
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`
@@ -4757,7 +5626,7 @@ impl MobActor {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_external_turn preflight")?;
         // Look up the entry
         let entry = {
@@ -4825,7 +5694,7 @@ impl MobActor {
         &self,
         meerkat_id: MeerkatId,
         content: ContentInput,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_internal_turn preflight")?;
         let entry = {
             let roster = self.roster.read().await;
@@ -4854,15 +5723,12 @@ impl MobActor {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    ) -> Result<SessionId, MobError> {
+    ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {
-                    MobError::Internal(format!(
-                        "autonomous dispatch requires session-backed member ref for '{}'",
-                        entry.meerkat_id
-                    ))
+                    Self::peer_only_member_control_error(entry.runtime_mode, "direct turn delivery")
                 })?;
 
                 self.ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
@@ -4891,20 +5757,9 @@ impl MobActor {
                             entry.meerkat_id, error
                         ))
                     })?;
-                Ok(bridge_session_id.clone())
+                Ok(())
             }
             crate::MobRuntimeMode::TurnDriven => {
-                let bridge_session_id =
-                    entry
-                        .member_ref
-                        .bridge_session_id()
-                        .cloned()
-                        .ok_or_else(|| {
-                            MobError::Internal(format!(
-                                "turn-driven dispatch requires session for '{}'",
-                                entry.meerkat_id
-                            ))
-                        })?;
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
                     system_prompt: None,
@@ -4917,7 +5772,7 @@ impl MobActor {
                     execution_kind: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
-                Ok(bridge_session_id)
+                Ok(())
             }
         }
     }
@@ -5387,41 +6242,50 @@ impl MobActor {
         let mut rollback = LifecycleRollback::new("spawn rollback");
 
         if !wired_peers.is_empty() {
-            let spawned_comms = spawned_comms.as_ref().ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "spawn rollback requires comms runtime for '{meerkat_id}'"
-                ))
-            })?;
             let spawned_entry = spawned_entry.as_ref().ok_or_else(|| {
                 MobError::WiringError(format!(
                     "spawn rollback requires roster entry for '{meerkat_id}'"
                 ))
             })?;
+            let spawned_sender = self
+                .sender_runtime_for_entry(spawned_entry)
+                .await
+                .ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "spawn rollback requires sender runtime for '{meerkat_id}'"
+                    ))
+                })?;
             for peer_meerkat_id in &wired_peers {
-                let peer_comms_name = {
+                let peer_spec = {
                     let roster = self.roster.read().await;
-                    roster
-                        .get(peer_meerkat_id)
-                        .map(|entry| self.comms_name_for(entry))
-                        .ok_or_else(|| {
-                            MobError::WiringError(format!(
-                                "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
-                            ))
-                        })?
+                    let peer_entry = roster.get(peer_meerkat_id).cloned().ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "spawn rollback requires roster entry for wired peer '{peer_meerkat_id}'"
+                        ))
+                    })?;
+                    drop(roster);
+                    match self
+                        .resolve_wiring_endpoint(&peer_entry, "spawn rollback")
+                        .await?
+                    {
+                        WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => {
+                            spec
+                        }
+                    }
                 };
-                self.notify_peer_retired(peer_meerkat_id, meerkat_id, spawned_entry, spawned_comms)
+                self.notify_peer_retired(&peer_spec, meerkat_id, spawned_entry, &spawned_sender)
                     .await?;
                 rollback.defer(
                     format!("compensating mob.peer_added '{meerkat_id}' -> '{peer_meerkat_id}'"),
                     {
-                        let spawned_comms = spawned_comms.clone();
-                        let peer_comms_name = peer_comms_name.clone();
+                        let spawned_sender = spawned_sender.clone();
+                        let peer_spec = peer_spec.clone();
                         let spawned_entry = spawned_entry.clone();
                         let meerkat_id = meerkat_id.clone();
                         move || async move {
                             self.notify_peer_added(
-                                &spawned_comms,
-                                &peer_comms_name,
+                                &spawned_sender,
+                                &peer_spec,
                                 &meerkat_id,
                                 &spawned_entry,
                             )
@@ -5524,7 +6388,6 @@ impl MobActor {
                     effective_profile_override: None,
                 }
             }),
-            retiring_comms: spawned_comms.clone(),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
         };
         if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {
@@ -5648,113 +6511,241 @@ impl MobActor {
                 "wire found non-canonical roster projection; reapplying full wire path"
             );
         }
+        let endpoint_a = self.resolve_wiring_endpoint(&entry_a, "wire").await?;
+        let endpoint_b = self.resolve_wiring_endpoint(&entry_b, "wire").await?;
 
-        // Establish bidirectional trust via comms (required).
-        let comms_a = self
-            .provisioner_comms(&entry_a.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!("wire requires comms runtime for '{a}'"))
-            })?;
-        let comms_b = self
-            .provisioner_comms(&entry_b.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!("wire requires comms runtime for '{b}'"))
-            })?;
-
-        let key_a = comms_a
-            .public_key()
-            .ok_or_else(|| MobError::WiringError(format!("wire requires public key for '{a}'")))?;
-        let key_b = comms_b
-            .public_key()
-            .ok_or_else(|| MobError::WiringError(format!("wire requires public key for '{b}'")))?;
-
-        // Get peer info for trust establishment
-        let comms_name_a = self.comms_name_for(&entry_a);
-        let comms_name_b = self.comms_name_for(&entry_b);
-
-        let spec_b = self
-            .provisioner
-            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
-            .await?;
-        let spec_a = self
-            .provisioner
-            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
-            .await?;
-
-        let mut rollback = LifecycleRollback::new("wire");
-
-        comms_a.add_trusted_peer(spec_b.clone()).await?;
-        rollback.defer(format!("remove trust '{a}' -> '{b}'"), {
-            let comms_a = comms_a.clone();
-            let key_b = key_b.clone();
-            move || async move {
-                comms_a.remove_trusted_peer(&key_b).await?;
-                Ok(())
-            }
-        });
-
-        if let Err(error) = comms_b.add_trusted_peer(spec_a.clone()).await {
-            return Err(rollback.fail(error.into()).await);
-        }
-        rollback.defer(format!("remove trust '{b}' -> '{a}'"), {
-            let comms_b = comms_b.clone();
-            let key_a = key_a.clone();
-            move || async move {
-                comms_b.remove_trusted_peer(&key_a).await?;
-                Ok(())
-            }
-        });
-
-        // Notify both peers (required for successful wire):
-        // Send FROM b TO a about new peer b
-        if let Err(error) = self
-            .notify_peer_added(&comms_b, &comms_name_a, b, &entry_b)
-            .await
-        {
-            return Err(rollback.fail(error).await);
-        }
-        rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
-            let comms_b = comms_b.clone();
-            let entry_b = entry_b.clone();
-            let a = a.clone();
-            let b = b.clone();
-            move || async move { self.notify_peer_retired(&a, &b, &entry_b, &comms_b).await }
-        });
-
-        // Send FROM a TO b about new peer a
-        if let Err(error) = self
-            .notify_peer_added(&comms_a, &comms_name_b, a, &entry_a)
-            .await
-        {
-            return Err(rollback.fail(error).await);
-        }
-        rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
-            let comms_a = comms_a.clone();
-            let entry_a = entry_a.clone();
-            let a = a.clone();
-            let b = b.clone();
-            move || async move { self.notify_peer_retired(&b, &a, &entry_a, &comms_a).await }
-        });
-
-        // Emit PeersWired event
-        if let Err(append_error) = self
-            .events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MembersWired {
-                    a: AgentIdentity::from(a.as_str()),
-                    b: AgentIdentity::from(b.as_str()),
+        match (&endpoint_a, &endpoint_b) {
+            (
+                WiringEndpoint::Local {
+                    comms: comms_a,
+                    spec: spec_a,
+                    comms_name: _comms_name_a,
+                    entry: entry_a,
                 },
-            })
-            .await
-        {
-            return Err(rollback.fail(MobError::from(append_error)).await);
+                WiringEndpoint::Local {
+                    comms: comms_b,
+                    spec: spec_b,
+                    comms_name: _comms_name_b,
+                    entry: entry_b,
+                },
+            ) => {
+                let mut rollback = LifecycleRollback::new("wire");
+
+                comms_a.add_trusted_peer(spec_b.clone()).await?;
+                rollback.defer(format!("remove trust '{a}' -> '{b}'"), {
+                    let comms_a = comms_a.clone();
+                    let peer_id = spec_b.peer_id.clone();
+                    move || async move {
+                        comms_a.remove_trusted_peer(&peer_id).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(error) = comms_b.add_trusted_peer(spec_a.clone()).await {
+                    return Err(rollback.fail(error.into()).await);
+                }
+                rollback.defer(format!("remove trust '{b}' -> '{a}'"), {
+                    let comms_b = comms_b.clone();
+                    let peer_id = spec_a.peer_id.clone();
+                    move || async move {
+                        comms_b.remove_trusted_peer(&peer_id).await?;
+                        Ok(())
+                    }
+                });
+
+                if let Err(error) = self.notify_peer_added(comms_b, spec_a, b, entry_b).await {
+                    return Err(rollback.fail(error).await);
+                }
+                rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
+                    let comms_b = comms_b.clone();
+                    let spec_a = spec_a.clone();
+                    let entry_b = entry_b.clone();
+                    let b = b.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_a, &b, &entry_b, &comms_b)
+                            .await
+                    }
+                });
+
+                if let Err(error) = self.notify_peer_added(comms_a, spec_b, a, entry_a).await {
+                    return Err(rollback.fail(error).await);
+                }
+                rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
+                    let comms_a = comms_a.clone();
+                    let spec_b = spec_b.clone();
+                    let entry_a = entry_a.clone();
+                    let a = a.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_b, &a, &entry_a, &comms_a)
+                            .await
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersWired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::Local {
+                    comms,
+                    spec: spec_a,
+                    entry: entry_a,
+                    ..
+                },
+                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+            ) => {
+                let mut rollback = LifecycleRollback::new("wire");
+                comms.add_trusted_peer(spec_b.clone()).await?;
+                rollback.defer(format!("remove trust '{a}' -> '{b}'"), {
+                    let comms = comms.clone();
+                    let peer_id = spec_b.peer_id.clone();
+                    move || async move {
+                        comms.remove_trusted_peer(&peer_id).await?;
+                        Ok(())
+                    }
+                });
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.notify_peer_added(&supervisor_sender, spec_a, b, &entry_b)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_a = spec_a.clone();
+                    let entry_b = entry_b.clone();
+                    let b = b.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_a, &b, &entry_b, &supervisor_sender)
+                            .await
+                    }
+                });
+                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_b = spec_b.clone();
+                    let entry_a = entry_a.clone();
+                    let a = a.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_b, &a, &entry_a, &supervisor_sender)
+                            .await
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersWired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                WiringEndpoint::Local {
+                    comms,
+                    spec: spec_b,
+                    entry: entry_b,
+                    ..
+                },
+            ) => {
+                let mut rollback = LifecycleRollback::new("wire");
+                comms.add_trusted_peer(spec_a.clone()).await?;
+                rollback.defer(format!("remove trust '{b}' -> '{a}'"), {
+                    let comms = comms.clone();
+                    let peer_id = spec_a.peer_id.clone();
+                    move || async move {
+                        comms.remove_trusted_peer(&peer_id).await?;
+                        Ok(())
+                    }
+                });
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_b = spec_b.clone();
+                    let entry_a = entry_a.clone();
+                    let a = a.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_b, &a, &entry_a, &supervisor_sender)
+                            .await
+                    }
+                });
+                self.notify_peer_added(&supervisor_sender, spec_a, b, &entry_b)
+                    .await?;
+                rollback.defer(format!("compensating mob.peer_retired '{b}' -> '{a}'"), {
+                    let supervisor_sender = supervisor_sender.clone();
+                    let spec_a = spec_a.clone();
+                    let entry_b = entry_b.clone();
+                    let b = b.clone();
+                    move || async move {
+                        self.notify_peer_retired(&spec_a, &b, &entry_b, &supervisor_sender)
+                            .await
+                    }
+                });
+
+                if let Err(append_error) = self
+                    .events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersWired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await
+                {
+                    return Err(rollback.fail(MobError::from(append_error)).await);
+                }
+            }
+            (
+                WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+            ) => {
+                let supervisor_sender = self.supervisor_bridge.runtime_core().await;
+                self.wire_peer_only_recipient(spec_a, spec_b, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_added(&supervisor_sender, spec_a, b, &entry_b)
+                    .await?;
+                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
+                    .await?;
+                self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
+                    .await?;
+                self.events
+                    .append(NewMobEvent {
+                        mob_id: self.definition.id.clone(),
+                        timestamp: None,
+                        kind: MobEventKind::MembersWired {
+                            a: AgentIdentity::from(a.as_str()),
+                            b: AgentIdentity::from(b.as_str()),
+                        },
+                    })
+                    .await?;
+            }
         }
 
-        // Update roster
         {
             let mut roster = self.roster.write().await;
             roster.wire_members(a, b);
@@ -5767,50 +6758,42 @@ impl MobActor {
 
     async fn reconcile_wire_trust_edges(
         &self,
-        a: &MeerkatId,
+        _a: &MeerkatId,
         entry_a: &RosterEntry,
-        b: &MeerkatId,
+        _b: &MeerkatId,
         entry_b: &RosterEntry,
     ) -> Result<(), MobError> {
-        let comms_a = self
-            .provisioner_comms(&entry_a.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "wire trust reconciliation requires comms runtime for '{a}'"
-                ))
-            })?;
-        let comms_b = self
-            .provisioner_comms(&entry_b.member_ref)
-            .await
-            .ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "wire trust reconciliation requires comms runtime for '{b}'"
-                ))
-            })?;
-        let key_a = comms_a.public_key().ok_or_else(|| {
-            MobError::WiringError(format!(
-                "wire trust reconciliation requires public key for '{a}'"
-            ))
-        })?;
-        let key_b = comms_b.public_key().ok_or_else(|| {
-            MobError::WiringError(format!(
-                "wire trust reconciliation requires public key for '{b}'"
-            ))
-        })?;
-        let comms_name_a = self.comms_name_for(entry_a);
-        let comms_name_b = self.comms_name_for(entry_b);
-        let spec_b = self
-            .provisioner
-            .trusted_peer_spec(&entry_b.member_ref, &comms_name_b, &key_b)
+        let endpoint_a = self
+            .resolve_wiring_endpoint(entry_a, "wire trust reconciliation")
             .await?;
-        let spec_a = self
-            .provisioner
-            .trusted_peer_spec(&entry_a.member_ref, &comms_name_a, &key_a)
+        let endpoint_b = self
+            .resolve_wiring_endpoint(entry_b, "wire trust reconciliation")
             .await?;
 
-        comms_a.add_trusted_peer(spec_b).await?;
-        comms_b.add_trusted_peer(spec_a).await?;
+        match (&endpoint_a, &endpoint_b) {
+            (
+                WiringEndpoint::Local {
+                    comms: comms_a,
+                    spec: spec_a,
+                    ..
+                },
+                WiringEndpoint::Local {
+                    comms: comms_b,
+                    spec: spec_b,
+                    ..
+                },
+            ) => {
+                comms_a.add_trusted_peer(spec_b.clone()).await?;
+                comms_b.add_trusted_peer(spec_a.clone()).await?;
+            }
+            (WiringEndpoint::Local { comms, .. }, WiringEndpoint::PeerOnly { spec, .. }) => {
+                comms.add_trusted_peer(spec.clone()).await?;
+            }
+            (WiringEndpoint::PeerOnly { spec, .. }, WiringEndpoint::Local { comms, .. }) => {
+                comms.add_trusted_peer(spec.clone()).await?;
+            }
+            (WiringEndpoint::PeerOnly { .. }, WiringEndpoint::PeerOnly { .. }) => {}
+        }
         Ok(())
     }
 
@@ -5844,9 +6827,68 @@ impl MobActor {
         self.provisioner.comms_runtime(member_ref).await
     }
 
+    async fn sender_runtime_for_entry(
+        &self,
+        entry: &RosterEntry,
+    ) -> Option<Arc<dyn CoreCommsRuntime>> {
+        if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+            return Some(comms);
+        }
+        if matches!(
+            entry.member_ref,
+            MemberRef::BackendPeer {
+                session_id: None,
+                ..
+            }
+        ) {
+            return Some(self.supervisor_bridge.runtime_core().await);
+        }
+        None
+    }
+
     /// Generate the comms name for a roster entry.
     fn comms_name_for(&self, entry: &RosterEntry) -> String {
         format!("{}/{}/{}", self.definition.id, entry.role, entry.meerkat_id)
+    }
+
+    async fn resolve_wiring_endpoint(
+        &self,
+        entry: &RosterEntry,
+        context: &'static str,
+    ) -> Result<WiringEndpoint, MobError> {
+        let comms_name = self.comms_name_for(entry);
+        if let Some(comms) = self.provisioner_comms(&entry.member_ref).await {
+            let public_key = comms.public_key().ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "{context} requires public key for '{}'",
+                    entry.meerkat_id
+                ))
+            })?;
+            let spec = self
+                .provisioner
+                .trusted_peer_spec(&entry.member_ref, &comms_name, &public_key)
+                .await?;
+            return Ok(WiringEndpoint::Local {
+                entry: entry.clone(),
+                comms,
+                spec,
+                comms_name,
+            });
+        }
+
+        match &entry.member_ref {
+            MemberRef::BackendPeer { peer_id, .. } => {
+                let spec = self
+                    .provisioner
+                    .trusted_peer_spec(&entry.member_ref, &comms_name, peer_id)
+                    .await?;
+                Ok(WiringEndpoint::PeerOnly { spec })
+            }
+            MemberRef::Session { .. } => Err(MobError::WiringError(format!(
+                "{context} requires comms runtime for '{}'",
+                entry.meerkat_id
+            ))),
+        }
     }
 
     /// Notify a peer that a new peer was added.
@@ -5859,7 +6901,7 @@ impl MobActor {
     async fn notify_peer_added(
         &self,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
-        recipient_comms_name: &str,
+        recipient_spec: &TrustedPeerSpec,
         new_peer_id: &MeerkatId,
         new_peer_entry: &RosterEntry,
     ) -> Result<(), MobError> {
@@ -5870,9 +6912,19 @@ impl MobActor {
             .map(|p| p.peer_description)
             .unwrap_or_default();
 
-        let peer_name = PeerName::new(recipient_comms_name).map_err(|error| {
+        let new_peer_spec = match self
+            .resolve_wiring_endpoint(new_peer_entry, "notify_peer_added")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+        };
+        sender_comms
+            .add_trusted_peer(recipient_spec.clone())
+            .await?;
+        let peer_name = PeerName::new(recipient_spec.name.clone()).map_err(|error| {
             MobError::WiringError(format!(
-                "notify_peer_added: invalid recipient comms name '{recipient_comms_name}': {error}"
+                "notify_peer_added: invalid recipient comms name '{}': {error}",
+                recipient_spec.name
             ))
         })?;
 
@@ -5883,6 +6935,10 @@ impl MobActor {
                 "peer": new_peer_id.as_str(),
                 "role": new_peer_entry.role.as_str(),
                 "description": peer_description,
+                "peer_name": new_peer_spec.name,
+                "peer_id": new_peer_spec.peer_id,
+                "address": new_peer_spec.address,
+                "peer_spec": new_peer_spec,
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: meerkat_core::comms::InputStreamMode::None,
@@ -5895,26 +6951,24 @@ impl MobActor {
     async fn notify_peer_event(
         &self,
         intent: &'static str,
-        peer_id: &MeerkatId,
+        recipient_spec: &TrustedPeerSpec,
         other_peer_id: &MeerkatId,
         other_peer_entry: &RosterEntry,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
-        let peer_entry = {
-            let roster = self.roster.read().await;
-            roster.get(peer_id).cloned()
+        let other_peer_spec = match self
+            .resolve_wiring_endpoint(other_peer_entry, "notify_peer_event")
+            .await?
+        {
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
         };
-
-        let peer_entry = peer_entry.ok_or_else(|| {
+        sender_comms
+            .add_trusted_peer(recipient_spec.clone())
+            .await?;
+        let peer_name = PeerName::new(recipient_spec.name.clone()).map_err(|error| {
             MobError::WiringError(format!(
-                "notify_peer_retired: peer '{peer_id}' missing from roster"
-            ))
-        })?;
-
-        let peer_comms_name = self.comms_name_for(&peer_entry);
-        let peer_name = PeerName::new(&peer_comms_name).map_err(|error| {
-            MobError::WiringError(format!(
-                "notify_peer_retired: invalid peer comms name '{peer_comms_name}': {error}"
+                "notify_peer_retired: invalid peer comms name '{}': {error}",
+                recipient_spec.name
             ))
         })?;
 
@@ -5924,6 +6978,10 @@ impl MobActor {
             params: serde_json::json!({
                 "peer": other_peer_id.as_str(),
                 "role": other_peer_entry.role.as_str(),
+                "peer_name": other_peer_spec.name,
+                "peer_id": other_peer_spec.peer_id,
+                "address": other_peer_spec.address,
+                "peer_spec": other_peer_spec,
             }),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: meerkat_core::comms::InputStreamMode::None,
@@ -5952,18 +7010,38 @@ impl MobActor {
         };
         let sender_comms = self.provisioner_comms(&entry.member_ref).await;
         let effects = MobRuntimeBridgeAuthority::plan_lifecycle_notice(
-            sender_comms.is_some(),
+            sender_comms.is_some()
+                || matches!(
+                    entry.member_ref,
+                    MemberRef::BackendPeer {
+                        session_id: None,
+                        ..
+                    }
+                ),
             &wired_peers,
             intent,
         );
 
-        let Some(sender_comms) = sender_comms else {
+        let Some(sender_comms) = self.sender_runtime_for_entry(&entry).await else {
             return Ok(());
         };
 
         for effect in effects {
             let MobRuntimeBridgeEffect::DeliverLifecycleNotice { peer_id, intent } = effect;
-            self.notify_peer_event(intent, &peer_id, meerkat_id, &entry, &sender_comms)
+            let recipient_entry = {
+                let roster = self.roster.read().await;
+                roster.get(&peer_id).cloned()
+            };
+            let Some(recipient_entry) = recipient_entry else {
+                continue;
+            };
+            let recipient_spec = match self
+                .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
+                .await?
+            {
+                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+            };
+            self.notify_peer_event(intent, &recipient_spec, meerkat_id, &entry, &sender_comms)
                 .await?;
         }
         Ok(())
@@ -5972,14 +7050,14 @@ impl MobActor {
     /// Notify a peer that another peer was retired from the mob.
     async fn notify_peer_retired(
         &self,
-        peer_id: &MeerkatId,
+        recipient_spec: &TrustedPeerSpec,
         retired_id: &MeerkatId,
         retired_entry: &RosterEntry,
         retiring_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
         self.notify_peer_event(
             "mob.peer_retired",
-            peer_id,
+            recipient_spec,
             retired_id,
             retired_entry,
             retiring_comms,
@@ -5990,14 +7068,14 @@ impl MobActor {
     /// Notify a peer that another peer was unwired (trust link removed).
     async fn notify_peer_unwired(
         &self,
-        peer_id: &MeerkatId,
+        recipient_spec: &TrustedPeerSpec,
         unwired_id: &MeerkatId,
         unwired_entry: &RosterEntry,
         sender_comms: &Arc<dyn CoreCommsRuntime>,
     ) -> Result<(), MobError> {
         self.notify_peer_event(
             "mob.peer_unwired",
-            peer_id,
+            recipient_spec,
             unwired_id,
             unwired_entry,
             sender_comms,

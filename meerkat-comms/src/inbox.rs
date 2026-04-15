@@ -32,6 +32,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) raw_item_id: String,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
+    pub(crate) auth_exempt: bool,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
@@ -112,6 +113,9 @@ impl ClassifiedInboxQueue {
     }
 
     fn sync_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
+        if entry.auth_exempt {
+            return;
+        }
         let InboxItem::External { .. } = &entry.item else {
             return;
         };
@@ -452,7 +456,11 @@ impl InboxSender {
             let kind = result.ingress_kind();
             let (should_enqueue, trusted_snapshot) = {
                 let mut queue = classified_queue.lock();
-                queue.sync_peer_receive(&result)
+                if result.auth_exempt && ctx.require_peer_auth && !result.trusted_sender {
+                    (true, Some(false))
+                } else {
+                    queue.sync_peer_receive(&result)
+                }
             };
             if !should_enqueue {
                 return Ok(());
@@ -461,6 +469,7 @@ impl InboxSender {
                 raw_item_id: result.raw_item_id,
                 item: result.item,
                 class: result.class,
+                auth_exempt: result.auth_exempt,
                 kind,
                 from_peer: result.from_peer,
                 lifecycle_peer: result.lifecycle_peer,

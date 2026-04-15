@@ -21,8 +21,11 @@ use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
 
@@ -960,7 +963,7 @@ impl MobProvisioner for SessionBackend {
 }
 
 pub struct ExternalBackend {
-    session_service: Arc<dyn MobSessionService>,
+    _session_service: Arc<dyn MobSessionService>,
 }
 
 impl ExternalBackend {
@@ -968,7 +971,9 @@ impl ExternalBackend {
         session_service: Arc<dyn MobSessionService>,
         _config: ExternalBackendConfig,
     ) -> Self {
-        Self { session_service }
+        Self {
+            _session_service: session_service,
+        }
     }
 }
 
@@ -1003,9 +1008,17 @@ fn is_valid_external_peer_name(peer_name: &str) -> bool {
         .all(|part| is_valid_peer_name_component(part))
 }
 
+fn synthetic_backend_peer_session_id(peer_id: &str, address: &str) -> SessionId {
+    SessionId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("meerkat-mob/backend-peer/{peer_id}/{address}").as_bytes(),
+    ))
+}
+
 pub struct MultiBackendProvisioner {
     session: SessionBackend,
     external: Option<ExternalBackend>,
+    supervisor_bridge: Arc<super::MobSupervisorBridge>,
 }
 
 impl MultiBackendProvisioner {
@@ -1013,15 +1026,114 @@ impl MultiBackendProvisioner {
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: Option<Arc<MeerkatMachine>>,
         external: Option<ExternalBackendConfig>,
+        supervisor_bridge: Arc<super::MobSupervisorBridge>,
     ) -> Self {
         let session = SessionBackend::new(session_service.clone(), runtime_adapter);
         let external = external.map(|cfg| ExternalBackend::new(session_service, cfg));
-        Self { session, external }
+        Self {
+            session,
+            external,
+            supervisor_bridge,
+        }
+    }
+
+    async fn peer_only_spec(&self, member_ref: &MemberRef) -> Result<TrustedPeerSpec, MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id: None,
+            } => TrustedPeerSpec::new(
+                address
+                    .strip_prefix("inproc://")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
+                peer_id.clone(),
+                address.clone(),
+            )
+            .map_err(|error| MobError::WiringError(format!("invalid peer-only spec: {error}"))),
+            _ => Err(MobError::Internal(
+                "peer-only spec requested for non-peer-only member".to_string(),
+            )),
+        }
+    }
+
+    fn peer_only_spec_from_parts(
+        peer_id: &str,
+        address: &str,
+    ) -> Result<TrustedPeerSpec, MobError> {
+        TrustedPeerSpec::new(
+            address
+                .strip_prefix("inproc://")
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
+            peer_id.to_string(),
+            address.to_string(),
+        )
+        .map_err(|error| MobError::WiringError(format!("invalid peer-only spec: {error}")))
+    }
+
+    async fn bridge_supervisor_payload(
+        &self,
+    ) -> Result<super::bridge_protocol::BridgeSupervisorPayload, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let spec = self.supervisor_bridge.supervisor_spec().await?;
+        Ok(super::bridge_protocol::BridgeSupervisorPayload {
+            supervisor: spec.into(),
+            epoch: authority.epoch,
+            protocol_version: authority.protocol_version,
+        })
+    }
+
+    async fn ensure_supervisor_authorized(&self, peer: &TrustedPeerSpec) -> Result<(), MobError> {
+        let payload = self.bridge_supervisor_payload().await?;
+        let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
+        let _ = self
+            .supervisor_bridge
+            .send_bridge_command(peer, &command, Duration::from_secs(30))
+            .await?;
+        Ok(())
+    }
+
+    async fn send_bridge_command_typed<R: DeserializeOwned>(
+        &self,
+        peer: &TrustedPeerSpec,
+        command: &super::bridge_protocol::BridgeCommand,
+        timeout: Duration,
+    ) -> Result<R, MobError> {
+        let value = self
+            .supervisor_bridge
+            .send_bridge_command(peer, command, timeout)
+            .await?;
+        serde_json::from_value(value).map_err(|error| {
+            MobError::Internal(format!("failed to decode bridge command response: {error}"))
+        })
+    }
+
+    async fn bind_peer_only_member(
+        &self,
+        peer: &TrustedPeerSpec,
+        peer_id: &str,
+        address: &str,
+    ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let command = super::bridge_protocol::BridgeCommand::BindMember(
+            super::bridge_protocol::BridgeBindPayload {
+                supervisor: sup_spec.into(),
+                epoch: authority.epoch,
+                protocol_version: authority.protocol_version,
+                expected_peer_id: peer_id.to_string(),
+                expected_address: address.to_string(),
+            },
+        );
+        self.send_bridge_command_typed(peer, &command, Duration::from_secs(30))
+            .await
     }
 
     async fn external_member_ref(
         &self,
-        mut create_session: CreateSessionRequest,
+        _create_session: CreateSessionRequest,
         peer_name: String,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
@@ -1037,112 +1149,41 @@ impl MultiBackendProvisioner {
             peer_name = %peer_name,
             "ExternalBackend::external_member_ref start"
         );
-        let external = self
+        let _external = self
             .external
             .as_ref()
             .ok_or_else(|| MobError::WiringError("external backend is not configured".into()))?;
-        // Pre-register with the runtime adapter (mirrors SessionBackend::provision_member).
-        let pre_registered_bridge_session_id = if let Some(adapter) = &self.session.runtime_adapter
-        {
-            if create_session.build.is_none() {
-                create_session.build = Some(meerkat_core::service::SessionBuildOptions::default());
-            }
-            let member_bridge_session_id = create_session
-                .build
-                .as_ref()
-                .and_then(|b| b.resume_session.as_ref())
-                .map(|s| s.id().clone())
-                .unwrap_or_else(|| {
-                    let id = SessionId::new();
-                    let session = meerkat_core::session::Session::with_id(id.clone());
-                    if let Some(ref mut build) = create_session.build {
-                        build.resume_session = Some(session);
-                    }
-                    id
-                });
-            let bindings = adapter
-                .prepare_bindings(member_bridge_session_id.clone())
-                .await
-                .map_err(|e| MobError::Internal(format!("prepare_bindings failed: {e}")))?;
-            if let Some(ref mut build) = create_session.build {
-                build.runtime_build_mode =
-                    meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
-            }
-            Some(member_bridge_session_id)
-        } else {
-            None
-        };
-        let created = match external
-            .session_service
-            .create_session(create_session)
-            .await
-        {
-            Ok(created) => created,
-            Err(e) => {
-                if let (Some(adapter), Some(pre_id)) = (
-                    &self.session.runtime_adapter,
-                    &pre_registered_bridge_session_id,
-                ) {
-                    adapter.unregister_session(pre_id).await;
-                }
-                return Err(e.into());
-            }
-        };
-        let created_bridge_session_id = created.session_id.clone();
-        // Reconcile: unregister orphan if session service returned a different
-        // bridge session than the pre-registered one.
-        if let (Some(adapter), Some(pre_id)) = (
-            &self.session.runtime_adapter,
-            &pre_registered_bridge_session_id,
-        ) {
-            if *pre_id != created_bridge_session_id {
-                tracing::debug!(
-                    pre_registered = %pre_id,
-                    actual_bridge_session_id = %created_bridge_session_id,
-                    "mob external provisioner: reconciling runtime registration"
-                );
-                adapter.unregister_session(pre_id).await;
-            }
-            let _ = self
-                .session
-                .runtime_session_state(&created_bridge_session_id)
-                .await;
-        }
-        if let (Some(owner_bridge_session_id), Some(registry)) =
-            (owner_bridge_session_id, ops_registry)
-        {
-            self.session.ops_adapter.bind_session_registry(
-                created_bridge_session_id.clone(),
-                owner_bridge_session_id,
-                registry,
-            );
-        }
-        let operation_id = self
-            .session
-            .ops_adapter
-            .mark_member_provisioned(&created_bridge_session_id, &peer_name)
-            .await?;
-        tracing::debug!(
-            bridge_session_id = %created_bridge_session_id,
-            "ExternalBackend::external_member_ref created bridge session"
-        );
-        // Use the real external process identity provided by the caller via
-        // RuntimeBinding::External. The bridge session's comms identity is
-        // infrastructure — it stays hidden and is used only for lifecycle
-        // transport within the orchestrator process.
         tracing::debug!(
             peer_id = %real_peer_id,
             address = %real_address,
             "ExternalBackend::external_member_ref success (real identity)"
         );
-        let peer_id = real_peer_id;
-        let address = real_address;
+        let peer = Self::peer_only_spec_from_parts(&real_peer_id, &real_address)?;
+        let bind_response = self
+            .bind_peer_only_member(&peer, &real_peer_id, &real_address)
+            .await?;
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: bind_response.peer_id,
+            address: bind_response.address,
+            session_id: None,
+        };
+        if let (Some(owner_bridge_session_id), Some(registry)) =
+            (owner_bridge_session_id, ops_registry)
+        {
+            self.session.ops_adapter.bind_member_registry(
+                &member_ref,
+                owner_bridge_session_id,
+                registry,
+                peer_name.clone(),
+            )?;
+        }
+        let operation_id = self
+            .session
+            .ops_adapter
+            .mark_member_provisioned_for_member(&member_ref, &peer_name)
+            .await?;
         Ok(MemberSpawnReceipt {
-            member_ref: MemberRef::BackendPeer {
-                peer_id,
-                address,
-                session_id: Some(created_bridge_session_id),
-            },
+            member_ref,
             operation_id,
         })
     }
@@ -1187,17 +1228,66 @@ impl MobProvisioner for MultiBackendProvisioner {
         operation_id: &OperationId,
         reason: &str,
     ) -> Result<(), MobError> {
-        self.session
-            .abort_member_provision(member_ref, operation_id, reason)
-            .await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                self.session
+                    .ops_adapter
+                    .abort_member_provision_for_member(
+                        member_ref,
+                        operation_id,
+                        Some(reason.to_string()),
+                    )
+                    .await
+            }
+            _ => {
+                self.session
+                    .abort_member_provision(member_ref, operation_id, reason)
+                    .await
+            }
+        }
     }
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.session.retire_member(member_ref).await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                let peer = self.peer_only_spec(member_ref).await?;
+                self.ensure_supervisor_authorized(&peer).await?;
+                let payload = self.bridge_supervisor_payload().await?;
+                let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
+                let _ = self
+                    .supervisor_bridge
+                    .send_bridge_command(&peer, &command, Duration::from_secs(10))
+                    .await?;
+                self.session
+                    .ops_adapter
+                    .mark_member_retired(member_ref)
+                    .await
+            }
+            _ => self.session.retire_member(member_ref).await,
+        }
     }
 
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
-        self.session.interrupt_member(member_ref).await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                let peer = self.peer_only_spec(member_ref).await?;
+                self.ensure_supervisor_authorized(&peer).await?;
+                let payload = self.bridge_supervisor_payload().await?;
+                let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
+                let _ = self
+                    .supervisor_bridge
+                    .send_bridge_command(&peer, &command, Duration::from_secs(5))
+                    .await?;
+                Ok(())
+            }
+            _ => self.session.interrupt_member(member_ref).await,
+        }
     }
 
     async fn start_turn(
@@ -1205,7 +1295,65 @@ impl MobProvisioner for MultiBackendProvisioner {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
-        self.session.start_turn(member_ref, req).await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                let peer = self.peer_only_spec(member_ref).await?;
+                self.ensure_supervisor_authorized(&peer).await?;
+                let authority = self.supervisor_bridge.authority().await;
+                let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+                let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
+                    super::bridge_protocol::BridgeDeliveryPayload {
+                        supervisor: sup_spec.into(),
+                        epoch: authority.epoch,
+                        protocol_version: authority.protocol_version,
+                        input_id: Uuid::now_v7().to_string(),
+                        content: req.prompt.clone(),
+                        handling_mode: req.handling_mode,
+                    },
+                );
+                let response: super::bridge_protocol::BridgeDeliveryResponse = self
+                    .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
+                    .await?;
+                match response.outcome {
+                    super::bridge_protocol::BridgeDeliveryOutcome::Accepted
+                    | super::bridge_protocol::BridgeDeliveryOutcome::Deduplicated { .. } => {}
+                    super::bridge_protocol::BridgeDeliveryOutcome::Rejected { reason } => {
+                        return Err(MobError::Internal(format!(
+                            "peer-only turn delivery rejected: {reason}"
+                        )));
+                    }
+                }
+                self.session
+                    .ops_adapter
+                    .report_member_progress(member_ref, "turn dispatched")
+                    .await?;
+                if let (
+                    MemberRef::BackendPeer {
+                        peer_id, address, ..
+                    },
+                    Some(event_tx),
+                ) = (member_ref, req.event_tx)
+                {
+                    let synthetic_session_id = synthetic_backend_peer_session_id(peer_id, address);
+                    let _ = event_tx
+                        .send(meerkat_core::event::EventEnvelope::new(
+                            format!("backend_peer:{peer_id}"),
+                            1,
+                            None,
+                            meerkat_core::event::AgentEvent::RunCompleted {
+                                session_id: synthetic_session_id,
+                                result: "\"Peer-only external turn dispatched\"".to_string(),
+                                usage: meerkat_core::types::Usage::default(),
+                            },
+                        ))
+                        .await;
+                }
+                Ok(())
+            }
+            _ => self.session.start_turn(member_ref, req).await,
+        }
     }
 
     async fn interaction_event_injector(
@@ -1218,11 +1366,21 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn is_member_active(&self, member_ref: &MemberRef) -> Result<Option<bool>, MobError> {
-        self.session.is_member_active(member_ref).await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => Ok(None),
+            _ => self.session.is_member_active(member_ref).await,
+        }
     }
 
     async fn comms_runtime(&self, member_ref: &MemberRef) -> Option<Arc<dyn CoreCommsRuntime>> {
-        self.session.comms_runtime(member_ref).await
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => None,
+            _ => self.session.comms_runtime(member_ref).await,
+        }
     }
 
     async fn trusted_peer_spec(
@@ -1269,11 +1427,37 @@ impl MobProvisioner for MultiBackendProvisioner {
     }
 
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
-        let bridge_session_id = member_ref.bridge_session_id()?;
-        self.session
-            .ops_adapter
-            .active_operation_id_for_session(bridge_session_id)
-            .await
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id: None,
+            } => {
+                if let Some(operation_id) = self
+                    .session
+                    .ops_adapter
+                    .active_operation_id_for_member(member_ref)
+                    .await
+                {
+                    return Some(operation_id);
+                }
+                self.session
+                    .ops_adapter
+                    .mark_member_provisioned_for_member(
+                        member_ref,
+                        &format!("mob_member/backend_peer/{peer_id}@{address}"),
+                    )
+                    .await
+                    .ok()
+            }
+            _ => {
+                let bridge_session_id = member_ref.bridge_session_id()?;
+                self.session
+                    .ops_adapter
+                    .active_operation_id_for_session(bridge_session_id)
+                    .await
+            }
+        }
     }
 
     async fn bind_member_owner_context(
@@ -1282,9 +1466,32 @@ impl MobProvisioner for MultiBackendProvisioner {
         owner_bridge_session_id: SessionId,
         ops_registry: Arc<dyn OpsLifecycleRegistry>,
     ) -> Result<(), MobError> {
-        self.session
-            .bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
-            .await
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id: None,
+            } => {
+                let display_name = format!("mob_member/backend_peer/{peer_id}@{address}");
+                self.session.ops_adapter.bind_member_registry(
+                    member_ref,
+                    owner_bridge_session_id,
+                    ops_registry,
+                    display_name.clone(),
+                )?;
+                let _ = self
+                    .session
+                    .ops_adapter
+                    .mark_member_provisioned_for_member(member_ref, &display_name)
+                    .await?;
+                Ok(())
+            }
+            _ => {
+                self.session
+                    .bind_member_owner_context(member_ref, owner_bridge_session_id, ops_registry)
+                    .await
+            }
+        }
     }
 
     async fn cancel_all_checkpointers(&self) {

@@ -153,7 +153,7 @@ pub(crate) enum MobMachineCommandResult {
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),
     Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),
-    BridgeSessionId(meerkat_core::types::SessionId),
+    DestroyReport(crate::runtime::MobDestroyReport),
     TaskId(crate::ids::TaskId),
     TaskList(Vec<MobTask>),
     TaskGet(Option<MobTask>),

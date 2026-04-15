@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -43,6 +44,7 @@ tempfile = { workspace = true }
 meerkat-store = { workspace = true, features = ["memory"] }
 meerkat-machine-schema = { workspace = true }
 meerkat-machine-kernels = { workspace = true }
+meerkat-comms = { workspace = true }
 
 [lints]
 workspace = true

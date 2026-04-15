@@ -35,6 +35,12 @@ pub use rpc_catalog::{
 };
 pub use session_locator::{SessionLocator, SessionLocatorError, format_session_ref};
 pub use version::ContractVersion;
+pub use wire::supervisor_bridge::{
+    BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
+    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+};
 pub use wire::{
     CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, InputListParams, InputListResult,
     InputStateParams, InputStateResult, ListSchedulesParams, McpAddParams, McpLiveOpResponse,

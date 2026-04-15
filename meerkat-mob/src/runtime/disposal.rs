@@ -7,8 +7,6 @@
 use crate::error::MobError;
 use crate::ids::MeerkatId;
 use crate::roster::RosterEntry;
-use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // DisposalStep
@@ -78,7 +76,6 @@ impl std::fmt::Display for DisposalStep {
 pub(super) struct DisposalContext {
     pub(crate) meerkat_id: MeerkatId,
     pub entry: RosterEntry,
-    pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub retiring_key: Option<String>,
 }
 
@@ -234,7 +231,6 @@ mod tests {
                 kickoff: None,
                 effective_profile_override: None,
             },
-            retiring_comms: None,
             retiring_key: None,
         }
     }

@@ -10,6 +10,7 @@ mod runtime;
 mod schedule;
 mod session;
 pub mod skills;
+pub mod supervisor_bridge;
 mod usage;
 
 pub use event::WireEvent;
@@ -52,4 +53,10 @@ pub use session::{
     WireToolResult, WireToolResultContent,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse};
+pub use supervisor_bridge::{
+    BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
+    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
+};
 pub use usage::WireUsage;

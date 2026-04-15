@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 # Internal crates
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction"] }

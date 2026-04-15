@@ -33,10 +33,13 @@ pub enum MobError {
     WiringError(String),
 
     /// The member failed to restore durable session state and is broken until repaired.
-    #[error("member {member_id} failed to restore session {session_id}: {reason}")]
+    #[error(
+        "member {member_id} failed to restore {}: {reason}",
+        format_member_restore_target(.session_id.as_ref())
+    )]
     MemberRestoreFailed {
         member_id: MeerkatId,
-        session_id: meerkat_core::types::SessionId,
+        session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
     },
 
@@ -163,6 +166,13 @@ fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
         .join("; ")
 }
 
+fn format_member_restore_target(session_id: Option<&meerkat_core::types::SessionId>) -> String {
+    match session_id {
+        Some(session_id) => format!("session {session_id}"),
+        None => "runtime bridge state".to_string(),
+    }
+}
+
 impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
     fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Self::StorageError(error)
@@ -269,7 +279,7 @@ mod tests {
             MobError::WiringError("w".to_string()),
             MobError::MemberRestoreFailed {
                 member_id: MeerkatId::from("m"),
-                session_id: meerkat_core::types::SessionId::new(),
+                session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
             },
             MobError::KickoffWaitTimedOut {

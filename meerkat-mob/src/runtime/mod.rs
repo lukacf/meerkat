@@ -56,6 +56,8 @@ pub(crate) fn flow_system_member_id() -> MeerkatId {
 
 mod actor;
 mod actor_turn_executor;
+pub mod bridge;
+pub mod bridge_protocol;
 mod builder;
 pub mod conditions;
 mod disposal;
@@ -87,6 +89,7 @@ mod session_service;
 mod spawn_policy;
 mod state;
 mod supervisor;
+mod supervisor_bridge;
 mod terminalization;
 mod tools;
 pub mod topology;
@@ -112,9 +115,9 @@ pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
-    SpawnResult,
+    MobDestroyError, MobDestroyReport, MobEventsView, MobHandle, MobMemberListEntry,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult,
 };
 #[cfg(test)]
 pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
@@ -126,6 +129,7 @@ use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub use state::MobState;
+pub(crate) use supervisor_bridge::MobSupervisorBridge;
 pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

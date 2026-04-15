@@ -100,29 +100,27 @@ fn resolve_completion_waiters(
     run_result: Option<meerkat_core::types::RunResult>,
     terminal: Option<CoreApplyTerminal>,
 ) {
-    match terminal {
-        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-            for input_id in input_ids {
-                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
-            }
+    if let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal {
+        for input_id in input_ids {
+            registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
         }
-        Some(CoreApplyTerminal::RunResult(_)) => match run_result {
-            Some(result) => {
-                for input_id in input_ids {
-                    registry.resolve_completed(input_id, result.clone());
-                }
-            }
-            None => {
-                for input_id in input_ids {
-                    registry.resolve_without_result(input_id);
-                }
-            }
-        },
-        None => {
+        return;
+    }
+
+    if let Some(result) = run_result {
+        for input_id in input_ids {
+            registry.resolve_completed(input_id, result.clone());
+        }
+        return;
+    }
+
+    match terminal {
+        Some(CoreApplyTerminal::RunResult(_)) | None => {
             for input_id in input_ids {
                 registry.resolve_without_result(input_id);
             }
         }
+        Some(CoreApplyTerminal::CallbackPending { .. }) => unreachable!(),
     }
 }
 

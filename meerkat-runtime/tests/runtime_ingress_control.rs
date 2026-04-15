@@ -151,7 +151,7 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
     assert_eq!(state.current_state(), InputLifecycleState::Consumed);
     assert_eq!(
         runtime.runtime_state(&sid).await.expect("runtime state"),
-        RuntimeState::Idle
+        RuntimeState::Attached
     );
     assert!(
         runtime
@@ -259,7 +259,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
 
 #[tokio::test]
 #[ignore = "Phase 3 multi-contributor staged-run contract"]
-async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_order() {
+async fn runtime_ingress_control_preserves_contributor_order_across_attached_runs() {
     let adapter = MeerkatMachine::ephemeral();
     let runtime: &dyn SessionServiceRuntimeExt = &adapter;
     let sid = SessionId::new();
@@ -294,10 +294,13 @@ async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_o
     assert!(matches!(second_result, CompletionOutcome::Completed(_)));
 
     let batches = seen.lock().await;
+    let flattened: Vec<InputId> = batches
+        .iter()
+        .flat_map(|batch| batch.iter().cloned())
+        .collect();
     assert_eq!(
-        batches.len(),
-        1,
-        "expected exactly one staged runtime batch"
+        flattened,
+        vec![first_id, second_id],
+        "runtime ingress should preserve contributor order even when attached execution materializes separate runs"
     );
-    assert_eq!(batches[0], vec![first_id, second_id]);
 }

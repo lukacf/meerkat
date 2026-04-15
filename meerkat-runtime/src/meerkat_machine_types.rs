@@ -4,6 +4,7 @@
 //! the supporting command/result enums and the durable diagnostic snapshots that
 //! remain useful after cutover.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use indexmap::IndexSet;
@@ -206,7 +207,16 @@ pub(crate) enum MeerkatMachineCommand {
     },
     ReconfigureSessionLlmIdentity {
         session_id: SessionId,
-        request: Box<SessionLlmReconfigureRequest>,
+        previous_identity: Box<meerkat_core::SessionLlmIdentity>,
+        previous_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
+        previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+        previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+        target_identity: Box<meerkat_core::SessionLlmIdentity>,
+        target_capability_surface: Box<SessionLlmCapabilitySurface>,
+        next_visibility_state: Box<meerkat_core::SessionToolVisibilityState>,
+        next_capability_base_filter: meerkat_core::ToolFilter,
+        next_active_visibility_revision: u64,
+        tool_visibility_delta: Box<SessionToolVisibilityDelta>,
     },
     StagePersistentFilter {
         session_id: SessionId,
@@ -454,6 +464,20 @@ pub struct MeerkatDrainSnapshot {
     pub handle_present: bool,
 }
 
+/// Schema-aligned projection of the Meerkat formal state derived from the
+/// live runtime.
+///
+/// This stays diagnostic and intentionally stringifies field values so the
+/// parity harness can compare full field vectors even where the runtime does
+/// not expose a first-class Rust type for every formal field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeerkatFormalStateProjection {
+    /// Formal fields that have a live runtime-backed projection today.
+    pub available_fields: BTreeMap<String, String>,
+    /// Formal fields that still have no canonical runtime source.
+    pub unavailable_fields: Vec<String>,
+}
+
 /// Diagnostic snapshot of the current Meerkat runtime spine.
 ///
 /// This is an observational scaffold over the existing runtime-owned Meerkat
@@ -466,6 +490,7 @@ pub struct MeerkatMachineSpineSnapshot {
     pub completion_waiters: MeerkatCompletionWaitersSnapshot,
     pub ops: MeerkatOpsSnapshot,
     pub drain: MeerkatDrainSnapshot,
+    pub formal_state: MeerkatFormalStateProjection,
 }
 
 impl MeerkatMachineSpineSnapshot {

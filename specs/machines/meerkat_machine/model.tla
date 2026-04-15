@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MeerkatMachine.
 
-CONSTANTS AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, InputIdValues, JsonValueValues, NatValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues
+CONSTANTS AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, InputIdValues, NatValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -11,7 +11,6 @@ Some(v) == [tag |-> "some", value |-> v]
 OptionAgentRuntimeIdValues == {None} \cup {Some(x) : x \in AgentRuntimeIdValues}
 OptionFenceTokenValues == {None} \cup {Some(x) : x \in FenceTokenValues}
 OptionGenerationValues == {None} \cup {Some(x) : x \in GenerationValues}
-OptionJsonValueValues == {None} \cup {Some(x) : x \in JsonValueValues}
 OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
 OptionSessionLlmCapabilitySurfaceValues == {None} \cup {Some(x) : x \in SessionLlmCapabilitySurfaceValues}
 OptionSessionLlmIdentityValues == {None} \cup {Some(x) : x \in SessionLlmIdentityValues}
@@ -28,9 +27,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision
+VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision
 
-vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 FilterWitnessKeys == DOMAIN filter_witnesses
 RequestedWitnessKeys == DOMAIN requested_witnesses
@@ -44,8 +43,10 @@ Init ==
     /\ active_fence_token = None
     /\ active_generation = None
     /\ active_work_id = None
+    /\ attachment_live = FALSE
     /\ wake_pending = FALSE
     /\ process_pending = FALSE
+    /\ pre_run_phase = None
     /\ peer_ingress_configured = FALSE
     /\ drain_running = FALSE
     /\ current_llm_identity = None
@@ -67,20 +68,20 @@ TerminalStutter ==
     /\ phase = "Destroyed"
     /\ UNCHANGED vars
 
-RECURSIVE StagePersistentFilterAttached_ForEach0_filter_witnesses(_, _, _)
-StagePersistentFilterAttached_ForEach0_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterAttached_ForEach0_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+RECURSIVE StagePersistentFilterIdle_ForEach0_filter_witnesses(_, _, _)
+StagePersistentFilterIdle_ForEach0_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterIdle_ForEach0_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
-RECURSIVE StagePersistentFilterIdle_ForEach1_filter_witnesses(_, _, _)
-StagePersistentFilterIdle_ForEach1_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterIdle_ForEach1_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+RECURSIVE StagePersistentFilterAttached_ForEach1_filter_witnesses(_, _, _)
+StagePersistentFilterAttached_ForEach1_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterAttached_ForEach1_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
 RECURSIVE StagePersistentFilterRunning_ForEach2_filter_witnesses(_, _, _)
 StagePersistentFilterRunning_ForEach2_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterRunning_ForEach2_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
-RECURSIVE RequestDeferredToolsAttached_ForEach3_staged_requested_deferred_names(_, _)
-RequestDeferredToolsAttached_ForEach3_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsAttached_ForEach3_staged_requested_deferred_names(next_acc, remaining \ {item})
+RECURSIVE StagePersistentFilterRetired_ForEach3_filter_witnesses(_, _, _)
+StagePersistentFilterRetired_ForEach3_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterRetired_ForEach3_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
-RECURSIVE RequestDeferredToolsAttached_ForEach4_requested_witnesses(_, _, _)
-RequestDeferredToolsAttached_ForEach4_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsAttached_ForEach4_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+RECURSIVE StagePersistentFilterStopped_ForEach4_filter_witnesses(_, _, _)
+StagePersistentFilterStopped_ForEach4_filter_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN StagePersistentFilterStopped_ForEach4_filter_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
 RECURSIVE RequestDeferredToolsIdle_ForEach5_staged_requested_deferred_names(_, _)
 RequestDeferredToolsIdle_ForEach5_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsIdle_ForEach5_staged_requested_deferred_names(next_acc, remaining \ {item})
@@ -88,29 +89,79 @@ RequestDeferredToolsIdle_ForEach5_staged_requested_deferred_names(acc, remaining
 RECURSIVE RequestDeferredToolsIdle_ForEach6_requested_witnesses(_, _, _)
 RequestDeferredToolsIdle_ForEach6_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsIdle_ForEach6_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
-RECURSIVE RequestDeferredToolsRunning_ForEach7_staged_requested_deferred_names(_, _)
-RequestDeferredToolsRunning_ForEach7_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsRunning_ForEach7_staged_requested_deferred_names(next_acc, remaining \ {item})
+RECURSIVE RequestDeferredToolsAttached_ForEach7_staged_requested_deferred_names(_, _)
+RequestDeferredToolsAttached_ForEach7_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsAttached_ForEach7_staged_requested_deferred_names(next_acc, remaining \ {item})
 
-RECURSIVE RequestDeferredToolsRunning_ForEach8_requested_witnesses(_, _, _)
-RequestDeferredToolsRunning_ForEach8_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsRunning_ForEach8_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+RECURSIVE RequestDeferredToolsAttached_ForEach8_requested_witnesses(_, _, _)
+RequestDeferredToolsAttached_ForEach8_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsAttached_ForEach8_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE RequestDeferredToolsRunning_ForEach9_staged_requested_deferred_names(_, _)
+RequestDeferredToolsRunning_ForEach9_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsRunning_ForEach9_staged_requested_deferred_names(next_acc, remaining \ {item})
+
+RECURSIVE RequestDeferredToolsRunning_ForEach10_requested_witnesses(_, _, _)
+RequestDeferredToolsRunning_ForEach10_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsRunning_ForEach10_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE RequestDeferredToolsRetired_ForEach11_staged_requested_deferred_names(_, _)
+RequestDeferredToolsRetired_ForEach11_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsRetired_ForEach11_staged_requested_deferred_names(next_acc, remaining \ {item})
+
+RECURSIVE RequestDeferredToolsRetired_ForEach12_requested_witnesses(_, _, _)
+RequestDeferredToolsRetired_ForEach12_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsRetired_ForEach12_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
+
+RECURSIVE RequestDeferredToolsStopped_ForEach13_staged_requested_deferred_names(_, _)
+RequestDeferredToolsStopped_ForEach13_staged_requested_deferred_names(acc, remaining) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == (acc \cup {name}) IN RequestDeferredToolsStopped_ForEach13_staged_requested_deferred_names(next_acc, remaining \ {item})
+
+RECURSIVE RequestDeferredToolsStopped_ForEach14_requested_witnesses(_, _, _)
+RequestDeferredToolsStopped_ForEach14_requested_witnesses(acc, remaining, outer_witnesses) == IF remaining = {} THEN acc ELSE LET item == CHOOSE x \in remaining : TRUE IN LET name == item IN LET next_acc == MapSet(acc, name, (IF name \in DOMAIN outer_witnesses THEN outer_witnesses[name] ELSE "None")) IN RequestDeferredToolsStopped_ForEach14_requested_witnesses(next_acc, remaining \ {item}, outer_witnesses)
 
 Initialize ==
     /\ phase = "Initializing"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-RegisterSession(arg_session_id) ==
-    /\ phase = "Idle" \/ phase = "Stopped" \/ phase = "Retired"
+RegisterSessionIdle(arg_session_id) ==
+    /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-UnregisterSession(arg_session_id) ==
-    /\ phase = "Idle" \/ phase = "Stopped" \/ phase = "Retired"
+RegisterSessionAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = Some(arg_session_id)
+    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RegisterSessionRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = Some(arg_session_id)
+    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RegisterSessionRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = Some(arg_session_id)
+    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RegisterSessionStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = Some(arg_session_id)
+    /\ UNCHANGED << active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+UnregisterSessionIdle(arg_session_id) ==
+    /\ phase = "Idle"
     /\ (session_id = Some(arg_session_id))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
@@ -119,8 +170,10 @@ UnregisterSession(arg_session_id) ==
     /\ active_fence_token' = None
     /\ active_generation' = None
     /\ active_work_id' = None
+    /\ attachment_live' = FALSE
     /\ wake_pending' = FALSE
     /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
     /\ peer_ingress_configured' = FALSE
     /\ drain_running' = FALSE
     /\ inherited_base_filter' = "All"
@@ -136,33 +189,150 @@ UnregisterSession(arg_session_id) ==
     /\ UNCHANGED << current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter >>
 
 
-ReconfigureSessionLlmIdentityAttached(model, provider, provider_params) ==
+UnregisterSessionAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id = Some(arg_session_id))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = None
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ active_generation' = None
+    /\ active_work_id' = None
+    /\ attachment_live' = FALSE
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
+    /\ peer_ingress_configured' = FALSE
+    /\ drain_running' = FALSE
+    /\ inherited_base_filter' = "All"
+    /\ active_filter' = "All"
+    /\ staged_filter' = "All"
+    /\ active_requested_deferred_names' = {}
+    /\ staged_requested_deferred_names' = {}
+    /\ requested_witnesses' = [x \in {} |-> None]
+    /\ filter_witnesses' = [x \in {} |-> None]
+    /\ active_visibility_revision' = 0
+    /\ staged_visibility_revision' = 0
+    /\ committed_visibility_revision' = 0
+    /\ UNCHANGED << current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter >>
+
+
+UnregisterSessionRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id = Some(arg_session_id))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = None
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ active_generation' = None
+    /\ active_work_id' = None
+    /\ attachment_live' = FALSE
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
+    /\ peer_ingress_configured' = FALSE
+    /\ drain_running' = FALSE
+    /\ inherited_base_filter' = "All"
+    /\ active_filter' = "All"
+    /\ staged_filter' = "All"
+    /\ active_requested_deferred_names' = {}
+    /\ staged_requested_deferred_names' = {}
+    /\ requested_witnesses' = [x \in {} |-> None]
+    /\ filter_witnesses' = [x \in {} |-> None]
+    /\ active_visibility_revision' = 0
+    /\ staged_visibility_revision' = 0
+    /\ committed_visibility_revision' = 0
+    /\ UNCHANGED << current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter >>
+
+
+UnregisterSessionRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id = Some(arg_session_id))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = None
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ active_generation' = None
+    /\ active_work_id' = None
+    /\ attachment_live' = FALSE
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
+    /\ peer_ingress_configured' = FALSE
+    /\ drain_running' = FALSE
+    /\ inherited_base_filter' = "All"
+    /\ active_filter' = "All"
+    /\ staged_filter' = "All"
+    /\ active_requested_deferred_names' = {}
+    /\ staged_requested_deferred_names' = {}
+    /\ requested_witnesses' = [x \in {} |-> None]
+    /\ filter_witnesses' = [x \in {} |-> None]
+    /\ active_visibility_revision' = 0
+    /\ staged_visibility_revision' = 0
+    /\ committed_visibility_revision' = 0
+    /\ UNCHANGED << current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter >>
+
+
+UnregisterSessionStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id = Some(arg_session_id))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ session_id' = None
+    /\ active_runtime_id' = None
+    /\ active_fence_token' = None
+    /\ active_generation' = None
+    /\ active_work_id' = None
+    /\ attachment_live' = FALSE
+    /\ wake_pending' = FALSE
+    /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
+    /\ peer_ingress_configured' = FALSE
+    /\ drain_running' = FALSE
+    /\ inherited_base_filter' = "All"
+    /\ active_filter' = "All"
+    /\ staged_filter' = "All"
+    /\ active_requested_deferred_names' = {}
+    /\ staged_requested_deferred_names' = {}
+    /\ requested_witnesses' = [x \in {} |-> None]
+    /\ filter_witnesses' = [x \in {} |-> None]
+    /\ active_visibility_revision' = 0
+    /\ staged_visibility_revision' = 0
+    /\ committed_visibility_revision' = 0
+    /\ UNCHANGED << current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter >>
+
+
+ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ (active_runtime_id # None)
+    /\ ((next_active_visibility_revision = active_visibility_revision) \/ (next_active_visibility_revision = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ current_llm_identity' = Some(target_identity)
+    /\ current_capability_surface' = Some(target_capability_surface)
+    /\ capability_surface_status' = "resolved"
+    /\ capability_base_filter' = next_capability_base_filter
+    /\ active_visibility_revision' = next_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, staged_visibility_revision, committed_visibility_revision >>
 
 
-ReconfigureSessionLlmIdentityRunning(model, provider, provider_params) ==
+ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ (active_runtime_id # None)
+    /\ ((next_active_visibility_revision = active_visibility_revision) \/ (next_active_visibility_revision = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
-
-
-StagePersistentFilterAttached(filter, witnesses) ==
-    /\ phase = "Attached"
-    /\ (session_id # None)
-    /\ phase' = "Attached"
-    /\ model_step_count' = model_step_count + 1
-    /\ staged_filter' = filter
-    /\ filter_witnesses' = StagePersistentFilterAttached_ForEach0_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ current_llm_identity' = Some(target_identity)
+    /\ current_capability_surface' = Some(target_capability_surface)
+    /\ capability_surface_status' = "resolved"
+    /\ capability_base_filter' = next_capability_base_filter
+    /\ active_visibility_revision' = next_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, staged_visibility_revision, committed_visibility_revision >>
 
 
 StagePersistentFilterIdle(filter, witnesses) ==
@@ -171,9 +341,20 @@ StagePersistentFilterIdle(filter, witnesses) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ staged_filter' = filter
-    /\ filter_witnesses' = StagePersistentFilterIdle_ForEach1_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ filter_witnesses' = StagePersistentFilterIdle_ForEach0_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
+
+
+StagePersistentFilterAttached(filter, witnesses) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ staged_filter' = filter
+    /\ filter_witnesses' = StagePersistentFilterAttached_ForEach1_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
 
 
 StagePersistentFilterRunning(filter, witnesses) ==
@@ -183,19 +364,30 @@ StagePersistentFilterRunning(filter, witnesses) ==
     /\ model_step_count' = model_step_count + 1
     /\ staged_filter' = filter
     /\ filter_witnesses' = StagePersistentFilterRunning_ForEach2_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
 
 
-RequestDeferredToolsAttached(names, witnesses) ==
-    /\ phase = "Attached"
+StagePersistentFilterRetired(filter, witnesses) ==
+    /\ phase = "Retired"
     /\ (session_id # None)
-    /\ phase' = "Attached"
+    /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ staged_requested_deferred_names' = RequestDeferredToolsAttached_ForEach3_staged_requested_deferred_names(staged_requested_deferred_names, names)
-    /\ requested_witnesses' = RequestDeferredToolsAttached_ForEach4_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ staged_filter' = filter
+    /\ filter_witnesses' = StagePersistentFilterRetired_ForEach3_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
+
+
+StagePersistentFilterStopped(filter, witnesses) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ staged_filter' = filter
+    /\ filter_witnesses' = StagePersistentFilterStopped_ForEach4_filter_witnesses(filter_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, active_visibility_revision, committed_visibility_revision >>
 
 
 RequestDeferredToolsIdle(names, witnesses) ==
@@ -205,8 +397,19 @@ RequestDeferredToolsIdle(names, witnesses) ==
     /\ model_step_count' = model_step_count + 1
     /\ staged_requested_deferred_names' = RequestDeferredToolsIdle_ForEach5_staged_requested_deferred_names(staged_requested_deferred_names, names)
     /\ requested_witnesses' = RequestDeferredToolsIdle_ForEach6_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+
+
+RequestDeferredToolsAttached(names, witnesses) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ staged_requested_deferred_names' = RequestDeferredToolsAttached_ForEach7_staged_requested_deferred_names(staged_requested_deferred_names, names)
+    /\ requested_witnesses' = RequestDeferredToolsAttached_ForEach8_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
 
 
 RequestDeferredToolsRunning(names, witnesses) ==
@@ -214,10 +417,32 @@ RequestDeferredToolsRunning(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ staged_requested_deferred_names' = RequestDeferredToolsRunning_ForEach7_staged_requested_deferred_names(staged_requested_deferred_names, names)
-    /\ requested_witnesses' = RequestDeferredToolsRunning_ForEach8_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
-    /\ staged_visibility_revision' = (staged_visibility_revision) + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+    /\ staged_requested_deferred_names' = RequestDeferredToolsRunning_ForEach9_staged_requested_deferred_names(staged_requested_deferred_names, names)
+    /\ requested_witnesses' = RequestDeferredToolsRunning_ForEach10_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+
+
+RequestDeferredToolsRetired(names, witnesses) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ staged_requested_deferred_names' = RequestDeferredToolsRetired_ForEach11_staged_requested_deferred_names(staged_requested_deferred_names, names)
+    /\ requested_witnesses' = RequestDeferredToolsRetired_ForEach12_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
+
+
+RequestDeferredToolsStopped(names, witnesses) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ staged_requested_deferred_names' = RequestDeferredToolsStopped_ForEach13_staged_requested_deferred_names(staged_requested_deferred_names, names)
+    /\ requested_witnesses' = RequestDeferredToolsStopped_ForEach14_requested_witnesses(requested_witnesses, DOMAIN witnesses, witnesses)
+    /\ staged_visibility_revision' = ((IF (active_visibility_revision > staged_visibility_revision) THEN active_visibility_revision ELSE staged_visibility_revision) + 1)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, filter_witnesses, active_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
@@ -227,7 +452,7 @@ PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
@@ -237,7 +462,7 @@ PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
@@ -247,7 +472,7 @@ PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
@@ -257,7 +482,7 @@ PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
@@ -267,7 +492,7 @@ PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
@@ -277,7 +502,7 @@ PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
     /\ active_generation' = Some(generation)
-    /\ UNCHANGED << session_id, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetPeerIngressContextIdle(keep_alive) ==
@@ -287,7 +512,7 @@ SetPeerIngressContextIdle(keep_alive) ==
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_configured' = TRUE
     /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetPeerIngressContextAttached(keep_alive) ==
@@ -297,7 +522,7 @@ SetPeerIngressContextAttached(keep_alive) ==
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_configured' = TRUE
     /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetPeerIngressContextRunning(keep_alive) ==
@@ -307,7 +532,7 @@ SetPeerIngressContextRunning(keep_alive) ==
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_configured' = TRUE
     /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetPeerIngressContextRetired(keep_alive) ==
@@ -317,7 +542,7 @@ SetPeerIngressContextRetired(keep_alive) ==
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_configured' = TRUE
     /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetPeerIngressContextStopped(keep_alive) ==
@@ -327,7 +552,7 @@ SetPeerIngressContextStopped(keep_alive) ==
     /\ model_step_count' = model_step_count + 1
     /\ peer_ingress_configured' = TRUE
     /\ drain_running' = keep_alive
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 NotifyDrainExitedIdle(reason) ==
@@ -336,7 +561,7 @@ NotifyDrainExitedIdle(reason) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 NotifyDrainExitedAttached(reason) ==
@@ -345,7 +570,7 @@ NotifyDrainExitedAttached(reason) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 NotifyDrainExitedRunning(reason) ==
@@ -354,7 +579,7 @@ NotifyDrainExitedRunning(reason) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 NotifyDrainExitedRetired(reason) ==
@@ -363,7 +588,7 @@ NotifyDrainExitedRetired(reason) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 NotifyDrainExitedStopped(reason) ==
@@ -372,23 +597,39 @@ NotifyDrainExitedStopped(reason) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+InterruptCurrentRunAttached ==
+    /\ phase = "Attached"
+    /\ attachment_live
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 InterruptCurrentRun ==
     /\ phase = "Running"
-    /\ (active_work_id # None)
+    /\ attachment_live
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+CancelAfterBoundaryAttached ==
+    /\ phase = "Attached"
+    /\ attachment_live
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CancelAfterBoundary ==
     /\ phase = "Running"
-    /\ (active_work_id # None)
+    /\ attachment_live
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 BoundaryAppliedPromote(revision) ==
@@ -401,7 +642,7 @@ BoundaryAppliedPromote(revision) ==
     /\ active_requested_deferred_names' = staged_requested_deferred_names
     /\ active_visibility_revision' = staged_visibility_revision
     /\ committed_visibility_revision' = revision
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, staged_filter, staged_requested_deferred_names, requested_witnesses, filter_witnesses, staged_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, staged_filter, staged_requested_deferred_names, requested_witnesses, filter_witnesses, staged_visibility_revision >>
 
 
 BoundaryAppliedNoop(revision) ==
@@ -411,34 +652,97 @@ BoundaryAppliedNoop(revision) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ committed_visibility_revision' = revision
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision >>
 
 
-PublishCommittedVisibleSetIdle(revision) ==
+PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision) ==
     /\ phase = "Idle"
-    /\ (active_visibility_revision = revision)
+    /\ (session_id # None)
+    /\ (arg_active_visibility_revision >= arg_staged_visibility_revision)
+    /\ (\A name \in arg_active_requested_deferred_names : (name \in arg_staged_requested_deferred_names))
+    /\ ((arg_active_visibility_revision # arg_staged_visibility_revision) \/ ((arg_active_filter = arg_staged_filter) /\ (arg_active_requested_deferred_names = arg_staged_requested_deferred_names)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ committed_visibility_revision' = revision
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision >>
+    /\ active_filter' = arg_active_filter
+    /\ staged_filter' = arg_staged_filter
+    /\ active_requested_deferred_names' = arg_active_requested_deferred_names
+    /\ staged_requested_deferred_names' = arg_staged_requested_deferred_names
+    /\ active_visibility_revision' = arg_active_visibility_revision
+    /\ staged_visibility_revision' = arg_staged_visibility_revision
+    /\ committed_visibility_revision' = arg_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, requested_witnesses, filter_witnesses >>
 
 
-PublishCommittedVisibleSetAttached(revision) ==
+PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision) ==
     /\ phase = "Attached"
-    /\ (active_visibility_revision = revision)
+    /\ (session_id # None)
+    /\ (arg_active_visibility_revision >= arg_staged_visibility_revision)
+    /\ (\A name \in arg_active_requested_deferred_names : (name \in arg_staged_requested_deferred_names))
+    /\ ((arg_active_visibility_revision # arg_staged_visibility_revision) \/ ((arg_active_filter = arg_staged_filter) /\ (arg_active_requested_deferred_names = arg_staged_requested_deferred_names)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ committed_visibility_revision' = revision
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision >>
+    /\ active_filter' = arg_active_filter
+    /\ staged_filter' = arg_staged_filter
+    /\ active_requested_deferred_names' = arg_active_requested_deferred_names
+    /\ staged_requested_deferred_names' = arg_staged_requested_deferred_names
+    /\ active_visibility_revision' = arg_active_visibility_revision
+    /\ staged_visibility_revision' = arg_staged_visibility_revision
+    /\ committed_visibility_revision' = arg_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, requested_witnesses, filter_witnesses >>
 
 
-PublishCommittedVisibleSetRunning(revision) ==
+PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision) ==
     /\ phase = "Running"
-    /\ (active_visibility_revision = revision)
+    /\ (session_id # None)
+    /\ (arg_active_visibility_revision >= arg_staged_visibility_revision)
+    /\ (\A name \in arg_active_requested_deferred_names : (name \in arg_staged_requested_deferred_names))
+    /\ ((arg_active_visibility_revision # arg_staged_visibility_revision) \/ ((arg_active_filter = arg_staged_filter) /\ (arg_active_requested_deferred_names = arg_staged_requested_deferred_names)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ committed_visibility_revision' = revision
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision >>
+    /\ active_filter' = arg_active_filter
+    /\ staged_filter' = arg_staged_filter
+    /\ active_requested_deferred_names' = arg_active_requested_deferred_names
+    /\ staged_requested_deferred_names' = arg_staged_requested_deferred_names
+    /\ active_visibility_revision' = arg_active_visibility_revision
+    /\ staged_visibility_revision' = arg_staged_visibility_revision
+    /\ committed_visibility_revision' = arg_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, requested_witnesses, filter_witnesses >>
+
+
+PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ (arg_active_visibility_revision >= arg_staged_visibility_revision)
+    /\ (\A name \in arg_active_requested_deferred_names : (name \in arg_staged_requested_deferred_names))
+    /\ ((arg_active_visibility_revision # arg_staged_visibility_revision) \/ ((arg_active_filter = arg_staged_filter) /\ (arg_active_requested_deferred_names = arg_staged_requested_deferred_names)))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_filter' = arg_active_filter
+    /\ staged_filter' = arg_staged_filter
+    /\ active_requested_deferred_names' = arg_active_requested_deferred_names
+    /\ staged_requested_deferred_names' = arg_staged_requested_deferred_names
+    /\ active_visibility_revision' = arg_active_visibility_revision
+    /\ staged_visibility_revision' = arg_staged_visibility_revision
+    /\ committed_visibility_revision' = arg_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, requested_witnesses, filter_witnesses >>
+
+
+PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ (arg_active_visibility_revision >= arg_staged_visibility_revision)
+    /\ (\A name \in arg_active_requested_deferred_names : (name \in arg_staged_requested_deferred_names))
+    /\ ((arg_active_visibility_revision # arg_staged_visibility_revision) \/ ((arg_active_filter = arg_staged_filter) /\ (arg_active_requested_deferred_names = arg_staged_requested_deferred_names)))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_filter' = arg_active_filter
+    /\ staged_filter' = arg_staged_filter
+    /\ active_requested_deferred_names' = arg_active_requested_deferred_names
+    /\ staged_requested_deferred_names' = arg_staged_requested_deferred_names
+    /\ active_visibility_revision' = arg_active_visibility_revision
+    /\ staged_visibility_revision' = arg_staged_visibility_revision
+    /\ committed_visibility_revision' = arg_active_visibility_revision
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, requested_witnesses, filter_witnesses >>
 
 
 RunCompleted(work_id) ==
@@ -447,7 +751,7 @@ RunCompleted(work_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RunFailed(work_id) ==
@@ -456,7 +760,7 @@ RunFailed(work_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RunCancelled(work_id) ==
@@ -465,42 +769,42 @@ RunCancelled(work_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverFromIdle ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverFromAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverFromRetired ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverFromStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverFromInitializing ==
     /\ phase = "Initializing"
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RetireRequestedFromIdle ==
@@ -508,30 +812,52 @@ RetireRequestedFromIdle ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 Reset ==
     /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Retired"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ active_runtime_id' = None
     /\ active_fence_token' = None
     /\ active_generation' = None
     /\ active_work_id' = None
     /\ wake_pending' = FALSE
     /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, attachment_live, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
-StopRuntimeExecutor ==
+StopRuntimeExecutorDetached ==
     /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Running" \/ phase = "Retired"
+    /\ ~(attachment_live)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ active_work_id' = None
+    /\ pre_run_phase' = None
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+StopRuntimeExecutorLiveAttached ==
+    /\ phase = "Attached"
+    /\ attachment_live
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_work_id' = None
+    /\ drain_running' = FALSE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+StopRuntimeExecutorLiveRunning ==
+    /\ phase = "Running"
+    /\ attachment_live
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ active_work_id' = None
+    /\ drain_running' = FALSE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 Destroy ==
@@ -542,16 +868,47 @@ Destroy ==
     /\ active_work_id' = None
     /\ wake_pending' = FALSE
     /\ process_pending' = FALSE
+    /\ pre_run_phase' = None
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, attachment_live, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 EnsureSessionWithExecutorIdle(arg_session_id) ==
     /\ phase = "Idle"
-    /\ (session_id # None)
-    /\ phase' = "Idle"
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ attachment_live' = TRUE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+EnsureSessionWithExecutorAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ attachment_live' = TRUE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+EnsureSessionWithExecutorRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ attachment_live' = TRUE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+EnsureSessionWithExecutorRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+EnsureSessionWithExecutorStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetSilentIntentsIdle(arg_session_id, intents) ==
@@ -559,7 +916,7 @@ SetSilentIntentsIdle(arg_session_id, intents) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ContainsSessionIdle(arg_session_id) ==
@@ -567,7 +924,7 @@ ContainsSessionIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SessionHasExecutorIdle(arg_session_id) ==
@@ -575,7 +932,7 @@ SessionHasExecutorIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SessionHasCommsIdle(arg_session_id) ==
@@ -583,7 +940,7 @@ SessionHasCommsIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 OpsLifecycleRegistryIdle(arg_session_id) ==
@@ -591,7 +948,7 @@ OpsLifecycleRegistryIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 InputStateIdle(arg_session_id, input_id) ==
@@ -599,7 +956,7 @@ InputStateIdle(arg_session_id, input_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ListActiveInputsIdle(arg_session_id) ==
@@ -607,7 +964,239 @@ ListActiveInputsIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SetSilentIntentsAttached(arg_session_id, intents) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ContainsSessionAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasExecutorAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasCommsAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+OpsLifecycleRegistryAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+InputStateAttached(arg_session_id, input_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ListActiveInputsAttached(arg_session_id) ==
+    /\ phase = "Attached"
+    /\ (session_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SetSilentIntentsRunning(arg_session_id, intents) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ContainsSessionRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasExecutorRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasCommsRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+OpsLifecycleRegistryRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+InputStateRunning(arg_session_id, input_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ListActiveInputsRunning(arg_session_id) ==
+    /\ phase = "Running"
+    /\ (session_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SetSilentIntentsRetired(arg_session_id, intents) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ContainsSessionRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasExecutorRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasCommsRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+OpsLifecycleRegistryRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+InputStateRetired(arg_session_id, input_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ListActiveInputsRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SetSilentIntentsStopped(arg_session_id, intents) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ContainsSessionStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasExecutorStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+SessionHasCommsStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+OpsLifecycleRegistryStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+InputStateStopped(arg_session_id, input_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+ListActiveInputsStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AbortIdle(arg_session_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortAttached(arg_session_id) ==
@@ -615,7 +1204,7 @@ AbortAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortRunning(arg_session_id) ==
@@ -623,7 +1212,31 @@ AbortRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AbortRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AbortStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+WaitIdle(arg_session_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 WaitAttached(arg_session_id) ==
@@ -631,7 +1244,7 @@ WaitAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 WaitRunning(arg_session_id) ==
@@ -639,7 +1252,31 @@ WaitRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+WaitRetired(arg_session_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+WaitStopped(arg_session_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AbortAllIdle ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ drain_running' = FALSE
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortAllAttached ==
@@ -647,7 +1284,7 @@ AbortAllAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortAllRunning ==
@@ -655,7 +1292,7 @@ AbortAllRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortAllRetired ==
@@ -663,7 +1300,7 @@ AbortAllRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortAllStopped ==
@@ -671,7 +1308,7 @@ AbortAllStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 EnsureDrainRunningAttached ==
@@ -681,7 +1318,7 @@ EnsureDrainRunningAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = TRUE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 EnsureDrainRunningRunning ==
@@ -691,7 +1328,15 @@ EnsureDrainRunningRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ drain_running' = TRUE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+IngestIdle(runtime_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 IngestAttached(runtime_id) ==
@@ -699,7 +1344,7 @@ IngestAttached(runtime_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 IngestRunning(runtime_id) ==
@@ -707,7 +1352,15 @@ IngestRunning(runtime_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+PublishEventIdle(kind) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PublishEventAttached(kind) ==
@@ -715,7 +1368,7 @@ PublishEventAttached(kind) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PublishEventRunning(kind) ==
@@ -723,7 +1376,31 @@ PublishEventRunning(kind) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+PublishEventRetired(kind) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+PublishEventStopped(kind) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AcceptWithCompletionIdle(input_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AcceptWithCompletionAttached(input_id) ==
@@ -731,7 +1408,7 @@ AcceptWithCompletionAttached(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AcceptWithCompletionRunning(input_id) ==
@@ -739,7 +1416,15 @@ AcceptWithCompletionRunning(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+AcceptWithoutWakeIdle(input_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AcceptWithoutWakeAttached(input_id) ==
@@ -747,7 +1432,7 @@ AcceptWithoutWakeAttached(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AcceptWithoutWakeRunning(input_id) ==
@@ -755,7 +1440,7 @@ AcceptWithoutWakeRunning(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ClassifyExternalEnvelopeAttached ==
@@ -763,7 +1448,7 @@ ClassifyExternalEnvelopeAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ClassifyExternalEnvelopeRunning ==
@@ -771,7 +1456,7 @@ ClassifyExternalEnvelopeRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ClassifyPlainEventAttached ==
@@ -779,7 +1464,7 @@ ClassifyPlainEventAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ClassifyPlainEventRunning ==
@@ -787,39 +1472,87 @@ ClassifyPlainEventRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RuntimeStateIdle(runtime_id) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RuntimeStateAttached(runtime_id) ==
     /\ phase = "Attached"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RuntimeStateRunning(runtime_id) ==
     /\ phase = "Running"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RuntimeStateRetired(runtime_id) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+RuntimeStateStopped(runtime_id) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+LoadBoundaryReceiptIdle(runtime_id, sequence) ==
+    /\ phase = "Idle"
+    /\ (session_id # None)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 LoadBoundaryReceiptAttached(runtime_id, sequence) ==
     /\ phase = "Attached"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 LoadBoundaryReceiptRunning(runtime_id, sequence) ==
     /\ phase = "Running"
-    /\ (active_runtime_id # None)
+    /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+LoadBoundaryReceiptRetired(runtime_id, sequence) ==
+    /\ phase = "Retired"
+    /\ (session_id # None)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+
+
+LoadBoundaryReceiptStopped(runtime_id, sequence) ==
+    /\ phase = "Stopped"
+    /\ (session_id # None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareIdle(arg_session_id) ==
@@ -827,7 +1560,8 @@ PrepareIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = Some("idle")
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrepareAttached(arg_session_id) ==
@@ -835,7 +1569,8 @@ PrepareAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = Some("attached")
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StartConversationRunAttached ==
@@ -843,7 +1578,7 @@ StartConversationRunAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StartImmediateAppendAttached ==
@@ -851,7 +1586,7 @@ StartImmediateAppendAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StartImmediateContextAttached ==
@@ -859,35 +1594,43 @@ StartImmediateContextAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CommitRunningToIdle(input_id, run_id) ==
     /\ phase = "Running"
+    /\ (pre_run_phase = Some("idle"))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FailRunningToIdle(run_id) ==
     /\ phase = "Running"
+    /\ (pre_run_phase = Some("idle"))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CommitRunningToAttached(input_id, run_id) ==
     /\ phase = "Running"
+    /\ (pre_run_phase = Some("attached"))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FailRunningToAttached(run_id) ==
     /\ phase = "Running"
+    /\ (pre_run_phase = Some("attached"))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AdmitQueuedRunning ==
@@ -895,7 +1638,7 @@ AdmitQueuedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AdmitConsumedOnAcceptRunning ==
@@ -903,7 +1646,7 @@ AdmitConsumedOnAcceptRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageDrainSnapshotRunning ==
@@ -911,7 +1654,7 @@ StageDrainSnapshotRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SupersedeQueuedInputRunning ==
@@ -919,7 +1662,7 @@ SupersedeQueuedInputRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CoalesceQueuedInputsRunning ==
@@ -927,7 +1670,7 @@ CoalesceQueuedInputsRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SetSilentIntentOverridesRunning ==
@@ -935,7 +1678,7 @@ SetSilentIntentOverridesRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PrimitiveAppliedRunning ==
@@ -943,7 +1686,7 @@ PrimitiveAppliedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 LlmReturnedToolCallsRunning ==
@@ -951,7 +1694,7 @@ LlmReturnedToolCallsRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 LlmReturnedTerminalRunning ==
@@ -959,7 +1702,7 @@ LlmReturnedTerminalRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RegisterPendingOpsRunning ==
@@ -967,7 +1710,7 @@ RegisterPendingOpsRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ToolCallsResolvedRunning ==
@@ -975,7 +1718,7 @@ ToolCallsResolvedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 OpsBarrierSatisfiedRunning ==
@@ -983,7 +1726,7 @@ OpsBarrierSatisfiedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 BoundaryContinueRunning ==
@@ -991,7 +1734,7 @@ BoundaryContinueRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 BoundaryCompleteRunning ==
@@ -999,7 +1742,7 @@ BoundaryCompleteRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecoverableFailureRunning ==
@@ -1007,7 +1750,7 @@ RecoverableFailureRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FatalFailureRunning ==
@@ -1015,7 +1758,7 @@ FatalFailureRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RetryRequestedRunning ==
@@ -1023,7 +1766,7 @@ RetryRequestedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CancelNowRunning ==
@@ -1031,7 +1774,7 @@ CancelNowRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CancellationObservedRunning ==
@@ -1039,7 +1782,7 @@ CancellationObservedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AcknowledgeTerminalRunning ==
@@ -1047,7 +1790,7 @@ AcknowledgeTerminalRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 TurnLimitReachedRunning ==
@@ -1055,7 +1798,7 @@ TurnLimitReachedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 BudgetExhaustedRunning ==
@@ -1063,7 +1806,7 @@ BudgetExhaustedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 TimeBudgetExceededRunning ==
@@ -1071,7 +1814,7 @@ TimeBudgetExceededRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 EnterExtractionRunning ==
@@ -1079,7 +1822,7 @@ EnterExtractionRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ExtractionValidationPassedRunning ==
@@ -1087,7 +1830,7 @@ ExtractionValidationPassedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ExtractionValidationFailedRunning ==
@@ -1095,7 +1838,7 @@ ExtractionValidationFailedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ExtractionStartRunning ==
@@ -1103,7 +1846,7 @@ ExtractionStartRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ForceCancelNoRunRunning ==
@@ -1111,7 +1854,7 @@ ForceCancelNoRunRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RegisterOperationRunning ==
@@ -1119,7 +1862,7 @@ RegisterOperationRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ProvisioningSucceededRunning ==
@@ -1127,7 +1870,7 @@ ProvisioningSucceededRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ProvisioningFailedRunning ==
@@ -1135,7 +1878,7 @@ ProvisioningFailedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 AbortProvisioningRunning ==
@@ -1143,7 +1886,7 @@ AbortProvisioningRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PeerReadyRunning ==
@@ -1151,7 +1894,7 @@ PeerReadyRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RegisterWatcherRunning ==
@@ -1159,7 +1902,7 @@ RegisterWatcherRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ProgressReportedRunning ==
@@ -1167,7 +1910,7 @@ ProgressReportedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CompleteOperationRunning ==
@@ -1175,7 +1918,7 @@ CompleteOperationRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FailOperationRunning ==
@@ -1183,7 +1926,7 @@ FailOperationRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CancelOperationRunning ==
@@ -1191,7 +1934,7 @@ CancelOperationRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RetireRequestedRunning ==
@@ -1199,7 +1942,7 @@ RetireRequestedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RetireCompletedRunning ==
@@ -1207,7 +1950,7 @@ RetireCompletedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CollectTerminalRunning ==
@@ -1215,7 +1958,7 @@ CollectTerminalRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 OwnerTerminatedRunning ==
@@ -1223,7 +1966,7 @@ OwnerTerminatedRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 BeginWaitAllRunning ==
@@ -1231,7 +1974,7 @@ BeginWaitAllRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CancelWaitAllRunning ==
@@ -1239,7 +1982,7 @@ CancelWaitAllRunning ==
     /\ (active_work_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageAddAttached ==
@@ -1247,7 +1990,7 @@ StageAddAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageAddRunning ==
@@ -1255,7 +1998,7 @@ StageAddRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageRemoveAttached ==
@@ -1263,7 +2006,7 @@ StageRemoveAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageRemoveRunning ==
@@ -1271,7 +2014,7 @@ StageRemoveRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageReloadAttached ==
@@ -1279,7 +2022,7 @@ StageReloadAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 StageReloadRunning ==
@@ -1287,7 +2030,7 @@ StageReloadRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ApplySurfaceBoundaryAttached ==
@@ -1295,7 +2038,7 @@ ApplySurfaceBoundaryAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ApplySurfaceBoundaryRunning ==
@@ -1303,7 +2046,7 @@ ApplySurfaceBoundaryRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PendingSucceededAttached ==
@@ -1311,7 +2054,7 @@ PendingSucceededAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PendingSucceededRunning ==
@@ -1319,7 +2062,7 @@ PendingSucceededRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PendingFailedAttached ==
@@ -1327,7 +2070,7 @@ PendingFailedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 PendingFailedRunning ==
@@ -1335,7 +2078,7 @@ PendingFailedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CallStartedAttached ==
@@ -1343,7 +2086,7 @@ CallStartedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CallStartedRunning ==
@@ -1351,7 +2094,7 @@ CallStartedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CallFinishedAttached ==
@@ -1359,7 +2102,7 @@ CallFinishedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 CallFinishedRunning ==
@@ -1367,7 +2110,7 @@ CallFinishedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FinalizeRemovalCleanAttached ==
@@ -1375,7 +2118,7 @@ FinalizeRemovalCleanAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FinalizeRemovalCleanRunning ==
@@ -1383,7 +2126,7 @@ FinalizeRemovalCleanRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FinalizeRemovalForcedAttached ==
@@ -1391,7 +2134,7 @@ FinalizeRemovalForcedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 FinalizeRemovalForcedRunning ==
@@ -1399,7 +2142,7 @@ FinalizeRemovalForcedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SnapshotAlignedAttached ==
@@ -1407,7 +2150,7 @@ SnapshotAlignedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 SnapshotAlignedRunning ==
@@ -1415,7 +2158,7 @@ SnapshotAlignedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ShutdownSurfaceAttached ==
@@ -1423,7 +2166,7 @@ ShutdownSurfaceAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 ShutdownSurfaceRunning ==
@@ -1431,7 +2174,7 @@ ShutdownSurfaceRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, wake_pending, process_pending, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, active_generation, active_work_id, attachment_live, wake_pending, process_pending, pre_run_phase, peer_ingress_configured, drain_running, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecycleFromIdleOrRetired ==
@@ -1439,7 +2182,6 @@ RecycleFromIdleOrRetired ==
     /\ (active_runtime_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ active_runtime_id' = None
     /\ active_fence_token' = None
     /\ active_generation' = None
     /\ active_work_id' = None
@@ -1447,7 +2189,7 @@ RecycleFromIdleOrRetired ==
     /\ process_pending' = FALSE
     /\ peer_ingress_configured' = FALSE
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, attachment_live, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 RecycleFromAttached ==
@@ -1455,7 +2197,6 @@ RecycleFromAttached ==
     /\ (active_runtime_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ active_runtime_id' = None
     /\ active_fence_token' = None
     /\ active_generation' = None
     /\ active_work_id' = None
@@ -1463,21 +2204,33 @@ RecycleFromAttached ==
     /\ process_pending' = FALSE
     /\ peer_ingress_configured' = FALSE
     /\ drain_running' = FALSE
-    /\ UNCHANGED << session_id, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
+    /\ UNCHANGED << session_id, active_runtime_id, attachment_live, pre_run_phase, current_llm_identity, current_capability_surface, capability_surface_status, capability_base_filter, inherited_base_filter, active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, requested_witnesses, filter_witnesses, active_visibility_revision, staged_visibility_revision, committed_visibility_revision >>
 
 
 Next ==
     \/ Initialize
-    \/ \E arg_session_id \in SessionIdValues : RegisterSession(arg_session_id)
-    \/ \E arg_session_id \in SessionIdValues : UnregisterSession(arg_session_id)
-    \/ \E model \in OptionStringValues : \E provider \in OptionStringValues : \E provider_params \in OptionJsonValueValues : ReconfigureSessionLlmIdentityAttached(model, provider, provider_params)
-    \/ \E model \in OptionStringValues : \E provider \in OptionStringValues : \E provider_params \in OptionJsonValueValues : ReconfigureSessionLlmIdentityRunning(model, provider, provider_params)
-    \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterAttached(filter, witnesses)
+    \/ \E arg_session_id \in SessionIdValues : RegisterSessionIdle(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : RegisterSessionAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : RegisterSessionRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : RegisterSessionRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : RegisterSessionStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : UnregisterSessionIdle(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : UnregisterSessionAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : UnregisterSessionRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : UnregisterSessionRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : UnregisterSessionStopped(arg_session_id)
+    \/ \E previous_identity \in SessionLlmIdentityValues : \E previous_visibility_state \in SessionToolVisibilityStateValues : \E previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E target_identity \in SessionLlmIdentityValues : \E target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E next_visibility_state \in SessionToolVisibilityStateValues : \E next_capability_base_filter \in ToolFilterValues : \E next_active_visibility_revision \in 0..2 : \E tool_visibility_delta \in SessionToolVisibilityDeltaValues : ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta)
+    \/ \E previous_identity \in SessionLlmIdentityValues : \E previous_visibility_state \in SessionToolVisibilityStateValues : \E previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E target_identity \in SessionLlmIdentityValues : \E target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E next_visibility_state \in SessionToolVisibilityStateValues : \E next_capability_base_filter \in ToolFilterValues : \E next_active_visibility_revision \in 0..2 : \E tool_visibility_delta \in SessionToolVisibilityDeltaValues : ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta)
     \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterIdle(filter, witnesses)
+    \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterAttached(filter, witnesses)
     \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterRunning(filter, witnesses)
-    \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsAttached(names, witnesses)
+    \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterRetired(filter, witnesses)
+    \/ \E filter \in ToolFilterValues : \E witnesses \in MapStringToolVisibilityWitnessValues : StagePersistentFilterStopped(filter, witnesses)
     \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsIdle(names, witnesses)
+    \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsAttached(names, witnesses)
     \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsRunning(names, witnesses)
+    \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsRetired(names, witnesses)
+    \/ \E names \in SetOfStringValues : \E witnesses \in MapStringToolVisibilityWitnessValues : RequestDeferredToolsStopped(names, witnesses)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsInitializing(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsIdle(agent_runtime_id, fence_token, generation)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : PrepareBindingsAttached(agent_runtime_id, fence_token, generation)
@@ -1494,13 +2247,17 @@ Next ==
     \/ \E reason \in StringValues : NotifyDrainExitedRunning(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedRetired(reason)
     \/ \E reason \in StringValues : NotifyDrainExitedStopped(reason)
+    \/ InterruptCurrentRunAttached
     \/ InterruptCurrentRun
+    \/ CancelAfterBoundaryAttached
     \/ CancelAfterBoundary
     \/ \E revision \in 0..2 : BoundaryAppliedPromote(revision)
     \/ \E revision \in 0..2 : BoundaryAppliedNoop(revision)
-    \/ \E revision \in 0..2 : PublishCommittedVisibleSetIdle(revision)
-    \/ \E revision \in 0..2 : PublishCommittedVisibleSetAttached(revision)
-    \/ \E revision \in 0..2 : PublishCommittedVisibleSetRunning(revision)
+    \/ \E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
+    \/ \E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
+    \/ \E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
+    \/ \E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
+    \/ \E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)
     \/ \E work_id \in WorkIdValues : RunCompleted(work_id)
     \/ \E work_id \in WorkIdValues : RunFailed(work_id)
     \/ \E work_id \in WorkIdValues : RunCancelled(work_id)
@@ -1511,9 +2268,15 @@ Next ==
     \/ RecoverFromInitializing
     \/ RetireRequestedFromIdle
     \/ Reset
-    \/ StopRuntimeExecutor
+    \/ StopRuntimeExecutorDetached
+    \/ StopRuntimeExecutorLiveAttached
+    \/ StopRuntimeExecutorLiveRunning
     \/ Destroy
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorIdle(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorStopped(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsIdle(arg_session_id, intents)
     \/ \E arg_session_id \in SessionIdValues : ContainsSessionIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : SessionHasExecutorIdle(arg_session_id)
@@ -1521,32 +2284,79 @@ Next ==
     \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateIdle(arg_session_id, input_id)
     \/ \E arg_session_id \in SessionIdValues : ListActiveInputsIdle(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsAttached(arg_session_id, intents)
+    \/ \E arg_session_id \in SessionIdValues : ContainsSessionAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasExecutorAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasCommsAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateAttached(arg_session_id, input_id)
+    \/ \E arg_session_id \in SessionIdValues : ListActiveInputsAttached(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsRunning(arg_session_id, intents)
+    \/ \E arg_session_id \in SessionIdValues : ContainsSessionRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasExecutorRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasCommsRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateRunning(arg_session_id, input_id)
+    \/ \E arg_session_id \in SessionIdValues : ListActiveInputsRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsRetired(arg_session_id, intents)
+    \/ \E arg_session_id \in SessionIdValues : ContainsSessionRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasExecutorRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasCommsRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateRetired(arg_session_id, input_id)
+    \/ \E arg_session_id \in SessionIdValues : ListActiveInputsRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E intents \in SetOfStringValues : SetSilentIntentsStopped(arg_session_id, intents)
+    \/ \E arg_session_id \in SessionIdValues : ContainsSessionStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasExecutorStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : SessionHasCommsStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : OpsLifecycleRegistryStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : \E input_id \in InputIdValues : InputStateStopped(arg_session_id, input_id)
+    \/ \E arg_session_id \in SessionIdValues : ListActiveInputsStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : AbortIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : AbortAttached(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : AbortRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : AbortRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : AbortStopped(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : WaitIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : WaitAttached(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : WaitRunning(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : WaitRetired(arg_session_id)
+    \/ \E arg_session_id \in SessionIdValues : WaitStopped(arg_session_id)
+    \/ AbortAllIdle
     \/ AbortAllAttached
     \/ AbortAllRunning
     \/ AbortAllRetired
     \/ AbortAllStopped
     \/ EnsureDrainRunningAttached
     \/ EnsureDrainRunningRunning
+    \/ \E runtime_id \in StringValues : IngestIdle(runtime_id)
     \/ \E runtime_id \in StringValues : IngestAttached(runtime_id)
     \/ \E runtime_id \in StringValues : IngestRunning(runtime_id)
+    \/ \E kind \in StringValues : PublishEventIdle(kind)
     \/ \E kind \in StringValues : PublishEventAttached(kind)
     \/ \E kind \in StringValues : PublishEventRunning(kind)
+    \/ \E kind \in StringValues : PublishEventRetired(kind)
+    \/ \E kind \in StringValues : PublishEventStopped(kind)
+    \/ \E input_id \in InputIdValues : AcceptWithCompletionIdle(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithCompletionAttached(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithCompletionRunning(input_id)
+    \/ \E input_id \in InputIdValues : AcceptWithoutWakeIdle(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithoutWakeAttached(input_id)
     \/ \E input_id \in InputIdValues : AcceptWithoutWakeRunning(input_id)
     \/ ClassifyExternalEnvelopeAttached
     \/ ClassifyExternalEnvelopeRunning
     \/ ClassifyPlainEventAttached
     \/ ClassifyPlainEventRunning
+    \/ \E runtime_id \in StringValues : RuntimeStateIdle(runtime_id)
     \/ \E runtime_id \in StringValues : RuntimeStateAttached(runtime_id)
     \/ \E runtime_id \in StringValues : RuntimeStateRunning(runtime_id)
+    \/ \E runtime_id \in StringValues : RuntimeStateRetired(runtime_id)
+    \/ \E runtime_id \in StringValues : RuntimeStateStopped(runtime_id)
+    \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptIdle(runtime_id, sequence)
     \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptAttached(runtime_id, sequence)
     \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptRunning(runtime_id, sequence)
+    \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptRetired(runtime_id, sequence)
+    \/ \E runtime_id \in StringValues : \E sequence \in 0..2 : LoadBoundaryReceiptStopped(runtime_id, sequence)
     \/ \E arg_session_id \in SessionIdValues : PrepareIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : PrepareAttached(arg_session_id)
     \/ StartConversationRunAttached
@@ -1628,12 +2438,10 @@ Next ==
     \/ RecycleFromAttached
     \/ TerminalStutter
 
-bound_runtime_has_fence == ((active_runtime_id = None) \/ (active_fence_token # None))
+fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))
 destroyed_has_no_active_work == ((phase # "Destroyed") \/ (active_work_id = None))
 drain_requires_ingress_context == ((drain_running = FALSE) \/ (peer_ingress_configured = TRUE))
-active_visibility_revision_not_ahead_of_staged == (active_visibility_revision <= staged_visibility_revision)
 active_requested_names_subset_of_staged == (\A name \in active_requested_deferred_names : (name \in staged_requested_deferred_names))
-equal_visibility_revision_means_equal_active_and_staged_state == ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
 committed_visibility_not_ahead_of_active == (committed_visibility_revision <= active_visibility_revision)
 
 CiStateConstraint == /\ model_step_count <= 8 /\ Cardinality(active_requested_deferred_names) <= 1 /\ Cardinality(staged_requested_deferred_names) <= 1 /\ Cardinality(DOMAIN requested_witnesses) <= 1 /\ Cardinality(DOMAIN filter_witnesses) <= 1
@@ -1641,12 +2449,10 @@ DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(active_requested_
 
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []bound_runtime_has_fence
+THEOREM Spec => []fence_requires_bound_runtime
 THEOREM Spec => []destroyed_has_no_active_work
 THEOREM Spec => []drain_requires_ingress_context
-THEOREM Spec => []active_visibility_revision_not_ahead_of_staged
 THEOREM Spec => []active_requested_names_subset_of_staged
-THEOREM Spec => []equal_visibility_revision_means_equal_active_and_staged_state
 THEOREM Spec => []committed_visibility_not_ahead_of_active
 
 =============================================================================

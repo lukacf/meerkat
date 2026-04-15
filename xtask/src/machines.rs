@@ -72,6 +72,9 @@ pub struct HopcroftArgs {
     /// Emit the full audit map: field-ablation summaries plus mixed-phase pair audits.
     #[arg(long)]
     audit_map: bool,
+    /// Reuse an existing `graph.dot` under `--artifact-dir` instead of rerunning TLC.
+    #[arg(long)]
+    reuse_existing_dump: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -130,7 +133,7 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
     let root = repo_root()?;
     ensure_no_drift(&root, &selection)?;
 
-    if which::which("tlc").is_err() {
+    if !args.reuse_existing_dump && which::which("tlc").is_err() {
         bail!("tlc not on PATH; machine-hopcroft requires the TLC CLI");
     }
 
@@ -175,6 +178,7 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
             workers,
             args.observation,
             args.audit_map,
+            args.reuse_existing_dump,
             artifact_subdir.as_deref(),
         )?);
     }
@@ -197,6 +201,7 @@ pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
             workers,
             args.observation,
             args.audit_map,
+            args.reuse_existing_dump,
             artifact_subdir.as_deref(),
         )?);
     }
@@ -2265,6 +2270,7 @@ struct HopcroftSummary {
     mixed_phase_blocks: Vec<HopcroftBlockSummary>,
     mixed_phase_pairs: Vec<HopcroftPhasePairSummary>,
     field_audit: Option<HopcroftFieldAuditSummary>,
+    largest_mixed_phase_block_field_projection: Option<HopcroftBlockFieldProjectionSummary>,
     largest_blocks: Vec<HopcroftBlockSummary>,
     tlc: TlcGraphStats,
 }
@@ -2307,6 +2313,35 @@ struct HopcroftFieldImpactSummary {
     all_except_reduction_states: usize,
     all_except_reduction_percent: f64,
     all_except_collapsed_states: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldProjectionSummary {
+    block: usize,
+    size: usize,
+    phases: BTreeMap<String, usize>,
+    field_count: usize,
+    distinct_tuples: usize,
+    phase_overlay_tuple_count: usize,
+    max_phases_per_tuple: usize,
+    fields: Vec<HopcroftBlockFieldProjectionFieldSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldProjectionFieldSummary {
+    field: String,
+    distinct_values: usize,
+    largest_bucket_size: usize,
+    largest_bucket_percent: f64,
+    omitted_value_count: usize,
+    top_values: Vec<HopcroftBlockFieldValueSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct HopcroftBlockFieldValueSummary {
+    value: String,
+    count: usize,
+    phases: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2441,6 +2476,7 @@ fn run_hopcroft_for_target(
     workers: usize,
     observation: HopcroftObservation,
     audit_map: bool,
+    reuse_existing_dump: bool,
     artifact_dir: Option<&Path>,
 ) -> Result<HopcroftSummary> {
     let artifact_dir = artifact_dir.map(|path| {
@@ -2449,7 +2485,14 @@ fn run_hopcroft_for_target(
     });
     let artifact_dir = artifact_dir.transpose()?;
 
-    let dump = dump_tlc_dot_for_target(root, &target, profile, workers, artifact_dir)?;
+    let dump = dump_tlc_dot_for_target(
+        root,
+        &target,
+        profile,
+        workers,
+        artifact_dir,
+        reuse_existing_dump,
+    )?;
     let graph = parse_tlc_dot_graph(&dump.dot)
         .with_context(|| format!("parse TLC DOT dump for {}", target.display_name))?;
     let quotient = hopcroft_partition_refinement(&graph, observation);
@@ -2483,6 +2526,7 @@ fn dump_tlc_dot_for_target(
     profile: VerifyProfile,
     workers: usize,
     artifact_dir: Option<&Path>,
+    reuse_existing_dump: bool,
 ) -> Result<TlcDotDump> {
     let config_name = match profile {
         VerifyProfile::Ci => "ci.cfg",
@@ -2524,6 +2568,18 @@ fn dump_tlc_dot_for_target(
 
     let dump_path = artifact_dir.join("graph.dot");
     let log_path = artifact_dir.join("tlc.log");
+
+    if reuse_existing_dump {
+        let dot = fs::read_to_string(&dump_path).with_context(|| {
+            format!(
+                "read existing TLC DOT dump for {} from {}",
+                target.display_name,
+                dump_path.display()
+            )
+        })?;
+        let tlc_output = fs::read_to_string(&log_path).unwrap_or_default();
+        return Ok(TlcDotDump { dot, tlc_output });
+    }
 
     let mut cmd = Command::new("tlc");
     cmd.arg("-workers")
@@ -2952,6 +3008,11 @@ fn summarize_hopcroft_target(
     } else {
         None
     };
+    let largest_mixed_phase_block_field_projection = if audit_map {
+        summarize_largest_mixed_phase_block_field_projection(graph, quotient, &mixed_phase_blocks)
+    } else {
+        None
+    };
 
     HopcroftSummary {
         kind: target.kind.into(),
@@ -2967,6 +3028,7 @@ fn summarize_hopcroft_target(
         mixed_phase_blocks,
         mixed_phase_pairs,
         field_audit,
+        largest_mixed_phase_block_field_projection,
         largest_blocks,
         tlc: parse_tlc_graph_stats(tlc_output),
     }
@@ -3112,6 +3174,124 @@ fn summarize_hopcroft_field_audit(graph: &TlcDotGraph) -> Option<HopcroftFieldAu
     })
 }
 
+fn summarize_largest_mixed_phase_block_field_projection(
+    graph: &TlcDotGraph,
+    quotient: &HopcroftQuotient,
+    mixed_phase_blocks: &[HopcroftBlockSummary],
+) -> Option<HopcroftBlockFieldProjectionSummary> {
+    let largest = mixed_phase_blocks.iter().max_by(|left, right| {
+        left.size
+            .cmp(&right.size)
+            .then_with(|| right.block.cmp(&left.block))
+    })?;
+    let members = quotient.blocks.get(largest.block)?;
+    let fields = members
+        .iter()
+        .flat_map(|state_idx| graph.states[*state_idx].snapshot_fields.keys().cloned())
+        .filter(|field| is_extended_state_field(field))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let tuple_phase_map = members
+        .iter()
+        .map(|state_idx| {
+            let state = &graph.states[*state_idx];
+            let tuple = fields
+                .iter()
+                .map(|field| snapshot_field_value(state, field))
+                .collect::<Vec<_>>();
+            let phase = state.phase.clone().unwrap_or_else(|| "<missing>".into());
+            (tuple, phase)
+        })
+        .fold(
+            BTreeMap::<Vec<String>, BTreeSet<String>>::new(),
+            |mut acc, (tuple, phase)| {
+                acc.entry(tuple).or_default().insert(phase);
+                acc
+            },
+        );
+    let distinct_tuples = tuple_phase_map.len();
+    let phase_overlay_tuple_count = tuple_phase_map
+        .values()
+        .filter(|phases| phases.len() > 1)
+        .count();
+    let max_phases_per_tuple = tuple_phase_map
+        .values()
+        .map(BTreeSet::len)
+        .max()
+        .unwrap_or_default();
+
+    let mut summaries = Vec::new();
+    for field in &fields {
+        let mut buckets = BTreeMap::<String, (usize, BTreeMap<String, usize>)>::new();
+        for &state_idx in members {
+            let state = &graph.states[state_idx];
+            let value = snapshot_field_value(state, field);
+            let entry = buckets.entry(value).or_default();
+            entry.0 += 1;
+            if let Some(phase) = &state.phase {
+                *entry.1.entry(phase.clone()).or_default() += 1;
+            }
+        }
+
+        let distinct_values = buckets.len();
+        let largest_bucket_size = buckets
+            .values()
+            .map(|(count, _)| *count)
+            .max()
+            .unwrap_or_default();
+        let mut top_values = buckets
+            .into_iter()
+            .map(|(value, (count, phases))| HopcroftBlockFieldValueSummary {
+                value,
+                count,
+                phases,
+            })
+            .collect::<Vec<_>>();
+        top_values.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| left.value.cmp(&right.value))
+        });
+        let omitted_value_count = distinct_values.saturating_sub(top_values.len().min(8));
+        top_values.truncate(8);
+
+        summaries.push(HopcroftBlockFieldProjectionFieldSummary {
+            field: field.clone(),
+            distinct_values,
+            largest_bucket_size,
+            largest_bucket_percent: reduction_percent(largest_bucket_size, members.len()),
+            omitted_value_count,
+            top_values,
+        });
+    }
+
+    summaries.sort_by(|left, right| {
+        right
+            .distinct_values
+            .cmp(&left.distinct_values)
+            .then_with(|| {
+                left.largest_bucket_percent
+                    .partial_cmp(&right.largest_bucket_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.field.cmp(&right.field))
+    });
+
+    Some(HopcroftBlockFieldProjectionSummary {
+        block: largest.block,
+        size: largest.size,
+        phases: largest.phases.clone(),
+        field_count: fields.len(),
+        distinct_tuples,
+        phase_overlay_tuple_count,
+        max_phases_per_tuple,
+        fields: summaries,
+    })
+}
+
 fn graph_field_names(graph: &TlcDotGraph) -> Vec<String> {
     graph
         .states
@@ -3121,6 +3301,14 @@ fn graph_field_names(graph: &TlcDotGraph) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn snapshot_field_value(state: &TlcDotState, field: &str) -> String {
+    state
+        .snapshot_fields
+        .get(field)
+        .cloned()
+        .unwrap_or_else(|| "<missing>".into())
 }
 
 fn reduction_percent(reduction_states: usize, reachable_states: usize) -> f64 {
@@ -3523,12 +3711,62 @@ fn print_hopcroft_summary(summary: &HopcroftSummary) {
             );
         }
     }
+    if let Some(block_projection) = &summary.largest_mixed_phase_block_field_projection {
+        println!(
+            "  largest mixed-block field projection: block {} size {} tuples={} phase_overlay={} max_phases_per_tuple={} fields={}",
+            block_projection.block,
+            block_projection.size,
+            block_projection.distinct_tuples,
+            block_projection.phase_overlay_tuple_count,
+            block_projection.max_phases_per_tuple,
+            block_projection.field_count
+        );
+        for field in block_projection.fields.iter().take(8) {
+            let top_values = field
+                .top_values
+                .iter()
+                .take(3)
+                .map(|value| {
+                    format!(
+                        "{} ({})",
+                        summarize_snapshot_value_for_cli(&value.value),
+                        value.count
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "    - {}: distinct={} largest_bucket={} ({:.1}%) top=[{}{}]",
+                field.field,
+                field.distinct_values,
+                field.largest_bucket_size,
+                field.largest_bucket_percent,
+                top_values,
+                if field.omitted_value_count == 0 {
+                    String::new()
+                } else {
+                    format!(", +{} more", field.omitted_value_count)
+                }
+            );
+        }
+    }
     println!("  largest blocks:");
     for block in summary.largest_blocks.iter().take(5) {
         println!(
             "    - block {} size {} phase {:?}",
             block.block, block.size, block.representative_phase
         );
+    }
+}
+
+fn summarize_snapshot_value_for_cli(value: &str) -> String {
+    let compact = value.replace('\n', " ");
+    const LIMIT: usize = 40;
+    if compact.chars().count() > LIMIT {
+        let truncated = compact.chars().take(LIMIT - 1).collect::<String>();
+        format!("{truncated}…")
+    } else {
+        compact
     }
 }
 

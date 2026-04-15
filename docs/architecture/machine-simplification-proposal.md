@@ -133,12 +133,17 @@ We ran three observation modes for each machine:
 
 | Machine | Observation | Reachable states | Quotient states | Reduction | Reading |
 |---|---|---:|---:|---:|---|
-| MobMachine | `none` | 4,797 | 195 | 95.9% | Raw behavior is dramatically smaller than the current formal state space. |
-| MobMachine | `phase` | 4,797 | 197 | 95.9% | Preserving phase barely changes the quotient; `Running` / `Stopped` / `Completed` are almost entirely projection. |
+| MobMachine | `none` | 4,797 | 202 | 95.8% | Raw behavior is still dramatically smaller than the current formal state space, but exact parity tightened the quotient slightly. |
+| MobMachine | `phase` | 4,797 | 204 | 95.7% | Preserving phase still barely changes the quotient; `Running` / `Stopped` / `Completed` remain mostly projection. |
 | MobMachine | `full` | 4,797 | 4,797 | 0.0% | Once the full extended state is preserved, every reachable snapshot is distinct. |
-| MeerkatMachine | `none` | 4,144 | 199 | 95.2% | Raw behavior again collapses to a machine of roughly the same order as Mob. |
+| MeerkatMachine | `none` | 4,463 | 201 | 95.5% | Raw behavior again collapses to a machine of roughly the same order as Mob, even after the current acceptance-parity cleanup. |
 | MeerkatMachine | `phase` | 4,144 | 204 | 95.1% | Preserving phase barely changes the quotient; phase is not the main source of complexity. |
 | MeerkatMachine | `full` | 4,144 | 4,144 | 0.0% | As with Mob, the entire present surface lives in the extended state tuple. |
+
+For Mob, all three rows above have been rerun after the exact
+runtime/schema triangle parity pass. For Meerkat, only the `none` row above
+has been rerun after the latest acceptance-parity cleanup; the `phase` and
+`full` rows remain the earlier stock-taking baseline until they are refreshed.
 
 ### What the quotient is telling us
 
@@ -158,7 +163,7 @@ The raw quotient exposes the highest-signal parity/simplification targets:
 
 - **MobMachine** has one dominant mixed block of `2,819` states spanning
   `Running`, `Stopped`, and `Completed`.
-- **MeerkatMachine** has one dominant mixed block of `2,094` states spanning
+- **MeerkatMachine** has one dominant mixed block of `2,166` states spanning
   `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, and `Stopped`.
 
 These are not automatic merge approvals. They are a **schema-side lower bound**
@@ -166,7 +171,7 @@ on the machine’s intrinsic complexity.
 
 ### Interpretation discipline
 
-The quotient does **not** prove the runtime is only `195` / `199` states. It
+The quotient does **not** prove the runtime is only `195` / `201` states. It
 proves that the **current schema** cannot behaviorally distinguish more than
 those quotient blocks under the chosen observation mode.
 
@@ -205,67 +210,236 @@ The checked-in row ledger for that audit now lives in
 
 ### Current Meerkat coverage
 
-- Audited pairs: `Attached <-> Idle`, `Running <-> Stopped`, `Idle <-> Retired`
-- Interesting schema rows in scope: `76`
-- Runtime probes implemented: `53`
-- Schema/runtime alignments: `53`
+- Audited pairs: `Attached <-> Idle`, `Attached <-> Running`,
+  `Running <-> Stopped`, `Running <-> Retired`, `Idle <-> Retired`,
+  `Idle <-> Stopped`, `Attached <-> Retired`, `Attached <-> Stopped`,
+  `Idle <-> Running`, `Retired <-> Stopped`
+- Interesting schema rows in scope: `322`
+- Runtime probes implemented: `322`
+- Schema/runtime alignments: `322`
 - Schema/runtime mismatches: `0`
-- Remaining unprobed rows: `23`
+- Remaining unprobed rows: `0`
 
-The open remainder is now concentrated in the reducer/control family:
-`Abort*`, `Accept*`, `LoadBoundaryReceipt`, `Prepare/Commit/Fail`,
-`PublishEvent`, `RuntimeState`, `Recycle`, and similar reducer-only carriers.
+The Meerkat acceptance frontier for the current public-phase matrix is fully
+probed and green. The acceptance audit now classifies rows using the simulated
+schema outcome from the same representative pre-state, rather than the older
+static transition-signature comparison.
+
+### Full-row Meerkat audit (2026-04-15)
+
+Acceptance parity turned out to be necessary but not sufficient. We added a
+second ignored in-crate audit that probes **all** transitioned rows for the
+same 10-pair public-phase matrix and compares the runtime using a
+schema-aligned field projection instead of the older trimmed snapshot:
+
+```bash
+cargo test -p meerkat-runtime audit_meerkat_runtime_phase_full_parity_map \
+  -- --ignored --nocapture
+```
+
+That audit writes `meerkat-runtime-phase-parity-full.json` into the system temp
+directory.
+
+Current full-row numbers:
+
+- rows in scope: `340`
+- runtime probes implemented: `340`
+- schema/runtime alignments: `339`
+- schema/runtime mismatches: `1`
+- remaining unprobed rows: `0`
+
+That drop from `19` mismatches to `1` was not a schema change. It came from
+fixing the audit methodology so the pair report compares runtime behavior
+against the simulated schema outcome from the same pre-state, rather than
+against static transition topology.
+
+The remaining mismatch is now narrow and explicit:
+
+- pair: `Attached <-> Running`
+- input: `Destroy`
+- schema classification: `same_surface`
+- runtime classification: `different_surface`
+
+What differs there is not the current formal field vector. The modeled-state
+audit remains green at `185 / 185` rows aligned. The remaining delta is in the
+runtime’s public/report surface and diagnostic input-ledger carrier truth:
+
+- `Destroy` from `Running` returns `inputs_abandoned = 1`
+- `Destroy` from `Attached` returns `inputs_abandoned = 0`
+- the formal machine does not currently encode that abandoned-input accounting
+
+So the Meerkat story is now:
+
+- the audited acceptance surface is green
+- the modeled formal-state vector is green
+- the remaining exact gap is no longer a broad phase/guard problem
+- the remaining exact gap is a **report/input-ledger semantics gap** around
+  `Destroy`
+
+That means the next parity tranche is no longer “widen more self-loops.” It is
+to decide whether the formal machine should start modeling report-producing
+input-ledger facts, or whether that surface stays outside the state-machine
+authority boundary.
 
 ### What is now aligned
 
-The Meerkat parity pass has already closed three concrete mismatch families:
+The Meerkat parity pass has now closed four concrete families:
 
 - registration-helper surface
 - durable tool-visibility mutation
 - helper/query surface (`EnsureSessionWithExecutor`, `SetSilentIntents`,
   `ContainsSession`, `SessionHasExecutor`, `SessionHasComms`,
   `OpsLifecycleRegistry`, `InputState`, `ListActiveInputs`)
+- reducer/control acceptance surface (`Abort*`, `Wait`, `Ingest`,
+  `PublishEvent`, `RuntimeState`, `LoadBoundaryReceipt`, `Accept*`,
+  `Recycle`, `Prepare`, `Commit`, `Fail`)
 
 The probe also still confirms several genuinely load-bearing distinctions:
 
 - `ReconfigureSessionLlmIdentity` remains phase-gated: `Attached` and
   `Running` accept it, while `Idle`, `Retired`, and `Stopped` reject it.
-- `InterruptCurrentRun` and `CancelAfterBoundary` remain meaningfully
-  `Running`-only relative to `Stopped`.
+- `InterruptCurrentRun` and `CancelAfterBoundary` are now modeled as
+  attached-loop control commands: `Attached` accepts them as self-loops,
+  `Running` accepts them with the active-work surface, and `Idle`, `Retired`,
+  and `Stopped` reject them.
 - `Retire`, `Recover`, `SetPeerIngressContext`, and `NotifyDrainExited` all
   still line up with the current schema surface for the audited pairs.
 
 ### What remains open
 
-The Meerkat audit front is no longer “resolve known mismatches.” It is now
-“finish probe coverage.”
+There are no currently known Meerkat acceptance mismatches in the audited
+public-phase frontier. The next open question is not acceptance parity; it is whether the
+remaining large mixed-phase quotient blocks reflect real runtime structure or
+other still-unaudited schema surfaces.
 
-The current open rows all sit in the reducer/control family, where genuine
-phase distinctions are still most likely to be load-bearing:
+### Mob runtime parity map
 
-- `Abort`
-- `AbortAll`
-- `Wait`
-- `Ingest`
-- `PublishEvent`
-- `RuntimeState`
-- `LoadBoundaryReceipt`
-- `AcceptWithCompletion`
-- `AcceptWithoutWake`
-- `Recycle`
-- `Prepare`
-- `Commit`
-- `Fail`
+We added the matching ignored in-crate Mob audit:
+
+```bash
+cargo test -p meerkat-mob audit_mob_runtime_phase_parity_map \
+  -- --ignored --nocapture
+```
+
+The checked-in row ledger for that audit now lives in
+[`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
+
+### Current Mob coverage
+
+- Audited lifecycle pairs: `Running <-> Stopped`, `Completed <-> Running`,
+  `Completed <-> Stopped`
+- Transition-bearing rows in scope: `65`
+- Runtime probes implemented: `65`
+- Schema/runtime alignments: `65`
+- Schema/runtime mismatches: `0`
+- Remaining unprobed rows: `0`
+
+The Mob lifecycle triangle is now fully probed and green on the current
+representative pre-state frontier.
+
+### What the Mob pass changed
+
+The Mob parity pass closed three concrete issues:
+
+- `TaskUpdate` and `CancelFlow` were probe-shape issues, not real contract
+  disagreement:
+  - `TaskUpdate` needed an owner-bearing task fixture
+  - `CancelFlow` needed a synthetic run id on the non-`Running` sides so
+    phase rejection could be observed without illegally stopping an active run
+- `SubscribeAgentEvents` was the real schema gap. The runtime requires a live
+  member; the schema now models that with `active_members_present`, and the
+  audit evaluates that guard against the representative pre-state instead of
+  treating every phase-local transition as always enabled
+- the full lifecycle triangle is now exact on the current transition-bearing
+  frontier
+
+### Post-parity Mob rerun
+
+After closing the exact triangle parity pass, we reran the raw Mob Hopcroft
+lanes:
+
+```bash
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine mob_machine --profile ci \
+  --observation none --audit-map
+```
+
+Current result:
+
+- reachable states: `4,797`
+- raw quotient states: `202`
+- phase-observed quotient states: `204`
+- full-observed quotient states: `4,797`
+- TLC: `167,791 generated / 4,797 distinct / depth 7`
+- dominant mixed block: `2,819` states spanning `Running`, `Stopped`, and
+  `Completed`
+
+The important read is that the quotient stayed in the same order of magnitude
+but moved from `195` to `202` once the schema stopped over-permitting
+member-specific subscriptions from member-less completed states. That is the
+exact kind of “don’t minimize against an under-modeled machine” correction the
+parity pass is supposed to surface.
 
 ### Reading the current pass
 
-The Meerkat audit has shifted from parity triage to parity completion:
+The Meerkat audit has shifted from parity triage to post-parity stock-taking:
 
-- the rows we have probed are currently green
-- the remaining uncertainty is probe coverage, not a known schema/runtime split
-- once the reducer/control family is probed, we can rerun Hopcroft against a
-  materially cleaner acceptance surface and use that result to steer the DSL
-  work
+- the rows we have probed are green
+- the current Meerkat acceptance surface is fully probed for the 10-pair
+  public-phase matrix
+- the next step is to use the post-parity Hopcroft rerun to steer the DSL work
+
+### Post-parity Meerkat rerun
+
+After closing the reducer/control acceptance gap and the last attached-loop
+control mismatch, we reran the raw Hopcroft lane:
+
+```bash
+cargo run -p xtask --features machine-authority -- \
+  machine-hopcroft --machine meerkat_machine --profile ci \
+  --observation none --audit-map
+```
+
+Current result:
+
+- reachable states: `4,463`
+- quotient states: `201`
+- TLC: `192,257 generated / 4,463 distinct / depth 9`
+- dominant mixed block: `2,166` states spanning `Initializing`, `Idle`,
+  `Attached`, `Running`, `Retired`, and `Stopped`
+
+The important read is that the raw quotient stayed essentially flat even after
+the acceptance-parity cleanup. That means the large remaining simplification
+signal is not just “missing accept/reject guards in the audited pairs”; it is
+still present after those gaps are removed.
+
+### Largest Meerkat mixed-block projection
+
+We then extended the Hopcroft summary itself to project the largest
+mixed-phase block onto its extended-state fields. On the current Meerkat run,
+that yields:
+
+- dominant mixed block: `2,166` states
+- distinct extended-state tuples inside that block: `670`
+- tuples reused across multiple phases: `404`
+- maximum phases sharing one tuple: `5`
+
+That is the strongest concrete evidence so far that the current phase surface
+is layered on top of a smaller field-driven machine instead of acting as the
+primary semantic axis. The most discriminating fields inside the block are:
+
+- `staged_visibility_revision` (`7` value buckets; largest bucket `904`)
+- `active_visibility_revision` (`3` buckets; largest bucket `990`)
+- `committed_visibility_revision` (`3` buckets; largest bucket `1,284`)
+- `peer_ingress_configured` (`2` buckets; split `1,104 / 1,062`)
+- `staged_requested_deferred_names` (`2` buckets; split `1,124 / 1,042`)
+- `requested_witnesses` (`2` buckets; split `1,144 / 1,022`)
+- `filter_witnesses` (`2` buckets; split `1,226 / 940`)
+- `active_fence_token` (`2` buckets; split `1,417 / 749`)
+
+The read is strikingly consistent with the earlier field-ablation pass: the
+largest Meerkat block is dominated by visibility-staging, deferred-tool, ingress,
+and runtime-binding/fence dimensions rather than by phase labels.
 
 ### Audit-map results
 
@@ -278,10 +452,10 @@ The first `--audit-map` pass answers two more concrete questions:
 #### Field-ablation leaders
 
 - **MeerkatMachine** most quotient-bearing fields today are
-  `requested_witnesses` (`all_except` collapses `2,647` states),
-  `filter_witnesses` (`2,493`), `staged_visibility_revision` (`2,350`),
-  `staged_requested_deferred_names` (`2,111`), `drain_running` (`2,111`), and
-  `peer_ingress_configured` (`1,885`).
+  `requested_witnesses` (`all_except` collapses `2,833` states),
+  `filter_witnesses` (`2,670`), `staged_visibility_revision` (`2,580`),
+  `staged_requested_deferred_names` (`2,293`), `drain_running` (`2,257`), and
+  `peer_ingress_configured` (`2,017`).
 - **MobMachine** most quotient-bearing fields today are
   `event_subscription_count` (`2,596`), `task_count` (`2,581`),
   `wiring_edge_count` (`2,219`), `coordinator_bound` (`2,182`),
@@ -293,37 +467,39 @@ field-normalization-first, not phase-first.
 #### Pair-audit highlights
 
 - **Meerkat `Attached` ↔ `Idle`**:
-  `same=6`, `different=7`, `left-only=10`, `right-only=10`.
-  The first reachable witness differs on `active_visibility_revision`,
-  `committed_visibility_revision`, `drain_running`, and `requested_witnesses`.
-  The first non-`same` schema rows are already useful parity leads:
-  `RegisterSession` / `UnregisterSession` are `right-only`, while
-  `ReconfigureSessionLlmIdentity` is `left-only`, and
-  `SetPeerIngressContext`, `NotifyDrainExited`, `StagePersistentFilter`,
-  `RequestDeferredTools`, and `PublishCommittedVisibleSet` are all
-  `different_surface`.
-- **Meerkat `Running` ↔ `Stopped`**:
-  `same=1`, `different=4`, `left-only=18`, `right-only=3`.
-  The witness differs on deferred-tool state, visibility revisions,
-  `drain_running`, `filter_witnesses`, and `peer_ingress_configured`.
-  The first non-`same` rows put the likely runtime probes in plain view:
-  `PrepareBindings`, `SetPeerIngressContext`, `NotifyDrainExited`,
+- **Meerkat `Attached` ↔ `Idle`**:
+  `same=8`, `different=24`, `left-only=3`, `right-only=0`.
+  After the acceptance-parity cleanup, this pair is now dominated by
+  surface-shape deltas rather than helper-surface accept/reject mismatches.
+  The remaining left-only rows are `ReconfigureSessionLlmIdentity`,
   `InterruptCurrentRun`, and `CancelAfterBoundary`.
+- **Meerkat `Attached` ↔ `Running`**:
+  `same=4`, `different=27`, `left-only=4`, `right-only=2`.
+  This is now a better next-step audit pair than the original
+  `Attached`/`Idle` gap: the accept/reject surface is green, but the quotient
+  still sees a large structural split between idle attached-loop control and
+  active-run control.
+- **Meerkat `Running` ↔ `Stopped`**:
+  `same=2`, `different=21`, `left-only=10`, `right-only=1`.
+  The helper/query and accept/reject gaps here are mostly gone, but the
+  quotient still sees a real split driven by active-work and lifecycle-control
+  surface, not just stale schema permissiveness.
 - **Mob `Running` ↔ `Stopped`**:
   `same=3`, `different=8`, `left-only=15`, `right-only=1`.
-  The witness differs only on `event_subscription_count`, but the schema rows
-  show the lifecycle split very clearly: `Spawn`, `SubmitWork`, `RunFlow`,
-  `Respawn`, and `Wire` are `left-only`, while `Retire` / `RetireAll` are
-  `different_surface`.
+  This pair is now fully runtime-verified on the representative frontier:
+  `27 / 27 / 27 / 0 / 0`. The quotient witness still shows the lifecycle split
+  clearly: `Spawn`, `SubmitWork`, `RunFlow`, `Respawn`, and `Wire` are
+  `left-only`, while `Retire` / `RetireAll` are `different_surface`.
 - **Mob `Completed` ↔ `Running`** and **`Completed` ↔ `Stopped`**:
-  `Completed` is behaviorally merged into the same raw quotient block, but the
-  static schema rows show it is mostly the query/subscription/provenance shell
-  while `Running` / `Stopped` still own the lifecycle-mutating inputs.
+  `Completed` is still behaviorally merged into the same raw quotient block,
+  but the exact parity pass now confirms that its remaining accepted surface is
+  mostly the query/subscription/provenance shell while `Running` /
+  `Stopped` still own the lifecycle-mutating inputs.
 
-These counts are **not** runtime truth yet. They are the new audit checklist.
-Every non-`same` row is now a concrete place to ask: "does runtime agree with
-the schema here?" Every `same` row inside a mixed-phase block is a genuine
-simplification candidate if runtime also agrees.
+The Meerkat public-phase frontier and the Mob lifecycle triangle are now
+runtime-verified. Outside those audited frontiers, the mixed-phase pair counts
+are still schema-first witness counts and should be read as the next checklist,
+not as proof.
 
 ### Public-surface consequence
 

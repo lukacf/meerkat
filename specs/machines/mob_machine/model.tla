@@ -348,6 +348,7 @@ ForceCancelRunning ==
 
 SubscribeAgentEventsRunning ==
     /\ phase = "Running"
+    /\ (active_member_count > 0)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1
@@ -356,6 +357,7 @@ SubscribeAgentEventsRunning ==
 
 SubscribeAgentEventsStopped ==
     /\ phase = "Stopped"
+    /\ (active_member_count > 0)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1
@@ -364,6 +366,7 @@ SubscribeAgentEventsStopped ==
 
 SubscribeAgentEventsCompleted ==
     /\ phase = "Completed"
+    /\ (active_member_count > 0)
     /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1
@@ -372,6 +375,7 @@ SubscribeAgentEventsCompleted ==
 
 SubscribeAgentEventsDestroyed ==
     /\ phase = "Destroyed"
+    /\ (active_member_count > 0)
     /\ phase' = "Destroyed"
     /\ model_step_count' = model_step_count + 1
     /\ event_subscription_count' = (event_subscription_count) + 1

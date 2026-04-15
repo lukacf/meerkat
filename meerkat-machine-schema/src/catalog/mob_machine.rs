@@ -929,15 +929,23 @@ fn absorbed_mob_transitions() -> Vec<TransitionSchema> {
         ));
     }
 
-    // --- Subscribe commands: no phase guard in runtime ---
-    for (variant, updates) in [
-        (
+    // --- Subscribe commands: member-specific subscription requires a live member;
+    // the aggregate subscriptions remain phase-agnostic.
+    for phase in &all_phases {
+        transitions.push(mob_guarded_self_loop_transition(
             "SubscribeAgentEvents",
+            phase,
+            "SubscribeAgentEvents",
+            vec![],
+            vec![active_members_present_guard()],
             vec![Update::Increment {
                 field: "event_subscription_count".into(),
                 amount: 1,
             }],
-        ),
+            vec![],
+        ));
+    }
+    for (variant, updates) in [
         (
             "SubscribeAllAgentEvents",
             vec![Update::Increment {
@@ -1415,6 +1423,30 @@ fn mob_self_loop_transition(
             bindings: bindings.into_iter().map(Into::into).collect(),
         },
         guards: vec![],
+        updates,
+        to: phase.into(),
+        emit,
+    }
+}
+
+fn mob_guarded_self_loop_transition(
+    name: &str,
+    phase: &str,
+    variant: &str,
+    bindings: Vec<&str>,
+    guards: Vec<Guard>,
+    updates: Vec<Update>,
+    emit: Vec<EffectEmit>,
+) -> TransitionSchema {
+    TransitionSchema {
+        name: format!("{name}{phase}"),
+        from: vec![phase.into()],
+        on: InputMatch {
+            kind: mob_trigger_kind(variant),
+            variant: variant.into(),
+            bindings: bindings.into_iter().map(Into::into).collect(),
+        },
+        guards,
         updates,
         to: phase.into(),
         emit,

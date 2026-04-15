@@ -313,21 +313,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `SubscribeAgentEventsRunning`
 - From: `Running`
 - On: `SubscribeAgentEvents`()
+- Guards:
+  - `active_members_present`
 - To: `Running`
 
 ### `SubscribeAgentEventsStopped`
 - From: `Stopped`
 - On: `SubscribeAgentEvents`()
+- Guards:
+  - `active_members_present`
 - To: `Stopped`
 
 ### `SubscribeAgentEventsCompleted`
 - From: `Completed`
 - On: `SubscribeAgentEvents`()
+- Guards:
+  - `active_members_present`
 - To: `Completed`
 
 ### `SubscribeAgentEventsDestroyed`
 - From: `Destroyed`
 - On: `SubscribeAgentEvents`()
+- Guards:
+  - `active_members_present`
 - To: `Destroyed`
 
 ### `SubscribeAllAgentEventsRunning`

@@ -199,6 +199,65 @@ color="white";
 }
 
 #[test]
+fn largest_mixed_block_projection_reports_distinct_field_partitions() {
+    let dot = r#"
+strict digraph DiskGraph {
+nodesep=0.35;
+subgraph cluster_graph {
+color="white";
+1 [label="/\\ phase = \"Idle\"\n/\\ x = 0\n/\\ y = \"left\"\n/\\ model_step_count = 0",style = filled]
+2 [label="/\\ phase = \"Running\"\n/\\ x = 0\n/\\ y = \"right\"\n/\\ model_step_count = 0"];
+3 [label="/\\ phase = \"Stopped\"\n/\\ x = 1\n/\\ y = \"right\"\n/\\ model_step_count = 0"];
+4 [label="/\\ phase = \"Retired\"\n/\\ x = 1\n/\\ y = \"right\"\n/\\ model_step_count = 0"];
+}
+}
+"#;
+
+    let graph = parse_tlc_dot_graph(dot).expect("parse DOT graph");
+    let quotient = hopcroft_partition_refinement(&graph, HopcroftObservation::None);
+    let mixed_phase_blocks = quotient
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(block_id, members)| {
+            let summary = summarize_hopcroft_block(block_id, members, &graph, &quotient);
+            (summary.phases.len() > 1).then_some(summary)
+        })
+        .collect::<Vec<_>>();
+
+    let projection = summarize_largest_mixed_phase_block_field_projection(
+        &graph,
+        &quotient,
+        &mixed_phase_blocks,
+    )
+    .expect("mixed block projection");
+
+    assert_eq!(projection.size, 4);
+    assert_eq!(projection.field_count, 2);
+    assert_eq!(projection.distinct_tuples, 3);
+    assert_eq!(projection.phase_overlay_tuple_count, 1);
+    assert_eq!(projection.max_phases_per_tuple, 2);
+
+    let x = projection
+        .fields
+        .iter()
+        .find(|field| field.field == "x")
+        .expect("x projection");
+    assert_eq!(x.distinct_values, 2);
+    assert_eq!(x.largest_bucket_size, 2);
+    assert_eq!(x.top_values.len(), 2);
+
+    let y = projection
+        .fields
+        .iter()
+        .find(|field| field.field == "y")
+        .expect("y projection");
+    assert_eq!(y.distinct_values, 2);
+    assert_eq!(y.largest_bucket_size, 3);
+    assert_eq!(y.top_values[0].count, 3);
+}
+
+#[test]
 fn schema_input_rows_classify_same_left_only_and_different_surfaces() {
     let schema = MachineSchema {
         machine: "TestMachine".into(),

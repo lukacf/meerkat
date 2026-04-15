@@ -7,8 +7,10 @@
     clippy::expect_used,
     clippy::cmp_owned,
     clippy::panic,
+    clippy::assign_op_pattern,
     unreachable_code,
     unused_variables,
+    unused_assignments,
     dead_code
 )]
 

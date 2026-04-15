@@ -424,9 +424,14 @@ impl RuntimeIngressAuthority {
         run_id: &RunId,
         contributing_work_ids: &[InputId],
     ) -> RuntimeIngressTransition {
-        let (next_fields, effects) = self
+        let (next_fields, effects) = match self
             .eval_stage_drain_snapshot(run_id, contributing_work_ids)
-            .expect("stage drain snapshot is mechanical once machine legality is known");
+        {
+            Ok(transition) => transition,
+            Err(error) => unreachable!(
+                "stage drain snapshot should be mechanical once machine legality is known: {error}"
+            ),
+        };
         self.commit_effects(next_fields, effects)
     }
 
@@ -437,9 +442,14 @@ impl RuntimeIngressAuthority {
         contributing_work_ids: &[InputId],
         boundary_sequence: u64,
     ) -> RuntimeIngressTransition {
-        let (next_fields, effects) = self
+        let (next_fields, effects) = match self
             .eval_boundary_applied(contributing_work_ids, boundary_sequence)
-            .expect("boundary application is mechanical once machine legality is known");
+        {
+            Ok(transition) => transition,
+            Err(error) => unreachable!(
+                "boundary application should be mechanical once machine legality is known: {error}"
+            ),
+        };
         self.commit_effects(next_fields, effects)
     }
 
@@ -449,9 +459,12 @@ impl RuntimeIngressAuthority {
         &mut self,
         contributing_work_ids: &[InputId],
     ) -> RuntimeIngressTransition {
-        let (next_fields, effects) = self
-            .eval_run_completed(contributing_work_ids)
-            .expect("run completion is mechanical once machine legality is known");
+        let (next_fields, effects) = match self.eval_run_completed(contributing_work_ids) {
+            Ok(transition) => transition,
+            Err(error) => unreachable!(
+                "run completion should be mechanical once machine legality is known: {error}"
+            ),
+        };
         self.commit_effects(next_fields, effects)
     }
 
@@ -465,14 +478,17 @@ impl RuntimeIngressAuthority {
         wake_runtime: bool,
         notice_kind: &str,
     ) -> RuntimeIngressTransition {
-        let (next_fields, effects) = self
-            .eval_replay_queued_contributors(
-                queue_work_ids,
-                steer_work_ids,
-                wake_runtime,
-                notice_kind,
-            )
-            .expect("replay queue routing is mechanical once machine legality is known");
+        let (next_fields, effects) = match self.eval_replay_queued_contributors(
+            queue_work_ids,
+            steer_work_ids,
+            wake_runtime,
+            notice_kind,
+        ) {
+            Ok(transition) => transition,
+            Err(error) => unreachable!(
+                "replay queue routing should be mechanical once machine legality is known: {error}"
+            ),
+        };
         self.commit_effects(next_fields, effects)
     }
 

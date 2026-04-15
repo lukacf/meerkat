@@ -30,7 +30,10 @@ members = [
     "meerkat-machine-schema",
     "meerkat-machine-codegen",
     "meerkat-machine-kernels",
+    "meerkat-machine-dsl-core",
+    "meerkat-machine-dsl",
     "test-fixtures/surface-build-fixtures",
+    "test-fixtures/machine-dsl-tests",
     "xtask",
 ]
 

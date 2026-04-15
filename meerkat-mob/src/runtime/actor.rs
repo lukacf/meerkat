@@ -4947,6 +4947,7 @@ impl MobActor {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn destroy_remote_member_for_destroy(&self, entry: RosterEntry) -> RemoteDestroyOutcome {
         let identity = entry.agent_identity.clone();
         let meerkat_id = entry.meerkat_id.clone();
@@ -5062,6 +5063,7 @@ impl MobActor {
         outcome
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn destroy_remote_members_for_destroy(
         &self,
         remote_entries: Vec<RosterEntry>,
@@ -5127,6 +5129,20 @@ impl MobActor {
                 outstanding.insert(entry.agent_identity.clone());
                 in_flight.push(self.destroy_remote_member_for_destroy(entry));
             }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn destroy_remote_members_for_destroy(
+        &self,
+        remote_entries: Vec<RosterEntry>,
+        report: &mut super::handle::MobDestroyReport,
+    ) {
+        for entry in remote_entries {
+            Self::push_unique_identity(
+                &mut report.orphaned_remote_members,
+                entry.agent_identity.clone(),
+            );
         }
     }
 

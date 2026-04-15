@@ -1,5 +1,7 @@
 use crate::MobError;
 use crate::store::SupervisorAuthorityRecord;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, SendReceipt, TrustedPeerSpec};
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate};

@@ -388,12 +388,17 @@ impl MobBuilder {
             &definition.id,
             supervisor_authority,
         )?);
-        let binding_overlays = storage
-            .runtime_metadata
-            .list_external_binding_overlays(&definition.id)
-            .await?;
-        let seeded_restore_diagnostics =
-            Self::apply_external_binding_overlays(&mut mob_events, &binding_overlays);
+        #[cfg(not(target_arch = "wasm32"))]
+        let seeded_restore_diagnostics = {
+            let binding_overlays = storage
+                .runtime_metadata
+                .list_external_binding_overlays(&definition.id)
+                .await?;
+            Self::apply_external_binding_overlays(&mut mob_events, &binding_overlays)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let seeded_restore_diagnostics = HashMap::new();
+        #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut mob_events);
         let mut roster = Roster::project(&mob_events);
         let task_board = TaskBoard::project(&mob_events);
@@ -532,6 +537,7 @@ impl MobBuilder {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn apply_external_binding_overlays(
         mob_events: &mut [crate::event::MobEvent],
         overlays: &[crate::store::ExternalBindingOverlayRecord],
@@ -595,6 +601,7 @@ impl MobBuilder {
         diagnostics
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn normalize_sessionless_backend_runtime_modes(mob_events: &mut [crate::event::MobEvent]) {
         for event in mob_events {
             let Some(member_spawned) = event.kind.member_spawned_mut() else {

@@ -102,6 +102,12 @@ Current state:
   machine legality only needed member presence, which is already captured by
   `live_runtime_ids != {}`. Removing the counter collapsed the truthful Mob
   baseline again from raw/phase/full `132 / 134 / 1181` to `102 / 104 / 861`
+- the next fast-loop reviewer pass rejected collapsing the remaining dominant
+  Mob drivers `coordinator_bound`, `active_run_count`, `pending_spawn_count`,
+  `live_runtime_ids`, `runtime_fence_tokens`, and
+  `externally_addressable_runtime_ids`; on the current branch tip those fields
+  are carrying real checked-in lifecycle, orchestration, or stale-binding
+  legality rather than overlapping top-level summaries
 - the generated `meerkat_mob_seam` composition now rejects inadmissible queued
   external entry packets instead of deadlocking after terminal Mob shutdown
 - external-turn legality now honors the roster's

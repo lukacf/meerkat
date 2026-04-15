@@ -4198,7 +4198,7 @@ impl MeerkatMachine {
             );
             MeerkatFormalStateProjection {
                 available_fields,
-                unavailable_fields: vec!["active_fence_token".into(), "active_generation".into()],
+                unavailable_fields: vec!["active_fence_token".into()],
             }
         };
 

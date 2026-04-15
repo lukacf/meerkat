@@ -334,6 +334,7 @@ Hopcroft-style behavioral quotient over the reachable graph.
 | `active_visibility_revision` should remain checked-in Meerkat state | rejected / landed | Removed `active_visibility_revision` from the checked-in Meerkat state while collapsing visibility publication to a single staged revision token plus publish-time input legality. The canonical active revision remains in the lower-authority visibility owner. TLC stayed green, the raw quotient dropped from `340` to `260`, and the truthful Meerkat graph fell again from `3,835` to `1,773` reachable states. |
 | `staged_visibility_revision` should remain checked-in Meerkat state | rejected / landed | Removed `staged_visibility_revision` from the checked-in Meerkat state as well. The machine now treats visibility publication as pure publish-time legality over owner-provided revision inputs instead of storing any top-level visibility revision mirrors. TLC stayed green, the raw quotient dropped from `260` to `196`, and the truthful Meerkat graph fell again from `1,773` to `742` reachable states. |
 | `attachment_live` should remain checked-in Meerkat state | rejected / landed | Removed `attachment_live` from the checked-in Meerkat state and collapsed interrupt/cancel/stop legality onto phase rather than on a second top-level "live" bit. TLC stayed green, the raw quotient dropped from `196` to `133`, and the truthful Meerkat graph fell again from `742` to `474` reachable states. |
+| `active_generation` should remain checked-in Meerkat state | rejected / landed | Removed `active_generation` from the checked-in Meerkat state and from the coarse runtime-identity effect payload mirror after confirming the live runtime never used it for legality and the seam never consumed it on the return leg. TLC/Hopcroft stayed exactly flat at `474` reachable with raw / phase / full `133 / 138 / 455`, proving it was fully correlated binding-shadow state. |
 | Helper-owned admission wake/process signaling should stay below the checked-in machine | rejected / landed | Removed admission-side `WakeRuntime` / `InterruptYielding` / `RequestImmediateProcessing` ownership from `RuntimeIngressAuthority`, then lifted the final admission signal classifier into the machine-owned accept surface itself: the checked-in runtime now derives the post-admission signal from the resolved `AcceptOutcome` policy plus the steer/immediacy bit, and the driver helper no longer caches admission-time signal truth locally. All three Meerkat parity audits, the direct driver regression lanes, full runtime tests, and clippy stayed green. |
 | Handwritten runtime-control admission/wake state should stay alive below the two-machine model | rejected / landed | Removed the dead handwritten `RuntimeControlAuthority` admission/wake branch (`SubmitWork`, `AdmissionAccepted`, `AdmissionRejected`, `AdmissionDeduplicated`, `wake_pending`, `process_pending`) after proving the live runtime never exercised it. Exact Meerkat parity stayed green, TLC/Hopcroft stayed flat, and the remaining handwritten helper is now narrowed to coarse run-lifecycle / recycle bookkeeping instead of a shadow admission machine. |
 | Live recycle should keep the helper-only `Recovering` detour | rejected / landed | Collapsed the live helper recycle path to the same direct control projection the checked-in Meerkat machine already models (`Idle/Retired -> Idle`, `Attached -> Attached`). Exact Meerkat parity stayed green, TLC/Hopcroft stayed flat, and the extra helper-side recycle completion transition was removed without changing the truthful state-space readout. |
@@ -882,7 +883,6 @@ primary semantic axis. The most discriminating fields inside the block are now:
 - `silent_intent_overrides` (`2` buckets; split `68 / 49`)
 - `current_run_id` (`2` buckets; split `70 / 47`)
 - `active_fence_token` (`2` buckets; split `78 / 39`)
-- `active_generation` (`2` buckets; split `78 / 39`)
 - `session_id` (`2` buckets; split `80 / 37`)
 - `active_runtime_id` (`2` buckets; split `87 / 30`)
 
@@ -891,6 +891,11 @@ largest Meerkat block is now dominated by run-return state, runtime binding,
 and the still-live silent-intent carrier rather than by visibility projection,
 attachment shadow state, phase labels, or the removed ingress/deferred-name
 mirrors.
+
+A later fast-loop cut removed `active_generation` too. The truthful Meerkat
+readout stayed perfectly flat at `474` reachable with raw / phase / full
+`133 / 138 / 455`, which confirmed that the field was a fully correlated
+binding-shadow rather than behavior-bearing machine state.
 
 ### Audit-map results
 

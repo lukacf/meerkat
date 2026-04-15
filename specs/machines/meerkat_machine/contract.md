@@ -10,7 +10,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `session_id`: `Option<SessionId>`
 - `active_runtime_id`: `Option<AgentRuntimeId>`
 - `active_fence_token`: `Option<FenceToken>`
-- `active_generation`: `Option<Generation>`
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
@@ -89,9 +88,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ShutdownSurface`
 
 ## Effects
-- `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `RuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `RuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `RuntimeBound`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RuntimeRetired`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `RequestCancellationAtBoundary`
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)

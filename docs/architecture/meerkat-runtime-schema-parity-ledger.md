@@ -197,6 +197,13 @@ Current state:
   rather than a second top-level "live" bit. TLC stayed green, the raw
   quotient dropped again from `196` to `133`, and the truthful Meerkat graph
   fell from `742` to `474` reachable states.
+- Fast-loop landed: `active_generation` was removed from the checked-in
+  Meerkat state and from the coarse `RuntimeBound` / `RuntimeRetired` /
+  `RuntimeDestroyed` effect payload mirror. The live runtime never used the
+  stored value for legality, the seam never consumed it on the return leg, and
+  rerunning TLC/Hopcroft stayed exactly flat at `474` reachable with raw /
+  phase / full quotients `133 / 138 / 455`, confirming it was a fully
+  correlated binding-shadow field rather than behavior-bearing state.
 
 ## Full-row Snapshot (2026-04-15)
 

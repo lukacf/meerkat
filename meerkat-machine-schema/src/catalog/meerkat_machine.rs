@@ -49,10 +49,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     TypeRef::Option(Box::new(TypeRef::Named("FenceToken".into()))),
                 ),
                 field(
-                    "active_generation",
-                    TypeRef::Option(Box::new(TypeRef::Named("Generation".into()))),
-                ),
-                field(
                     "current_run_id",
                     TypeRef::Option(Box::new(TypeRef::Named("RunId".into()))),
                 ),
@@ -68,7 +64,6 @@ pub fn meerkat_machine() -> MachineSchema {
                     init("session_id", Expr::None),
                     init("active_runtime_id", Expr::None),
                     init("active_fence_token", Expr::None),
-                    init("active_generation", Expr::None),
                     init("current_run_id", Expr::None),
                     init("pre_run_phase", Expr::None),
                     init("silent_intent_overrides", Expr::EmptySet),
@@ -292,7 +287,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 updates: vec![
                     assign_some("active_runtime_id", "agent_runtime_id"),
                     assign_some("active_fence_token", "fence_token"),
-                    assign_some("active_generation", "generation"),
                 ],
                 to: "Stopped".into(),
                 emit: vec![runtime_identity_emit("RuntimeBound")],
@@ -519,10 +513,6 @@ pub fn meerkat_machine() -> MachineSchema {
                         expr: Expr::None,
                     },
                     Update::Assign {
-                        field: "active_generation".into(),
-                        expr: Expr::None,
-                    },
-                    Update::Assign {
                         field: "pre_run_phase".into(),
                         expr: Expr::None,
                     },
@@ -660,10 +650,6 @@ fn reset_session_state() -> Vec<Update> {
             expr: Expr::None,
         },
         Update::Assign {
-            field: "active_generation".into(),
-            expr: Expr::None,
-        },
-        Update::Assign {
             field: "current_run_id".into(),
             expr: Expr::None,
         },
@@ -678,7 +664,6 @@ fn runtime_identity_fields() -> Vec<FieldSchema> {
     vec![
         field("agent_runtime_id", TypeRef::Named("AgentRuntimeId".into())),
         field("fence_token", TypeRef::Named("FenceToken".into())),
-        field("generation", TypeRef::Named("Generation".into())),
     ]
 }
 
@@ -688,7 +673,6 @@ fn runtime_identity_emit(variant: &str) -> EffectEmit {
         fields: IndexMap::from([
             ("agent_runtime_id".into(), option_value("active_runtime_id")),
             ("fence_token".into(), option_value("active_fence_token")),
-            ("generation".into(), option_value("active_generation")),
         ]),
     }
 }
@@ -784,7 +768,6 @@ fn prepare_bindings_transition(name: &str, from_phase: &str, to_phase: &str) -> 
         updates: vec![
             assign_some("active_runtime_id", "agent_runtime_id"),
             assign_some("active_fence_token", "fence_token"),
-            assign_some("active_generation", "generation"),
         ],
         to: to_phase.into(),
         emit: vec![runtime_identity_emit("RuntimeBound")],
@@ -1875,10 +1858,6 @@ fn absorbed_meerkat_transitions() -> Vec<TransitionSchema> {
     let recycle_updates = vec![
         Update::Assign {
             field: "active_fence_token".into(),
-            expr: Expr::None,
-        },
-        Update::Assign {
-            field: "active_generation".into(),
             expr: Expr::None,
         },
         Update::Assign {

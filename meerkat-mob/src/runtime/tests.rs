@@ -10803,8 +10803,10 @@ async fn test_stop_rejects_active_flow_and_schema_requires_no_active_runs() {
         .expect_err("stop should reject active flows");
     assert!(matches!(
         error,
-        MobError::Internal(message)
-            if message.contains("orchestrator StopOrchestrator transition failed during stop")
+        MobError::InvalidTransition {
+            from: MobState::Running,
+            to: MobState::Stopped,
+        }
     ));
     assert_eq!(handle.status(), MobState::Running);
 

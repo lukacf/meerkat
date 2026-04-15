@@ -185,24 +185,33 @@ impl DriverEntry {
     }
 
     pub(crate) fn runtime_state(&self) -> crate::runtime_state::RuntimeState {
-        match self {
-            DriverEntry::Ephemeral(d) => d.runtime_state(),
-            DriverEntry::Persistent(d) => d.inner_ref().runtime_state(),
-        }
+        self.control_projection_handle()
+            .read()
+            .map(|guard| guard.phase)
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner().phase
+            })
     }
 
     pub(crate) fn current_run_id(&self) -> Option<RunId> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.current_run_id(),
-            DriverEntry::Persistent(d) => d.inner_ref().current_run_id(),
-        }
+        self.control_projection_handle()
+            .read()
+            .map(|guard| guard.current_run_id.clone())
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner().current_run_id.clone()
+            })
     }
 
     pub(crate) fn pre_run_phase(&self) -> Option<crate::runtime_state::RuntimeState> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.pre_run_phase(),
-            DriverEntry::Persistent(d) => d.inner_ref().pre_run_phase(),
-        }
+        self.control_projection_handle()
+            .read()
+            .map(|guard| guard.pre_run_phase)
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner().pre_run_phase
+            })
     }
 
     pub(crate) fn set_control_projection(
@@ -275,17 +284,30 @@ impl DriverEntry {
         &mut self,
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
+        replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
         error: String,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
-                d.run_failed(run_id, contributing_input_ids, error, recoverable)
-                    .await
+                d.run_failed(
+                    run_id,
+                    contributing_input_ids,
+                    replay_plan,
+                    error,
+                    recoverable,
+                )
+                .await
             }
             DriverEntry::Persistent(d) => {
-                d.run_failed(run_id, contributing_input_ids, error, recoverable)
-                    .await
+                d.run_failed(
+                    run_id,
+                    contributing_input_ids,
+                    replay_plan,
+                    error,
+                    recoverable,
+                )
+                .await
             }
         }
     }
@@ -592,6 +614,27 @@ fn machine_validate_run_failed(
     Ok(())
 }
 
+fn machine_build_replay_plan(
+    driver: &DriverEntry,
+    contributing_work_ids: &[InputId],
+    notice_kind: &'static str,
+) -> crate::driver::ephemeral::ReplayQueuedContributorsPlan {
+    let mut queue_work_ids = Vec::new();
+    let mut steer_work_ids = Vec::new();
+    for work_id in contributing_work_ids {
+        match driver.ingress().handling_mode(work_id) {
+            Some(meerkat_core::types::HandlingMode::Steer) => steer_work_ids.push(work_id.clone()),
+            _ => queue_work_ids.push(work_id.clone()),
+        }
+    }
+    crate::driver::ephemeral::ReplayQueuedContributorsPlan {
+        wake_runtime: !(queue_work_ids.is_empty() && steer_work_ids.is_empty()),
+        queue_work_ids,
+        steer_work_ids,
+        notice_kind,
+    }
+}
+
 async fn machine_stop_runtime(driver: &mut DriverEntry) -> Result<(), RuntimeDriverError> {
     match driver.runtime_state() {
         RuntimeState::Initializing
@@ -798,10 +841,12 @@ pub(crate) async fn commit_runtime_loop_run(
         let unwind_run_id = run_id.clone();
         let staged_input_ids = machine_staged_contributors(&driver);
         machine_validate_run_failed(&driver, &staged_input_ids)?;
+        let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
         if let Err(unwind_err) = driver
             .run_failed(
                 unwind_run_id.clone(),
                 staged_input_ids,
+                replay_plan,
                 format!("boundary commit failed: {err}"),
                 true,
             )
@@ -855,8 +900,15 @@ pub(crate) async fn fail_runtime_loop_run(
     let failed_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)?;
+    let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     driver
-        .run_failed(failed_run_id.clone(), staged_input_ids, error, true)
+        .run_failed(
+            failed_run_id.clone(),
+            staged_input_ids,
+            replay_plan,
+            error,
+            true,
+        )
         .await
         .map_err(|run_err| {
             RuntimeDriverError::Internal(format!("failed to record run-failed event: {run_err}"))
@@ -967,6 +1019,12 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 struct RuntimeSessionEntry {
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
+    /// Canonical coarse control projection for this session.
+    ///
+    /// The driver reads this to realize shell mechanics, but machine-facing
+    /// queries should publish from this shared cell rather than treating the
+    /// driver shell as the source of lifecycle truth.
+    control_projection: Arc<StdRwLock<crate::driver::ephemeral::RuntimeControlProjection>>,
     /// Shared async-operation lifecycle registry for this runtime/session.
     ops_lifecycle: Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
     /// Runtime epoch identity — stable across rebuilds, rotated on reset/restart-without-recovery.
@@ -1020,6 +1078,16 @@ enum RegistrationPhase {
 }
 
 impl RuntimeSessionEntry {
+    fn control_snapshot(&self) -> crate::driver::ephemeral::RuntimeControlProjection {
+        self.control_projection
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner().clone()
+            })
+    }
+
     fn attachment_is_live(&self) -> bool {
         match &self.phase {
             RegistrationPhase::Active(attachment) => {
@@ -2086,11 +2154,13 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {
-                let (_session_id, driver, _completions, _wake_tx) =
-                    self.lookup_entry(&runtime_id).await?;
-                let drv = driver.lock().await;
+                let session_id = Self::resolve_session_id(&runtime_id)?;
+                let sessions = self.sessions.read().await;
+                let entry = sessions
+                    .get(&session_id)
+                    .ok_or(RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
                 Ok(MeerkatMachineCommandResult::RuntimeState(
-                    drv.as_driver().runtime_state(),
+                    entry.control_snapshot().phase,
                 ))
             }
             MeerkatMachineCommand::LoadBoundaryReceipt {
@@ -2455,8 +2525,9 @@ impl MeerkatMachine {
 
         let (ops_lifecycle, epoch_id, cursor_state) =
             self.recover_or_create_ops_state(&session_id).await;
-
+        let control_projection = entry.control_projection_handle();
         let session_entry = RuntimeSessionEntry {
+            control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
             epoch_id,
@@ -2604,12 +2675,14 @@ impl MeerkatMachine {
                         entry.ops_lifecycle.clone(),
                     )
                 } else {
+                    let control_projection = recovered_entry.control_projection_handle();
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
+                            control_projection,
                             driver: driver.clone(),
                             ops_lifecycle: recovered_ops.clone(),
                             epoch_id: recovered_epoch,
@@ -3660,6 +3733,7 @@ impl MeerkatMachine {
     ) -> Option<MeerkatMachineSpineSnapshot> {
         let (
             driver_handle,
+            control_snapshot,
             completions_handle,
             ops_lifecycle,
             cursor_state,
@@ -3687,6 +3761,7 @@ impl MeerkatMachine {
                 });
             (
                 Arc::clone(&entry.driver),
+                entry.control_snapshot(),
                 Arc::clone(&entry.completions),
                 Arc::clone(&entry.ops_lifecycle),
                 Arc::clone(&entry.cursor_state),
@@ -3763,18 +3838,10 @@ impl MeerkatMachine {
             },
         };
 
-        let control_projection = driver
-            .control_projection_handle()
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| {
-                tracing::error!("runtime control projection lock poisoned");
-                poisoned.into_inner().clone()
-            });
         let control = MeerkatControlSnapshot {
-            phase: control_projection.phase,
-            current_run_id: control_projection.current_run_id,
-            pre_run_phase: control_projection.pre_run_phase,
+            phase: control_snapshot.phase,
+            current_run_id: control_snapshot.current_run_id,
+            pre_run_phase: control_snapshot.pre_run_phase,
         };
 
         let admission_order: Vec<MeerkatAdmittedInputSnapshot> = ingress
@@ -4404,16 +4471,27 @@ impl MeerkatMachine {
     }
 
     async fn existing_session_runtime_state(&self, session_id: &SessionId) -> Option<RuntimeState> {
-        let driver = {
+        let control = {
             let sessions = self.sessions.read().await;
-            sessions.get(session_id).map(|entry| entry.driver.clone())
+            sessions
+                .get(session_id)
+                .map(|entry| entry.control_snapshot())
         }?;
-        Some(Self::driver_runtime_state(&driver).await)
+        Some(control.phase)
     }
 
     async fn driver_runtime_state(driver: &SharedDriver) -> RuntimeState {
-        let driver = driver.lock().await;
-        driver.as_driver().runtime_state()
+        let control_handle = {
+            let driver = driver.lock().await;
+            driver.control_projection_handle()
+        };
+        control_handle
+            .read()
+            .map(|guard| guard.phase)
+            .unwrap_or_else(|poisoned| {
+                tracing::error!("runtime control projection lock poisoned");
+                poisoned.into_inner().phase
+            })
     }
 
     /// Look up the session entry for a runtime ID, returning a control-plane error

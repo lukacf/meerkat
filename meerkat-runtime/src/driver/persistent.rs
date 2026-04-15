@@ -466,12 +466,19 @@ impl PersistentRuntimeDriver {
         &mut self,
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
+        replay_plan: super::ephemeral::ReplayQueuedContributorsPlan,
         error: String,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         self.inner
-            .run_failed(run_id, contributing_input_ids, error, recoverable)
+            .run_failed(
+                run_id,
+                contributing_input_ids,
+                replay_plan,
+                error,
+                recoverable,
+            )
             .await?;
         let input_states = self.inner.input_states_snapshot();
         if let Err(err) = self

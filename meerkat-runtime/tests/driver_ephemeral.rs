@@ -347,7 +347,18 @@ async fn on_run_failed_rollbacks() {
 
     // Run failed
     driver
-        .run_failed(run_id, vec![input_id.clone()], "LLM error".into(), true)
+        .run_failed(
+            run_id,
+            vec![input_id.clone()],
+            crate::driver::ephemeral::ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![input_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "LLM error".into(),
+            true,
+        )
         .await
         .unwrap();
     complete_run_projection(&mut driver, RuntimeState::Idle);
@@ -377,7 +388,18 @@ async fn on_run_failed_requests_wake_for_backlog() {
     driver.stage_input(&input1_id, &run_id).unwrap();
 
     driver
-        .run_failed(run_id, vec![input1_id.clone()], "LLM error".into(), true)
+        .run_failed(
+            run_id,
+            vec![input1_id.clone()],
+            crate::driver::ephemeral::ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![input1_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "LLM error".into(),
+            true,
+        )
         .await
         .unwrap();
 
@@ -491,7 +513,18 @@ async fn rollback_restores_queue_projection_order() {
     driver.stage_input(&first_id, &run_id).unwrap();
 
     driver
-        .run_failed(run_id, vec![first_id.clone()], "rollback".into(), true)
+        .run_failed(
+            run_id,
+            vec![first_id.clone()],
+            crate::driver::ephemeral::ReplayQueuedContributorsPlan {
+                queue_work_ids: vec![first_id.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed",
+            },
+            "rollback".into(),
+            true,
+        )
         .await
         .unwrap();
 

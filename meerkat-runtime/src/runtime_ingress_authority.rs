@@ -43,9 +43,10 @@ pub struct RequestId(pub String);
 /// Shell code classifies raw inputs into these typed inputs, then calls
 /// [`RuntimeIngressAuthority::apply`]. For admission/coalescing/supersession
 /// this helper still owns the legality. For run-batch contributor paths
-/// (`StageDrainSnapshot`, `BoundaryApplied`, `RunCompleted`, `RunFailed`,
-/// `RunCancelled`) the checked-in `MeerkatMachine` now owns the legality and
-/// this helper applies only the already-decided queue/lifecycle updates.
+/// (`StageDrainSnapshot`, `BoundaryApplied`, `RunCompleted`,
+/// `ReplayQueuedContributors`) the checked-in `MeerkatMachine` now owns the
+/// legality and replay classification, and this helper applies only the
+/// already-decided queue/lifecycle updates.
 #[derive(Debug, Clone)]
 pub enum RuntimeIngressInput {
     /// Admit a queued input (Queue or Steer handling mode).
@@ -88,10 +89,17 @@ pub enum RuntimeIngressInput {
     },
     /// Run completed: consume all contributors.
     RunCompleted { contributing_work_ids: Vec<InputId> },
-    /// Run failed: rollback staged contributors to queued.
-    RunFailed { contributing_work_ids: Vec<InputId> },
-    /// Run cancelled: rollback staged contributors to queued.
-    RunCancelled { contributing_work_ids: Vec<InputId> },
+    /// Replay already-classified staged contributors back to their queue lanes.
+    ///
+    /// The checked-in Meerkat machine owns replay classification and wake
+    /// semantics; the ingress helper only applies the already-decided queue and
+    /// lifecycle mutations.
+    ReplayQueuedContributors {
+        queue_work_ids: Vec<InputId>,
+        steer_work_ids: Vec<InputId>,
+        wake_runtime: bool,
+        notice_kind: String,
+    },
     /// Supersede a queued input with a newer one.
     SupersedeQueuedInput {
         new_work_id: InputId,
@@ -435,14 +443,17 @@ impl RuntimeIngressAuthority {
             RuntimeIngressInput::RunCompleted {
                 contributing_work_ids,
             } => self.eval_run_completed(contributing_work_ids),
-
-            RuntimeIngressInput::RunFailed {
-                contributing_work_ids,
-            } => self.eval_run_failed(contributing_work_ids),
-
-            RuntimeIngressInput::RunCancelled {
-                contributing_work_ids,
-            } => self.eval_run_cancelled(contributing_work_ids),
+            RuntimeIngressInput::ReplayQueuedContributors {
+                queue_work_ids,
+                steer_work_ids,
+                wake_runtime,
+                notice_kind,
+            } => self.eval_replay_queued_contributors(
+                queue_work_ids,
+                steer_work_ids,
+                *wake_runtime,
+                notice_kind,
+            ),
 
             RuntimeIngressInput::SupersedeQueuedInput {
                 new_work_id,
@@ -761,11 +772,14 @@ impl RuntimeIngressAuthority {
         Ok((fields, effects))
     }
 
-    fn eval_run_failed(
+    fn eval_replay_queued_contributors(
         &self,
-        contributing_work_ids: &[InputId],
+        queue_work_ids: &[InputId],
+        steer_work_ids: &[InputId],
+        wake_runtime: bool,
+        notice_kind: &str,
     ) -> Result<(RuntimeIngressFields, Vec<RuntimeIngressEffect>), RuntimeIngressError> {
-        if contributing_work_ids.is_empty() {
+        if queue_work_ids.is_empty() && steer_work_ids.is_empty() {
             return Err(RuntimeIngressError::GuardFailed {
                 guard: "current_run_present: no contributors are staged".into(),
             });
@@ -774,26 +788,13 @@ impl RuntimeIngressAuthority {
         let mut fields = self.fields.clone();
         let mut effects = Vec::new();
 
-        // Rollback staged contributors to Queued and re-enqueue
-        for wid in contributing_work_ids {
-            let lifecycle = fields.lifecycle.get(wid);
-            if lifecycle == Some(&InputLifecycleState::Staged) {
+        for wid in queue_work_ids {
+            if fields.lifecycle.get(wid) == Some(&InputLifecycleState::Staged) {
                 fields
                     .lifecycle
                     .insert(wid.clone(), InputLifecycleState::Queued);
-                // Re-enqueue based on handling mode
-                let hm = fields.handling_mode.get(wid).copied();
-                match hm {
-                    Some(HandlingMode::Steer) => {
-                        if !fields.steer_queue.contains(wid) {
-                            fields.steer_queue.insert(0, wid.clone());
-                        }
-                    }
-                    _ => {
-                        if !fields.queue.contains(wid) {
-                            fields.queue.insert(0, wid.clone());
-                        }
-                    }
+                if !fields.queue.contains(wid) {
+                    fields.queue.insert(0, wid.clone());
                 }
                 effects.push(RuntimeIngressEffect::InputLifecycleNotice {
                     work_id: wid.clone(),
@@ -802,52 +803,13 @@ impl RuntimeIngressAuthority {
             }
         }
 
-        // Wake if there's still work in the queue
-        if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
-            effects.push(RuntimeIngressEffect::WakeRuntime);
-        }
-
-        effects.push(RuntimeIngressEffect::IngressNotice {
-            kind: "RunFailed".into(),
-            detail: "StagedRolledBack".into(),
-        });
-
-        Ok((fields, effects))
-    }
-
-    fn eval_run_cancelled(
-        &self,
-        contributing_work_ids: &[InputId],
-    ) -> Result<(RuntimeIngressFields, Vec<RuntimeIngressEffect>), RuntimeIngressError> {
-        // Same logic as RunFailed per the schema.
-        if contributing_work_ids.is_empty() {
-            return Err(RuntimeIngressError::GuardFailed {
-                guard: "current_run_present: no contributors are staged".into(),
-            });
-        }
-
-        let mut fields = self.fields.clone();
-        let mut effects = Vec::new();
-
-        // Rollback staged contributors
-        for wid in contributing_work_ids {
-            let lifecycle = fields.lifecycle.get(wid);
-            if lifecycle == Some(&InputLifecycleState::Staged) {
+        for wid in steer_work_ids {
+            if fields.lifecycle.get(wid) == Some(&InputLifecycleState::Staged) {
                 fields
                     .lifecycle
                     .insert(wid.clone(), InputLifecycleState::Queued);
-                let hm = fields.handling_mode.get(wid).copied();
-                match hm {
-                    Some(HandlingMode::Steer) => {
-                        if !fields.steer_queue.contains(wid) {
-                            fields.steer_queue.insert(0, wid.clone());
-                        }
-                    }
-                    _ => {
-                        if !fields.queue.contains(wid) {
-                            fields.queue.insert(0, wid.clone());
-                        }
-                    }
+                if !fields.steer_queue.contains(wid) {
+                    fields.steer_queue.insert(0, wid.clone());
                 }
                 effects.push(RuntimeIngressEffect::InputLifecycleNotice {
                     work_id: wid.clone(),
@@ -856,12 +818,12 @@ impl RuntimeIngressAuthority {
             }
         }
 
-        if !fields.queue.is_empty() || !fields.steer_queue.is_empty() {
+        if wake_runtime {
             effects.push(RuntimeIngressEffect::WakeRuntime);
         }
 
         effects.push(RuntimeIngressEffect::IngressNotice {
-            kind: "RunCancelled".into(),
+            kind: notice_kind.into(),
             detail: "StagedRolledBack".into(),
         });
 
@@ -1485,8 +1447,11 @@ mod tests {
         .unwrap();
 
         let transition = auth
-            .apply(RuntimeIngressInput::RunFailed {
-                contributing_work_ids: vec![w1.clone()],
+            .apply(RuntimeIngressInput::ReplayQueuedContributors {
+                queue_work_ids: vec![w1.clone()],
+                steer_work_ids: Vec::new(),
+                wake_runtime: true,
+                notice_kind: "RunFailed".into(),
             })
             .expect("run failed should succeed");
 
@@ -1513,8 +1478,11 @@ mod tests {
             contributing_work_ids: vec![w1.clone()],
         })
         .unwrap();
-        auth.apply(RuntimeIngressInput::RunFailed {
-            contributing_work_ids: vec![w1.clone()],
+        auth.apply(RuntimeIngressInput::ReplayQueuedContributors {
+            queue_work_ids: vec![w1.clone()],
+            steer_work_ids: Vec::new(),
+            wake_runtime: true,
+            notice_kind: "RunFailed".into(),
         })
         .unwrap();
 
@@ -1566,8 +1534,11 @@ mod tests {
         })
         .unwrap();
 
-        auth.apply(RuntimeIngressInput::RunCancelled {
-            contributing_work_ids: vec![w1.clone()],
+        auth.apply(RuntimeIngressInput::ReplayQueuedContributors {
+            queue_work_ids: vec![w1.clone()],
+            steer_work_ids: Vec::new(),
+            wake_runtime: true,
+            notice_kind: "RunCancelled".into(),
         })
         .expect("run cancelled should succeed");
 
@@ -1734,8 +1705,11 @@ mod tests {
         })
         .unwrap();
 
-        auth.apply(RuntimeIngressInput::RunFailed {
-            contributing_work_ids: vec![w1.clone()],
+        auth.apply(RuntimeIngressInput::ReplayQueuedContributors {
+            queue_work_ids: Vec::new(),
+            steer_work_ids: vec![w1.clone()],
+            wake_runtime: true,
+            notice_kind: "RunFailed".into(),
         })
         .unwrap();
 

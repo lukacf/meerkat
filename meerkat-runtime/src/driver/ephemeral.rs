@@ -91,6 +91,14 @@ impl Default for RuntimeControlProjection {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReplayQueuedContributorsPlan {
+    pub queue_work_ids: Vec<InputId>,
+    pub steer_work_ids: Vec<InputId>,
+    pub wake_runtime: bool,
+    pub notice_kind: &'static str,
+}
+
 /// Derive the handling mode from a policy decision's routing disposition.
 pub(crate) fn handling_mode_from_policy(policy: &crate::policy::PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
@@ -1141,12 +1149,18 @@ impl EphemeralRuntimeDriver {
         &mut self,
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
+        replay_plan: ReplayQueuedContributorsPlan,
         _error: String,
         _recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
-        match self.ingress.apply(RuntimeIngressInput::RunFailed {
-            contributing_work_ids: contributing_input_ids.clone(),
-        }) {
+        match self
+            .ingress
+            .apply(RuntimeIngressInput::ReplayQueuedContributors {
+                queue_work_ids: replay_plan.queue_work_ids,
+                steer_work_ids: replay_plan.steer_work_ids,
+                wake_runtime: replay_plan.wake_runtime,
+                notice_kind: replay_plan.notice_kind.to_string(),
+            }) {
             Ok(transition) => {
                 self.process_ingress_effects(&transition.effects);
             }

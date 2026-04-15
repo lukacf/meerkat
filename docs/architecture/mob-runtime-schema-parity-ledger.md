@@ -257,6 +257,12 @@ Current state:
   `runtime_fence_tokens`, `pending_spawn_count`, `active_run_count`,
   `externally_addressable_runtime_ids`, `coordinator_bound`, and
   `live_runtime_ids`.
+- The latest fast-loop tranche did not remove another remaining core field.
+  Instead, it moved top-level Mob lifecycle legality for `Stop`, `Resume`,
+  `Complete`, and `Destroy` into the checked-in machine boundary. `MobActor`
+  now rejects those verbs using MobMachine-aligned phase/run predicates first,
+  while the lifecycle and orchestrator authorities are left as realization
+  checks after the machine-owned gate passes.
 
 ## Notes
 
@@ -283,3 +289,7 @@ Current state:
    `externally_addressable_runtime_ids`). On the current design those drivers
    still read as real orchestration and stale-binding legality rather than
    leftover top-level projection state.
+5. The next high-value Mob frontier is no longer raw field removal. It is the
+   `coordinator_bound` duplication between the checked-in orchestrator
+   authority and the lower topology service, plus any remaining top-level
+   lifecycle legality that still bypasses the checked-in machine.

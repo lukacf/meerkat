@@ -383,6 +383,62 @@ impl MobActor {
         self.lifecycle_authority.require_phase(expected, to)
     }
 
+    fn machine_active_run_count(&self) -> u32 {
+        self.run_cancel_tokens.len() as u32
+    }
+
+    fn require_mob_machine_stop(&self) -> Result<(), MobError> {
+        if self.state() != MobState::Running {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            });
+        }
+        if self.machine_active_run_count() != 0 {
+            return Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            });
+        }
+        Ok(())
+    }
+
+    fn require_mob_machine_resume(&self) -> Result<(), MobError> {
+        if self.state() == MobState::Stopped {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            })
+        }
+    }
+
+    fn require_mob_machine_complete(&self) -> Result<(), MobError> {
+        if self.state() == MobState::Running {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Completed,
+            })
+        }
+    }
+
+    fn require_mob_machine_destroy(&self) -> Result<(), MobError> {
+        if matches!(
+            self.state(),
+            MobState::Running | MobState::Stopped | MobState::Completed
+        ) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Destroyed,
+            })
+        }
+    }
+
     /// Guard that the mob is in one of the `allowed` phases.
     ///
     /// Used by command handlers that operate *within* the current state
@@ -1435,7 +1491,7 @@ impl MobActor {
                     let _ = reply_tx.send(self.lifecycle_authority.snapshot());
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Stopped) {
+                    let result = match self.require_mob_machine_stop() {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
@@ -1509,7 +1565,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Stopped], MobState::Running) {
+                    let result = match self.require_mob_machine_resume() {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
@@ -1595,8 +1651,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.expect_state(&[MobState::Running], MobState::Completed)
-                    {
+                    let result = match self.require_mob_machine_complete() {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is completing").await;
                             self.handle_complete().await
@@ -1606,17 +1661,8 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    // Shell guard: reject early if lifecycle authority would not accept
-                    // Destroy. This prevents fail_all_pending_spawns from running as a
-                    // side-effect when the transition is invalid (e.g. already Destroyed).
-                    if !self
-                        .lifecycle_authority
-                        .can_accept(MobLifecycleInput::Destroy)
-                    {
-                        let _ = reply_tx.send(Err(MobError::InvalidTransition {
-                            from: self.state(),
-                            to: MobState::Destroyed,
-                        }));
+                    if let Err(error) = self.require_mob_machine_destroy() {
+                        let _ = reply_tx.send(Err(error));
                         continue;
                     }
                     self.fail_all_pending_spawns("mob is destroying").await;
@@ -4228,21 +4274,6 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_complete preflight")
             .await?;
         self.cancel_all_flow_tasks().await?;
-        if !self
-            .lifecycle_authority
-            .can_accept(MobLifecycleInput::MarkCompleted)
-        {
-            return Err(MobError::Internal(
-                "lifecycle authority rejected MarkCompleted after flow cancellation".into(),
-            ));
-        }
-        if let Some(ref orch) = self.orchestrator
-            && !orch.can_accept(MobOrchestratorInput::MarkCompleted)
-        {
-            return Err(MobError::Internal(
-                "orchestrator authority rejected MarkCompleted after flow cancellation".into(),
-            ));
-        }
 
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is completing.", self.definition.id))
             .await;
@@ -4281,16 +4312,6 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_destroy preflight")?;
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await?;
-        // Gate via lifecycle authority — reject if current phase doesn't support Destroy.
-        if !self
-            .lifecycle_authority
-            .can_accept(MobLifecycleInput::Destroy)
-        {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Destroyed,
-            });
-        }
         self.cancel_all_flow_tasks().await?;
         self.notify_orchestrator_lifecycle(format!("Mob '{}' is destroying.", self.definition.id))
             .await;

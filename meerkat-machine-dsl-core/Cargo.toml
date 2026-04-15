@@ -18,8 +18,5 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 
-[dev-dependencies]
-trybuild = "1"
-
 [lints]
 workspace = true

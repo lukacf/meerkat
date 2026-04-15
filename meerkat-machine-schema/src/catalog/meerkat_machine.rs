@@ -109,6 +109,7 @@ pub fn meerkat_machine() -> MachineSchema {
             "ListActiveInputs".into(),
             "RuntimeState".into(),
             "LoadBoundaryReceipt".into(),
+            "Recover".into(),
         ],
         signals: EnumSchema {
             name: "MeerkatMachineSignal".into(),
@@ -630,74 +631,6 @@ pub fn meerkat_machine() -> MachineSchema {
                 "PublishCommittedVisibleSetStopped",
                 "Stopped",
             ),
-            // Recover: dispatch calls drv.recover() which only touches ingress
-            // authority — the control phase does NOT change. Runtime rejects
-            // Destroyed and Running; all other phases are self-loop no-ops.
-            TransitionSchema {
-                name: "RecoverFromIdle".into(),
-                from: vec!["Idle".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Idle".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
-                name: "RecoverFromAttached".into(),
-                from: vec!["Attached".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Attached".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
-                name: "RecoverFromRetired".into(),
-                from: vec!["Retired".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Retired".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
-                name: "RecoverFromStopped".into(),
-                from: vec!["Stopped".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Stopped".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
-            TransitionSchema {
-                name: "RecoverFromInitializing".into(),
-                from: vec!["Initializing".into()],
-                on: InputMatch {
-                    kind: meerkat_trigger_kind("Recover"),
-                    variant: "Recover".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![],
-                to: "Initializing".into(),
-                emit: vec![notice_emit("recover", "runtime recovering")],
-            },
             TransitionSchema {
                 name: "RetireRequestedFromIdle".into(),
                 from: vec!["Idle".into(), "Attached".into(), "Running".into()],

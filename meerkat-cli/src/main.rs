@@ -60,7 +60,7 @@ use meerkat_core::error::AgentError;
 use meerkat_core::mcp_config::{McpScope, McpTransportKind};
 use meerkat_core::types::OutputSchema;
 use meerkat_store::{RealmBackend, RealmOrigin};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -1613,7 +1613,7 @@ async fn handle_run_command(
             || !labels.is_empty()
             || app_context.is_some()
             || keep_alive
-            || tools.is_some()
+            || !matches!(tools, ToolPreset::Safe)
             || yolo
         {
             return Err(anyhow::anyhow!(
@@ -8632,7 +8632,13 @@ mod tests {
 
         assert_eq!(runtime_skill_id, "demo-skill");
         assert_eq!(runtime_repo.source_uuid, config_repo.source_uuid);
-        assert_eq!(runtime_repo.transport, config_repo.transport);
+        match (&runtime_repo.transport, &config_repo.transport) {
+            (
+                meerkat_core::skills_config::SkillRepoTransport::Filesystem { path: runtime_path },
+                meerkat_core::skills_config::SkillRepoTransport::Filesystem { path: config_path },
+            ) => assert_eq!(runtime_path, config_path),
+            other => panic!("expected filesystem transports, got {other:?}"),
+        }
     }
 
     #[test]

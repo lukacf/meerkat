@@ -3,6 +3,7 @@ name = "machine-dsl-tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
@@ -10,10 +11,13 @@ meerkat-machine-dsl = { path = "../../meerkat-machine-dsl" }
 meerkat-machine-schema = { path = "../../meerkat-machine-schema" }
 meerkat-machine-kernels = { path = "../../meerkat-machine-kernels" }
 meerkat-machine-codegen = { path = "../../meerkat-machine-codegen" }
-indexmap = "2"
+indexmap = "2" # used by DSL macro-generated schema code (invisible to cargo-machete)
 
 [dev-dependencies]
 trybuild = "1"
+
+[package.metadata.cargo-machete]
+ignored = ["indexmap"]  # used by DSL macro-generated schema code
 
 [lints]
 workspace = true

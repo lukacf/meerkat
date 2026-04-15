@@ -2680,7 +2680,6 @@ name = "meerkat-machine-dsl"
 version = "0.5.2"
 dependencies = [
  "meerkat-machine-dsl-core",
- "proc-macro2",
 ]
 
 [[package]]

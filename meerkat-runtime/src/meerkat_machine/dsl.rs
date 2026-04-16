@@ -1998,7 +1998,7 @@ machine! {
         transition SpawnDrain {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SpawnDrain { mode }
-            guard "drain_is_inactive" { self.drain_phase == "Inactive" }
+            guard "drain_can_spawn" { self.drain_phase == "Inactive" || self.drain_phase == "Stopped" || self.drain_phase == "ExitedRespawnable" }
             update {
                 self.drain_phase = "Running";
                 self.drain_mode = Some(mode);

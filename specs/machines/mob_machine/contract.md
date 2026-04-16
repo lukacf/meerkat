@@ -125,7 +125,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
 - Guards:
-  - ``
+  - `coordinator_bound`
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -138,7 +138,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
 - Guards:
-  - ``
+  - `active_members_present`
+  - `current_binding_matches`
+  - `external_origin`
+  - `runtime_externally_addressable`
 - Emits: `RequestRuntimeIngress`
 - To: `Running`
 
@@ -146,7 +149,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `SubmitWork`(agent_runtime_id, fence_token, work_id, origin)
 - Guards:
-  - ``
+  - `active_members_present`
+  - `current_binding_matches`
+  - `internal_origin`
 - Emits: `RequestRuntimeIngress`
 - To: `Running`
 
@@ -154,7 +159,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RetireMember`(agent_runtime_id, fence_token)
 - Guards:
-  - ``
+  - `current_binding_matches`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
@@ -162,7 +167,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ObserveRuntimeRetired`(agent_runtime_id, fence_token)
 - Guards:
-  - ``
+  - `current_binding_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Stopped`
 
@@ -196,7 +201,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`, `Completed`, `Destroyed`
 - On: `ObserveRuntimeDestroyed`(agent_runtime_id, fence_token)
 - Guards:
-  - ``
+  - `current_binding_matches`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Destroyed`
 
@@ -306,28 +311,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `SubscribeAgentEvents`()
 - Guards:
-  - ``
+  - `active_members_present`
 - To: `Running`
 
 ### `SubscribeAgentEventsStopped`
 - From: `Stopped`
 - On: `SubscribeAgentEvents`()
 - Guards:
-  - ``
+  - `active_members_present`
 - To: `Stopped`
 
 ### `SubscribeAgentEventsCompleted`
 - From: `Completed`
 - On: `SubscribeAgentEvents`()
 - Guards:
-  - ``
+  - `active_members_present`
 - To: `Completed`
 
 ### `SubscribeAgentEventsDestroyed`
 - From: `Destroyed`
 - On: `SubscribeAgentEvents`()
 - Guards:
-  - ``
+  - `active_members_present`
 - To: `Destroyed`
 
 ### `SubscribeAllAgentEventsRunning`
@@ -494,7 +499,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RunFlow`()
 - Guards:
-  - ``
+  - `active_members_present`
+  - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -502,7 +508,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StartFlow`()
 - Guards:
-  - ``
+  - `active_members_present`
+  - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
 
@@ -510,7 +517,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `CreateRun`()
 - Guards:
-  - ``
+  - `active_members_present`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
@@ -518,7 +525,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StartRun`()
 - Guards:
-  - ``
+  - `active_members_present`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
@@ -532,7 +539,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Completed`
 - On: `CompleteFlow`()
 - Guards:
-  - ``
+  - `active_runs_present`
 - Emits: `FlowTerminalized`
 - To: `Running`
 
@@ -540,7 +547,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`
 - On: `FinishRun`()
 - Guards:
-  - ``
+  - `active_runs_present`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
@@ -548,7 +555,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Retire`(agent_runtime_id)
 - Guards:
-  - ``
+  - `active_members_present`
+  - `runtime_id_present`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
@@ -556,7 +564,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `Retire`(agent_runtime_id)
 - Guards:
-  - ``
+  - `active_members_present`
+  - `runtime_id_present`
 - Emits: `RequestRuntimeRetire`
 - To: `Stopped`
 
@@ -576,7 +585,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`
 - On: `CompleteSpawn`()
 - Guards:
-  - ``
+  - `pending_spawns_present`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Running`
 
@@ -589,7 +598,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Respawn`(agent_runtime_id)
 - Guards:
-  - ``
+  - `runtime_id_present`
+  - `coordinator_bound`
 - Emits: `ExposePendingSpawn`
 - To: `Running`
 
@@ -597,7 +607,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `CancelAllWork`(agent_runtime_id, fence_token)
 - Guards:
-  - ``
+  - `active_members_present`
+  - `current_binding_matches`
 - Emits: `FlowTerminalized`
 - To: `Running`
 

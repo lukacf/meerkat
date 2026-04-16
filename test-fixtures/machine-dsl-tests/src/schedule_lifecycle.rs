@@ -138,7 +138,7 @@ machine! {
 
         transition RecordPlanningWindowActive {
             on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
-            guard { self.lifecycle_phase == Phase::Active && next_occurrence_ordinal > 0 }
+            guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Active && next_occurrence_ordinal > 0 }
             update {
                 self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
                 self.next_occurrence_ordinal = next_occurrence_ordinal;
@@ -150,7 +150,7 @@ machine! {
 
         transition RecordPlanningWindowPaused {
             on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
-            guard { self.lifecycle_phase == Phase::Paused && next_occurrence_ordinal > 0 }
+            guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Paused && next_occurrence_ordinal > 0 }
             update {
                 self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
                 self.next_occurrence_ordinal = next_occurrence_ordinal;
@@ -360,7 +360,7 @@ mod tests {
             hand_schema.effect_dispositions.len()
         );
 
-        // Verify from-phases match
+        // Verify from-phases and guard names match
         for hand_t in &hand_schema.transitions {
             let dsl_t = dsl_schema
                 .transitions
@@ -376,6 +376,22 @@ mod tests {
                 "from mismatch for `{}`: dsl={:?}, hand={:?}",
                 hand_t.name, dsl_from, hand_from
             );
+            // Guard count and names must match
+            assert_eq!(
+                dsl_t.guards.len(),
+                hand_t.guards.len(),
+                "guard count mismatch for `{}`: dsl={}, hand={}",
+                hand_t.name,
+                dsl_t.guards.len(),
+                hand_t.guards.len()
+            );
+            for (dsl_g, hand_g) in dsl_t.guards.iter().zip(hand_t.guards.iter()) {
+                assert_eq!(
+                    dsl_g.name, hand_g.name,
+                    "guard name mismatch for `{}`: dsl={:?}, hand={:?}",
+                    hand_t.name, dsl_g.name, hand_g.name
+                );
+            }
         }
     }
 

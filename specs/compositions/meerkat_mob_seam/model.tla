@@ -424,7 +424,8 @@ meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previou
        /\ packet.payload.tool_visibility_delta = arg_tool_visibility_delta
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
-       /\ ((meerkat_session_id # None) /\ (meerkat_active_runtime_id # None))
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Attached"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -452,7 +453,8 @@ meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous
        /\ packet.payload.tool_visibility_delta = arg_tool_visibility_delta
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_session_id # None) /\ (meerkat_active_runtime_id # None))
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Running"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1084,7 +1086,10 @@ meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg
        /\ packet.payload.staged_visibility_revision = arg_staged_visibility_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)
+       /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
+       /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Idle"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1108,7 +1113,10 @@ meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter,
        /\ packet.payload.staged_visibility_revision = arg_staged_visibility_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)
+       /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
+       /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Attached"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1132,7 +1140,10 @@ meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, 
        /\ packet.payload.staged_visibility_revision = arg_staged_visibility_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)
+       /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
+       /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Running"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1156,7 +1167,10 @@ meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, 
        /\ packet.payload.staged_visibility_revision = arg_staged_visibility_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Retired"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)
+       /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
+       /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Retired"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1180,7 +1194,10 @@ meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, 
        /\ packet.payload.staged_visibility_revision = arg_staged_visibility_revision
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Stopped"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)
+       /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
+       /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Stopped"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -1980,7 +1997,9 @@ meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_proce
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = FALSE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Idle"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2002,7 +2021,9 @@ meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_pr
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = TRUE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Idle"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2024,7 +2045,9 @@ meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediat
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = TRUE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Running"
        /\ meerkat_current_run_id' = Some(packet.payload.run_id)
        /\ meerkat_pre_run_phase' = Some("attached")
@@ -2048,7 +2071,9 @@ meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_p
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = FALSE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Attached"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2070,7 +2095,9 @@ meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immed
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = FALSE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Running"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2092,7 +2119,9 @@ meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_i
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = TRUE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = FALSE)
+       /\ (packet.payload.interrupt_yielding = TRUE)
        /\ meerkat_phase' = "Running"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2114,7 +2143,9 @@ meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE))
+       /\ (meerkat_session_id # None)
+       /\ (packet.payload.request_immediate_processing = TRUE)
+       /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Running"
        /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -2381,7 +2412,8 @@ meerkat_CommitRunningToIdle(arg_input_id, arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("idle")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("idle"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Idle"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -2403,7 +2435,8 @@ meerkat_CommitRunningToAttached(arg_input_id, arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("attached")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("attached"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Attached"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -2425,7 +2458,8 @@ meerkat_CommitRunningToRetired(arg_input_id, arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("retired")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("retired"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Retired"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -2446,7 +2480,8 @@ meerkat_FailRunningToIdle(arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("idle")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("idle"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Idle"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -2467,7 +2502,8 @@ meerkat_FailRunningToAttached(arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("attached")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("attached"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Attached"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -2488,7 +2524,8 @@ meerkat_FailRunningToRetired(arg_run_id) ==
        /\ packet.payload.run_id = arg_run_id
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
-       /\ ((meerkat_pre_run_phase = Some("retired")) /\ (meerkat_current_run_id = Some(packet.payload.run_id)))
+       /\ (meerkat_pre_run_phase = Some("retired"))
+       /\ (meerkat_current_run_id = Some(packet.payload.run_id))
        /\ meerkat_phase' = "Retired"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
@@ -3035,7 +3072,10 @@ mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (packet.payload.origin = "External") /\ (packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids))
+       /\ (mob_live_runtime_ids # {})
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
+       /\ (packet.payload.origin = "External")
+       /\ (packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids)
        /\ mob_phase' = "Running"
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)])
@@ -3057,7 +3097,9 @@ mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id
        /\ packet.payload.origin = arg_origin
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (packet.payload.origin = "Internal"))
+       /\ (mob_live_runtime_ids # {})
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
+       /\ (packet.payload.origin = "Internal")
        /\ mob_phase' = "Running"
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)])
@@ -4115,7 +4157,8 @@ mob_RunFlowRunning ==
        /\ packet.variant = "RunFlow"
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (mob_coordinator_bound = TRUE))
+       /\ (mob_live_runtime_ids # {})
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4134,7 +4177,8 @@ mob_StartFlowRunning ==
        /\ packet.variant = "StartFlow"
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (mob_coordinator_bound = TRUE))
+       /\ (mob_live_runtime_ids # {})
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4247,7 +4291,8 @@ mob_RetireRunning(arg_agent_runtime_id) ==
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+       /\ (mob_live_runtime_ids # {})
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
@@ -4268,7 +4313,8 @@ mob_RetireStopped(arg_agent_runtime_id) ==
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
-       /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+       /\ (mob_live_runtime_ids # {})
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Stopped"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
@@ -4368,7 +4414,8 @@ mob_RespawnRunning(arg_agent_runtime_id) ==
        /\ packet.payload.agent_runtime_id = arg_agent_runtime_id
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (mob_coordinator_bound = TRUE))
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
+       /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
@@ -4388,7 +4435,8 @@ mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token) ==
        /\ packet.payload.fence_token = arg_fence_token
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
-       /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+       /\ (mob_live_runtime_ids # {})
+       /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -4412,8 +4460,8 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "UnregisterSession") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id = Some(packet.payload.session_id)))
     \/ /\ (packet.variant = "UnregisterSession") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id = Some(packet.payload.session_id)))
     \/ /\ (packet.variant = "UnregisterSession") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id = Some(packet.payload.session_id)))
-    \/ /\ (packet.variant = "ReconfigureSessionLlmIdentity") /\ (meerkat_phase = "Attached") /\ (((meerkat_session_id # None) /\ (meerkat_active_runtime_id # None)))
-    \/ /\ (packet.variant = "ReconfigureSessionLlmIdentity") /\ (meerkat_phase = "Running") /\ (((meerkat_session_id # None) /\ (meerkat_active_runtime_id # None)))
+    \/ /\ (packet.variant = "ReconfigureSessionLlmIdentity") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_active_runtime_id # None))
+    \/ /\ (packet.variant = "ReconfigureSessionLlmIdentity") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_active_runtime_id # None))
     \/ /\ (packet.variant = "StagePersistentFilter") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "StagePersistentFilter") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "StagePersistentFilter") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
@@ -4444,11 +4492,11 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "InterruptCurrentRun") /\ (meerkat_phase = "Running")
     \/ /\ (packet.variant = "CancelAfterBoundary") /\ (meerkat_phase = "Attached")
     \/ /\ (packet.variant = "CancelAfterBoundary") /\ (meerkat_phase = "Running")
-    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Idle") /\ (((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))))
-    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Attached") /\ (((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))))
-    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Running") /\ (((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))))
-    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Retired") /\ (((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))))
-    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Stopped") /\ (((meerkat_session_id # None) /\ (packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision) /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names))) /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))))
+    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)) /\ (((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))) /\ ((\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)) /\ (((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))) /\ ((\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)) /\ (((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))) /\ ((\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)) /\ (((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))) /\ ((\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
+    \/ /\ (packet.variant = "PublishCommittedVisibleSet") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((packet.payload.active_visibility_revision >= packet.payload.staged_visibility_revision)) /\ (((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))) /\ ((\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names)))
     \/ /\ (packet.variant = "Retire") /\ (meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Running")
     \/ /\ (packet.variant = "Reset") /\ (meerkat_phase = "Initializing" \/ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Retired")
     \/ /\ (packet.variant = "StopRuntimeExecutor") /\ (meerkat_phase = "Initializing" \/ meerkat_phase = "Idle" \/ meerkat_phase = "Retired")
@@ -4488,31 +4536,31 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "PublishEvent") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "PublishEvent") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "PublishEvent") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Idle") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Idle") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Attached") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Attached") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = FALSE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = FALSE) /\ (packet.payload.interrupt_yielding = TRUE)))
-    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ (((meerkat_session_id # None) /\ (packet.payload.request_immediate_processing = TRUE) /\ (packet.payload.interrupt_yielding = FALSE)))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = FALSE)) /\ ((packet.payload.interrupt_yielding = FALSE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = TRUE)) /\ ((packet.payload.interrupt_yielding = FALSE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = TRUE)) /\ ((packet.payload.interrupt_yielding = FALSE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = FALSE)) /\ ((packet.payload.interrupt_yielding = FALSE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = FALSE)) /\ ((packet.payload.interrupt_yielding = FALSE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = FALSE)) /\ ((packet.payload.interrupt_yielding = TRUE))
+    \/ /\ (packet.variant = "AcceptWithCompletion") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((packet.payload.request_immediate_processing = TRUE)) /\ ((packet.payload.interrupt_yielding = FALSE))
     \/ /\ (packet.variant = "AcceptWithoutWake") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "AcceptWithoutWake") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "AcceptWithoutWake") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "Prepare") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
     \/ /\ (packet.variant = "Prepare") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
-    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("idle")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
-    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("attached")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
-    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("retired")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
-    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("idle")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
-    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("attached")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
-    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ (((meerkat_pre_run_phase = Some("retired")) /\ (meerkat_current_run_id = Some(packet.payload.run_id))))
+    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("idle"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
+    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("attached"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
+    \/ /\ (packet.variant = "Commit") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("retired"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
+    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("idle"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
+    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("attached"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
+    \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("retired"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
     \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Idle" \/ meerkat_phase = "Retired") /\ ((meerkat_active_runtime_id # None))
     \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Attached") /\ ((meerkat_active_runtime_id # None))
 
 EntryPacketAdmissible_mob(packet) ==
     \/ /\ (packet.variant = "Spawn") /\ (mob_phase = "Running") /\ ((mob_coordinator_bound = TRUE))
-    \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ (((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (packet.payload.origin = "External") /\ (packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids)))
-    \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ (((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (packet.payload.origin = "Internal")))
+    \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids)) /\ ((packet.payload.origin = "External")) /\ ((packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids))
+    \/ /\ (packet.variant = "SubmitWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids)) /\ ((packet.payload.origin = "Internal"))
     \/ /\ (packet.variant = "RecordOperatorActionProvenance") /\ (mob_phase = "Running")
     \/ /\ (packet.variant = "RecordOperatorActionProvenance") /\ (mob_phase = "Stopped")
     \/ /\ (packet.variant = "RecordOperatorActionProvenance") /\ (mob_phase = "Completed")
@@ -4547,15 +4595,15 @@ EntryPacketAdmissible_mob(packet) ==
     \/ /\ (packet.variant = "Shutdown") /\ (mob_phase = "Stopped")
     \/ /\ (packet.variant = "Shutdown") /\ (mob_phase = "Completed")
     \/ /\ (packet.variant = "CancelFlow") /\ (mob_phase = "Running")
-    \/ /\ (packet.variant = "RunFlow") /\ (mob_phase = "Running") /\ (((mob_live_runtime_ids # {}) /\ (mob_coordinator_bound = TRUE)))
+    \/ /\ (packet.variant = "RunFlow") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((mob_coordinator_bound = TRUE))
     \/ /\ (packet.variant = "Unwire") /\ (mob_phase = "Running")
-    \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Running") /\ (((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)))
-    \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Stopped") /\ (((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)))
+    \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+    \/ /\ (packet.variant = "Retire") /\ (mob_phase = "Stopped") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
     \/ /\ (packet.variant = "RetireAll") /\ (mob_phase = "Running")
     \/ /\ (packet.variant = "RetireAll") /\ (mob_phase = "Stopped")
     \/ /\ (packet.variant = "Destroy") /\ (mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed")
-    \/ /\ (packet.variant = "Respawn") /\ (mob_phase = "Running") /\ (((packet.payload.agent_runtime_id \in mob_live_runtime_ids) /\ (mob_coordinator_bound = TRUE)))
-    \/ /\ (packet.variant = "CancelAllWork") /\ (mob_phase = "Running") /\ (((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)))
+    \/ /\ (packet.variant = "Respawn") /\ (mob_phase = "Running") /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids)) /\ ((mob_coordinator_bound = TRUE))
+    \/ /\ (packet.variant = "CancelAllWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
 
 EntryPacketAdmissible(packet) ==
     CASE

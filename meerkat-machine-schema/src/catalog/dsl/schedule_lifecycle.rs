@@ -138,7 +138,7 @@ machine! {
 
         transition RecordPlanningWindowActive {
             on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
-            guard { self.lifecycle_phase == Phase::Active && next_occurrence_ordinal > 0 }
+            guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Active && next_occurrence_ordinal > 0 }
             update {
                 self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
                 self.next_occurrence_ordinal = next_occurrence_ordinal;
@@ -150,7 +150,7 @@ machine! {
 
         transition RecordPlanningWindowPaused {
             on input RecordPlanningWindow { planning_cursor_utc_ms, next_occurrence_ordinal }
-            guard { self.lifecycle_phase == Phase::Paused && next_occurrence_ordinal > 0 }
+            guard "planning_window_advances_ordinal" { self.lifecycle_phase == Phase::Paused && next_occurrence_ordinal > 0 }
             update {
                 self.planning_cursor_utc_ms = Some(planning_cursor_utc_ms);
                 self.next_occurrence_ordinal = next_occurrence_ordinal;

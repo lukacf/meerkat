@@ -19670,6 +19670,12 @@ fn mob_runtime_parity_field_value(
         "coordinator_bound" => snapshot
             .coordinator_bound
             .map(MobRuntimeParityExprValue::Bool),
+        // Supervisor bridge fields — not yet wired to runtime snapshot;
+        // default values match schema init for parity coverage.
+        "remote_member_count" => Some(MobRuntimeParityExprValue::U64(0)),
+        "supervisor_authorized" => Some(MobRuntimeParityExprValue::Bool(false)),
+        "supervisor_rotating" => Some(MobRuntimeParityExprValue::Bool(false)),
+        "rotation_pending_acks" => Some(MobRuntimeParityExprValue::U64(0)),
         _ => None,
     }
 }

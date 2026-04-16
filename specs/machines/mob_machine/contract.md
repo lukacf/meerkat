@@ -13,10 +13,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_run_count`: `u32`
 - `pending_spawn_count`: `u32`
 - `coordinator_bound`: `Bool`
+- `remote_member_count`: `u32`
+- `supervisor_authorized`: `Bool`
+- `supervisor_rotating`: `Bool`
+- `rotation_pending_acks`: `u32`
 
 ## Inputs
 - `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String)
+- `RotateSupervisor`
+- `AckRotation`
 - `RunFlow`
 - `CancelFlow`
 - `FlowStatus`
@@ -106,6 +112,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestRuntimeRetire`
 - `RequestRuntimeDestroy`
 - `EmitMemberLifecycleNotice`(kind: String)
+- `BridgeBindMember`
+- `BridgeAuthorizeSupervisor`
+- `BridgeRevokeSupervisor`
+- `BridgeDeliverMemberInput`
+- `BridgeObserveMember`
+- `BridgeInterruptMember`
+- `BridgeRetireMember`
+- `BridgeDestroyMember`
+- `BridgeWireMember`
+- `BridgeUnwireMember`
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
 - `AppendFailureLedger`
@@ -126,7 +142,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
 - Guards:
   - `coordinator_bound`
-- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
+- Emits: `RequestRuntimeBinding`, `BridgeBindMember`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
 ### `ObserveRuntimeReady`
@@ -190,6 +206,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `no_active_runs`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Completed`
+
+### `RotateSupervisorRunning`
+- From: `Running`
+- On: `RotateSupervisor`()
+- Emits: `BridgeAuthorizeSupervisor`
+- To: `Running`
+
+### `AckRotationRunning`
+- From: `Running`
+- On: `AckRotation`()
+- Guards:
+  - `rotation_pending_acks_positive`
+- To: `Running`
 
 ### `DestroyMob`
 - From: `Running`, `Stopped`, `Completed`

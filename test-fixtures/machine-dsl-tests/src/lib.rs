@@ -8,6 +8,7 @@
     clippy::cmp_owned,
     clippy::panic,
     clippy::assign_op_pattern,
+    clippy::iter_cloned_collect,
     unreachable_code,
     unused_variables,
     unused_assignments,

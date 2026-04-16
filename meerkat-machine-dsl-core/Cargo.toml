@@ -1,7 +1,6 @@
 [package]
 name = "meerkat-machine-dsl-core"
 description = "Parsing, validation, and code generation for the Meerkat machine DSL"
-publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

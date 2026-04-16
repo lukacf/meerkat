@@ -48,10 +48,18 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
     let state_name = crate::gen_state::state_struct_name(def);
 
+    // When rust_crate is "self", the DSL is invoked inside meerkat-machine-schema
+    // itself, so imports use `crate::` instead of `meerkat_machine_schema::`.
+    let schema_crate = if def.rust_crate == "self" {
+        quote! { crate }
+    } else {
+        quote! { meerkat_machine_schema }
+    };
+
     quote! {
         impl #state_name {
-            pub fn schema() -> meerkat_machine_schema::MachineSchema {
-                use meerkat_machine_schema::*;
+            pub fn schema() -> #schema_crate::MachineSchema {
+                use #schema_crate::*;
 
                 MachineSchema {
                     machine: #machine_name.into(),

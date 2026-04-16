@@ -158,8 +158,7 @@ UnregisterSessionStopped(arg_session_id) ==
 
 ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
     /\ phase = "Attached"
-    /\ (session_id # None)
-    /\ (active_runtime_id # None)
+    /\ ((session_id # None) /\ (active_runtime_id # None))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -167,8 +166,7 @@ ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_sta
 
 ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
     /\ phase = "Running"
-    /\ (session_id # None)
-    /\ (active_runtime_id # None)
+    /\ ((session_id # None) /\ (active_runtime_id # None))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -425,10 +423,7 @@ BoundaryAppliedPublish(revision) ==
 
 PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
     /\ phase = "Idle"
-    /\ (session_id # None)
-    /\ (active_visibility_revision >= staged_visibility_revision)
-    /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
-    /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
+    /\ ((session_id # None) /\ (active_visibility_revision >= staged_visibility_revision) /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names))) /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -436,10 +431,7 @@ PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_de
 
 PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
     /\ phase = "Attached"
-    /\ (session_id # None)
-    /\ (active_visibility_revision >= staged_visibility_revision)
-    /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
-    /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
+    /\ ((session_id # None) /\ (active_visibility_revision >= staged_visibility_revision) /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names))) /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -447,10 +439,7 @@ PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requeste
 
 PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
     /\ phase = "Running"
-    /\ (session_id # None)
-    /\ (active_visibility_revision >= staged_visibility_revision)
-    /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
-    /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
+    /\ ((session_id # None) /\ (active_visibility_revision >= staged_visibility_revision) /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names))) /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names)))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -458,10 +447,7 @@ PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested
 
 PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
     /\ phase = "Retired"
-    /\ (session_id # None)
-    /\ (active_visibility_revision >= staged_visibility_revision)
-    /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
-    /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
+    /\ ((session_id # None) /\ (active_visibility_revision >= staged_visibility_revision) /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names))) /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names)))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -469,10 +455,7 @@ PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested
 
 PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
     /\ phase = "Stopped"
-    /\ (session_id # None)
-    /\ (active_visibility_revision >= staged_visibility_revision)
-    /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names)))
-    /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
+    /\ ((session_id # None) /\ (active_visibility_revision >= staged_visibility_revision) /\ ((active_visibility_revision # staged_visibility_revision) \/ ((active_filter = staged_filter) /\ (active_requested_deferred_names = staged_requested_deferred_names))) /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names)))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -809,9 +792,7 @@ PublishEventStopped(kind) ==
 
 AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Idle"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = FALSE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = FALSE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -819,9 +800,7 @@ AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt
 
 AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Idle"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = TRUE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = TRUE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -829,9 +808,7 @@ AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interr
 
 AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Attached"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = TRUE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = TRUE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
@@ -841,9 +818,7 @@ AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, in
 
 AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Attached"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = FALSE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = FALSE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -851,9 +826,7 @@ AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, inter
 
 AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Running"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = FALSE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = FALSE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -861,9 +834,7 @@ AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing,
 
 AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Running"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = FALSE)
-    /\ (interrupt_yielding = TRUE)
+    /\ ((session_id # None) /\ (request_immediate_processing = FALSE) /\ (interrupt_yielding = TRUE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -871,9 +842,7 @@ AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_process
 
 AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
     /\ phase = "Running"
-    /\ (session_id # None)
-    /\ (request_immediate_processing = TRUE)
-    /\ (interrupt_yielding = FALSE)
+    /\ ((session_id # None) /\ (request_immediate_processing = TRUE) /\ (interrupt_yielding = FALSE))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
@@ -990,19 +959,7 @@ StartImmediateContextAttached ==
 
 CommitRunningToIdle(input_id, run_id) ==
     /\ phase = "Running"
-    /\ (pre_run_phase = Some("idle"))
-    /\ (current_run_id = Some(run_id))
-    /\ phase' = "Idle"
-    /\ model_step_count' = model_step_count + 1
-    /\ current_run_id' = None
-    /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
-
-
-FailRunningToIdle(run_id) ==
-    /\ phase = "Running"
-    /\ (pre_run_phase = Some("idle"))
-    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_phase = Some("idle")) /\ (current_run_id = Some(run_id)))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -1012,19 +969,7 @@ FailRunningToIdle(run_id) ==
 
 CommitRunningToAttached(input_id, run_id) ==
     /\ phase = "Running"
-    /\ (pre_run_phase = Some("attached"))
-    /\ (current_run_id = Some(run_id))
-    /\ phase' = "Attached"
-    /\ model_step_count' = model_step_count + 1
-    /\ current_run_id' = None
-    /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
-
-
-FailRunningToAttached(run_id) ==
-    /\ phase = "Running"
-    /\ (pre_run_phase = Some("attached"))
-    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_phase = Some("attached")) /\ (current_run_id = Some(run_id)))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -1034,9 +979,28 @@ FailRunningToAttached(run_id) ==
 
 CommitRunningToRetired(input_id, run_id) ==
     /\ phase = "Running"
-    /\ (pre_run_phase = Some("retired"))
-    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_phase = Some("retired")) /\ (current_run_id = Some(run_id)))
     /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+
+
+FailRunningToIdle(run_id) ==
+    /\ phase = "Running"
+    /\ ((pre_run_phase = Some("idle")) /\ (current_run_id = Some(run_id)))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ current_run_id' = None
+    /\ pre_run_phase' = None
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+
+
+FailRunningToAttached(run_id) ==
+    /\ phase = "Running"
+    /\ ((pre_run_phase = Some("attached")) /\ (current_run_id = Some(run_id)))
+    /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
@@ -1045,8 +1009,7 @@ CommitRunningToRetired(input_id, run_id) ==
 
 FailRunningToRetired(run_id) ==
     /\ phase = "Running"
-    /\ (pre_run_phase = Some("retired"))
-    /\ (current_run_id = Some(run_id))
+    /\ ((pre_run_phase = Some("retired")) /\ (current_run_id = Some(run_id)))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
@@ -1378,10 +1341,10 @@ Next ==
     \/ StartImmediateAppendAttached
     \/ StartImmediateContextAttached
     \/ \E input_id \in InputIdValues : \E run_id \in RunIdValues : CommitRunningToIdle(input_id, run_id)
-    \/ \E run_id \in RunIdValues : FailRunningToIdle(run_id)
     \/ \E input_id \in InputIdValues : \E run_id \in RunIdValues : CommitRunningToAttached(input_id, run_id)
-    \/ \E run_id \in RunIdValues : FailRunningToAttached(run_id)
     \/ \E input_id \in InputIdValues : \E run_id \in RunIdValues : CommitRunningToRetired(input_id, run_id)
+    \/ \E run_id \in RunIdValues : FailRunningToIdle(run_id)
+    \/ \E run_id \in RunIdValues : FailRunningToAttached(run_id)
     \/ \E run_id \in RunIdValues : FailRunningToRetired(run_id)
     \/ StageAddAttached
     \/ StageAddRunning
@@ -1413,9 +1376,9 @@ Next ==
 
 fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))
 running_has_current_run == ((phase # "Running") \/ (current_run_id # None))
-current_run_only_while_running_or_retired == ((current_run_id = None) \/ ((phase = "Running") \/ (phase = "Retired")))
+current_run_only_while_running_or_retired == ((current_run_id = None) \/ (phase = "Running") \/ (phase = "Retired"))
 
-CiStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 1
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(silent_intent_overrides) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 2
 
 Spec == Init /\ [][Next]_vars

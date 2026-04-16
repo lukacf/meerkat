@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-runtime` / `generated::meerkat_machine`
+- Rust owner: `self` / `catalog::dsl::meerkat_machine`
 
 ## State
 - Phase enum: `Initializing | Idle | Attached | Running | Retired | Stopped | Destroyed`
@@ -168,121 +168,119 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `UnregisterSession`(session_id)
 - Guards:
-  - `session_matches_current`
+  - ``
 - To: `Idle`
 
 ### `UnregisterSessionAttached`
 - From: `Attached`
 - On: `UnregisterSession`(session_id)
 - Guards:
-  - `session_matches_current`
+  - ``
 - To: `Idle`
 
 ### `UnregisterSessionRunning`
 - From: `Running`
 - On: `UnregisterSession`(session_id)
 - Guards:
-  - `session_matches_current`
+  - ``
 - To: `Idle`
 
 ### `UnregisterSessionRetired`
 - From: `Retired`
 - On: `UnregisterSession`(session_id)
 - Guards:
-  - `session_matches_current`
+  - ``
 - To: `Idle`
 
 ### `UnregisterSessionStopped`
 - From: `Stopped`
 - On: `UnregisterSession`(session_id)
 - Guards:
-  - `session_matches_current`
+  - ``
 - To: `Idle`
 
 ### `ReconfigureSessionLlmIdentityAttached`
 - From: `Attached`
 - On: `ReconfigureSessionLlmIdentity`(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta)
 - Guards:
-  - `session_registered`
-  - `runtime_is_bound`
+  - ``
 - To: `Attached`
 
 ### `ReconfigureSessionLlmIdentityRunning`
 - From: `Running`
 - On: `ReconfigureSessionLlmIdentity`(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta)
 - Guards:
-  - `session_registered`
-  - `runtime_is_bound`
+  - ``
 - To: `Running`
 
 ### `StagePersistentFilterIdle`
 - From: `Idle`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `StagePersistentFilterAttached`
 - From: `Attached`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `StagePersistentFilterRunning`
 - From: `Running`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `StagePersistentFilterRetired`
 - From: `Retired`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `StagePersistentFilterStopped`
 - From: `Stopped`
 - On: `StagePersistentFilter`(filter, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `RequestDeferredToolsIdle`
 - From: `Idle`
 - On: `RequestDeferredTools`(names, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `RequestDeferredToolsAttached`
 - From: `Attached`
 - On: `RequestDeferredTools`(names, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `RequestDeferredToolsRunning`
 - From: `Running`
 - On: `RequestDeferredTools`(names, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `RequestDeferredToolsRetired`
 - From: `Retired`
 - On: `RequestDeferredTools`(names, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `RequestDeferredToolsStopped`
 - From: `Stopped`
 - On: `RequestDeferredTools`(names, witnesses)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `PrepareBindingsInitializing`
@@ -325,42 +323,42 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `SetPeerIngressContextAttached`
 - From: `Attached`
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `SetPeerIngressContextRunning`
 - From: `Running`
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `SetPeerIngressContextRetired`
 - From: `Retired`
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `SetPeerIngressContextStopped`
 - From: `Stopped`
 - On: `SetPeerIngressContext`(keep_alive)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `NotifyDrainExitedIdle`
 - From: `Idle`
 - On: `NotifyDrainExited`(reason)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
@@ -368,7 +366,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `NotifyDrainExited`(reason)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `RuntimeNotice`
 - To: `Attached`
 
@@ -376,7 +374,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `NotifyDrainExited`(reason)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `RuntimeNotice`
 - To: `Running`
 
@@ -384,7 +382,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `NotifyDrainExited`(reason)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `RuntimeNotice`
 - To: `Retired`
 
@@ -392,7 +390,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `NotifyDrainExited`(reason)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `RuntimeNotice`
 - To: `Stopped`
 
@@ -430,10 +428,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
 - Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
+  - ``
 - Emits: `CommittedVisibleSetPublished`
 - To: `Idle`
 
@@ -441,10 +436,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
 - Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
+  - ``
 - Emits: `CommittedVisibleSetPublished`
 - To: `Attached`
 
@@ -452,10 +444,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
 - Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
+  - ``
 - Emits: `CommittedVisibleSetPublished`
 - To: `Running`
 
@@ -463,10 +452,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
 - Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
+  - ``
 - Emits: `CommittedVisibleSetPublished`
 - To: `Retired`
 
@@ -474,10 +460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PublishCommittedVisibleSet`(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
 - Guards:
-  - `session_registered`
-  - `active_not_behind_staged`
-  - `equal_revision_requires_equal_active_and_staged_input`
-  - `active_requested_subset_of_staged_requested`
+  - ``
 - Emits: `CommittedVisibleSetPublished`
 - To: `Stopped`
 
@@ -515,7 +498,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
 - On: `Destroy`()
 - Guards:
-  - `runtime_is_bound`
+  - ``
 - Emits: `RuntimeDestroyed`
 - To: `Destroyed`
 
@@ -548,105 +531,105 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `SetSilentIntents`(session_id, intents)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `SetSilentIntentsAttached`
 - From: `Attached`
 - On: `SetSilentIntents`(session_id, intents)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `SetSilentIntentsRunning`
 - From: `Running`
 - On: `SetSilentIntents`(session_id, intents)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `SetSilentIntentsRetired`
 - From: `Retired`
 - On: `SetSilentIntents`(session_id, intents)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `SetSilentIntentsStopped`
 - From: `Stopped`
 - On: `SetSilentIntents`(session_id, intents)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `AbortIdle`
 - From: `Idle`
 - On: `Abort`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `AbortAttached`
 - From: `Attached`
 - On: `Abort`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `AbortRunning`
 - From: `Running`
 - On: `Abort`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `AbortRetired`
 - From: `Retired`
 - On: `Abort`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `AbortStopped`
 - From: `Stopped`
 - On: `Abort`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `WaitIdle`
 - From: `Idle`
 - On: `Wait`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Idle`
 
 ### `WaitAttached`
 - From: `Attached`
 - On: `Wait`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `WaitRunning`
 - From: `Running`
 - On: `Wait`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `WaitRetired`
 - From: `Retired`
 - On: `Wait`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Retired`
 
 ### `WaitStopped`
 - From: `Stopped`
 - On: `Wait`(session_id)
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Stopped`
 
 ### `AbortAllIdle`
@@ -678,7 +661,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `EnsureDrainRunning`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SpawnDrainTask`
 - To: `Attached`
 
@@ -686,7 +669,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `EnsureDrainRunning`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SpawnDrainTask`
 - To: `Running`
 
@@ -694,7 +677,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `Ingest`(runtime_id, work_id, origin)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `ResolveAdmission`
 - To: `Idle`
 
@@ -702,7 +685,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `Ingest`(runtime_id, work_id, origin)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `ResolveAdmission`
 - To: `Attached`
 
@@ -710,7 +693,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Ingest`(runtime_id, work_id, origin)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `ResolveAdmission`
 - To: `Running`
 
@@ -718,7 +701,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `PublishEvent`(kind)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressNotice`
 - To: `Idle`
 
@@ -726,7 +709,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PublishEvent`(kind)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressNotice`
 - To: `Attached`
 
@@ -734,7 +717,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PublishEvent`(kind)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressNotice`
 - To: `Running`
 
@@ -742,7 +725,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Retired`
 - On: `PublishEvent`(kind)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressNotice`
 - To: `Retired`
 
@@ -750,7 +733,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Stopped`
 - On: `PublishEvent`(kind)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressNotice`
 - To: `Stopped`
 
@@ -758,9 +741,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Idle`
 
@@ -768,9 +749,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Idle`
 
@@ -778,9 +757,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`, `SubmitRunPrimitive`
 - To: `Running`
 
@@ -788,9 +765,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Attached`
 
@@ -798,9 +773,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`
 - To: `Running`
 
@@ -808,9 +781,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
@@ -818,9 +789,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
 - Guards:
-  - `session_registered`
-  - `request_immediate_processing`
-  - `interrupt_yielding`
+  - ``
 - Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
@@ -828,7 +797,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `AcceptWithoutWake`(input_id)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressAccepted`
 - To: `Idle`
 
@@ -836,7 +805,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `AcceptWithoutWake`(input_id)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressAccepted`
 - To: `Attached`
 
@@ -844,7 +813,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `AcceptWithoutWake`(input_id)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `IngressAccepted`
 - To: `Running`
 
@@ -852,7 +821,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EnqueueClassifiedEntry`
 - To: `Attached`
 
@@ -860,7 +829,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ClassifyExternalEnvelope`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EnqueueClassifiedEntry`
 - To: `Running`
 
@@ -868,7 +837,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ClassifyPlainEvent`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EnqueueClassifiedEntry`
 - To: `Attached`
 
@@ -876,7 +845,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ClassifyPlainEvent`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EnqueueClassifiedEntry`
 - To: `Running`
 
@@ -884,7 +853,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`
 - On: `Prepare`(session_id, run_id)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -892,7 +861,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `Prepare`(session_id, run_id)
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -906,7 +875,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StartConversationRun`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SubmitRunPrimitive`
 - To: `Attached`
 
@@ -914,7 +883,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StartImmediateAppend`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SubmitRunPrimitive`
 - To: `Attached`
 
@@ -922,7 +891,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StartImmediateContext`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `SubmitRunPrimitive`
 - To: `Attached`
 
@@ -930,50 +899,44 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Commit`(input_id, run_id)
 - Guards:
-  - `pre_run_phase_matches_idle`
-  - `current_run_id_matches_binding`
-- To: `Idle`
-
-### `FailRunningToIdle`
-- From: `Running`
-- On: `Fail`(run_id)
-- Guards:
-  - `pre_run_phase_matches_idle`
-  - `current_run_id_matches_binding`
-- Emits: `RecordTerminalOutcome`
+  - ``
 - To: `Idle`
 
 ### `CommitRunningToAttached`
 - From: `Running`
 - On: `Commit`(input_id, run_id)
 - Guards:
-  - `pre_run_phase_matches_attached`
-  - `current_run_id_matches_binding`
-- To: `Attached`
-
-### `FailRunningToAttached`
-- From: `Running`
-- On: `Fail`(run_id)
-- Guards:
-  - `pre_run_phase_matches_attached`
-  - `current_run_id_matches_binding`
-- Emits: `RecordTerminalOutcome`
+  - ``
 - To: `Attached`
 
 ### `CommitRunningToRetired`
 - From: `Running`
 - On: `Commit`(input_id, run_id)
 - Guards:
-  - `pre_run_phase_matches_retired`
-  - `current_run_id_matches_binding`
+  - ``
 - To: `Retired`
+
+### `FailRunningToIdle`
+- From: `Running`
+- On: `Fail`(run_id)
+- Guards:
+  - ``
+- Emits: `RecordTerminalOutcome`
+- To: `Idle`
+
+### `FailRunningToAttached`
+- From: `Running`
+- On: `Fail`(run_id)
+- Guards:
+  - ``
+- Emits: `RecordTerminalOutcome`
+- To: `Attached`
 
 ### `FailRunningToRetired`
 - From: `Running`
 - On: `Fail`(run_id)
 - Guards:
-  - `pre_run_phase_matches_retired`
-  - `current_run_id_matches_binding`
+  - ``
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -981,7 +944,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StageAdd`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -989,7 +952,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StageAdd`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -997,7 +960,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StageRemove`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1005,7 +968,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StageRemove`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1013,7 +976,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `StageReload`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1021,7 +984,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StageReload`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1029,7 +992,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ApplySurfaceBoundary`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `ScheduleSurfaceCompletion`
 - To: `Attached`
 
@@ -1037,7 +1000,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ApplySurfaceBoundary`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `ScheduleSurfaceCompletion`
 - To: `Running`
 
@@ -1045,7 +1008,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PendingSucceeded`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1053,7 +1016,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PendingSucceeded`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1061,7 +1024,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `PendingFailed`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1069,7 +1032,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `PendingFailed`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1077,35 +1040,35 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `CallStarted`()
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `CallStartedRunning`
 - From: `Running`
 - On: `CallStarted`()
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `CallFinishedAttached`
 - From: `Attached`
 - On: `CallFinished`()
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Attached`
 
 ### `CallFinishedRunning`
 - From: `Running`
 - On: `CallFinished`()
 - Guards:
-  - `session_registered`
+  - ``
 - To: `Running`
 
 ### `FinalizeRemovalCleanAttached`
 - From: `Attached`
 - On: `FinalizeRemovalClean`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1113,7 +1076,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `FinalizeRemovalClean`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1121,7 +1084,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `FinalizeRemovalForced`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1129,7 +1092,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `FinalizeRemovalForced`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1137,7 +1100,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `SnapshotAligned`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1145,7 +1108,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `SnapshotAligned`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1153,7 +1116,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `ShutdownSurface`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Attached`
 
@@ -1161,7 +1124,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `ShutdownSurface`()
 - Guards:
-  - `session_registered`
+  - ``
 - Emits: `EmitExternalToolDelta`
 - To: `Running`
 
@@ -1169,7 +1132,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Idle`, `Retired`
 - On: `Recycle`()
 - Guards:
-  - `runtime_is_bound`
+  - ``
 - Emits: `InitiateRecycle`
 - To: `Idle`
 
@@ -1177,7 +1140,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Attached`
 - On: `Recycle`()
 - Guards:
-  - `runtime_is_bound`
+  - ``
 - Emits: `InitiateRecycle`
 - To: `Attached`
 

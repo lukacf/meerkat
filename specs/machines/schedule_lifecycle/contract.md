@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-schedule` / `generated::schedule_lifecycle`
+- Rust owner: `self` / `catalog::dsl::schedule_lifecycle`
 
 ## State
 - Phase enum: `Active | Paused | Deleted`
@@ -59,7 +59,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Active`
 - On: `RecordPlanningWindow`(planning_cursor_utc_ms, next_occurrence_ordinal)
 - Guards:
-  - `planning_window_advances_ordinal`
+  - ``
 - Emits: `EmitScheduleNotice`, `PlanningWindowRecorded`
 - To: `Active`
 
@@ -67,7 +67,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Paused`
 - On: `RecordPlanningWindow`(planning_cursor_utc_ms, next_occurrence_ordinal)
 - Guards:
-  - `planning_window_advances_ordinal`
+  - ``
 - Emits: `EmitScheduleNotice`, `PlanningWindowRecorded`
 - To: `Paused`
 

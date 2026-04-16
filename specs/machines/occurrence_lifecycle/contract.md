@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-schedule` / `generated::occurrence_lifecycle`
+- Rust owner: `self` / `catalog::dsl::occurrence_lifecycle`
 
 ## State
 - Phase enum: `Pending | Claimed | Dispatching | AwaitingCompletion | Completed | Skipped | Misfired | Superseded | DeliveryFailed`

@@ -1152,6 +1152,13 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+            // Supervisor rotation commands are handled by the existing
+            // rotate_supervisor() path on MobHandle, not through the
+            // machine command dispatch. These variants exist for schema
+            // parity only.
+            MobMachineCommand::RotateSupervisor | MobMachineCommand::AckRotation => {
+                Ok(MobMachineCommandResult::Unit)
+            }
         }
     }
 

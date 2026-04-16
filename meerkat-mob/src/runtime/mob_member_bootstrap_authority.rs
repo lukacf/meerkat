@@ -1,11 +1,15 @@
 use crate::roster::MobMemberKickoffPhase;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_runtime::completion::CompletionOutcome;
 
 #[derive(Debug)]
 pub enum MobMemberBootstrapInput {
     MarkPending,
     MarkStarting,
-    ResolveOutcome { outcome: CompletionOutcome },
+    #[cfg(feature = "runtime-adapter")]
+    ResolveOutcome {
+        outcome: CompletionOutcome,
+    },
     CancelRequested,
 }
 
@@ -59,6 +63,7 @@ impl MobMemberBootstrapAuthority {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn evaluate_transition(
     phase: Option<MobMemberKickoffPhase>,
     input: &MobMemberBootstrapInput,
@@ -141,6 +146,50 @@ fn evaluate_transition(
         (_, MarkPending) => reject("MarkPending"),
         (_, MarkStarting) => reject("MarkStarting"),
         (_, ResolveOutcome { .. }) => reject("ResolveOutcome"),
+        (_, CancelRequested) => reject("CancelRequested"),
+    }
+}
+
+#[cfg(not(feature = "runtime-adapter"))]
+fn evaluate_transition(
+    phase: Option<MobMemberKickoffPhase>,
+    input: &MobMemberBootstrapInput,
+) -> Result<(MobMemberKickoffPhase, Vec<MobMemberBootstrapEffect>), MobMemberBootstrapError> {
+    use MobMemberBootstrapEffect::PersistKickoff;
+    use MobMemberBootstrapInput::{CancelRequested, MarkPending, MarkStarting};
+    use MobMemberKickoffPhase::{Cancelled, Pending, Starting};
+
+    let reject = |input: &'static str| Err(MobMemberBootstrapError { phase, input });
+
+    match (phase, input) {
+        (None, MarkPending) => Ok((
+            Pending,
+            vec![PersistKickoff {
+                phase: Pending,
+                error: None,
+            }],
+        )),
+        (Some(Pending), MarkStarting) => Ok((
+            Starting,
+            vec![PersistKickoff {
+                phase: Starting,
+                error: None,
+            }],
+        )),
+        (Some(Pending | Starting), CancelRequested) => Ok((
+            Cancelled,
+            vec![
+                PersistKickoff {
+                    phase: Cancelled,
+                    error: None,
+                },
+                MobMemberBootstrapEffect::EmitLifecycleNotice {
+                    intent: "mob.kickoff_cancelled",
+                },
+            ],
+        )),
+        (_, MarkPending) => reject("MarkPending"),
+        (_, MarkStarting) => reject("MarkStarting"),
         (_, CancelRequested) => reject("CancelRequested"),
     }
 }

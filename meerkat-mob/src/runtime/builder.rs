@@ -1,7 +1,9 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // MobBuilder
@@ -12,7 +14,8 @@ pub struct MobBuilder {
     mode: BuilderMode,
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
-    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    #[cfg(feature = "runtime-adapter")]
+    runtime_adapter: RuntimeAdapterOption,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -44,6 +47,7 @@ impl MobBuilder {
             mode: BuilderMode::Create(Arc::new(definition)),
             storage,
             session_service: None,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -86,6 +90,7 @@ impl MobBuilder {
             mode: BuilderMode::Resume,
             storage,
             session_service: None,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -102,6 +107,7 @@ impl MobBuilder {
     /// runtime adapter override has been set yet, the builder seeds its
     /// canonical runtime adapter from `service.runtime_adapter()`.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
+        #[cfg(feature = "runtime-adapter")]
         if self.runtime_adapter.is_none() {
             self.runtime_adapter = service.runtime_adapter();
         }
@@ -114,6 +120,7 @@ impl MobBuilder {
     /// When set, this override is used consistently by both provisioning and
     /// autonomous-host comms-drain ingress instead of re-deriving an adapter
     /// from the session service at runtime.
+    #[cfg(feature = "runtime-adapter")]
     pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = Some(adapter);
         self
@@ -163,11 +170,13 @@ impl MobBuilder {
     }
 
     /// Create the mob: emit MobCreated event, start the actor, return handle.
+    #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
             mode,
             storage,
             session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume: _,
@@ -175,6 +184,8 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
         } = self;
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter: RuntimeAdapterOption = None;
 
         let definition = match mode {
             BuilderMode::Create(definition) => definition,
@@ -211,18 +222,21 @@ impl MobBuilder {
         // §8: AutonomousHost profiles require a runtime adapter. Validate at
         // build time so Option<adapter> on the trait doesn't hide an ownership
         // requirement that only surfaces at spawn time.
-        let has_autonomous = definition
-            .profiles
-            .values()
-            .filter_map(|b| b.as_inline())
-            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
-        if has_autonomous && runtime_adapter.is_none() {
-            return Err(MobError::Internal(
-                "definition contains AutonomousHost profiles but no runtime adapter is available; \
-                 provide one via with_runtime_adapter() or use a session service that implements \
-                 runtime_adapter()"
-                    .to_string(),
-            ));
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let has_autonomous = definition
+                .profiles
+                .values()
+                .filter_map(|b| b.as_inline())
+                .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+            if has_autonomous && runtime_adapter.is_none() {
+                return Err(MobError::Internal(
+                    "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                     provide one via with_runtime_adapter() or use a session service that implements \
+                     runtime_adapter()"
+                        .to_string(),
+                ));
+            }
         }
 
         // Emit MobCreated event first
@@ -284,11 +298,13 @@ impl MobBuilder {
     /// - Recover definition from `MobCreated`.
     /// - Rebuild roster by replaying structural events.
     /// - Start actor/runtime in Running state.
+    #[cfg(feature = "runtime-adapter")]
     pub async fn resume(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
             mode,
             storage,
             session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume,
@@ -296,6 +312,8 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
         } = self;
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter: RuntimeAdapterOption = None;
 
         if !matches!(mode, BuilderMode::Resume) {
             return Err(MobError::Internal(
@@ -646,12 +664,13 @@ impl MobBuilder {
         }
     }
 
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     async fn reconcile_resume(
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -1034,6 +1053,7 @@ impl MobBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     fn start_runtime(
         definition: Arc<MobDefinition>,
@@ -1045,7 +1065,7 @@ impl MobBuilder {
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
         supervisor_bridge: Arc<MobSupervisorBridge>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -1098,6 +1118,7 @@ impl MobBuilder {
         )
     }
 
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     fn start_runtime_with_components(
         definition: Arc<MobDefinition>,
@@ -1105,7 +1126,7 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -1239,6 +1260,7 @@ impl MobBuilder {
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             restore_diagnostics,
             runtime_metadata,

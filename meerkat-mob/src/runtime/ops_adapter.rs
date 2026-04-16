@@ -1,16 +1,25 @@
+#[cfg(feature = "runtime-adapter")]
 use super::*;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::comms::TrustedPeerSpec;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::ops_lifecycle::{
     OperationId, OperationKind, OperationLifecycleSnapshot, OperationPeerHandle,
     OperationProgressUpdate, OperationSpec, OperationStatus, OpsLifecycleError,
     OpsLifecycleRegistry,
 };
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::types::SessionId;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
+#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
 use std::sync::Mutex;
+#[cfg(feature = "runtime-adapter")]
 use uuid::Uuid;
 
+#[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
 struct MemberOpsBinding {
     owner_bridge_session_id: SessionId,
@@ -18,12 +27,14 @@ struct MemberOpsBinding {
     display_name: Option<String>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MemberOpsKey {
     Session(SessionId),
     BackendPeer { peer_id: String, address: String },
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl MemberOpsKey {
     fn from_member_ref(member_ref: &MemberRef) -> Option<Self> {
         match member_ref {
@@ -71,11 +82,13 @@ impl MemberOpsKey {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 pub(crate) struct MobOpsAdapter {
     fallback_registry: Arc<RuntimeOpsLifecycleRegistry>,
     member_bindings: Mutex<HashMap<MemberOpsKey, MemberOpsBinding>>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl MobOpsAdapter {
     pub(crate) fn new() -> Self {
         Self {

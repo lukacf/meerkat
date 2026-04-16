@@ -109,6 +109,7 @@ pub(super) enum MobCommand {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
         meerkat_id: MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,

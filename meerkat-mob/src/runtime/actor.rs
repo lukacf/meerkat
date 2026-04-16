@@ -277,6 +277,7 @@ pub(super) struct MobActor {
     pub(super) edge_locks: Arc<super::edge_locks::EdgeLockRegistry>,
     pub(super) lifecycle_tasks: tokio::task::JoinSet<()>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics:
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
@@ -1148,6 +1149,7 @@ impl MobActor {
     ///   background task for completion wait + barrier signal.
     /// - **No adapter (test/ephemeral):** Falls back to `provisioner.start_turn()`
     ///   in a spawned task with yield-check for immediate failure detection.
+    #[cfg(feature = "runtime-adapter")]
     async fn start_autonomous_member(
         &self,
         meerkat_id: &MeerkatId,
@@ -1247,7 +1249,7 @@ impl MobActor {
         // provisioner's lazy `runtime_session_state()` init (called during
         // provision_member). stop_autonomous_member preserves registration
         // (only aborts the drain), so resume just needs to re-spawn the drain.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
         {
             let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
                 MobError::Internal(format!(
@@ -1268,13 +1270,14 @@ impl MobActor {
                     );
                 }
             }
-        } // cfg(not(wasm32))
+        }
 
         self.ensure_autonomous_dispatch_capability(meerkat_id, member_ref)
             .await
     }
 
     async fn teardown_autonomous_runtime(&self, member_ref: &MemberRef) {
+        #[cfg(feature = "runtime-adapter")]
         if let (Some(adapter), Some(bridge_session_id)) =
             (&self.runtime_adapter, member_ref.bridge_session_id())
         {
@@ -1304,6 +1307,7 @@ impl MobActor {
         Ok(())
     }
 
+    #[cfg(feature = "runtime-adapter")]
     async fn resolve_kickoff_outcome(
         &self,
         meerkat_id: &MeerkatId,
@@ -1390,6 +1394,7 @@ impl MobActor {
             return Err(error);
         }
         // Abort the comms drain but keep the session registered.
+        #[cfg(feature = "runtime-adapter")]
         if let (Some(adapter), Some(session_id)) =
             (&self.runtime_adapter, member_ref.bridge_session_id())
         {
@@ -1723,6 +1728,7 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
+                #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
                     meerkat_id,
                     outcome,
@@ -3402,6 +3408,7 @@ impl MobActor {
             return Err(wiring_error);
         }
 
+        #[cfg(feature = "runtime-adapter")]
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
                 .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::MarkStarting)

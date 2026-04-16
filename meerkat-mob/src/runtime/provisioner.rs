@@ -8,22 +8,34 @@ use crate::tokio;
 use async_trait::async_trait;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event_injector::SubscribableInjector;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_control::RunControlCommand;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+#[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::{InputId, RunId as CoreRunId};
 use meerkat_core::ops::OperationId;
-use meerkat_core::ops_lifecycle::{OperationStatus, OpsLifecycleRegistry};
+#[cfg(feature = "runtime-adapter")]
+use meerkat_core::ops_lifecycle::OperationStatus;
+use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
+#[cfg(feature = "runtime-adapter")]
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+#[cfg(feature = "runtime-adapter")]
 use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
+#[cfg(feature = "runtime-adapter")]
 use serde::de::DeserializeOwned;
+#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
 use std::time::Duration;
+#[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
@@ -97,6 +109,7 @@ pub trait MobProvisioner: Send + Sync {
     async fn rearm_all_checkpointers(&self) {}
 }
 
+#[cfg(feature = "runtime-adapter")]
 pub struct SessionBackend {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<MeerkatMachine>>,
@@ -107,6 +120,7 @@ pub struct SessionBackend {
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -290,6 +304,7 @@ impl SessionBackend {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn runtime_completion_to_mob_result(
     session_id: &SessionId,
     completion: meerkat_runtime::completion::CompletionOutcome,
@@ -327,6 +342,7 @@ fn session_turn_error_to_mob_error(bridge_session_id: &SessionId, error: Session
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 struct RuntimeSessionState {
     // Transport-only owner context keyed by canonical runtime input identity.
     // Never used as lifecycle/ordering truth; ordering is runtime-owned via
@@ -334,16 +350,19 @@ struct RuntimeSessionState {
     queued_turns: Mutex<RuntimeSessionQueue>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[derive(Default)]
 struct RuntimeSessionQueue {
     // Event delivery transport handles for runtime-backed turn dispatch.
     entries: HashMap<InputId, QueuedTurnContext>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 struct QueuedTurnContext {
     event_tx: TurnEventTx,
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl RuntimeSessionState {
     async fn enqueue_turn_context(&self, input_id: InputId, event_tx: Option<TurnEventTx>) -> bool {
         let Some(event_tx) = event_tx else {
@@ -462,6 +481,7 @@ mod tests {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 struct MobSessionRuntimeExecutor {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Arc<MeerkatMachine>,
@@ -470,6 +490,7 @@ struct MobSessionRuntimeExecutor {
     runtime_sessions: Arc<RwLock<HashMap<SessionId, Arc<RuntimeSessionState>>>>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl MobSessionRuntimeExecutor {
     fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -488,6 +509,7 @@ impl MobSessionRuntimeExecutor {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
@@ -586,6 +608,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for SessionBackend {
@@ -1015,12 +1038,14 @@ fn synthetic_backend_peer_session_id(peer_id: &str, address: &str) -> SessionId 
     ))
 }
 
+#[cfg(feature = "runtime-adapter")]
 pub struct MultiBackendProvisioner {
     session: SessionBackend,
     external: Option<ExternalBackend>,
     supervisor_bridge: Arc<super::MobSupervisorBridge>,
 }
 
+#[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -1189,6 +1214,7 @@ impl MultiBackendProvisioner {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobProvisioner for MultiBackendProvisioner {

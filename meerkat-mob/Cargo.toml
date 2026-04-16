@@ -20,7 +20,7 @@ meerkat-comms = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction"] }
 meerkat-client = { workspace = true }
-meerkat-runtime = { workspace = true }
+meerkat-runtime = { workspace = true, optional = true }
 meerkat-machine-kernels = { workspace = true }
 
 # Async runtime
@@ -68,6 +68,8 @@ meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 
 [features]
+default = ["runtime-adapter"]
+runtime-adapter = ["dep:meerkat-runtime"]
 integration-real-tests = []
 
 [package.metadata.cargo-machete]

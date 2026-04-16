@@ -14,7 +14,9 @@ use meerkat_core::service::{
 };
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
 use std::sync::{Mutex, OnceLock, Weak};
 
 fn build_runtime_receipt(
@@ -75,6 +77,7 @@ fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool 
         && peer_meta.labels.get("meerkat_id").map(String::as_str) == Some(meerkat_id)
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
@@ -82,7 +85,7 @@ fn ephemeral_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
 fn persistent_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
@@ -90,6 +93,7 @@ fn persistent_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn cached_runtime_adapter(
     cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
     key: usize,
@@ -134,6 +138,7 @@ pub trait MobSessionService:
         false
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         None
     }
@@ -221,6 +226,7 @@ where
         false
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         let key = std::ptr::from_ref(self) as usize;
         Some(cached_runtime_adapter(
@@ -325,6 +331,7 @@ where
         true
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         #[cfg(target_arch = "wasm32")]
         {

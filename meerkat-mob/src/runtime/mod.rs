@@ -42,6 +42,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
+/// Conditional type alias for the runtime adapter.
+///
+/// When `runtime-adapter` is enabled, this resolves to the concrete
+/// `MeerkatMachine` adapter. Otherwise it is a zero-sized unit so callsites
+/// that thread this through builder/actor plumbing can compile unconditionally.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) type RuntimeAdapterOption = Option<Arc<meerkat_runtime::MeerkatMachine>>;
+#[cfg(not(feature = "runtime-adapter"))]
+pub(crate) type RuntimeAdapterOption = Option<()>;
+
 const FLOW_SYSTEM_STEP_ID_RAW: &str = "__flow__";
 const FLOW_SYSTEM_MEMBER_ID_RAW: &str = "__flow_system_member__";
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
@@ -69,7 +79,7 @@ pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
 pub mod local_bridge;
 pub(crate) mod loop_iteration_authority;
 mod mob_lifecycle_authority;
@@ -102,10 +112,14 @@ pub mod turn_executor;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
 
+#[cfg(feature = "runtime-adapter")]
 use actor::MobActor;
+#[cfg(feature = "runtime-adapter")]
 use actor_turn_executor::ActorFlowTurnExecutor;
 use flow::FlowEngine;
-use provisioner::{MobProvisioner, MultiBackendProvisioner, ProvisionMemberRequest};
+#[cfg(feature = "runtime-adapter")]
+use provisioner::MultiBackendProvisioner;
+use provisioner::{MobProvisioner, ProvisionMemberRequest};
 use state::MobCommand;
 use tools::compose_external_tools_for_profile;
 

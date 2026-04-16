@@ -82,7 +82,7 @@ pub use runtime::bridge_protocol::{
     BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
     BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

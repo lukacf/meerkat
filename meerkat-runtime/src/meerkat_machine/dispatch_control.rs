@@ -7,7 +7,7 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
-                let (_session_id, driver, _completions, wake_tx, control_tx) = {
+                let (session_id, driver, _completions, wake_tx, control_tx) = {
                     let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
                     let ctrl = {
                         let sessions = self.sessions.read().await;
@@ -44,6 +44,36 @@ impl MeerkatMachine {
                     (result, signal)
                 };
 
+                // Shadow-validate: stage DSL Ingest input after mutation
+                let shadow_work_id = match &outcome {
+                    AcceptOutcome::Accepted { input_id, .. } => input_id.to_string(),
+                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
+                    AcceptOutcome::Rejected { .. } => String::new(),
+                };
+                if !matches!(&outcome, AcceptOutcome::Rejected { .. }) {
+                    if let Err(err) = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
+                                runtime_id:
+                                    crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                                        &runtime_id,
+                                    ),
+                                work_id: crate::meerkat_machine::dsl::WorkId::from(shadow_work_id),
+                                origin: "ingest".to_string(),
+                            },
+                            "Ingest",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime disagreement after Ingest"
+                        );
+                    }
+                }
+
                 if signal.should_wake()
                     && let Some(ref tx) = wake_tx
                 {
@@ -61,7 +91,7 @@ impl MeerkatMachine {
             }
             MeerkatMachineCommand::PublishEvent { event } => {
                 let runtime_id = event.runtime_id.clone();
-                let (_session_id, driver, _completions, _wake_tx) =
+                let (session_id, driver, _completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
                 if matches!(
@@ -73,11 +103,31 @@ impl MeerkatMachine {
                     });
                 }
 
+                let event_kind = format!("{:?}", std::mem::discriminant(&event.event));
                 let mut drv = driver.lock().await;
                 drv.as_driver_mut()
                     .on_runtime_event(event)
                     .await
                     .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                drop(drv);
+
+                // Shadow-validate: stage DSL PublishEvent input after mutation
+                if let Err(err) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::PublishEvent {
+                            kind: event_kind,
+                        },
+                        "PublishEvent",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "DSL/runtime disagreement after PublishEvent"
+                    );
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::Retire { runtime_id } => {

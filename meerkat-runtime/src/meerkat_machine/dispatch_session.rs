@@ -75,8 +75,28 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                self.set_session_silent_intents_inner(&session_id, intents)
+                self.set_session_silent_intents_inner(&session_id, intents.clone())
                     .await;
+                // Shadow-validate: stage DSL input after mutation
+                if let Err(err) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetSilentIntents {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
+                            intents: intents.into_iter().collect(),
+                        },
+                        "SetSilentIntents",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "DSL/runtime disagreement after SetSilentIntents"
+                    );
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::InterruptCurrentRun { session_id } => {
@@ -87,9 +107,25 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                self.interrupt_current_run_inner(&session_id)
-                    .await
-                    .map(|()| MeerkatMachineCommandResult::Unit)
+                let result = self.interrupt_current_run_inner(&session_id).await;
+                // Shadow-validate: stage DSL input after mutation
+                if result.is_ok() {
+                    if let Err(err) = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::InterruptCurrentRun,
+                            "InterruptCurrentRun",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime disagreement after InterruptCurrentRun"
+                        );
+                    }
+                }
+                result.map(|()| MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::CancelAfterBoundary { session_id } => {
                 // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
@@ -99,9 +135,25 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                self.cancel_after_boundary_inner(&session_id)
-                    .await
-                    .map(|()| MeerkatMachineCommandResult::Unit)
+                let result = self.cancel_after_boundary_inner(&session_id).await;
+                // Shadow-validate: stage DSL input after mutation
+                if result.is_ok() {
+                    if let Err(err) = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::CancelAfterBoundary,
+                            "CancelAfterBoundary",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime disagreement after CancelAfterBoundary"
+                        );
+                    }
+                }
+                result.map(|()| MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::StopRuntimeExecutor {
                 session_id,
@@ -355,9 +407,21 @@ impl MeerkatMachine {
                             .tool_visibility_owner,
                     )
                 };
+                let filter_str = serde_json::to_string(&filter).unwrap_or_default();
                 let revision = owner
                     .stage_persistent_filter(filter, witnesses)
                     .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                // Stage DSL visibility filter after mutation
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::StageVisibilityFilter {
+                        filter: filter_str,
+                        revision: revision.0,
+                    },
+                    "StageVisibilityFilter",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::RequestDeferredTools {
@@ -390,6 +454,22 @@ impl MeerkatMachine {
                 let revision = owner
                     .request_deferred_tools(names, witnesses)
                     .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                // Read the full accumulated staged deferred names from the owner
+                // (request_deferred_tools extends, DSL replaces — pass the full set)
+                let accumulated_names = owner
+                    .visibility_state()
+                    .map(|s| s.staged_requested_deferred_names)
+                    .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+                // Stage DSL deferred names after mutation
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::StageDeferredNames {
+                        names: accumulated_names,
+                    },
+                    "StageDeferredNames",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }
             MeerkatMachineCommand::PublishCommittedVisibleSet {
@@ -462,6 +542,28 @@ impl MeerkatMachine {
                         .replace_visibility_state(*visibility_state.clone())
                         .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
                 }
+
+                // Stage DSL CommitVisibilityFilter + CommitDeferredNames
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::CommitVisibilityFilter {
+                        filter: serde_json::to_string(&visibility_state.active_filter)
+                            .unwrap_or_default(),
+                        revision: visibility_state.active_revision,
+                    },
+                    "CommitVisibilityFilter",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                self.stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::CommitDeferredNames {
+                        names: visibility_state.active_requested_deferred_names.clone(),
+                    },
+                    "CommitDeferredNames",
+                )
+                .await
+                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
                 Ok(MeerkatMachineCommandResult::VisibilityPublished(
                     *visibility_state,

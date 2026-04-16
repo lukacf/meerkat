@@ -271,6 +271,51 @@ impl MeerkatMachine {
                     );
                 }
 
+                // Input lifecycle shadow: infer from outcome which transition fired
+                {
+                    let is_terminal = match &outcome {
+                        AcceptOutcome::Accepted { input_id, .. } => {
+                            let drv = driver.lock().await;
+                            drv.as_driver()
+                                .input_state(input_id)
+                                .map(|s| s.current_state().is_terminal())
+                                .unwrap_or(true)
+                        }
+                        _ => false,
+                    };
+                    let shadow_input = if is_terminal {
+                        Some(
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeOnAccept {
+                                input_id: shadow_input_id.to_string(),
+                            },
+                        )
+                    } else if matches!(&outcome, AcceptOutcome::Accepted { .. }) {
+                        Some(
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
+                                input_id: shadow_input_id.to_string(),
+                            },
+                        )
+                    } else {
+                        None // Deduplicated — no new input lifecycle transition
+                    };
+                    if let Some(input) = shadow_input {
+                        if let Err(err) = self
+                            .stage_session_dsl_input(
+                                &session_id,
+                                input,
+                                "InputLifecycle(accept_without_wake)",
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %err,
+                                "DSL/runtime DISAGREEMENT on input lifecycle after accept_without_wake"
+                            );
+                        }
+                    }
+                }
+
                 if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
                     tracing::error!(
                         error = %err,

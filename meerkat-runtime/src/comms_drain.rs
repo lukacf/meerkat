@@ -1331,8 +1331,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
             address: format!(
-                "inproc://receiver-real?{}=expected-token",
-                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                "inproc://receiver-real?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
             ),
             bootstrap_token: Some("expected-token".to_string()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),

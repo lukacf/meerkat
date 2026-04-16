@@ -36,6 +36,9 @@ schema = ["dep:schemars"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+meerkat-machine-dsl = { workspace = true }
+meerkat-machine-schema = { workspace = true }
+indexmap = { workspace = true }
 
 [lints]
 workspace = true

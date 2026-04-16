@@ -10,6 +10,8 @@ mod authority;
 mod driver;
 mod error;
 mod service;
+#[cfg(test)]
+mod shadow;
 mod store;
 mod surface;
 mod tool_surface;

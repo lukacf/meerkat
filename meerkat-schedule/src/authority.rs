@@ -71,6 +71,22 @@ impl ScheduleLifecycleAuthority {
         schedule: Option<Schedule>,
         input: ScheduleLifecycleInput,
     ) -> Result<ScheduleLifecycleMutator, ScheduleLifecycleError> {
+        #[cfg(test)]
+        let (pre_snapshot, input_snapshot) = (schedule.clone(), input.clone());
+
+        let result = self.apply_inner(schedule, input);
+
+        #[cfg(test)]
+        crate::shadow::schedule::shadow_assert(pre_snapshot.as_ref(), &input_snapshot, &result);
+
+        result
+    }
+
+    fn apply_inner(
+        &self,
+        schedule: Option<Schedule>,
+        input: ScheduleLifecycleInput,
+    ) -> Result<ScheduleLifecycleMutator, ScheduleLifecycleError> {
         match input {
             ScheduleLifecycleInput::Create(request) => Ok(ScheduleLifecycleMutator {
                 schedule: Schedule::new(request),
@@ -342,6 +358,22 @@ pub struct OccurrenceLifecycleAuthority;
 
 impl OccurrenceLifecycleAuthority {
     pub fn apply(
+        &self,
+        occurrence: Occurrence,
+        input: OccurrenceLifecycleInput,
+    ) -> Result<OccurrenceLifecycleMutator, OccurrenceLifecycleError> {
+        #[cfg(test)]
+        let (pre_snapshot, input_snapshot) = (occurrence.clone(), input.clone());
+
+        let result = self.apply_inner(occurrence, input);
+
+        #[cfg(test)]
+        crate::shadow::occurrence::shadow_assert(&pre_snapshot, &input_snapshot, &result);
+
+        result
+    }
+
+    fn apply_inner(
         &self,
         mut occurrence: Occurrence,
         input: OccurrenceLifecycleInput,

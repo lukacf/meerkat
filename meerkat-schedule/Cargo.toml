@@ -14,6 +14,9 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-machine-dsl = { workspace = true }
+meerkat-machine-schema = { workspace = true }
+indexmap = { version = "2", default-features = false, features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -36,9 +39,6 @@ schema = ["dep:schemars"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
-meerkat-machine-dsl = { workspace = true }
-meerkat-machine-schema = { workspace = true }
-indexmap = { workspace = true }
 
 [lints]
 workspace = true

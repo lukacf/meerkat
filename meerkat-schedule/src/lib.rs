@@ -9,6 +9,7 @@ pub use ::tokio;
 mod authority;
 mod driver;
 mod error;
+pub mod machines;
 mod service;
 #[cfg(test)]
 mod shadow;

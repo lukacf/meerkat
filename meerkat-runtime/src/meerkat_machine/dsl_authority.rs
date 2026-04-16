@@ -61,8 +61,7 @@ pub(crate) fn project_state(
                 None,
                 None,
             ),
-            (RuntimeState::Running, current_run_id, pre_run_phase)
-            | (RuntimeState::Retired, current_run_id, pre_run_phase) => {
+            (RuntimeState::Running | RuntimeState::Retired, current_run_id, pre_run_phase) => {
                 (runtime_phase, current_run_id, pre_run_phase)
             }
             (phase, _, _) => (phase, None, None),

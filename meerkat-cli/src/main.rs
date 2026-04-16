@@ -7990,7 +7990,7 @@ mod tests {
             .register_session_with_executor(session_id.clone(), executor)
             .await;
 
-        let err = tokio::time::timeout(
+        let err = Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
             finalize_cli_runtime_backed_turn(
                 pipeline,
@@ -8000,7 +8000,7 @@ mod tests {
                     Ok(())
                 },
             ),
-        )
+        ))
         .await
         .expect("failure-path shutdown should not deadlock")
         .expect_err("finalizer should preserve the original turn failure");

@@ -349,7 +349,7 @@ impl MeerkatMachine {
                     .ok_or(RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
                 Ok(MeerkatMachineCommandResult::RuntimeState(
                     crate::meerkat_machine::dsl_authority::write_back_phase(
-                        entry.dsl_authority.state.lifecycle_phase.clone(),
+                        entry.dsl_authority.state.lifecycle_phase,
                     ),
                 ))
             }

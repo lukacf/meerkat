@@ -270,6 +270,7 @@ impl MobOrchestratorAuthority {
     }
 
     /// Check legality using an externally owned top-level phase.
+    #[allow(dead_code)]
     pub(crate) fn can_accept_in_phase(
         &self,
         phase: MobState,

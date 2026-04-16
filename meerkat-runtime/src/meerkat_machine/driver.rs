@@ -15,8 +15,7 @@ use crate::input_state::{
 use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::Mutex;
 use crate::traits::{
-    DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
-    RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
+    DestroyReport, RecoveryReport, ResetReport, RetireReport, RuntimeDriver, RuntimeDriverError,
 };
 use chrono::Utc;
 

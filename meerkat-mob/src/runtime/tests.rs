@@ -10839,7 +10839,7 @@ async fn test_failed_spawn_clears_pending_spawn_count_and_failed_roster_entry() 
         .await
         .expect("spawn lead");
 
-    let initial = handle
+    let _initial = handle
         .debug_orchestrator_snapshot()
         .await
         .expect("initial orchestrator snapshot");

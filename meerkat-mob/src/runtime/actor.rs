@@ -349,6 +349,7 @@ impl MobActor {
         self.dsl_authority.state.runtime_fence_tokens = fence_map;
     }
 
+    #[allow(dead_code)]
     fn sync_dsl_run_state(&mut self) {
         let active_run_count = self.machine_active_run_count() as u64;
         self.dsl_authority.state.active_run_count = active_run_count;
@@ -454,6 +455,7 @@ impl MobActor {
             .map(|orch| orch.snapshot_in_phase(phase, self.machine_active_run_count()))
     }
 
+    #[allow(dead_code)]
     fn machine_orchestrator_can_accept(
         &self,
         phase: MobState,
@@ -808,7 +810,7 @@ impl MobActor {
         if self.orchestrator.is_some() {
             match self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteSpawn, "complete_spawn")
             {
-                Ok(_) => {
+                Ok(()) => {
                     topology_advanced = true;
                 }
                 Err(error) => {
@@ -1727,13 +1729,13 @@ impl MobActor {
                             }
                             if stop_result.is_ok() {
                                 let mut topology_unbound = false;
-                                let phase = self.state();
+                                let _phase = self.state();
                                 if self.orchestrator.is_some() {
                                     match self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::StopOrchestrator,
                                         "stop_orchestrator",
                                     ) {
-                                        Ok(_) => {
+                                        Ok(()) => {
                                             topology_unbound = true;
                                         }
                                         Err(error) => {
@@ -1819,13 +1821,13 @@ impl MobActor {
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
                                 let mut topology_bound = false;
-                                let phase = self.state();
+                                let _phase = self.state();
                                 if self.orchestrator.is_some() {
                                     match self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::ResumeOrchestrator,
                                         "resume_orchestrator",
                                     ) {
-                                        Ok(_) => {
+                                        Ok(()) => {
                                             topology_bound = true;
                                         }
                                         Err(error) => {
@@ -4549,12 +4551,11 @@ impl MobActor {
             })?;
         #[cfg(debug_assertions)]
         {
-            if self.orchestrator.is_some() {
-                if let Err(e) =
+            if self.orchestrator.is_some()
+                && let Err(e) =
                     self.machine_apply_orchestrator(phase, MobOrchestratorInput::MarkCompleted)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
+            {
+                tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
             }
             if let Err(e) = self.lifecycle_authority.apply_in_phase(
                 phase,
@@ -5295,7 +5296,7 @@ impl MobActor {
                 .await?
                 .as_ref()
                 .is_some_and(|run| run.status.is_terminal());
-            let phase = self.state();
+            let _phase = self.state();
             let authorities_expect_completion = {
                 let mut probe =
                     mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());

@@ -46,6 +46,7 @@ pub(crate) enum MobLifecycleInput {
     MarkCompleted,
     Destroy,
     StartRun,
+    #[allow(dead_code)]
     FinishRun,
     #[cfg_attr(
         not(test),
@@ -227,6 +228,7 @@ impl MobLifecycleAuthority {
         self.evaluate(input).is_ok()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn can_accept_in_phase(
         &self,
         phase: MobState,

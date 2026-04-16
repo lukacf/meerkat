@@ -22,17 +22,11 @@ use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::Utc;
 use meerkat_core::BlobStore;
-use meerkat_core::comms_drain_lifecycle_authority::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainMode, DrainExitReason,
-};
-use meerkat_core::generated::{protocol_comms_drain_abort, protocol_comms_drain_spawn};
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::{InputId, RunId};
-use meerkat_core::types::{HandlingMode, SessionId};
+use meerkat_core::types::SessionId;
 use meerkat_core::{
     SessionToolVisibilityState, ToolFilter, ToolScopeApplyError, ToolScopeRevision,
     ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
@@ -43,10 +37,7 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
-use crate::input_state::{
-    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
-};
+use crate::input_state::{InputLifecycleState, InputState};
 use crate::meerkat_machine_types::{
     HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
     MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
@@ -57,15 +48,16 @@ use crate::meerkat_machine_types::{
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
-use crate::policy::PolicyDecision;
-use crate::runtime_state::{RuntimeState, RuntimeStateTransitionError};
+use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
 use crate::store::RuntimeStore;
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
+#[cfg(test)]
+use crate::traits::RuntimeDriver;
 use crate::traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
-    RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
+    RuntimeControlPlaneError, RuntimeDriverError,
 };
 
 /// Error type for [`MeerkatMachine::prepare_bindings`].
@@ -77,18 +69,13 @@ pub enum RuntimeBindingsError {
 }
 
 pub(crate) use driver::{
-    DriverEntry, MachineRecoveryDelta, RecoveredIngressEntry, SharedCompletionRegistry,
-    SharedDriver, commit_runtime_loop_run, fail_runtime_loop_run,
-    machine_apply_recovered_input_normalization, machine_apply_run_return_projection,
-    machine_begin_run, machine_build_recovered_ingress_entry, machine_build_replay_plan,
-    machine_destroy, machine_executor_attach_projection, machine_input_boundary,
-    machine_normalize_recovered_input_state, machine_prepare_bindings_projection,
-    machine_realize_recovered_runtime_state, machine_recover_ephemeral_driver,
+    DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run,
+    fail_runtime_loop_run, machine_apply_run_return_projection, machine_begin_run, machine_destroy,
+    machine_executor_attach_projection, machine_input_boundary,
+    machine_prepare_bindings_projection, machine_recover_ephemeral_driver,
     machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_retire, machine_select_runtime_loop_batch, machine_staged_contributors,
-    machine_stop_runtime, machine_unregister_session_projection, machine_validate_active_run,
-    machine_validate_boundary_applied, machine_validate_run_completed, machine_validate_run_failed,
-    machine_validate_stage_drain_snapshot, prepare_runtime_loop_batch_start, slice_starts_with,
+    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
+    machine_unregister_session_projection, prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;
@@ -98,6 +85,7 @@ mod dispatch_control;
 mod dispatch_drain;
 mod dispatch_ingress;
 mod dispatch_session;
+#[allow(unused_variables, dead_code)]
 pub(crate) mod dsl;
 pub(crate) mod dsl_authority;
 mod llm_reconfigure;
@@ -106,7 +94,7 @@ mod session_management;
 mod traits;
 mod visibility;
 
-pub(crate) use comms_drain::{CommsDrainSlot, abort_slot, apply_runtime_drain_effects};
+pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
 /// Per-session state: driver + registration phase.
@@ -351,10 +339,7 @@ impl MeerkatMachine {
     }
 }
 
-/// Per-session comms drain slot, driven by `CommsDrainLifecycleAuthority`.
-///
-/// ALL state transitions go through the authority -- no manual
-/// `handle.is_finished()` checks in shell code.
+/// Per-session comms drain slot, driven by direct in-kernel state.
 /// Session-scoped execution kernel for the Meerkat runtime.
 ///
 /// Owns per-session runtime state (driver, ops registry, completion waiters,
@@ -370,7 +355,7 @@ pub struct MeerkatMachine {
     store: Option<Arc<dyn RuntimeStore>>,
     /// Blob store used by persistent drivers for durable input externalization.
     blob_store: Option<Arc<dyn BlobStore>>,
-    /// Per-session comms drain lifecycle, driven by machine authority.
+    /// Per-session comms drain lifecycle.
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,

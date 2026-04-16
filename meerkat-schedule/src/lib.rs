@@ -48,7 +48,7 @@ pub use types::{
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceContext, OccurrenceFailureClass,
     OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
-    Schedule, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
+    Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     UpdateScheduleRequest,

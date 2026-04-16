@@ -147,7 +147,7 @@ impl ScheduleLifecycleAuthority {
                     return Err(ScheduleLifecycleError::Deleted);
                 }
                 schedule.phase = SchedulePhase::Paused;
-                schedule.updated_at_utc = at_utc;
+                schedule.config.updated_at_utc = at_utc;
                 let revision = schedule.revision;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
@@ -164,7 +164,7 @@ impl ScheduleLifecycleAuthority {
                     return Err(ScheduleLifecycleError::Deleted);
                 }
                 schedule.phase = SchedulePhase::Active;
-                schedule.updated_at_utc = at_utc;
+                schedule.config.updated_at_utc = at_utc;
                 let revision = schedule.revision;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
@@ -183,8 +183,8 @@ impl ScheduleLifecycleAuthority {
                 schedule.revision = schedule.revision.next();
                 schedule.phase = SchedulePhase::Deleted;
                 schedule.planning_cursor_utc = None;
-                schedule.deleted_at_utc = Some(at_utc);
-                schedule.updated_at_utc = at_utc;
+                schedule.config.deleted_at_utc = Some(at_utc);
+                schedule.config.updated_at_utc = at_utc;
                 let revision = schedule.revision;
                 Ok(ScheduleLifecycleMutator {
                     schedule,
@@ -224,10 +224,10 @@ impl ScheduleLifecycleAuthority {
         let mut revision_affecting_change = false;
 
         if let Some(name) = request.name {
-            schedule.name = Some(name);
+            schedule.config.name = Some(name);
         }
         if let Some(description) = request.description {
-            schedule.description = Some(description);
+            schedule.config.description = Some(description);
         }
         if let Some(trigger) = request.trigger {
             revision_affecting_change |= trigger != schedule.trigger;
@@ -250,13 +250,13 @@ impl ScheduleLifecycleAuthority {
             schedule.missing_target_policy = policy;
         }
         if let Some(days) = request.planning_horizon_days {
-            schedule.planning_horizon_days = days;
+            schedule.config.planning_horizon_days = days;
         }
         if let Some(count) = request.planning_horizon_occurrences {
-            schedule.planning_horizon_occurrences = count;
+            schedule.config.planning_horizon_occurrences = count;
         }
         if let Some(labels) = request.labels {
-            schedule.labels = labels;
+            schedule.config.labels = labels;
         }
 
         if revision_affecting_change {

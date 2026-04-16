@@ -293,7 +293,8 @@ impl ScheduleStore for MemoryScheduleStore {
             })
             .cloned()
             .collect();
-        schedules.sort_by_key(|schedule| (schedule.created_at_utc, schedule.schedule_id.clone()));
+        schedules
+            .sort_by_key(|schedule| (schedule.config.created_at_utc, schedule.schedule_id.clone()));
         if let Some(limit) = filter.limit {
             schedules.truncate(limit);
         }

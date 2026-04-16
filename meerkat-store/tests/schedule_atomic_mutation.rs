@@ -53,7 +53,7 @@ async fn assert_atomic_schedule_mutation_supersedes_old_pending(
 
     let mut updated = original.clone();
     updated.revision = updated.revision.next();
-    updated.updated_at_utc = Utc::now();
+    updated.config.updated_at_utc = Utc::now();
     updated.next_occurrence_ordinal = updated.next_occurrence_ordinal.next();
 
     let replacement = Occurrence::planned_from_schedule(

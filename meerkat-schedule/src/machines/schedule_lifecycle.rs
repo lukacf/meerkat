@@ -3,7 +3,7 @@ use meerkat_machine_dsl::machine;
 machine! {
     machine ScheduleLifecycleMachine {
         version: 1,
-        rust: "self" / "catalog::dsl::schedule_lifecycle",
+        rust: "meerkat-schedule" / "machines::schedule_lifecycle",
 
         state {
             lifecycle_phase: ScheduleLifecycleState,
@@ -206,19 +206,22 @@ machine! {
     }
 }
 
-// Stub types
+// DSL proxy types — must match the real policy enums 1:1
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MisfirePolicy {
     Skip,
-    Execute,
+    CatchUpWithin,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlapPolicy {
+    AllowConcurrent,
     SkipIfRunning,
-    Queue,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingTargetPolicy {
-    MarkMisfired,
     Skip,
+    MarkMisfired,
 }

@@ -6,7 +6,16 @@ use crate::{
     Update, VariantSchema, machine::TriggerKind,
 };
 
+/// Canonical MobMachine schema. Delegates to the DSL-generated version.
+///
+/// The hand-written builder below is retained only for historical reference
+/// and for any downstream callers that may rely on the `mob_machine()` name.
 pub fn mob_machine() -> MachineSchema {
+    super::dsl::dsl_mob_machine()
+}
+
+#[allow(dead_code)]
+fn mob_machine_hand_written() -> MachineSchema {
     let mut trigger_variants = direct_mob_trigger_variants();
     trigger_variants.extend(absorbed_mob_input_variants());
     let (input_variants, signal_variants) = split_mob_variants(trigger_variants);

@@ -476,7 +476,7 @@ mod tests {
             .iter()
             .find(|t| t.name == "CancelActive")
             .expect("CancelActive transition");
-        assert!(cancel.guard.is_some());
+        assert!(!cancel.guards.is_empty());
         assert_eq!(cancel.effects.len(), 1);
         assert_eq!(cancel.effects[0].variant, "OrderCancelled");
         assert_eq!(cancel.updates.len(), 3); // failure_reason, assigned_to, paid_at

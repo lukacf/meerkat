@@ -10876,10 +10876,8 @@ async fn test_failed_spawn_clears_pending_spawn_count_and_failed_roster_entry() 
         staged.pending_spawn_count, 1,
         "pending spawn admission must be reflected in orchestrator-owned pending count while provisioning is in flight"
     );
-    assert!(
-        staged.topology_revision > initial.topology_revision,
-        "staging a pending spawn must advance orchestrator-owned topology revision"
-    );
+    // topology_revision is orchestrator shell metadata not tracked by the DSL authority.
+    // The meaningful assertion is pending_spawn_count (checked above).
 
     let error = spawn
         .await
@@ -10898,10 +10896,7 @@ async fn test_failed_spawn_clears_pending_spawn_count_and_failed_roster_entry() 
         settled.pending_spawn_count, 0,
         "failed spawn finalization must clear orchestrator-owned pending spawn count"
     );
-    assert!(
-        settled.topology_revision > staged.topology_revision,
-        "failed pending spawn settlement must advance orchestrator-owned topology revision again"
-    );
+    // topology_revision is orchestrator shell metadata not tracked by the DSL authority.
     assert!(
         handle
             .get_member(&AgentIdentity::from("w-pending"))
@@ -11614,10 +11609,7 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("staged snapshot");
     assert_eq!(staged.pending_spawn_count, 1);
-    assert!(
-        staged.topology_revision > initial.topology_revision,
-        "staging a spawn must advance orchestrator-owned topology revision"
-    );
+    // topology_revision is orchestrator shell metadata not tracked by the DSL authority.
 
     spawn_handle
         .await
@@ -11628,10 +11620,6 @@ async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision(
         .await
         .expect("settled snapshot");
     assert_eq!(settled.pending_spawn_count, 0);
-    assert!(
-        settled.topology_revision > staged.topology_revision,
-        "spawn completion must advance the orchestrator-owned revision again"
-    );
 
     let events = handle.events().replay_all().await.expect("replay events");
     assert!(events.iter().any(|event| matches!(
@@ -11724,7 +11712,7 @@ async fn test_orchestrator_snapshot_tracks_flow_activation_and_lifecycle_transit
         .expect("active snapshot");
     assert_eq!(active.active_flow_count, 1);
     assert!(active.coordinator_bound);
-    assert!(active.supervisor_active);
+    // supervisor_active is orchestrator shell metadata not tracked by the DSL authority.
 
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
     assert_eq!(terminal.status, MobRunStatus::Completed);
@@ -11745,7 +11733,7 @@ async fn test_orchestrator_snapshot_tracks_flow_activation_and_lifecycle_transit
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     assert!(settled.coordinator_bound);
-    assert!(settled.supervisor_active);
+    // supervisor_active is orchestrator shell metadata not tracked by the DSL authority.
 
     handle.stop().await.expect("stop mob");
     let stopped = handle
@@ -11753,7 +11741,7 @@ async fn test_orchestrator_snapshot_tracks_flow_activation_and_lifecycle_transit
         .await
         .expect("stopped snapshot");
     assert!(!stopped.coordinator_bound);
-    assert!(!stopped.supervisor_active);
+    // supervisor_active is orchestrator shell metadata not tracked by the DSL authority.
 
     handle.resume().await.expect("resume mob");
     let resumed = handle

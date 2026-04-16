@@ -9,6 +9,7 @@ pub use ::tokio;
 mod authority;
 mod driver;
 mod error;
+pub(crate) mod machines;
 mod service;
 mod store;
 mod surface;
@@ -44,9 +45,9 @@ pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule, ScheduleId,
-    SchedulePhase, ScheduleRevision, ScheduleSpawnTooling, ScheduledMobAction,
-    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule,
+    ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
+    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     UpdateScheduleRequest,
 };

@@ -291,7 +291,7 @@ impl ScheduleService {
         }
 
         let horizon_end_utc =
-            store_now_utc + Duration::days(i64::from(schedule.planning_horizon_days));
+            store_now_utc + Duration::days(i64::from(schedule.config.planning_horizon_days));
         let existing = self
             .store
             .list_occurrences(OccurrenceFilter {
@@ -318,7 +318,7 @@ impl ScheduleService {
             .count();
 
         let desired_count =
-            usize::try_from(schedule.planning_horizon_occurrences).unwrap_or(usize::MAX);
+            usize::try_from(schedule.config.planning_horizon_occurrences).unwrap_or(usize::MAX);
         if future_pending_count >= desired_count {
             return Ok(Vec::new());
         }
@@ -330,7 +330,7 @@ impl ScheduleService {
             .map(|occurrence| occurrence.due_at_utc)
             .max()
             .or(schedule.planning_cursor_utc)
-            .unwrap_or_else(|| schedule.updated_at_utc - Duration::minutes(1));
+            .unwrap_or_else(|| schedule.config.updated_at_utc - Duration::minutes(1));
 
         let due_times = occurrences_for_horizon(
             &schedule.trigger,

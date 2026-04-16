@@ -479,17 +479,19 @@ fn gen_transitions(def: &MachineDef) -> Vec<TokenStream> {
                 .collect();
 
             // Guards — strip phase-field references (they're in `from` instead)
-            let guards = if let Some(guard) = &t.guard {
-                let stripped = strip_phase_guards(def, guard);
-                if let Some(remaining) = stripped {
-                    let expr = gen_schema_expr_for(def, &remaining);
-                    quote! { vec![Guard { name: String::new(), expr: #expr }] }
-                } else {
-                    quote! { vec![] }
-                }
-            } else {
-                quote! { vec![] }
-            };
+            let guard_items: Vec<_> = t
+                .guards
+                .iter()
+                .filter_map(|g| {
+                    let stripped = strip_phase_guards(def, &g.expr);
+                    stripped.map(|remaining| {
+                        let expr = gen_schema_expr_for(def, &remaining);
+                        let guard_name_str = &g.name;
+                        quote! { Guard { name: #guard_name_str.into(), expr: #expr } }
+                    })
+                })
+                .collect();
+            let guards = quote! { vec![#(#guard_items),*] };
 
             // Updates
             let updates = gen_schema_updates(&t.updates);
@@ -627,15 +629,15 @@ fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
         .map(std::string::ToString::to_string)
         .collect();
 
-    let guard = match &t.guard {
+    let combined = match t.combined_guard() {
         Some(g) => g,
-        None => return all_phases, // no guard → all phases
+        None => return all_phases, // no guards → all phases
     };
 
     if def.is_stored_phase() {
         // Extract phases from guard by pattern matching
         let mut phases = Vec::new();
-        extract_phase_refs_from_guard(def, guard, &mut phases);
+        extract_phase_refs_from_guard(def, &combined, &mut phases);
         if phases.is_empty() {
             // Guard doesn't reference the phase field → all phases
             all_phases
@@ -645,7 +647,7 @@ fn derive_from_phases(def: &MachineDef, t: &TransitionDef) -> Vec<String> {
     } else {
         // Derived-phase: enumerate all non-terminal phases, substitute the phase
         // projection's defining conditions into the guard, check if trivially false.
-        derive_from_phases_derived(def, guard, &all_phases)
+        derive_from_phases_derived(def, &combined, &all_phases)
     }
 }
 

@@ -265,10 +265,8 @@ machine! {
         // Cannot use per_phase because target is always Idle, not source phase.
         transition UnregisterSessionIdle {
             on input UnregisterSession { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Idle
-                && self.session_id == Some(session_id)
-            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -280,10 +278,8 @@ machine! {
         }
         transition UnregisterSessionAttached {
             on input UnregisterSession { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.session_id == Some(session_id)
-            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -295,10 +291,8 @@ machine! {
         }
         transition UnregisterSessionRunning {
             on input UnregisterSession { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id == Some(session_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -310,10 +304,8 @@ machine! {
         }
         transition UnregisterSessionRetired {
             on input UnregisterSession { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Retired
-                && self.session_id == Some(session_id)
-            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -325,10 +317,8 @@ machine! {
         }
         transition UnregisterSessionStopped {
             on input UnregisterSession { session_id }
-            guard {
-                self.lifecycle_phase == Phase::Stopped
-                && self.session_id == Some(session_id)
-            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
             update {
                 self.session_id = None;
                 self.active_runtime_id = None;
@@ -348,11 +338,9 @@ machine! {
                 next_visibility_state, next_capability_base_filter,
                 next_active_visibility_revision, tool_visibility_delta
             }
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.session_id != None
-                && self.active_runtime_id != None
-            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {}
             to Attached
         }
@@ -364,11 +352,9 @@ machine! {
                 next_visibility_state, next_capability_base_filter,
                 next_active_visibility_revision, tool_visibility_delta
             }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id != None
-                && self.active_runtime_id != None
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {}
             to Running
         }
@@ -377,7 +363,7 @@ machine! {
         transition StagePersistentFilter {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StagePersistentFilter { filter, witnesses }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
         }
@@ -386,7 +372,7 @@ machine! {
         transition RequestDeferredTools {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RequestDeferredTools { names, witnesses }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
         }
@@ -463,7 +449,7 @@ machine! {
         transition SetPeerIngressContext {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SetPeerIngressContext { keep_alive }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
         }
@@ -472,7 +458,7 @@ machine! {
         transition NotifyDrainExited {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input NotifyDrainExited { reason }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
             emit RuntimeNotice { kind: "drain", detail: "drain exited" }
@@ -528,14 +514,16 @@ machine! {
                 active_requested_deferred_names, staged_requested_deferred_names,
                 active_visibility_revision, staged_visibility_revision
             }
-            guard {
-                self.lifecycle_phase == Phase::Idle
-                && self.session_id != None
-                && active_visibility_revision >= staged_visibility_revision
-                && (active_visibility_revision != staged_visibility_revision
-                    || (active_filter == staged_filter
-                        && active_requested_deferred_names == staged_requested_deferred_names))
-                && for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
             update {}
             to Idle
@@ -547,14 +535,16 @@ machine! {
                 active_requested_deferred_names, staged_requested_deferred_names,
                 active_visibility_revision, staged_visibility_revision
             }
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.session_id != None
-                && active_visibility_revision >= staged_visibility_revision
-                && (active_visibility_revision != staged_visibility_revision
-                    || (active_filter == staged_filter
-                        && active_requested_deferred_names == staged_requested_deferred_names))
-                && for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
             update {}
             to Attached
@@ -566,14 +556,16 @@ machine! {
                 active_requested_deferred_names, staged_requested_deferred_names,
                 active_visibility_revision, staged_visibility_revision
             }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id != None
-                && active_visibility_revision >= staged_visibility_revision
-                && (active_visibility_revision != staged_visibility_revision
-                    || (active_filter == staged_filter
-                        && active_requested_deferred_names == staged_requested_deferred_names))
-                && for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
             update {}
             to Running
@@ -585,14 +577,16 @@ machine! {
                 active_requested_deferred_names, staged_requested_deferred_names,
                 active_visibility_revision, staged_visibility_revision
             }
-            guard {
-                self.lifecycle_phase == Phase::Retired
-                && self.session_id != None
-                && active_visibility_revision >= staged_visibility_revision
-                && (active_visibility_revision != staged_visibility_revision
-                    || (active_filter == staged_filter
-                        && active_requested_deferred_names == staged_requested_deferred_names))
-                && for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
             update {}
             to Retired
@@ -604,14 +598,16 @@ machine! {
                 active_requested_deferred_names, staged_requested_deferred_names,
                 active_visibility_revision, staged_visibility_revision
             }
-            guard {
-                self.lifecycle_phase == Phase::Stopped
-                && self.session_id != None
-                && active_visibility_revision >= staged_visibility_revision
-                && (active_visibility_revision != staged_visibility_revision
-                    || (active_filter == staged_filter
-                        && active_requested_deferred_names == staged_requested_deferred_names))
-                && for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
             update {}
             to Stopped
@@ -692,14 +688,14 @@ machine! {
         transition Destroy {
             on input Destroy
             guard {
-                (self.lifecycle_phase == Phase::Initializing
+                self.lifecycle_phase == Phase::Initializing
                 || self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Retired
-                || self.lifecycle_phase == Phase::Stopped)
-                && self.active_runtime_id != None
+                || self.lifecycle_phase == Phase::Stopped
             }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -752,32 +748,37 @@ machine! {
         // Idle, Attached, Running, Retired: update intents
         transition SetSilentIntentsIdle {
             on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Idle && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
             update { self.silent_intent_overrides = intents; }
             to Idle
         }
         transition SetSilentIntentsAttached {
             on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update { self.silent_intent_overrides = intents; }
             to Attached
         }
         transition SetSilentIntentsRunning {
             on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update { self.silent_intent_overrides = intents; }
             to Running
         }
         transition SetSilentIntentsRetired {
             on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Retired && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
             update { self.silent_intent_overrides = intents; }
             to Retired
         }
         // Stopped: no-op (no update)
         transition SetSilentIntentsStopped {
             on input SetSilentIntents { session_id, intents }
-            guard { self.lifecycle_phase == Phase::Stopped && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Stopped
         }
@@ -786,7 +787,7 @@ machine! {
         transition Abort {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input Abort { session_id }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
         }
@@ -795,7 +796,7 @@ machine! {
         transition Wait {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input Wait { session_id }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
         }
@@ -811,14 +812,16 @@ machine! {
         // 22. EnsureDrainRunning: Attached/Running self-loops, emit SpawnDrainTask
         transition EnsureDrainRunningAttached {
             on signal EnsureDrainRunning
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit SpawnDrainTask
         }
         transition EnsureDrainRunningRunning {
             on signal EnsureDrainRunning
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit SpawnDrainTask
@@ -828,7 +831,7 @@ machine! {
         transition Ingest {
             per_phase [Idle, Attached, Running]
             on input Ingest { runtime_id, work_id, origin }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
             emit ResolveAdmission
@@ -838,7 +841,7 @@ machine! {
         transition PublishEvent {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PublishEvent { kind }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
             emit IngressNotice
@@ -848,12 +851,10 @@ machine! {
         // Idle + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionIdleQueued {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Idle
-                && self.session_id != None
-                && request_immediate_processing == false
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {}
             to Idle
             emit IngressAccepted
@@ -862,12 +863,10 @@ machine! {
         // Idle + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionIdleImmediate {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Idle
-                && self.session_id != None
-                && request_immediate_processing == true
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {}
             to Idle
             emit IngressAccepted
@@ -876,12 +875,10 @@ machine! {
         // Attached + immediate → Running (phase change!)
         transition AcceptWithCompletionAttachedImmediate {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.session_id != None
-                && request_immediate_processing == true
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some("attached");
@@ -894,12 +891,10 @@ machine! {
         // Attached + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionAttachedQueued {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.session_id != None
-                && request_immediate_processing == false
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {}
             to Attached
             emit IngressAccepted
@@ -908,12 +903,10 @@ machine! {
         // Running + queued passive (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionRunningQueuedPassive {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id != None
-                && request_immediate_processing == false
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {}
             to Running
             emit IngressAccepted
@@ -921,12 +914,10 @@ machine! {
         // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
         transition AcceptWithCompletionRunningInterruptYielding {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id != None
-                && request_immediate_processing == false
-                && interrupt_yielding == true
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == true }
             update {}
             to Running
             emit IngressAccepted
@@ -935,12 +926,10 @@ machine! {
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
             on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.session_id != None
-                && request_immediate_processing == true
-                && interrupt_yielding == false
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
             update {}
             to Running
             emit IngressAccepted
@@ -951,7 +940,7 @@ machine! {
         transition AcceptWithoutWake {
             per_phase [Idle, Attached, Running]
             on input AcceptWithoutWake { input_id }
-            guard { self.session_id != None }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Idle
             emit IngressAccepted
@@ -960,28 +949,32 @@ machine! {
         // 27. ClassifyExternalEnvelope/ClassifyPlainEvent: Attached/Running, emit EnqueueClassifiedEntry
         transition ClassifyExternalEnvelopeAttached {
             on signal ClassifyExternalEnvelope
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
         }
         transition ClassifyExternalEnvelopeRunning {
             on signal ClassifyExternalEnvelope
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EnqueueClassifiedEntry
         }
         transition ClassifyPlainEventAttached {
             on signal ClassifyPlainEvent
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
         }
         transition ClassifyPlainEventRunning {
             on signal ClassifyPlainEvent
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EnqueueClassifiedEntry
@@ -990,7 +983,8 @@ machine! {
         // 28. Prepare: Idle→Running, Attached→Running
         transition PrepareIdle {
             on input Prepare { session_id, run_id }
-            guard { self.lifecycle_phase == Phase::Idle && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some("idle");
@@ -1000,7 +994,8 @@ machine! {
         }
         transition PrepareAttached {
             on input Prepare { session_id, run_id }
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some("attached");
@@ -1025,21 +1020,24 @@ machine! {
         //     Attached self-loops (signals), emit SubmitRunPrimitive
         transition StartConversationRunAttached {
             on signal StartConversationRun
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit SubmitRunPrimitive
         }
         transition StartImmediateAppendAttached {
             on signal StartImmediateAppend
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit SubmitRunPrimitive
         }
         transition StartImmediateContextAttached {
             on signal StartImmediateContext
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit SubmitRunPrimitive
@@ -1048,11 +1046,9 @@ machine! {
         // 31. Commit: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
         transition CommitRunningToIdle {
             on input Commit { input_id, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("idle")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1061,11 +1057,9 @@ machine! {
         }
         transition CommitRunningToAttached {
             on input Commit { input_id, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("attached")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1074,11 +1068,9 @@ machine! {
         }
         transition CommitRunningToRetired {
             on input Commit { input_id, run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("retired")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1089,11 +1081,9 @@ machine! {
         // 32. Fail: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
         transition FailRunningToIdle {
             on input Fail { run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("idle")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1103,11 +1093,9 @@ machine! {
         }
         transition FailRunningToAttached {
             on input Fail { run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("attached")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1117,11 +1105,9 @@ machine! {
         }
         transition FailRunningToRetired {
             on input Fail { run_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.pre_run_phase == Some("retired")
-                && self.current_run_id == Some(run_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -1133,164 +1119,188 @@ machine! {
         // 33. MCP surface signals: Attached/Running per-phase, emit EmitExternalToolDelta (or other)
         transition StageAddAttached {
             on signal StageAdd
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition StageAddRunning {
             on signal StageAdd
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition StageRemoveAttached {
             on signal StageRemove
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition StageRemoveRunning {
             on signal StageRemove
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition StageReloadAttached {
             on signal StageReload
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition StageReloadRunning {
             on signal StageReload
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition ApplySurfaceBoundaryAttached {
             on signal ApplySurfaceBoundary
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit ScheduleSurfaceCompletion
         }
         transition ApplySurfaceBoundaryRunning {
             on signal ApplySurfaceBoundary
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit ScheduleSurfaceCompletion
         }
         transition PendingSucceededAttached {
             on signal PendingSucceeded
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition PendingSucceededRunning {
             on signal PendingSucceeded
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition PendingFailedAttached {
             on signal PendingFailed
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition PendingFailedRunning {
             on signal PendingFailed
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition CallStartedAttached {
             on signal CallStarted
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
         }
         transition CallStartedRunning {
             on signal CallStarted
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
         }
         transition CallFinishedAttached {
             on signal CallFinished
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
         }
         transition CallFinishedRunning {
             on signal CallFinished
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
         }
         transition FinalizeRemovalCleanAttached {
             on signal FinalizeRemovalClean
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition FinalizeRemovalCleanRunning {
             on signal FinalizeRemovalClean
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition FinalizeRemovalForcedAttached {
             on signal FinalizeRemovalForced
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition FinalizeRemovalForcedRunning {
             on signal FinalizeRemovalForced
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedAttached {
             on signal SnapshotAligned
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition SnapshotAlignedRunning {
             on signal SnapshotAligned
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
         }
         transition ShutdownSurfaceAttached {
             on signal ShutdownSurface
-            guard { self.lifecycle_phase == Phase::Attached && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EmitExternalToolDelta
         }
         transition ShutdownSurfaceRunning {
             on signal ShutdownSurface
-            guard { self.lifecycle_phase == Phase::Running && self.session_id != None }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EmitExternalToolDelta
@@ -1300,9 +1310,9 @@ machine! {
         transition RecycleFromIdleOrRetired {
             on input Recycle
             guard {
-                (self.lifecycle_phase == Phase::Idle || self.lifecycle_phase == Phase::Retired)
-                && self.active_runtime_id != None
+                self.lifecycle_phase == Phase::Idle || self.lifecycle_phase == Phase::Retired
             }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {
                 self.active_fence_token = None;
                 self.current_run_id = None;
@@ -1312,10 +1322,8 @@ machine! {
         }
         transition RecycleFromAttached {
             on input Recycle
-            guard {
-                self.lifecycle_phase == Phase::Attached
-                && self.active_runtime_id != None
-            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {
                 self.active_fence_token = None;
                 self.current_run_id = None;

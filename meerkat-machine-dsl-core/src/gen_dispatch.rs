@@ -211,12 +211,17 @@ fn gen_transition_chain(
 ) -> TokenStream {
     if transitions.len() == 1 {
         let t = transitions[0];
-        if let Some(guard) = &t.guard {
-            let guard_expr = gen_expr(guard, FieldPrefix::AuthorityState);
+        if t.has_guards() {
+            let guard_exprs: Vec<_> = t
+                .guards
+                .iter()
+                .map(|g| gen_expr(&g.expr, FieldPrefix::AuthorityState))
+                .collect();
+            let combined = quote! { #(#guard_exprs)&&* };
             let body = gen_transition_body(def, t);
             let variant_str = t.trigger.variant.to_string();
             quote! {
-                if #guard_expr {
+                if #combined {
                     #body
                 } else {
                     return Err(#error_name::NoMatchingTransition {
@@ -232,18 +237,23 @@ fn gen_transition_chain(
         let mut arms = Vec::new();
         for (i, t) in transitions.iter().enumerate() {
             let body = gen_transition_body(def, t);
-            if let Some(guard) = &t.guard {
-                let guard_expr = gen_expr(guard, FieldPrefix::AuthorityState);
+            if t.has_guards() {
+                let guard_exprs: Vec<_> = t
+                    .guards
+                    .iter()
+                    .map(|g| gen_expr(&g.expr, FieldPrefix::AuthorityState))
+                    .collect();
+                let combined = quote! { #(#guard_exprs)&&* };
                 if i == 0 {
-                    arms.push(quote! { if #guard_expr { #body } });
+                    arms.push(quote! { if #combined { #body } });
                 } else {
-                    arms.push(quote! { else if #guard_expr { #body } });
+                    arms.push(quote! { else if #combined { #body } });
                 }
             } else {
                 arms.push(quote! { else { #body } });
             }
         }
-        let last_has_guard = transitions.last().is_none_or(|t| t.guard.is_some());
+        let last_has_guard = transitions.last().is_none_or(|t| t.has_guards());
         if last_has_guard {
             let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {

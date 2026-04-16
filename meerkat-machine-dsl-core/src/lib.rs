@@ -43,11 +43,12 @@ fn expand_per_phase(def: &mut ast::MachineDef) {
                     )
                 };
 
-                // Prepend phase guard to existing guard
-                let combined_guard = match &t.guard {
-                    Some(existing) => Some(ast::ExprDef::And(vec![phase_guard, existing.clone()])),
-                    None => Some(phase_guard),
-                };
+                // Prepend phase guard as an unnamed guard; keep existing guards
+                let mut combined_guards = vec![ast::GuardDef {
+                    name: String::new(),
+                    expr: phase_guard,
+                }];
+                combined_guards.extend(t.guards.iter().cloned());
 
                 expanded.push(ast::TransitionDef {
                     name: expanded_name,
@@ -60,7 +61,7 @@ fn expand_per_phase(def: &mut ast::MachineDef) {
                         variant: t.trigger.variant.clone(),
                         bindings: t.trigger.bindings.clone(),
                     },
-                    guard: combined_guard,
+                    guards: combined_guards,
                     updates: t.updates.clone(),
                     to_phase: phase.clone(),
                     effects: t.effects.clone(),

@@ -42,6 +42,7 @@ pub mod event;
 mod generated;
 pub mod ids;
 pub mod launch;
+pub(crate) mod machines;
 mod mob_machine;
 pub mod profile;
 mod roster;

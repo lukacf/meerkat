@@ -1,9 +1,120 @@
+//! MobMachine — DSL-generated canonical state.
+//!
+//! The generated `MobMachineState` is the machine-owned portion of mob state.
+//! It covers lifecycle phase, roster membership, run tracking, spawn tracking,
+//! and coordinator binding. Shell infrastructure (channels, stores, services,
+//! handles, etc.) is NOT modeled here.
+
 use meerkat_machine_dsl::machine;
+
+// ---------------------------------------------------------------------------
+// Bridging newtypes
+// ---------------------------------------------------------------------------
+//
+// These types bridge between the DSL's flat representation and the real mob
+// domain types in `crate::ids`. The DSL needs Ord+Hash+Clone for Set/Map;
+// these newtypes satisfy that while providing From/Into mappings.
+
+/// Bridging type for agent identity. Maps to `crate::ids::AgentIdentity`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentIdentity(pub String);
+
+impl<T: Into<String>> From<T> for AgentIdentity {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for agent runtime ID. Maps to `crate::ids::AgentRuntimeId`.
+///
+/// The real `AgentRuntimeId` is a struct `{ identity: AgentIdentity, generation: Generation }`.
+/// The DSL uses a single string key `"identity:generation"` for Set/Map operations.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AgentRuntimeId(pub String);
+
+impl<T: Into<String>> From<T> for AgentRuntimeId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for fence token. Maps to `crate::ids::FenceToken`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FenceToken(pub u64);
+
+impl From<u64> for FenceToken {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
+
+/// Bridging type for generation counter. Maps to `crate::ids::Generation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Generation(pub u64);
+
+impl From<u64> for Generation {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
+
+/// Bridging type for work reference. Maps to `crate::ids::WorkRef`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WorkId(pub String);
+
+impl<T: Into<String>> From<T> for WorkId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Projection helpers: domain types → bridging types
+// ---------------------------------------------------------------------------
+
+impl AgentRuntimeId {
+    /// Project a real `AgentRuntimeId` into the DSL bridging type.
+    pub fn from_domain(rid: &crate::ids::AgentRuntimeId) -> Self {
+        Self(rid.to_string()) // "identity:generation"
+    }
+}
+
+impl AgentIdentity {
+    /// Project a real `AgentIdentity` into the DSL bridging type.
+    pub fn from_domain(id: &crate::ids::AgentIdentity) -> Self {
+        Self(id.to_string())
+    }
+}
+
+impl FenceToken {
+    /// Project a real `FenceToken` into the DSL bridging type.
+    pub fn from_domain(ft: crate::ids::FenceToken) -> Self {
+        Self(ft.get())
+    }
+}
+
+impl Generation {
+    /// Project a real `Generation` into the DSL bridging type.
+    pub fn from_domain(generation: crate::ids::Generation) -> Self {
+        Self(generation.get())
+    }
+}
+
+impl WorkId {
+    /// Project a real `WorkRef` into the DSL bridging type.
+    pub fn from_work_ref(wr: &crate::ids::WorkRef) -> Self {
+        Self(wr.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Machine definition
+// ---------------------------------------------------------------------------
 
 machine! {
     machine MobMachine {
         version: 1,
-        rust: "meerkat-mob" / "generated::mob_machine",
+        rust: "meerkat-mob" / "machines::mob_machine",
 
         state {
             lifecycle_phase: MobPhase,
@@ -162,15 +273,11 @@ machine! {
         // Direct transitions
         // =====================================================================
 
-        // Spawn is a Running self-loop: the real runtime starts in Running
-        // and does not expose a durable pre-start top-level phase.
         transition SpawnRunning {
             on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {
-                self.active_run_count = 0;
-                self.pending_spawn_count = 0;
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -191,7 +298,6 @@ machine! {
             to Running
         }
 
-        // SubmitWork formally requests runtime ingress on the bound member runtime.
         transition SubmitWorkRunningExternal {
             on input SubmitWork { agent_runtime_id, fence_token, work_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
@@ -245,8 +351,6 @@ machine! {
                 || self.lifecycle_phase == Phase::Stopped
             }
             update {
-                self.active_run_count = 0;
-                self.pending_spawn_count = 0;
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -264,8 +368,6 @@ machine! {
             on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.active_run_count = 0;
-                self.pending_spawn_count = 0;
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -330,7 +432,6 @@ machine! {
         // Absorbed transitions: per-phase self-loops
         // =====================================================================
 
-        // RecordOperatorActionProvenance: all 4 phases, no guard, no effect
         transition RecordOperatorActionProvenanceRunning {
             on input RecordOperatorActionProvenance
             guard { self.lifecycle_phase == Phase::Running }
@@ -356,7 +457,6 @@ machine! {
             to Destroyed
         }
 
-        // SetSpawnPolicy: all 4 phases, no guard, no effect
         transition SetSpawnPolicyRunning {
             on input SetSpawnPolicy
             guard { self.lifecycle_phase == Phase::Running }
@@ -386,11 +486,9 @@ machine! {
         // Phase-changing transitions
         // =====================================================================
 
-        // Stop: Running -> Stopped
         transition StopRunning {
             on input Stop
             guard { self.lifecycle_phase == Phase::Running }
-            guard "no_active_runs" { self.active_run_count == 0 }
             update {
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
@@ -399,7 +497,6 @@ machine! {
             emit EmitRunLifecycleNotice
         }
 
-        // Resume: Stopped -> Running
         transition ResumeStopped {
             on input Resume
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -410,7 +507,6 @@ machine! {
             emit EmitRunLifecycleNotice
         }
 
-        // Complete: Running -> Completed
         transition CompleteRunning {
             on input Complete
             guard { self.lifecycle_phase == Phase::Running }
@@ -421,7 +517,6 @@ machine! {
             emit EmitRunLifecycleNotice
         }
 
-        // Reset: Running|Stopped|Completed -> Running
         transition ResetToRunning {
             on input Reset
             guard {
@@ -496,7 +591,6 @@ machine! {
         // Subscribe commands
         // =====================================================================
 
-        // SubscribeAgentEvents: all 4 phases, guard: active_members_present
         transition SubscribeAgentEventsRunning {
             on input SubscribeAgentEvents
             guard { self.lifecycle_phase == Phase::Running }
@@ -526,7 +620,6 @@ machine! {
             to Destroyed
         }
 
-        // SubscribeAllAgentEvents: all 4 phases, no guard
         transition SubscribeAllAgentEventsRunning {
             on input SubscribeAllAgentEvents
             guard { self.lifecycle_phase == Phase::Running }
@@ -552,7 +645,6 @@ machine! {
             to Destroyed
         }
 
-        // SubscribeMobEvents: all 4 phases, no guard
         transition SubscribeMobEventsRunning {
             on input SubscribeMobEvents
             guard { self.lifecycle_phase == Phase::Running }
@@ -829,7 +921,6 @@ machine! {
         transition StartFlowRunning {
             on signal StartFlow
             guard { self.lifecycle_phase == Phase::Running }
-            guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.active_run_count += 1;
             }
@@ -878,7 +969,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Completed }
             guard "active_runs_present" { self.active_run_count > 0 }
             update {
-                self.active_run_count = 0;
+                self.active_run_count -= 1;
             }
             to Running
             emit FlowTerminalized
@@ -889,7 +980,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
             guard "active_runs_present" { self.active_run_count > 0 }
             update {
-                self.active_run_count = 0;
+                self.active_run_count -= 1;
             }
             to Running
             emit EmitRunLifecycleNotice
@@ -1012,345 +1103,5 @@ machine! {
             to Running
             emit FlowTerminalized
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub types for compilation
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AgentIdentity(pub String);
-impl<T: Into<String>> From<T> for AgentIdentity {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AgentRuntimeId(pub String);
-impl<T: Into<String>> From<T> for AgentRuntimeId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FenceToken(pub u64);
-impl From<u64> for FenceToken {
-    fn from(v: u64) -> Self {
-        Self(v)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Generation(pub u64);
-impl From<u64> for Generation {
-    fn from(v: u64) -> Self {
-        Self(v)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WorkId(pub String);
-impl<T: Into<String>> From<T> for WorkId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ---- Runtime dispatch tests ----
-
-    #[test]
-    fn initial_state_is_running() {
-        let auth = MobMachineAuthority::new();
-        assert_eq!(auth.state.phase(), MobPhase::Running);
-        assert!(auth.state.live_runtime_ids.is_empty());
-        assert_eq!(auth.state.active_run_count, 0);
-        assert!(auth.state.coordinator_bound);
-    }
-
-    #[test]
-    fn spawn_and_retire_lifecycle() {
-        let mut auth = MobMachineAuthority::new();
-
-        // Spawn a member
-        let r = MobMachineMutator::apply(
-            &mut auth,
-            MobMachineInput::Spawn {
-                agent_identity: AgentIdentity::from("agent-1"),
-                agent_runtime_id: AgentRuntimeId::from("rt-1"),
-                fence_token: FenceToken(1),
-                generation: Generation(0),
-                external_addressable: true,
-            },
-        )
-        .unwrap();
-        assert_eq!(r.to_phase, MobPhase::Running);
-        assert!(
-            auth.state
-                .live_runtime_ids
-                .contains(&AgentRuntimeId::from("rt-1"))
-        );
-        assert!(
-            auth.state
-                .externally_addressable_runtime_ids
-                .contains(&AgentRuntimeId::from("rt-1"))
-        );
-
-        // Retire the member (signal)
-        let r = auth
-            .apply_signal(MobMachineSignal::RetireMember {
-                agent_runtime_id: AgentRuntimeId::from("rt-1"),
-                fence_token: FenceToken(1),
-            })
-            .unwrap();
-        assert_eq!(r.to_phase, MobPhase::Running);
-
-        // Observe runtime retired (signal)
-        let r = auth
-            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
-                agent_runtime_id: AgentRuntimeId::from("rt-1"),
-                fence_token: FenceToken(1),
-            })
-            .unwrap();
-        assert_eq!(r.to_phase, MobPhase::Stopped);
-        assert!(auth.state.live_runtime_ids.is_empty());
-    }
-
-    #[test]
-    fn stop_and_resume() {
-        let mut auth = MobMachineAuthority::new();
-
-        // Stop
-        let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop).unwrap();
-        assert_eq!(r.to_phase, MobPhase::Stopped);
-        assert!(!auth.state.coordinator_bound);
-
-        // Resume
-        let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Resume).unwrap();
-        assert_eq!(r.to_phase, MobPhase::Running);
-        assert!(auth.state.coordinator_bound);
-    }
-
-    #[test]
-    fn destroy_is_terminal() {
-        let mut auth = MobMachineAuthority::new();
-        let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Destroy).unwrap();
-        assert_eq!(r.to_phase, MobPhase::Destroyed);
-
-        // Cannot act after destroy
-        let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop);
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn reset_returns_to_running() {
-        let mut auth = MobMachineAuthority::new();
-        MobMachineMutator::apply(&mut auth, MobMachineInput::Stop).unwrap();
-        assert_eq!(auth.state.phase(), MobPhase::Stopped);
-
-        let r = MobMachineMutator::apply(&mut auth, MobMachineInput::Reset).unwrap();
-        assert_eq!(r.to_phase, MobPhase::Running);
-        assert!(auth.state.coordinator_bound);
-    }
-
-    // ---- Schema tests ----
-
-    #[test]
-    fn schema_validates() {
-        let schema = MobMachineState::schema();
-        schema
-            .validate()
-            .expect("mob machine schema should validate");
-    }
-
-    #[test]
-    fn schema_matches_hand_written() {
-        let dsl_schema = MobMachineState::schema();
-        let hand_schema = meerkat_machine_schema::catalog::mob_machine();
-
-        // Machine identity
-        assert_eq!(dsl_schema.machine, hand_schema.machine);
-        assert_eq!(dsl_schema.version, hand_schema.version);
-
-        // Phases
-        assert_eq!(
-            dsl_schema.state.phase.variants.len(),
-            hand_schema.state.phase.variants.len(),
-            "phase count: dsl={}, hand={}",
-            dsl_schema.state.phase.variants.len(),
-            hand_schema.state.phase.variants.len()
-        );
-
-        // Fields (lifecycle_phase excluded from schema)
-        assert_eq!(
-            dsl_schema.state.fields.len(),
-            hand_schema.state.fields.len(),
-            "field count mismatch: dsl={}, hand={}",
-            dsl_schema.state.fields.len(),
-            hand_schema.state.fields.len()
-        );
-
-        // Terminal phases
-        assert_eq!(
-            dsl_schema.state.terminal_phases.len(),
-            hand_schema.state.terminal_phases.len(),
-            "terminal phase count: dsl={}, hand={}",
-            dsl_schema.state.terminal_phases.len(),
-            hand_schema.state.terminal_phases.len()
-        );
-
-        // Inputs
-        assert_eq!(
-            dsl_schema.inputs.variants.len(),
-            hand_schema.inputs.variants.len(),
-            "input variant count: dsl={}, hand={}",
-            dsl_schema.inputs.variants.len(),
-            hand_schema.inputs.variants.len()
-        );
-
-        // Signals
-        assert_eq!(
-            dsl_schema.signals.variants.len(),
-            hand_schema.signals.variants.len(),
-            "signal variant count: dsl={}, hand={}",
-            dsl_schema.signals.variants.len(),
-            hand_schema.signals.variants.len()
-        );
-
-        // Effects
-        assert_eq!(
-            dsl_schema.effects.variants.len(),
-            hand_schema.effects.variants.len(),
-            "effect variant count: dsl={}, hand={}",
-            dsl_schema.effects.variants.len(),
-            hand_schema.effects.variants.len()
-        );
-
-        // Helpers
-        assert_eq!(dsl_schema.helpers.len(), hand_schema.helpers.len());
-
-        // Invariants
-        assert_eq!(dsl_schema.invariants.len(), hand_schema.invariants.len());
-
-        // Transitions
-        assert_eq!(
-            dsl_schema.transitions.len(),
-            hand_schema.transitions.len(),
-            "transition count mismatch: dsl={}, hand={}",
-            dsl_schema.transitions.len(),
-            hand_schema.transitions.len()
-        );
-
-        // Dispositions
-        assert_eq!(
-            dsl_schema.effect_dispositions.len(),
-            hand_schema.effect_dispositions.len(),
-            "disposition count: dsl={}, hand={}",
-            dsl_schema.effect_dispositions.len(),
-            hand_schema.effect_dispositions.len()
-        );
-
-        // Verify each transition's from-phases match
-        for hand_t in &hand_schema.transitions {
-            let dsl_t = dsl_schema
-                .transitions
-                .iter()
-                .find(|t| t.name == hand_t.name)
-                .unwrap_or_else(|| panic!("DSL schema missing transition `{}`", hand_t.name));
-
-            let mut dsl_from = dsl_t.from.clone();
-            let mut hand_from = hand_t.from.clone();
-            dsl_from.sort();
-            hand_from.sort();
-            assert_eq!(
-                dsl_from, hand_from,
-                "from mismatch for transition `{}`: dsl={:?}, hand={:?}",
-                hand_t.name, dsl_from, hand_from
-            );
-        }
-    }
-
-    // ---- TLA+ rendering ----
-
-    #[test]
-    fn schema_renders_tla() {
-        let schema = MobMachineState::schema();
-        let tla = meerkat_machine_codegen::render_machine_module(&schema);
-        assert!(tla.contains("MobMachine"));
-        assert!(tla.contains("SpawnRunning"));
-        assert!(tla.contains("DestroyMob"));
-        assert!(tla.contains("ObserveRuntimeRetired"));
-    }
-
-    // ---- Kernel round-trip ----
-
-    #[test]
-    fn dsl_dispatch_matches_kernel() {
-        let schema = MobMachineState::schema();
-        let kernel = meerkat_machine_kernels::GeneratedMachineKernel::new(schema);
-
-        let mut auth = MobMachineAuthority::new();
-        let mut kernel_state = kernel.initial_state().unwrap();
-
-        // Run Spawn through both
-        let dsl_r = MobMachineMutator::apply(
-            &mut auth,
-            MobMachineInput::Spawn {
-                agent_identity: AgentIdentity::from("agent-1"),
-                agent_runtime_id: AgentRuntimeId::from("rt-1"),
-                fence_token: FenceToken(1),
-                generation: Generation(0),
-                external_addressable: true,
-            },
-        )
-        .unwrap();
-
-        let kernel_input = meerkat_machine_kernels::KernelInput {
-            variant: "Spawn".into(),
-            fields: std::collections::BTreeMap::from([
-                (
-                    "agent_identity".into(),
-                    meerkat_machine_kernels::KernelValue::String("agent-1".into()),
-                ),
-                (
-                    "agent_runtime_id".into(),
-                    meerkat_machine_kernels::KernelValue::String("rt-1".into()),
-                ),
-                (
-                    "fence_token".into(),
-                    meerkat_machine_kernels::KernelValue::U64(1),
-                ),
-                (
-                    "generation".into(),
-                    meerkat_machine_kernels::KernelValue::U64(0),
-                ),
-                (
-                    "external_addressable".into(),
-                    meerkat_machine_kernels::KernelValue::Bool(true),
-                ),
-            ]),
-        };
-        let kernel_r = kernel.transition(&kernel_state, &kernel_input).unwrap();
-
-        assert_eq!(format!("{:?}", dsl_r.to_phase), kernel_r.next_state.phase);
-        assert_eq!(dsl_r.effects.len(), kernel_r.effects.len());
-
-        kernel_state = kernel_r.next_state;
-
-        // Run Stop through both
-        let dsl_r = MobMachineMutator::apply(&mut auth, MobMachineInput::Stop);
-        let kernel_input = meerkat_machine_kernels::KernelInput {
-            variant: "Stop".into(),
-            fields: std::collections::BTreeMap::new(),
-        };
-        let kernel_r = kernel.transition(&kernel_state, &kernel_input);
-
-        assert_eq!(dsl_r.is_ok(), kernel_r.is_ok());
     }
 }

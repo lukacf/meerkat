@@ -1036,6 +1036,7 @@ impl MobBuilder {
             task_board_service,
             spawn_policy,
             lifecycle_authority,
+            dsl_authority: crate::machines::mob_machine::MobMachineAuthority::new(),
             default_external_tools_provider,
             realm_profile_store,
         };

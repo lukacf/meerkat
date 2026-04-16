@@ -166,7 +166,8 @@ machine! {
         // and does not expose a durable pre-start top-level phase.
         transition SpawnRunning {
             on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
-            guard { self.lifecycle_phase == Phase::Running && self.coordinator_bound == true }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -193,13 +194,11 @@ machine! {
         // SubmitWork formally requests runtime ingress on the bound member runtime.
         transition SubmitWorkRunningExternal {
             on input SubmitWork { agent_runtime_id, fence_token, work_id, origin }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.live_runtime_ids.contains(agent_runtime_id)
-                && origin == "External"
-                && self.externally_addressable_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "external_origin" { origin == "External" }
+            guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
             update {}
             to Running
             emit RequestRuntimeIngress { agent_runtime_id: agent_runtime_id, fence_token: fence_token, work_id: work_id, origin: origin }
@@ -207,12 +206,10 @@ machine! {
 
         transition SubmitWorkRunningInternal {
             on input SubmitWork { agent_runtime_id, fence_token, work_id, origin }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.live_runtime_ids.contains(agent_runtime_id)
-                && origin == "Internal"
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "internal_origin" { origin == "Internal" }
             update {}
             to Running
             emit RequestRuntimeIngress { agent_runtime_id: agent_runtime_id, fence_token: fence_token, work_id: work_id, origin: origin }
@@ -220,10 +217,8 @@ machine! {
 
         transition RetireMember {
             on signal RetireMember { agent_runtime_id, fence_token }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {}
             to Running
             emit RequestRuntimeRetire
@@ -231,10 +226,8 @@ machine! {
 
         transition ObserveRuntimeRetired {
             on signal ObserveRuntimeRetired { agent_runtime_id, fence_token }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
@@ -288,10 +281,8 @@ machine! {
 
         transition MarkCompleted {
             on signal MarkCompleted
-            guard {
-                (self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped)
-                && self.active_run_count == 0
-            }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard "no_active_runs" { self.active_run_count == 0 }
             update {}
             to Completed
             emit EmitMemberLifecycleNotice { kind: "completed" }
@@ -318,12 +309,12 @@ machine! {
         transition ObserveRuntimeDestroyed {
             on signal ObserveRuntimeDestroyed { agent_runtime_id, fence_token }
             guard {
-                (self.lifecycle_phase == Phase::Running
+                self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Stopped
                 || self.lifecycle_phase == Phase::Completed
-                || self.lifecycle_phase == Phase::Destroyed)
-                && self.live_runtime_ids.contains(agent_runtime_id)
+                || self.lifecycle_phase == Phase::Destroyed
             }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
@@ -398,7 +389,8 @@ machine! {
         // Stop: Running -> Stopped
         transition StopRunning {
             on input Stop
-            guard { self.lifecycle_phase == Phase::Running && self.active_run_count == 0 }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "no_active_runs" { self.active_run_count == 0 }
             update {
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
@@ -507,25 +499,29 @@ machine! {
         // SubscribeAgentEvents: all 4 phases, guard: active_members_present
         transition SubscribeAgentEventsRunning {
             on input SubscribeAgentEvents
-            guard { self.lifecycle_phase == Phase::Running && self.live_runtime_ids != EmptySet }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
             update {}
             to Running
         }
         transition SubscribeAgentEventsStopped {
             on input SubscribeAgentEvents
-            guard { self.lifecycle_phase == Phase::Stopped && self.live_runtime_ids != EmptySet }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
             update {}
             to Stopped
         }
         transition SubscribeAgentEventsCompleted {
             on input SubscribeAgentEvents
-            guard { self.lifecycle_phase == Phase::Completed && self.live_runtime_ids != EmptySet }
+            guard { self.lifecycle_phase == Phase::Completed }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
             update {}
             to Completed
         }
         transition SubscribeAgentEventsDestroyed {
             on input SubscribeAgentEvents
-            guard { self.lifecycle_phase == Phase::Destroyed && self.live_runtime_ids != EmptySet }
+            guard { self.lifecycle_phase == Phase::Destroyed }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
             update {}
             to Destroyed
         }
@@ -676,30 +672,66 @@ machine! {
         transition StopOrchestratorRunning {
             on signal StopOrchestrator
             guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.coordinator_bound = false;
-            }
+            update { self.coordinator_bound = false; }
             to Running
+            emit NotifyCoordinator
+        }
+        transition StopOrchestratorStopped {
+            on signal StopOrchestrator
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update { self.coordinator_bound = false; }
+            to Stopped
+            emit NotifyCoordinator
+        }
+        transition StopOrchestratorCompleted {
+            on signal StopOrchestrator
+            guard { self.lifecycle_phase == Phase::Completed }
+            update { self.coordinator_bound = false; }
+            to Completed
             emit NotifyCoordinator
         }
 
         transition ResumeOrchestratorRunning {
             on signal ResumeOrchestrator
             guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.coordinator_bound = true;
-            }
+            update { self.coordinator_bound = true; }
             to Running
+            emit NotifyCoordinator
+        }
+        transition ResumeOrchestratorStopped {
+            on signal ResumeOrchestrator
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update { self.coordinator_bound = true; }
+            to Stopped
+            emit NotifyCoordinator
+        }
+        transition ResumeOrchestratorCompleted {
+            on signal ResumeOrchestrator
+            guard { self.lifecycle_phase == Phase::Completed }
+            update { self.coordinator_bound = true; }
+            to Completed
             emit NotifyCoordinator
         }
 
         transition DestroyOrchestratorRunning {
             on signal DestroyOrchestrator
             guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.coordinator_bound = false;
-            }
+            update { self.coordinator_bound = false; }
             to Running
+            emit NotifyCoordinator
+        }
+        transition DestroyOrchestratorStopped {
+            on signal DestroyOrchestrator
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update { self.coordinator_bound = false; }
+            to Stopped
+            emit NotifyCoordinator
+        }
+        transition DestroyOrchestratorCompleted {
+            on signal DestroyOrchestrator
+            guard { self.lifecycle_phase == Phase::Completed }
+            update { self.coordinator_bound = false; }
+            to Completed
             emit NotifyCoordinator
         }
 
@@ -785,11 +817,8 @@ machine! {
 
         transition RunFlowRunning {
             on input RunFlow
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.coordinator_bound == true
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.active_run_count += 1;
             }
@@ -799,11 +828,8 @@ machine! {
 
         transition StartFlowRunning {
             on signal StartFlow
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.coordinator_bound == true
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.active_run_count += 1;
             }
@@ -813,10 +839,7 @@ machine! {
 
         transition CreateRunRunning {
             on signal CreateRun
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-            }
+            guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_run_count += 1;
             }
@@ -826,10 +849,7 @@ machine! {
 
         transition StartRunRunning {
             on signal StartRun
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-            }
+            guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.active_run_count += 1;
             }
@@ -855,10 +875,8 @@ machine! {
 
         transition CompleteFlowRunning {
             on signal CompleteFlow
-            guard {
-                (self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Completed)
-                && self.active_run_count > 0
-            }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Completed }
+            guard "active_runs_present" { self.active_run_count > 0 }
             update {
                 self.active_run_count = 0;
             }
@@ -868,10 +886,8 @@ machine! {
 
         transition FinishRunRunning {
             on signal FinishRun
-            guard {
-                (self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped)
-                && self.active_run_count > 0
-            }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard "active_runs_present" { self.active_run_count > 0 }
             update {
                 self.active_run_count = 0;
             }
@@ -885,11 +901,9 @@ machine! {
 
         transition RetireRunning {
             on input Retire { agent_runtime_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.live_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -900,11 +914,9 @@ machine! {
 
         transition RetireStopped {
             on input Retire { agent_runtime_id }
-            guard {
-                self.lifecycle_phase == Phase::Stopped
-                && self.live_runtime_ids != EmptySet
-                && self.live_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
@@ -941,10 +953,8 @@ machine! {
 
         transition CompleteSpawnRunning {
             on signal CompleteSpawn
-            guard {
-                (self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped)
-                && self.pending_spawn_count > 0
-            }
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard "pending_spawns_present" { self.pending_spawn_count > 0 }
             update {
                 self.pending_spawn_count -= 1;
             }
@@ -979,11 +989,9 @@ machine! {
 
         transition RespawnRunning {
             on input Respawn { agent_runtime_id }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids.contains(agent_runtime_id)
-                && self.coordinator_bound == true
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "coordinator_bound" { self.coordinator_bound == true }
             update {}
             to Running
             emit ExposePendingSpawn
@@ -995,11 +1003,9 @@ machine! {
 
         transition CancelAllWorkRunning {
             on input CancelAllWork { agent_runtime_id, fence_token }
-            guard {
-                self.lifecycle_phase == Phase::Running
-                && self.live_runtime_ids != EmptySet
-                && self.live_runtime_ids.contains(agent_runtime_id)
-            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
                 self.active_run_count = 0;
             }

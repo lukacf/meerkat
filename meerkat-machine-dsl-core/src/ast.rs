@@ -154,11 +154,37 @@ pub struct TransitionDef {
     /// prepended and a `to X` target.
     pub per_phase: Option<Vec<Ident>>,
     pub trigger: TriggerDef,
-    pub guard: Option<ExprDef>,
+    /// Guard blocks. Multiple named guards are supported:
+    /// ```text
+    /// guard "name1" { expr1 }
+    /// guard "name2" { expr2 }
+    /// ```
+    /// An unnamed guard (no string literal) gets an empty-string name.
+    /// All guards are ANDed for dispatch; each emits a separate Guard in the schema.
+    pub guards: Vec<GuardDef>,
     pub updates: Vec<UpdateDef>,
     pub to_phase: Ident,
     pub effects: Vec<EffectEmitDef>,
     pub span: Span,
+}
+
+impl TransitionDef {
+    /// Returns the combined guard expression (all guards ANDed), or `None` if
+    /// there are no guards. Used by schema `from`-derivation.
+    pub fn combined_guard(&self) -> Option<ExprDef> {
+        match self.guards.len() {
+            0 => None,
+            1 => Some(self.guards[0].expr.clone()),
+            _ => Some(ExprDef::And(
+                self.guards.iter().map(|g| g.expr.clone()).collect(),
+            )),
+        }
+    }
+
+    /// Whether this transition has any guards at all.
+    pub fn has_guards(&self) -> bool {
+        !self.guards.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -172,6 +198,14 @@ pub struct TriggerDef {
     pub kind: TriggerKindDef,
     pub variant: Ident,
     pub bindings: Vec<Ident>,
+}
+
+/// A single guard block: `guard ["name"] { expr }`.
+#[derive(Debug, Clone)]
+pub struct GuardDef {
+    /// Guard name (empty string if unnamed).
+    pub name: String,
+    pub expr: ExprDef,
 }
 
 #[derive(Debug, Clone)]

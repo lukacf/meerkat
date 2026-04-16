@@ -13117,6 +13117,98 @@ async fn test_mob_runtime_parity_field_evaluator_covers_formal_state_fields() {
     );
 }
 
+#[test]
+fn test_bridge_protocol_types_live_in_contracts_not_runtime() {
+    // Verify the canonical protocol types are re-exported from contracts,
+    // not defined in meerkat-runtime. This is a compile-time structural
+    // assertion — if the re-export chain breaks, this won't compile.
+    let _cmd: meerkat_contracts::BridgeCommand = meerkat_contracts::BridgeCommand::ObserveMember(
+        meerkat_contracts::BridgeSupervisorPayload {
+            supervisor: meerkat_contracts::BridgePeerSpec {
+                name: "test".into(),
+                peer_id: "ed25519:test".into(),
+                address: "inproc://test".into(),
+            },
+            epoch: 1,
+            protocol_version: 1,
+        },
+    );
+}
+
+#[test]
+fn test_bridge_trait_methods_have_corresponding_schema_effects() {
+    let schema = schema_mob_machine();
+    let bridge_effects = [
+        "BridgeBindMember",
+        "BridgeAuthorizeSupervisor",
+        "BridgeRevokeSupervisor",
+        "BridgeDeliverMemberInput",
+        "BridgeObserveMember",
+        "BridgeInterruptMember",
+        "BridgeRetireMember",
+        "BridgeDestroyMember",
+        "BridgeWireMember",
+        "BridgeUnwireMember",
+    ];
+    let schema_effect_names: Vec<_> = schema
+        .effects
+        .variants
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    let missing: Vec<_> = bridge_effects
+        .iter()
+        .filter(|name| !schema_effect_names.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "bridge trait methods missing corresponding schema effects: {missing:?}"
+    );
+}
+
+#[test]
+fn test_bridge_schema_fields_present_for_remote_member_tracking() {
+    let schema = schema_mob_machine();
+    let required_fields = [
+        "remote_member_count",
+        "supervisor_authorized",
+        "supervisor_rotating",
+        "rotation_pending_acks",
+    ];
+    let field_names: Vec<_> = schema
+        .state
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let missing: Vec<_> = required_fields
+        .iter()
+        .filter(|name| !field_names.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "schema missing remote member tracking fields: {missing:?}"
+    );
+}
+
+#[test]
+fn test_rotate_supervisor_transition_exists_in_schema() {
+    let schema = schema_mob_machine();
+    let has_rotate = schema
+        .transitions
+        .iter()
+        .any(|t| t.name == "RotateSupervisorRunning");
+    let has_ack = schema
+        .transitions
+        .iter()
+        .any(|t| t.name == "AckRotationRunning");
+    assert!(
+        has_rotate,
+        "schema must include RotateSupervisor transition"
+    );
+    assert!(has_ack, "schema must include AckRotation transition");
+}
+
 #[tokio::test]
 async fn test_orchestrator_snapshot_tracks_pending_spawn_ownership_and_revision() {
     let (handle, service) = create_test_mob(sample_definition()).await;

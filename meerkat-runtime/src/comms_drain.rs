@@ -348,8 +348,7 @@ fn advertised_bind_bootstrap_token(
         .map(|(_, query)| query)
         .ok_or_else(|| {
             format!(
-                "runtime advertised address '{address}' is missing '{}' query param",
-                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                "runtime advertised address '{address}' is missing '{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}' query param"
             )
         })?;
     for pair in query.split('&') {
@@ -361,8 +360,7 @@ fn advertised_bind_bootstrap_token(
         }
     }
     Err(format!(
-        "runtime advertised address '{address}' is missing '{}' query param",
-        SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+        "runtime advertised address '{address}' is missing '{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}' query param"
     ))
 }
 
@@ -1165,8 +1163,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
             address: format!(
-                "inproc://receiver?{}=expected-token",
-                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                "inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
             ),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         });
@@ -1197,8 +1194,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
             address: format!(
-                "inproc://receiver?{}=expected-token",
-                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                "inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
             ),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         });

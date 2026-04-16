@@ -308,22 +308,30 @@ impl MeerkatMachine {
             )
         };
 
+        let (effective_phase, effective_run_id, effective_pre_run) =
+            dsl_authority::effective_lifecycle(
+                control_snapshot.phase,
+                control_snapshot.current_run_id.as_ref(),
+                control_snapshot.pre_run_phase,
+            );
+
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
             .ok_or(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })?;
-        entry.dsl_authority =
-            dsl::MeerkatMachineAuthority::from_state(dsl_authority::project_state(
-                session_id,
-                control_snapshot.phase,
-                Some(&runtime_id),
-                control_snapshot.current_run_id.as_ref(),
-                control_snapshot.pre_run_phase,
-                silent_intents,
-                active_fence_token,
-            ));
+        // Update ONLY coarse lifecycle fields — preserve absorbed substate
+        // (input_phases, op_statuses, drain_phase, visibility, etc.)
+        // which is maintained incrementally by DSL transitions.
+        let state = &mut entry.dsl_authority.state;
+        state.lifecycle_phase = dsl_authority::project_phase(effective_phase);
+        state.session_id = Some(dsl::SessionId::from_domain(session_id));
+        state.active_runtime_id = Some(dsl::AgentRuntimeId::from_domain(&runtime_id));
+        state.active_fence_token = active_fence_token.map(dsl::FenceToken::from);
+        state.current_run_id = effective_run_id.map(dsl::RunId::from_domain);
+        state.pre_run_phase = effective_pre_run.map(|p| p.to_string());
+        state.silent_intent_overrides = silent_intents;
         Ok(())
     }
 

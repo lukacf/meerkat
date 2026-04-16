@@ -242,10 +242,16 @@ impl ShellConfig {
             .canonicalize()
             .map_err(|_| ShellError::WorkingDirNotFound(resolved.display().to_string()))?;
 
-        // Check if path is within project root when restricted
+        // Check if path is within project root when restricted.
+        // If project_root is empty, fall back to cwd for the restriction check.
         if self.restrict_to_project {
-            let canonical_root = self.project_root.canonicalize().map_err(|_| {
-                ShellError::WorkingDirNotFound(self.project_root.display().to_string())
+            let effective_root = if self.project_root.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            } else {
+                self.project_root.clone()
+            };
+            let canonical_root = effective_root.canonicalize().map_err(|_| {
+                ShellError::WorkingDirNotFound(effective_root.display().to_string())
             })?;
 
             if !canonical.starts_with(&canonical_root) {

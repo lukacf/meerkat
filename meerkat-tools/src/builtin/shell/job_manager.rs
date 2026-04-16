@@ -537,6 +537,13 @@ impl JobManager {
         cmd.process_group(0);
 
         // Spawn the child process
+        eprintln!(
+            "[SHELL-DEBUG] shell={} work_dir={} exists={} command={}",
+            shell_path.display(),
+            work_dir.display(),
+            work_dir.exists(),
+            &command[..command.len().min(80)]
+        );
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {

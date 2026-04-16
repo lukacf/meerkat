@@ -252,14 +252,16 @@ impl ShellTool {
         let mut cmd = Command::new(&shell_path);
         cmd.arg("-c").arg(command);
 
-        // Set working directory
-        if let Some(dir) = working_dir {
-            cmd.current_dir(dir);
-            cmd.env("PWD", dir);
+        // Set working directory — fall back to cwd if project_root is empty.
+        let effective_dir = if let Some(dir) = working_dir {
+            dir.to_path_buf()
+        } else if self.config.project_root.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         } else {
-            cmd.current_dir(&self.config.project_root);
-            cmd.env("PWD", &self.config.project_root);
-        }
+            self.config.project_root.clone()
+        };
+        cmd.current_dir(&effective_dir);
+        cmd.env("PWD", &effective_dir);
 
         // Inject per-agent environment variables
         cmd.envs(&self.config.env_vars);

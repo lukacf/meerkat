@@ -17,9 +17,23 @@
 // Re-export for test modules
 pub use meerkat_machine_schema;
 
-mod meerkat_machine;
-mod mob_machine;
-mod occurrence_lifecycle;
-mod schedule_lifecycle;
+pub mod meerkat_machine;
+pub mod mob_machine;
+pub mod occurrence_lifecycle;
+pub mod schedule_lifecycle;
 #[cfg(test)]
 mod tests;
+
+/// Returns all 4 DSL-generated machine schemas.
+///
+/// This is the DSL equivalent of `canonical_machine_schemas()` from the
+/// hand-written catalog. Used for aggregate equivalence testing and as the
+/// future replacement source.
+pub fn dsl_machine_schemas() -> Vec<meerkat_machine_schema::MachineSchema> {
+    vec![
+        meerkat_machine::MeerkatMachineState::schema(),
+        mob_machine::MobMachineState::schema(),
+        schedule_lifecycle::ScheduleLifecycleMachineState::schema(),
+        occurrence_lifecycle::OccurrenceLifecycleMachineState::schema(),
+    ]
+}

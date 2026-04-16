@@ -2706,6 +2706,7 @@ name = "meerkat-machine-schema"
 version = "0.5.2"
 dependencies = [
  "indexmap",
+ "meerkat-machine-dsl",
 ]
 
 [[package]]

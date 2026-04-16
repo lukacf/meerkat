@@ -1,5 +1,6 @@
 mod compositions;
 mod coverage;
+pub(crate) mod dsl;
 mod meerkat_machine;
 mod mob_machine;
 mod occurrence_lifecycle;
@@ -24,10 +25,10 @@ pub use schedule_lifecycle::schedule_lifecycle_machine;
 
 pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
     vec![
-        meerkat_machine(),
-        mob_machine(),
-        schedule_lifecycle_machine(),
-        occurrence_lifecycle_machine(),
+        dsl::dsl_meerkat_machine(),
+        dsl::dsl_mob_machine(),
+        dsl::dsl_schedule_lifecycle_machine(),
+        dsl::dsl_occurrence_lifecycle_machine(),
     ]
 }
 

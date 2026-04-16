@@ -44,7 +44,7 @@ SpawnRunning(agent_identity, agent_runtime_id, fence_token, generation, external
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \cup {agent_runtime_id})
-    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE MapRemove(externally_addressable_runtime_ids, agent_runtime_id)
+    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE (externally_addressable_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, fence_token)
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
@@ -87,8 +87,8 @@ ObserveRuntimeRetired(agent_runtime_id, fence_token) ==
     /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ live_runtime_ids' = MapRemove(live_runtime_ids, agent_runtime_id)
-    /\ externally_addressable_runtime_ids' = MapRemove(externally_addressable_runtime_ids, agent_runtime_id)
+    /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
+    /\ externally_addressable_runtime_ids' = (externally_addressable_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapRemove(runtime_fence_tokens, agent_runtime_id)
     /\ active_run_count' = 0
     /\ UNCHANGED << pending_spawn_count, coordinator_bound >>
@@ -99,7 +99,7 @@ ResetMember(agent_identity, agent_runtime_id, fence_token, generation, external_
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \cup {agent_runtime_id})
-    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE MapRemove(externally_addressable_runtime_ids, agent_runtime_id)
+    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE (externally_addressable_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, fence_token)
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
@@ -111,7 +111,7 @@ RespawnMember(agent_identity, agent_runtime_id, fence_token, generation, externa
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \cup {agent_runtime_id})
-    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE MapRemove(externally_addressable_runtime_ids, agent_runtime_id)
+    /\ externally_addressable_runtime_ids' = IF external_addressable THEN (externally_addressable_runtime_ids \cup {agent_runtime_id}) ELSE (externally_addressable_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapSet(runtime_fence_tokens, agent_runtime_id, fence_token)
     /\ active_run_count' = 0
     /\ pending_spawn_count' = 0
@@ -594,7 +594,7 @@ RetireRunning(agent_runtime_id) ==
     /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ live_runtime_ids' = MapRemove(live_runtime_ids, agent_runtime_id)
+    /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapRemove(runtime_fence_tokens, agent_runtime_id)
     /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound >>
 
@@ -604,7 +604,7 @@ RetireStopped(agent_runtime_id) ==
     /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ live_runtime_ids' = MapRemove(live_runtime_ids, agent_runtime_id)
+    /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
     /\ runtime_fence_tokens' = MapRemove(runtime_fence_tokens, agent_runtime_id)
     /\ UNCHANGED << externally_addressable_runtime_ids, active_run_count, pending_spawn_count, coordinator_bound >>
 

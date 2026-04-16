@@ -2992,7 +2992,7 @@ mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_
        /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \cup {packet.payload.agent_runtime_id})
-       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE MapRemove(mob_externally_addressable_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
@@ -3099,8 +3099,8 @@ mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_phase = "Running"
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Stopped"
-       /\ mob_live_runtime_ids' = MapRemove(mob_live_runtime_ids, packet.payload.agent_runtime_id)
-       /\ mob_externally_addressable_runtime_ids' = MapRemove(mob_externally_addressable_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
+       /\ mob_externally_addressable_runtime_ids' = (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
        /\ mob_active_run_count' = 0
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
@@ -3126,7 +3126,7 @@ mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_g
        /\ mob_phase = "Running" \/ mob_phase = "Stopped"
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \cup {packet.payload.agent_runtime_id})
-       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE MapRemove(mob_externally_addressable_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
@@ -3153,7 +3153,7 @@ mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \cup {packet.payload.agent_runtime_id})
-       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE MapRemove(mob_externally_addressable_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_externally_addressable_runtime_ids' = IF packet.payload.external_addressable THEN (mob_externally_addressable_runtime_ids \cup {packet.payload.agent_runtime_id}) ELSE (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
@@ -4249,7 +4249,7 @@ mob_RetireRunning(arg_agent_runtime_id) ==
        /\ mob_phase = "Running"
        /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids))
        /\ mob_phase' = "Running"
-       /\ mob_live_runtime_ids' = MapRemove(mob_live_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)])
@@ -4270,7 +4270,7 @@ mob_RetireStopped(arg_agent_runtime_id) ==
        /\ mob_phase = "Stopped"
        /\ ((mob_live_runtime_ids # {}) /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids))
        /\ mob_phase' = "Stopped"
-       /\ mob_live_runtime_ids' = MapRemove(mob_live_runtime_ids, packet.payload.agent_runtime_id)
+       /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
        /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)])

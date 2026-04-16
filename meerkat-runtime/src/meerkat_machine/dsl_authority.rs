@@ -75,6 +75,32 @@ pub(crate) fn project_state(
         current_run_id: effective_current_run_id.map(mm_dsl::RunId::from_domain),
         pre_run_phase: effective_pre_run_phase.map(|phase| phase.to_string()),
         silent_intent_overrides,
+        // Absorbed substate fields — initialised to DSL defaults.
+        // These are projected from their respective authority owners
+        // during the Phase 3 cutover; until then they carry defaults.
+        registration_phase: "Queuing".to_string(),
+        drain_phase: "Inactive".to_string(),
+        drain_mode: None,
+        active_filter: String::new(),
+        staged_filter: String::new(),
+        active_visibility_revision: 0,
+        staged_visibility_revision: 0,
+        active_deferred_names: std::collections::BTreeSet::new(),
+        staged_deferred_names: std::collections::BTreeSet::new(),
+        input_phases: std::collections::BTreeMap::new(),
+        input_terminal_outcomes: std::collections::BTreeMap::new(),
+        input_attempt_counts: std::collections::BTreeMap::new(),
+        input_run_associations: std::collections::BTreeMap::new(),
+        next_admission_seq: 0,
+        input_admission_seq: std::collections::BTreeMap::new(),
+        queue_lane: std::collections::BTreeSet::new(),
+        steer_lane: std::collections::BTreeSet::new(),
+        op_statuses: std::collections::BTreeMap::new(),
+        op_completion_seq: std::collections::BTreeMap::new(),
+        active_op_count: 0,
+        wait_active: false,
+        wait_operation_ids: std::collections::BTreeSet::new(),
+        next_completion_seq: 0,
     }
 }
 

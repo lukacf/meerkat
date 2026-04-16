@@ -271,6 +271,39 @@ machine! {
             current_run_id: Option<RunId>,
             pre_run_phase: Option<String>,
             silent_intent_overrides: Set<String>,
+
+            // --- Registration substate ---
+            registration_phase: String,
+
+            // --- Comms drain substate ---
+            drain_phase: String,
+            drain_mode: Option<String>,
+
+            // --- Visibility substate ---
+            active_filter: String,
+            staged_filter: String,
+            active_visibility_revision: u64,
+            staged_visibility_revision: u64,
+            active_deferred_names: Set<String>,
+            staged_deferred_names: Set<String>,
+
+            // --- Input lifecycle substate ---
+            input_phases: Map<String, String>,
+            input_terminal_outcomes: Map<String, String>,
+            input_attempt_counts: Map<String, u64>,
+            input_run_associations: Map<String, String>,
+            next_admission_seq: u64,
+            input_admission_seq: Map<String, u64>,
+            queue_lane: Set<String>,
+            steer_lane: Set<String>,
+
+            // --- Ops lifecycle substate ---
+            op_statuses: Map<String, String>,
+            op_completion_seq: Map<String, u64>,
+            active_op_count: u64,
+            wait_active: bool,
+            wait_operation_ids: Set<String>,
+            next_completion_seq: u64,
         }
 
         init(Initializing) {
@@ -280,6 +313,34 @@ machine! {
             current_run_id = None,
             pre_run_phase = None,
             silent_intent_overrides = EmptySet,
+            // Registration substate
+            registration_phase = "Queuing",
+            // Comms drain substate
+            drain_phase = "Inactive",
+            drain_mode = None,
+            // Visibility substate
+            active_filter = "",
+            staged_filter = "",
+            active_visibility_revision = 0,
+            staged_visibility_revision = 0,
+            active_deferred_names = EmptySet,
+            staged_deferred_names = EmptySet,
+            // Input lifecycle substate
+            input_phases = EmptyMap,
+            input_terminal_outcomes = EmptyMap,
+            input_attempt_counts = EmptyMap,
+            input_run_associations = EmptyMap,
+            next_admission_seq = 0,
+            input_admission_seq = EmptyMap,
+            queue_lane = EmptySet,
+            steer_lane = EmptySet,
+            // Ops lifecycle substate
+            op_statuses = EmptyMap,
+            op_completion_seq = EmptyMap,
+            active_op_count = 0,
+            wait_active = false,
+            wait_operation_ids = EmptySet,
+            next_completion_seq = 0,
         }
 
         terminal [Destroyed]
@@ -352,6 +413,34 @@ machine! {
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
             Recycle,
+            // Input lifecycle inputs
+            QueueAccepted { input_id: String },
+            StageForRun { input_id: String, run_id: String },
+            RollbackStaged { input_id: String },
+            MarkApplied { input_id: String },
+            ConsumeInput { input_id: String },
+            SupersedeInput { input_id: String },
+            CoalesceInput { input_id: String },
+            AbandonInput { input_id: String },
+            // Ops lifecycle inputs
+            RegisterOp { operation_id: String, kind: String },
+            StartOp { operation_id: String },
+            CompleteOp { operation_id: String },
+            FailOp { operation_id: String },
+            CancelOp { operation_id: String },
+            AbortOp { operation_id: String },
+            RequestWaitAll,
+            SatisfyWaitAll,
+            // Comms drain inputs
+            SpawnDrain { mode: String },
+            StopDrain,
+            DrainExitedClean,
+            DrainExitedRespawnable,
+            // Visibility inputs
+            StageVisibilityFilter { filter: String, revision: u64 },
+            CommitVisibilityFilter { filter: String, revision: u64 },
+            StageDeferredNames { names: Set<String> },
+            CommitDeferredNames { names: Set<String> },
         }
 
         surface_only [
@@ -1623,6 +1712,326 @@ machine! {
             }
             to Attached
             emit InitiateRecycle
+        }
+
+        // =====================================================================
+        // Absorbed substate transitions — Input Lifecycle
+        // =====================================================================
+
+        // QueueAccepted: admit a new input into the queue lane
+        transition QueueAccepted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input QueueAccepted { input_id }
+            guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Queued");
+                self.queue_lane.insert(input_id);
+                self.input_admission_seq.insert(input_id, self.next_admission_seq);
+                self.next_admission_seq += 1;
+            }
+            to Idle
+            emit IngressAccepted
+        }
+
+        // StageForRun: stage a queued input for a run
+        transition StageForRun {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StageForRun { input_id, run_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Staged");
+                self.input_run_associations.insert(input_id, run_id);
+            }
+            to Idle
+            emit RecordRunAssociation
+        }
+
+        // RollbackStaged: return a staged input to queued
+        transition RollbackStaged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RollbackStaged { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Queued");
+                self.input_run_associations.remove(input_id);
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // MarkApplied: mark an input as applied
+        transition MarkApplied {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input MarkApplied { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Applied");
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // ConsumeInput: terminal — mark input consumed, remove from lanes
+        transition ConsumeInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ConsumeInput { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Consumed");
+                self.queue_lane.remove(input_id);
+                self.steer_lane.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // SupersedeInput: terminal — mark input superseded, remove from queue
+        transition SupersedeInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SupersedeInput { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Superseded");
+                self.queue_lane.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // CoalesceInput: terminal — mark input coalesced, remove from queue
+        transition CoalesceInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CoalesceInput { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Coalesced");
+                self.queue_lane.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // AbandonInput: terminal — mark input abandoned, remove from lanes
+        transition AbandonInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbandonInput { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Abandoned");
+                self.queue_lane.remove(input_id);
+                self.steer_lane.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // =====================================================================
+        // Absorbed substate transitions — Ops Lifecycle
+        // =====================================================================
+
+        // RegisterOp: register a new operation as Provisioning
+        transition RegisterOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterOp { operation_id, kind }
+            guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Provisioning");
+                self.active_op_count += 1;
+            }
+            to Idle
+            emit SubmitOpEvent
+        }
+
+        // StartOp: advance to Running
+        transition StartOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StartOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Running");
+            }
+            to Idle
+            emit SubmitOpEvent
+        }
+
+        // CompleteOp: terminal success — record completion sequence
+        transition CompleteOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CompleteOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Completed");
+                self.active_op_count -= 1;
+                self.op_completion_seq.insert(operation_id, self.next_completion_seq);
+                self.next_completion_seq += 1;
+            }
+            to Idle
+            emit SubmitOpEvent
+            emit NotifyOpWatcher
+        }
+
+        // FailOp: terminal failure
+        transition FailOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FailOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Failed");
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit SubmitOpEvent
+            emit NotifyOpWatcher
+        }
+
+        // CancelOp: terminal cancellation
+        transition CancelOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CancelOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Cancelled");
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit SubmitOpEvent
+            emit NotifyOpWatcher
+        }
+
+        // AbortOp: terminal abort
+        transition AbortOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Aborted");
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit SubmitOpEvent
+            emit NotifyOpWatcher
+        }
+
+        // RequestWaitAll: activate wait-all barrier
+        transition RequestWaitAll {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequestWaitAll
+            update {
+                self.wait_active = true;
+            }
+            to Idle
+        }
+
+        // SatisfyWaitAll: deactivate wait-all barrier
+        transition SatisfyWaitAll {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SatisfyWaitAll
+            guard "wait_is_active" { self.wait_active == true }
+            update {
+                self.wait_active = false;
+                self.wait_operation_ids = EmptySet;
+            }
+            to Idle
+            emit WaitAllSatisfied
+        }
+
+        // =====================================================================
+        // Absorbed substate transitions — Comms Drain
+        // =====================================================================
+
+        // SpawnDrain: start a drain task
+        transition SpawnDrain {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SpawnDrain { mode }
+            guard "drain_is_inactive" { self.drain_phase == "Inactive" }
+            update {
+                self.drain_phase = "Running";
+                self.drain_mode = Some(mode);
+            }
+            to Idle
+            emit SpawnDrainTask
+        }
+
+        // StopDrain: stop the running drain
+        transition StopDrain {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StopDrain
+            guard "drain_is_running" { self.drain_phase == "Running" }
+            update {
+                self.drain_phase = "Stopped";
+            }
+            to Idle
+        }
+
+        // DrainExitedClean: drain exited cleanly, reset to inactive
+        transition DrainExitedClean {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DrainExitedClean
+            update {
+                self.drain_phase = "Inactive";
+                self.drain_mode = None;
+            }
+            to Idle
+        }
+
+        // DrainExitedRespawnable: drain exited but can be respawned
+        transition DrainExitedRespawnable {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DrainExitedRespawnable
+            update {
+                self.drain_phase = "ExitedRespawnable";
+            }
+            to Idle
+        }
+
+        // =====================================================================
+        // Absorbed substate transitions — Visibility
+        // =====================================================================
+
+        // StageVisibilityFilter: stage a new tool filter + revision
+        transition StageVisibilityFilter {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StageVisibilityFilter { filter, revision }
+            update {
+                self.staged_filter = filter;
+                self.staged_visibility_revision = revision;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet
+        }
+
+        // CommitVisibilityFilter: promote staged filter to active
+        transition CommitVisibilityFilter {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CommitVisibilityFilter { filter, revision }
+            update {
+                self.active_filter = filter;
+                self.active_visibility_revision = revision;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet
+        }
+
+        // StageDeferredNames: stage a set of deferred tool names
+        transition StageDeferredNames {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StageDeferredNames { names }
+            update {
+                self.staged_deferred_names = names;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet
+        }
+
+        // CommitDeferredNames: promote staged deferred names to active
+        transition CommitDeferredNames {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CommitDeferredNames { names }
+            update {
+                self.active_deferred_names = names;
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet
         }
     }
 }

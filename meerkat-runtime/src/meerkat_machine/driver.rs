@@ -392,6 +392,13 @@ pub(crate) fn machine_apply_run_return_projection(
     next_phase: RuntimeState,
 ) -> Result<(), crate::runtime_state::RuntimeStateTransitionError> {
     machine_validate_active_run(driver, run_id, next_phase)?;
+    let current_phase = driver.runtime_state();
+    if matches!(
+        current_phase,
+        RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
+    ) {
+        return Ok(());
+    }
     driver.set_control_projection(next_phase, None, None);
     Ok(())
 }

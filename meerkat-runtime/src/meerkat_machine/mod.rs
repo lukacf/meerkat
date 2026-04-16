@@ -98,6 +98,8 @@ mod dispatch_control;
 mod dispatch_drain;
 mod dispatch_ingress;
 mod dispatch_session;
+pub(crate) mod dsl;
+pub(crate) mod dsl_authority;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;

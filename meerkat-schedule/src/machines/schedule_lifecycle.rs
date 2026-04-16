@@ -12,37 +12,25 @@ use meerkat_machine_dsl::machine;
 // Bridging newtypes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MisfirePolicy {
+    #[default]
     Skip,
     Execute,
 }
-impl Default for MisfirePolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OverlapPolicy {
+    #[default]
     SkipIfRunning,
     Queue,
 }
-impl Default for OverlapPolicy {
-    fn default() -> Self {
-        Self::SkipIfRunning
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MissingTargetPolicy {
+    #[default]
     MarkMisfired,
     Skip,
-}
-impl Default for MissingTargetPolicy {
-    fn default() -> Self {
-        Self::MarkMisfired
-    }
 }
 
 // ---------------------------------------------------------------------------

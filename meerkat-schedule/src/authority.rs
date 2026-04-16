@@ -369,7 +369,7 @@ fn write_back_occurrence(
     // from the input.
     occ.failure_class = match input {
         OccurrenceLifecycleInput::Skip { failure_class, .. }
-        | OccurrenceLifecycleInput::Misfire { failure_class, .. } => failure_class.clone(),
+        | OccurrenceLifecycleInput::Misfire { failure_class, .. } => *failure_class,
         OccurrenceLifecycleInput::DeliveryFailed { failure_class, .. } => Some(*failure_class),
         OccurrenceLifecycleInput::Claim { .. } | OccurrenceLifecycleInput::LeaseExpired { .. } => {
             None
@@ -822,15 +822,6 @@ fn to_dsl_failure_class(fc: OccurrenceFailureClass) -> occ_dsl::OccurrenceFailur
 }
 
 /// The DSL stores failure class opaquely — it never branches on the value.
-/// When writing back, we preserve the ORIGINAL failure class from the input,
-/// not the lossy DSL category.
-fn from_dsl_failure_class(_fc: occ_dsl::OccurrenceFailureClass) -> OccurrenceFailureClass {
-    // This function should not be called in practice — write_back_occurrence
-    // preserves the original failure class from the input, not the DSL's
-    // simplified category. If called, return InternalError as safe default.
-    OccurrenceFailureClass::InternalError
-}
-
 fn to_dsl_misfire_policy(policy: &MisfirePolicy) -> sched_dsl::MisfirePolicy {
     match policy {
         MisfirePolicy::Skip => sched_dsl::MisfirePolicy::Skip,

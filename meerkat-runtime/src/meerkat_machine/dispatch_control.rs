@@ -18,60 +18,53 @@ impl MeerkatMachine {
                     (sid, d, c, w, ctrl)
                 };
 
-                // Guard: AdmitQueuedInput requires phase not in
-                // {Retired, Stopped, Destroyed}. Steered inputs are more
-                // permissive but the dispatch cannot distinguish here, so we
-                // reject all three conservatively.
-                let state = Self::driver_runtime_state(&driver).await;
-                if matches!(
-                    state,
-                    RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
-                ) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
+                // DSL-first: stage Ingest input before driver mutation.
+                // The DSL transition guards phase ∈ {Idle, Attached, Running}
+                // which subsumes the old manual Retired/Stopped/Destroyed check.
+                let provisional_work_id = uuid::Uuid::new_v4().to_string();
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
+                            runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                                &runtime_id,
+                            ),
+                            work_id: crate::meerkat_machine::dsl::WorkId::from(provisional_work_id),
+                            origin: "ingest".to_string(),
+                        },
+                        "Ingest",
+                    )
+                    .await;
+                let previous_dsl_state = match previous_dsl_state {
+                    Ok(state) => state,
+                    Err(_) => {
+                        let state = Self::driver_runtime_state(&driver).await;
+                        return Err(RuntimeControlPlaneError::InvalidState { state });
+                    }
+                };
 
                 let request_immediate_processing =
                     crate::accept::requests_immediate_processing(&input);
                 let (outcome, signal) = {
                     let mut drv = driver.lock().await;
-                    let result = drv
-                        .as_driver_mut()
-                        .accept_input(input)
-                        .await
-                        .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
+                    let result = match drv.as_driver_mut().accept_input(input).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            drop(drv);
+                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                                .await;
+                            return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+                        }
+                    };
                     let signal =
                         Self::machine_owned_admission_signal(&result, request_immediate_processing);
                     (result, signal)
                 };
 
-                // Shadow-validate: stage DSL Ingest input after mutation
-                let shadow_work_id = match &outcome {
-                    AcceptOutcome::Accepted { input_id, .. } => input_id.to_string(),
-                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
-                    AcceptOutcome::Rejected { .. } => String::new(),
-                };
-                if !matches!(&outcome, AcceptOutcome::Rejected { .. }) {
-                    if let Err(err) = self
-                        .stage_session_dsl_input(
-                            &session_id,
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
-                                runtime_id:
-                                    crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
-                                        &runtime_id,
-                                    ),
-                                work_id: crate::meerkat_machine::dsl::WorkId::from(shadow_work_id),
-                                origin: "ingest".to_string(),
-                            },
-                            "Ingest",
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err,
-                            "DSL/runtime disagreement after Ingest"
-                        );
-                    }
+                // If the driver rejected the input, rollback DSL state.
+                if matches!(&outcome, AcceptOutcome::Rejected { .. }) {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
                 }
 
                 if signal.should_wake()
@@ -94,25 +87,10 @@ impl MeerkatMachine {
                 let (session_id, driver, _completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
-                if matches!(
-                    Self::driver_runtime_state(&driver).await,
-                    RuntimeState::Destroyed
-                ) {
-                    return Err(RuntimeControlPlaneError::InvalidState {
-                        state: RuntimeState::Destroyed,
-                    });
-                }
-
+                // DSL-first: stage PublishEvent before driver mutation.
+                // Compute event_kind before consuming the event.
                 let event_kind = format!("{:?}", std::mem::discriminant(&event.event));
-                let mut drv = driver.lock().await;
-                drv.as_driver_mut()
-                    .on_runtime_event(event)
-                    .await
-                    .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
-                drop(drv);
-
-                // Shadow-validate: stage DSL PublishEvent input after mutation
-                if let Err(err) = self
+                let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::PublishEvent {
@@ -121,13 +99,17 @@ impl MeerkatMachine {
                         "PublishEvent",
                     )
                     .await
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %err,
-                        "DSL/runtime disagreement after PublishEvent"
-                    );
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+
+                let mut drv = driver.lock().await;
+                if let Err(err) = drv.as_driver_mut().on_runtime_event(event).await {
+                    drop(drv);
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                 }
+                drop(drv);
+
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::Retire { runtime_id } => {

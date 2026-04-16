@@ -82,7 +82,8 @@ meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume,
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
 meerkat-rest      → Optional REST API server
 meerkat-comms     → Inter-agent communication (Ed25519-signed messaging, transports, trust model)
-meerkat-contracts → Wire types, capability registry, error codes (canonical over all surfaces)
+meerkat-contracts → Wire types, capability registry, error codes, supervisor bridge protocol
+                     (canonical over all surfaces; BridgeCommand/BridgeReply for mob↔runtime boundary)
 meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTTP, embedded sources)
 meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
 meerkat-mob       → Multi-agent mob orchestration (spawn, provision, finalize, SQLite storage, flow frames/loops)
@@ -213,6 +214,11 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-rpc/src/server.rs` - RPC server main loop
 - `meerkat-rpc/src/handlers/mcp.rs` - Live MCP controls (mcp/add, mcp/remove, mcp/reload)
 - `meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
+- `meerkat-contracts/src/wire/supervisor_bridge.rs` - Supervisor bridge protocol types (BridgeCommand, BridgeReply, payloads)
+- `meerkat-mob/src/runtime/bridge.rs` - MobMemberRuntimeBridge trait (mob-owned protocol boundary)
+- `meerkat-mob/src/runtime/bridge_protocol.rs` - Re-exports of bridge protocol types from contracts
+- `meerkat-mob/src/runtime/local_bridge.rs` - LocalMobRuntimeBridge (in-process MeerkatMachine wrapper)
+- `meerkat-mob/src/runtime/supervisor_bridge.rs` - MobSupervisorBridge (comms transport for remote commands)
 - `meerkat-mob/src/storage.rs` - MobStorage bundle (SQLite persistent, in-memory)
 - `meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops)
 - `meerkat-mob/src/runtime/loop_iteration_authority.rs` - Loop body/evaluate seam ownership

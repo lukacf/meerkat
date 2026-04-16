@@ -56,7 +56,8 @@ pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse};
 pub use supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    SUPERVISOR_BRIDGE_INTENT,
 };
 pub use usage::WireUsage;

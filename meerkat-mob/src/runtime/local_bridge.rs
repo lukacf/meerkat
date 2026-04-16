@@ -3,12 +3,12 @@
 
 use crate::error::MobError;
 use crate::runtime::bridge::MobMemberRuntimeBridge;
-use async_trait::async_trait;
-use meerkat_contracts::wire::supervisor_bridge::{
+use crate::runtime::bridge_protocol::{
     BridgeAck, BridgeBindResponse, BridgeDeliveryOutcome, BridgeDeliveryResponse,
-    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec,
-    BridgeRetireResponse,
+    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
+    BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
 };
+use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
 use meerkat_runtime::MeerkatMachine;
 #[allow(unused_imports)]
@@ -175,8 +175,13 @@ impl MobMemberRuntimeBridge for LocalMobRuntimeBridge {
             });
 
         Ok(BridgeObservationResponse {
+            phase: runtime_state_to_bridge(state),
             state: runtime_state_to_bridge(state),
+            accepting_inputs: Some(state.can_accept_input()),
+            current_run: current_run_id.clone(),
             current_run_id,
+            peer_connectivity: Some(BridgePeerConnectivity::Reachable),
+            last_error: None,
             observed_at: chrono::Utc::now().to_rfc3339(),
         })
     }

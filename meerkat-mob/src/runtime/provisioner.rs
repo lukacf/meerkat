@@ -1,3 +1,7 @@
+#[cfg(feature = "runtime-adapter")]
+use super::bridge::MobMemberRuntimeBridge;
+#[cfg(feature = "runtime-adapter")]
+use super::local_bridge::LocalMobRuntimeBridge;
 use super::*;
 use crate::RuntimeBinding;
 use crate::definition::ExternalBackendConfig;
@@ -783,9 +787,10 @@ impl MobProvisioner for SessionBackend {
         let session_id = Self::require_session(member_ref, "retire")?;
         if let Some(adapter) = &self.runtime_adapter {
             if adapter.contains_session(&session_id).await {
-                adapter
-                    .retire_runtime(&session_id)
+                LocalMobRuntimeBridge::new(adapter.clone(), session_id.clone())
+                    .retire_member()
                     .await
+                    .map(|_| ())
                     .map_err(|err| MobError::Internal(err.to_string()))?;
                 adapter.unregister_session(&session_id).await;
             }
@@ -800,8 +805,11 @@ impl MobProvisioner for SessionBackend {
         let session_id = Self::require_session(member_ref, "interrupt")?;
         if let Some(adapter) = &self.runtime_adapter {
             if adapter.contains_session(&session_id).await {
-                return match adapter.interrupt_current_run(&session_id).await {
-                    Ok(()) => Ok(()),
+                return match LocalMobRuntimeBridge::new(adapter.clone(), session_id.clone())
+                    .interrupt_member()
+                    .await
+                {
+                    Ok(_) => Ok(()),
                     Err(error) => {
                         // Preserve bridge sidecar alignment when registration
                         // changed between contains_session and interrupt.

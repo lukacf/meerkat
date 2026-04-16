@@ -38,8 +38,8 @@ pub use version::ContractVersion;
 pub use wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
 pub use wire::{
     CatalogModelEntry, CommsParams, CoreCreateParams, HookParams, InputListParams, InputListResult,

@@ -10,12 +10,12 @@
 //!   typed [`BridgeCommand`](meerkat_contracts::BridgeCommand) envelopes over
 //!   comms.
 
-use crate::error::MobError;
-use async_trait::async_trait;
-use meerkat_contracts::wire::supervisor_bridge::{
+use super::bridge_protocol::{
     BridgeAck, BridgeBindResponse, BridgeDeliveryResponse, BridgeDestroyResponse,
     BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgeRetireResponse,
 };
+use crate::error::MobError;
+use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode};
 
 /// Protocol boundary between MobMachine and the MeerkatMachine instances

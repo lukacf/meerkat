@@ -47,11 +47,6 @@ pub fn mob_machine() -> MachineSchema {
                 field("active_run_count", TypeRef::U32),
                 field("pending_spawn_count", TypeRef::U32),
                 field("coordinator_bound", TypeRef::Bool),
-                // Supervisor bridge fields
-                field("remote_member_count", TypeRef::U32),
-                field("supervisor_authorized", TypeRef::Bool),
-                field("supervisor_rotating", TypeRef::Bool),
-                field("rotation_pending_acks", TypeRef::U32),
             ],
             init: InitSchema {
                 phase: "Running".into(),
@@ -62,10 +57,6 @@ pub fn mob_machine() -> MachineSchema {
                     init("active_run_count", Expr::U64(0)),
                     init("pending_spawn_count", Expr::U64(0)),
                     init("coordinator_bound", Expr::Bool(true)),
-                    init("remote_member_count", Expr::U64(0)),
-                    init("supervisor_authorized", Expr::Bool(false)),
-                    init("supervisor_rotating", Expr::Bool(false)),
-                    init("rotation_pending_acks", Expr::U64(0)),
                 ],
             },
             terminal_phases: vec!["Destroyed".into()],
@@ -117,47 +108,6 @@ pub fn mob_machine() -> MachineSchema {
                         name: "EmitMemberLifecycleNotice".into(),
                         fields: vec![field("kind", TypeRef::String)],
                     },
-                    // Supervisor bridge command effects
-                    VariantSchema {
-                        name: "BridgeBindMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeAuthorizeSupervisor".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeRevokeSupervisor".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeDeliverMemberInput".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeObserveMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeInterruptMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeRetireMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeDestroyMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeWireMember".into(),
-                        fields: vec![],
-                    },
-                    VariantSchema {
-                        name: "BridgeUnwireMember".into(),
-                        fields: vec![],
-                    },
                 ];
                 variants.extend(absorbed_mob_effect_variants());
                 variants
@@ -193,16 +143,10 @@ pub fn mob_machine() -> MachineSchema {
                         },
                         Update::Conditional {
                             condition: Expr::Binding("external_addressable".into()),
-                            then_updates: vec![
-                                Update::SetInsert {
-                                    field: "externally_addressable_runtime_ids".into(),
-                                    value: Expr::Binding("agent_runtime_id".into()),
-                                },
-                                Update::Increment {
-                                    field: "remote_member_count".into(),
-                                    amount: 1,
-                                },
-                            ],
+                            then_updates: vec![Update::SetInsert {
+                                field: "externally_addressable_runtime_ids".into(),
+                                value: Expr::Binding("agent_runtime_id".into()),
+                            }],
                             else_updates: vec![Update::SetRemove {
                                 field: "externally_addressable_runtime_ids".into(),
                                 value: Expr::Binding("agent_runtime_id".into()),
@@ -219,7 +163,6 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Running".into(),
                 emit: vec![
                     runtime_binding_emit("RequestRuntimeBinding"),
-                    simple_emit("BridgeBindMember"),
                     lifecycle_notice_emit("spawned"),
                 ],
             },
@@ -419,52 +362,6 @@ pub fn mob_machine() -> MachineSchema {
                 to: "Completed".into(),
                 emit: vec![lifecycle_notice_emit("completed")],
             },
-            // Supervisor rotation: sets supervisor_rotating, queues acks
-            TransitionSchema {
-                name: "RotateSupervisorRunning".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    kind: mob_trigger_kind("RotateSupervisor"),
-                    variant: "RotateSupervisor".into(),
-                    bindings: vec![],
-                },
-                guards: vec![],
-                updates: vec![
-                    Update::Assign {
-                        field: "supervisor_rotating".into(),
-                        expr: Expr::Bool(true),
-                    },
-                    Update::Assign {
-                        field: "rotation_pending_acks".into(),
-                        expr: Expr::Field("remote_member_count".into()),
-                    },
-                ],
-                to: "Running".into(),
-                emit: vec![simple_emit("BridgeAuthorizeSupervisor")],
-            },
-            // AckRotation: decrements pending, clears rotating when zero
-            TransitionSchema {
-                name: "AckRotationRunning".into(),
-                from: vec!["Running".into()],
-                on: InputMatch {
-                    kind: mob_trigger_kind("AckRotation"),
-                    variant: "AckRotation".into(),
-                    bindings: vec![],
-                },
-                guards: vec![Guard {
-                    name: "rotation_pending_acks_positive".into(),
-                    expr: Expr::Gt(
-                        Box::new(Expr::Field("rotation_pending_acks".into())),
-                        Box::new(Expr::U64(0)),
-                    ),
-                }],
-                updates: vec![Update::Decrement {
-                    field: "rotation_pending_acks".into(),
-                    amount: 1,
-                }],
-                to: "Running".into(),
-                emit: vec![],
-            },
             TransitionSchema {
                 name: "DestroyMob".into(),
                 from: vec!["Running".into(), "Stopped".into(), "Completed".into()],
@@ -507,20 +404,6 @@ pub fn mob_machine() -> MachineSchema {
             routed_disposition("RequestRuntimeRetire", &["MeerkatMachine"]),
             routed_disposition("RequestRuntimeDestroy", &["MeerkatMachine"]),
             external_disposition("EmitMemberLifecycleNotice"),
-            // Bridge command effects — delivered over comms protocol, not via
-            // composition routing. External disposition because the target is
-            // a per-member runtime instance reached through the supervisor
-            // bridge transport, not a composition-level machine instance.
-            external_disposition("BridgeBindMember"),
-            external_disposition("BridgeAuthorizeSupervisor"),
-            external_disposition("BridgeRevokeSupervisor"),
-            external_disposition("BridgeDeliverMemberInput"),
-            external_disposition("BridgeObserveMember"),
-            external_disposition("BridgeInterruptMember"),
-            external_disposition("BridgeRetireMember"),
-            external_disposition("BridgeDestroyMember"),
-            external_disposition("BridgeWireMember"),
-            external_disposition("BridgeUnwireMember"),
         ]
         .into_iter()
         .chain(absorbed_mob_effect_dispositions())
@@ -696,9 +579,6 @@ fn direct_mob_trigger_variants() -> Vec<VariantSchema> {
             fields: runtime_observation_fields(),
         },
         variant("MarkCompleted"),
-        // Supervisor rotation
-        variant("RotateSupervisor"),
-        variant("AckRotation"),
     ]
 }
 
@@ -757,8 +637,6 @@ fn is_mob_runtime_input_variant(variant: &str) -> bool {
             | "SetSpawnPolicy"
             | "Shutdown"
             | "ForceCancel"
-            | "RotateSupervisor"
-            | "AckRotation"
     )
 }
 

@@ -79,8 +79,8 @@ pub use runtime::bridge::{MobMemberRuntimeBridge, observation_is_terminal};
 pub use runtime::bridge_protocol::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;

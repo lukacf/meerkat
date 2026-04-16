@@ -20,8 +20,8 @@ use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
     BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
-    BridgeObservationResponse, BridgePeerSpec, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_INTENT,
+    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
+    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -482,7 +482,7 @@ async fn try_handle_supervisor_bridge_command(
     };
 
     // Accept both the canonical typed intent and legacy per-command intents.
-    let is_bridge = intent == SUPERVISOR_BRIDGE_INTENT || intent.starts_with("mob.runtime.");
+    let is_bridge = intent == SUPERVISOR_BRIDGE_INTENT;
     if !is_bridge {
         return false;
     }
@@ -866,8 +866,13 @@ async fn try_handle_supervisor_bridge_command(
                         });
                     let bridge_state = runtime_state_to_bridge(state);
                     let response = serde_json::to_value(BridgeObservationResponse {
+                        phase: bridge_state,
                         state: bridge_state,
+                        accepting_inputs: Some(state.can_accept_input()),
+                        current_run: current_run_id.clone(),
                         current_run_id,
+                        peer_connectivity: Some(BridgePeerConnectivity::Reachable),
+                        last_error: None,
                         observed_at: chrono::Utc::now().to_rfc3339(),
                     })
                     .unwrap_or_else(|_| serde_json::json!({ "state": bridge_state.to_string() }));
@@ -962,6 +967,15 @@ async fn try_handle_supervisor_bridge_command(
                     .await;
                 }
             }
+            true
+        }
+        _ => {
+            send_bridge_failure(
+                comms_runtime,
+                candidate,
+                "unsupported supervisor bridge command".to_string(),
+            )
+            .await;
             true
         }
     }

@@ -142,14 +142,6 @@ pub(crate) enum MobMachineCommand {
     ForceCancel {
         meerkat_id: MeerkatId,
     },
-    /// Rotate the supervisor's authority credentials.
-    /// Schema parity only — runtime uses `MobHandle::rotate_supervisor()`.
-    #[allow(dead_code)]
-    RotateSupervisor,
-    /// Acknowledge a supervisor rotation from a remote member.
-    /// Schema parity only — runtime processes ack inline.
-    #[allow(dead_code)]
-    AckRotation,
 }
 
 pub(crate) enum MobMachineCommandResult {

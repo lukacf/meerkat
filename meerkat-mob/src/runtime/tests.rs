@@ -2754,13 +2754,28 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 super::bridge_protocol::BridgeCommand::ObserveMember(_) => {
                                     serde_json::to_value(
                                         super::bridge_protocol::BridgeObservationResponse {
+                                            phase: state,
                                             state,
+                                            accepting_inputs: Some(matches!(
+                                                state,
+                                                super::bridge_protocol::BridgeMemberRuntimeState::Idle
+                                                    | super::bridge_protocol::BridgeMemberRuntimeState::Attached
+                                                    | super::bridge_protocol::BridgeMemberRuntimeState::Running
+                                            )),
+                                            current_run: None,
                                             current_run_id: None,
+                                            peer_connectivity: Some(
+                                                super::bridge_protocol::BridgePeerConnectivity::Reachable,
+                                            ),
+                                            last_error: None,
                                             observed_at: Utc::now().to_rfc3339(),
                                         },
                                     )
                                     .expect("observe response")
                                 }
+                                _ => serde_json::json!({
+                                    "error": "unsupported bridge command in test harness"
+                                }),
                             }
                         } else {
                             // Non-bridge lifecycle messages
@@ -13136,9 +13151,9 @@ fn test_bridge_protocol_types_live_in_contracts_not_runtime() {
 }
 
 #[test]
-fn test_bridge_trait_methods_have_corresponding_schema_effects() {
+fn test_top_level_mob_schema_does_not_duplicate_bridge_protocol_effects() {
     let schema = schema_mob_machine();
-    let bridge_effects = [
+    let forbidden_effects = [
         "BridgeBindMember",
         "BridgeAuthorizeSupervisor",
         "BridgeRevokeSupervisor",
@@ -13156,20 +13171,20 @@ fn test_bridge_trait_methods_have_corresponding_schema_effects() {
         .iter()
         .map(|v| v.name.as_str())
         .collect();
-    let missing: Vec<_> = bridge_effects
+    let duplicated: Vec<_> = forbidden_effects
         .iter()
-        .filter(|name| !schema_effect_names.contains(name))
+        .filter(|name| schema_effect_names.contains(name))
         .collect();
     assert!(
-        missing.is_empty(),
-        "bridge trait methods missing corresponding schema effects: {missing:?}"
+        duplicated.is_empty(),
+        "top-level mob schema must not duplicate bridge protocol effects: {duplicated:?}"
     );
 }
 
 #[test]
-fn test_bridge_schema_fields_present_for_remote_member_tracking() {
+fn test_top_level_mob_schema_avoids_shadow_bridge_state_fields() {
     let schema = schema_mob_machine();
-    let required_fields = [
+    let forbidden_fields = [
         "remote_member_count",
         "supervisor_authorized",
         "supervisor_rotating",
@@ -13181,32 +13196,38 @@ fn test_bridge_schema_fields_present_for_remote_member_tracking() {
         .iter()
         .map(|f| f.name.as_str())
         .collect();
-    let missing: Vec<_> = required_fields
+    let shadowed: Vec<_> = forbidden_fields
         .iter()
-        .filter(|name| !field_names.contains(name))
+        .filter(|name| field_names.contains(name))
         .collect();
     assert!(
-        missing.is_empty(),
-        "schema missing remote member tracking fields: {missing:?}"
+        shadowed.is_empty(),
+        "top-level mob schema must not carry shadow bridge state fields: {shadowed:?}"
     );
 }
 
 #[test]
-fn test_rotate_supervisor_transition_exists_in_schema() {
+fn test_top_level_mob_schema_does_not_model_schema_only_rotation_transitions() {
     let schema = schema_mob_machine();
-    let has_rotate = schema
-        .transitions
-        .iter()
-        .any(|t| t.name == "RotateSupervisorRunning");
-    let has_ack = schema
-        .transitions
-        .iter()
-        .any(|t| t.name == "AckRotationRunning");
+    let transition_names: Vec<_> = schema.transitions.iter().map(|t| t.name.as_str()).collect();
     assert!(
-        has_rotate,
-        "schema must include RotateSupervisor transition"
+        !transition_names.contains(&"RotateSupervisorRunning"),
+        "top-level mob schema must not model schema-only RotateSupervisor transitions"
     );
-    assert!(has_ack, "schema must include AckRotation transition");
+    assert!(
+        !transition_names.contains(&"AckRotationRunning"),
+        "top-level mob schema must not model schema-only AckRotation transitions"
+    );
+
+    let manifest = crate::mob_machine::canonical_mob_machine_command_manifest();
+    assert!(
+        !manifest.contains("RotateSupervisor"),
+        "canonical mob machine command surface must not include schema-only RotateSupervisor"
+    );
+    assert!(
+        !manifest.contains("AckRotation"),
+        "canonical mob machine command surface must not include schema-only AckRotation"
+    );
 }
 
 #[tokio::test]
@@ -19762,12 +19783,6 @@ fn mob_runtime_parity_field_value(
         "coordinator_bound" => snapshot
             .coordinator_bound
             .map(MobRuntimeParityExprValue::Bool),
-        // Supervisor bridge fields — not yet wired to runtime snapshot;
-        // default values match schema init for parity coverage.
-        "remote_member_count" => Some(MobRuntimeParityExprValue::U64(0)),
-        "supervisor_authorized" => Some(MobRuntimeParityExprValue::Bool(false)),
-        "supervisor_rotating" => Some(MobRuntimeParityExprValue::Bool(false)),
-        "rotation_pending_acks" => Some(MobRuntimeParityExprValue::U64(0)),
         _ => None,
     }
 }

@@ -20,6 +20,7 @@ pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 /// A typed command sent from a supervisor to a member runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BridgeCommand {
     BindMember(BridgeBindPayload),
     AuthorizeSupervisor(BridgeSupervisorPayload),
@@ -40,6 +41,7 @@ pub enum BridgeCommand {
 /// A typed reply from a member runtime back to the supervisor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BridgeReply {
     BindMember(BridgeBindResponse),
     Ack(BridgeAck),
@@ -96,6 +98,16 @@ pub struct BridgePeerSpec {
     pub name: String,
     pub peer_id: String,
     pub address: String,
+}
+
+/// Connectivity class observed for the bridged member runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BridgePeerConnectivity {
+    Reachable,
+    Unreachable,
+    Unknown,
 }
 
 impl From<meerkat_core::comms::TrustedPeerSpec> for BridgePeerSpec {
@@ -226,8 +238,18 @@ pub struct BridgeDestroyResponse {
 /// Response to an observe command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeObservationResponse {
+    pub phase: BridgeMemberRuntimeState,
     pub state: BridgeMemberRuntimeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepting_inputs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_connectivity: Option<BridgePeerConnectivity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     /// ISO 8601 timestamp.
     pub observed_at: String,
 }

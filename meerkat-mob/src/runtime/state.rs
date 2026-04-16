@@ -1,8 +1,3 @@
-#[cfg(test)]
-#[cfg(test)]
-use super::mob_lifecycle_authority::MobLifecycleSnapshot;
-#[cfg(test)]
-use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
@@ -54,6 +49,57 @@ impl MobState {
 impl std::fmt::Display for MobState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic snapshots (DSL-projected, shell-owned)
+// ---------------------------------------------------------------------------
+
+/// Observable snapshot of mob orchestrator-facing state.
+///
+/// Projected from the MobMachine DSL state plus shell-owned metadata that is
+/// not tracked by the DSL authority (`topology_revision`, `supervisor_active`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobOrchestratorSnapshot {
+    pub phase: MobState,
+    pub coordinator_bound: bool,
+    pub pending_spawn_count: u32,
+    pub active_flow_count: u32,
+    pub topology_revision: u32,
+    pub supervisor_active: bool,
+}
+
+impl Default for MobOrchestratorSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Creating,
+            coordinator_bound: false,
+            pending_spawn_count: 0,
+            active_flow_count: 0,
+            topology_revision: 0,
+            supervisor_active: false,
+        }
+    }
+}
+
+/// Observable snapshot of mob lifecycle-facing state.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MobLifecycleSnapshot {
+    pub phase: MobState,
+    pub active_run_count: u32,
+    pub cleanup_pending: bool,
+}
+
+#[cfg(test)]
+impl Default for MobLifecycleSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Running,
+            active_run_count: 0,
+            cleanup_pending: false,
+        }
     }
 }
 

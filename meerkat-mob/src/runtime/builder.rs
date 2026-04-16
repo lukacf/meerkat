@@ -945,40 +945,22 @@ impl MobBuilder {
         let topology_service = Arc::new(super::topology::MobTopologyService::new(
             definition.topology.clone(),
         ));
-        // Only create the orchestrator authority when the definition has an orchestrator.
-        // Plain mobs (orchestrator: None) skip orchestrator guards entirely.
+        // Normalize initial phase: fresh creation + stale Creating restores both
+        // become Running. Persisted Stopped/Completed/Destroyed are preserved.
         let initial_phase = match MobState::from_u8(state.load(Ordering::Acquire)) {
             MobState::Creating => MobState::Running,
             phase => phase,
         };
-        let orchestrator = if definition.orchestrator.is_some() {
-            let mut orch = match initial_phase {
-                MobState::Running => {
-                    // Fresh creation and stale Creating restores both normalize to
-                    // the checked-in Running bootstrap state.
-                    super::mob_orchestrator_authority::MobOrchestratorAuthority::new_running()
-                }
-                _ => {
-                    // Resume: restore to the persisted phase.
-                    super::mob_orchestrator_authority::MobOrchestratorAuthority::with_phase(
-                        initial_phase,
-                    )
-                }
-            };
-            if orch
-                .apply_in_phase(
-                    initial_phase,
-                    0,
-                    super::mob_orchestrator_authority::MobOrchestratorInput::BindCoordinator,
-                )
-                .is_ok()
-            {
-                topology_service.bind_coordinator();
-            }
-            Some(orch)
-        } else {
-            None
-        };
+        // Publish the normalized phase to the observable atomic (the DSL
+        // authority's write-back path relies on this cache being current).
+        state.store(initial_phase as u8, Ordering::Release);
+        // Plain mobs (orchestrator: None in the definition) skip orchestrator
+        // guards entirely; mobs with an orchestrator bind the topology
+        // coordinator when entering Running.
+        let has_orchestrator = definition.orchestrator.is_some();
+        if has_orchestrator && initial_phase == MobState::Running {
+            topology_service.bind_coordinator();
+        }
         let flow_kernel = super::flow_run_kernel::FlowRunKernel::new(
             handle.mob_id().clone(),
             run_store.clone(),
@@ -991,12 +973,6 @@ impl MobBuilder {
             events.clone(),
             topology_service,
             flow_kernel.clone(),
-        );
-        // Use the initial_phase captured before orchestrator construction to avoid
-        // clobbering persisted state (e.g. Completed/Stopped) with Running.
-        let lifecycle_authority = super::mob_lifecycle_authority::MobLifecycleAuthority::with_phase(
-            state.clone(),
-            initial_phase,
         );
         let task_board_service = crate::tasks::MobTaskBoardService::new(
             definition.id.clone(),
@@ -1015,7 +991,7 @@ impl MobBuilder {
             provisioner,
             flow_engine,
             flow_kernel,
-            orchestrator,
+            has_orchestrator,
             run_tasks: BTreeMap::new(),
             run_cancel_tokens: BTreeMap::new(),
             flow_streams: handle.flow_streams.clone(),
@@ -1035,7 +1011,6 @@ impl MobBuilder {
             restore_diagnostics,
             task_board_service,
             spawn_policy,
-            lifecycle_authority,
             dsl_authority: crate::machines::mob_machine::MobMachineAuthority::new(),
             default_external_tools_provider,
             realm_profile_store,

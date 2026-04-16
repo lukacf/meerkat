@@ -8,7 +8,7 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `MeerkatMachine`
 
 ### Code Anchors
-- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine.rs` — authoritative MeerkatMachine command dispatch and state ownership
+- `meerkat_machine`: `meerkat-runtime/src/meerkat_machine/mod.rs` — authoritative MeerkatMachine command dispatch and state ownership
 - `meerkat_public_surface`: `meerkat/src/meerkat_machine.rs` — MeerkatMachine snapshot/diagnostic facade
 - `peer_directory_reachability_authority`: `meerkat-comms/src/peer_directory_reachability_authority.rs` — peer directory reachability state now owned as a MeerkatMachine-internal region
 

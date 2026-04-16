@@ -58,7 +58,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[
                 anchor(
                     "meerkat_machine",
-                    "meerkat-runtime/src/meerkat_machine.rs",
+                    "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "authoritative MeerkatMachine command dispatch and state ownership",
                 ),
                 anchor(
@@ -159,7 +159,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
                 anchor(
                     "meerkat_runtime_entry",
-                    "meerkat-runtime/src/meerkat_machine.rs",
+                    "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "MeerkatMachine command authority consuming seam traffic",
                 ),
             ],

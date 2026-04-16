@@ -1488,8 +1488,13 @@ impl MobActor {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
-                    self.enqueue_spawn(*spec, owner_bridge_session_id, ops_registry, reply_tx)
-                        .await;
+                    Box::pin(self.enqueue_spawn(
+                        *spec,
+                        owner_bridge_session_id,
+                        ops_registry,
+                        reply_tx,
+                    ))
+                    .await;
                 }
                 MobCommand::SpawnProvisioned {
                     spawn_ticket,
@@ -1541,7 +1546,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result = match self.require_mob_machine_spawn() {
-                        Ok(()) => self.handle_respawn(meerkat_id, initial_message).await,
+                        Ok(()) => Box::pin(self.handle_respawn(meerkat_id, initial_message)).await,
                         Err(error) => Err(super::handle::MobRespawnError::from(error)),
                     };
                     let _ = reply_tx.send(result);
@@ -1584,12 +1589,12 @@ impl MobActor {
                 } => {
                     let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
-                            self.handle_external_turn(
+                            Box::pin(self.handle_external_turn(
                                 meerkat_id,
                                 content,
                                 handling_mode,
                                 render_metadata,
-                            )
+                            ))
                             .await
                         }
                         Err(error) => Err(error),
@@ -4980,7 +4985,7 @@ impl MobActor {
             None => {
                 let agent_identity = AgentIdentity::from(meerkat_id.as_str());
                 if let Some(spec) = self.spawn_policy.resolve(&agent_identity).await {
-                    self.spawn_from_policy_inline(&meerkat_id, spec)
+                    Box::pin(self.spawn_from_policy_inline(&meerkat_id, spec))
                         .await
                         .map_err(|error| {
                             MobError::Internal(format!(

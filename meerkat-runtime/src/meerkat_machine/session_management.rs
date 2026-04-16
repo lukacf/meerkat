@@ -19,8 +19,8 @@ impl MeerkatMachine {
         let (ops_lifecycle, epoch_id, cursor_state) =
             self.recover_or_create_ops_state(&session_id).await;
         let control_projection = entry.control_projection_handle();
-        let dsl_authority =
-            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
+        let dsl_authority = Box::new(super::dsl::MeerkatMachineAuthority::from_state(
+            super::dsl_authority::project_state(
                 &session_id,
                 control_projection
                     .read()
@@ -31,7 +31,8 @@ impl MeerkatMachine {
                 None,
                 std::collections::BTreeSet::new(),
                 None,
-            ));
+            ),
+        ));
         let session_entry = RuntimeSessionEntry {
             mutation_gate: Arc::new(Mutex::new(())),
             control_projection,
@@ -191,7 +192,7 @@ impl MeerkatMachine {
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    let dsl_authority = super::dsl::MeerkatMachineAuthority::from_state(
+                    let dsl_authority = Box::new(super::dsl::MeerkatMachineAuthority::from_state(
                         super::dsl_authority::project_state(
                             &session_id,
                             control_projection
@@ -204,7 +205,7 @@ impl MeerkatMachine {
                             std::collections::BTreeSet::new(),
                             None,
                         ),
-                    );
+                    ));
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {

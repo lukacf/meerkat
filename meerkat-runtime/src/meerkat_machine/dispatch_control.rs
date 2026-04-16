@@ -404,6 +404,14 @@ impl MeerkatMachine {
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {
                 let session_id = Self::resolve_session_id(&runtime_id)?;
+                // Quick existence check BEFORE sync — so gone sessions
+                // return NotFound (→ NotReady{Destroyed}) instead of Internal.
+                {
+                    let sessions = self.sessions.read().await;
+                    if !sessions.contains_key(&session_id) {
+                        return Err(RuntimeControlPlaneError::NotFound(runtime_id));
+                    }
+                }
                 self.sync_session_dsl_projection(&session_id)
                     .await
                     .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;

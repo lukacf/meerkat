@@ -169,17 +169,16 @@ impl MeerkatMachine {
                     } else {
                         None // Deduplicated — no new input lifecycle transition
                     };
-                    if let Some(input) = shadow_input {
-                        if let Err(err) = self
+                    if let Some(input) = shadow_input
+                        && let Err(err) = self
                             .stage_session_dsl_input(&session_id, input, "InputLifecycle(accept)")
                             .await
-                        {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %err,
-                                "DSL/runtime DISAGREEMENT on input lifecycle after accept"
-                            );
-                        }
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime DISAGREEMENT on input lifecycle after accept"
+                        );
                     }
                 }
 
@@ -280,15 +279,12 @@ impl MeerkatMachine {
                         !signal.should_process_immediately(),
                         "queue-only admission unexpectedly requested immediate processing"
                     );
-                    match &result {
-                        AcceptOutcome::Rejected { reason } => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeDriverError::ValidationFailed {
-                                reason: reason.to_string(),
-                            });
-                        }
-                        _ => {}
+                    if let AcceptOutcome::Rejected { reason } = &result {
+                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                            .await;
+                        return Err(RuntimeDriverError::ValidationFailed {
+                            reason: reason.to_string(),
+                        });
                     }
                     result
                 };
@@ -327,21 +323,20 @@ impl MeerkatMachine {
                     } else {
                         None // Deduplicated — no new input lifecycle transition
                     };
-                    if let Some(input) = shadow_input {
-                        if let Err(err) = self
+                    if let Some(input) = shadow_input
+                        && let Err(err) = self
                             .stage_session_dsl_input(
                                 &session_id,
                                 input,
                                 "InputLifecycle(accept_without_wake)",
                             )
                             .await
-                        {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %err,
-                                "DSL/runtime DISAGREEMENT on input lifecycle after accept_without_wake"
-                            );
-                        }
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime DISAGREEMENT on input lifecycle after accept_without_wake"
+                        );
                     }
                 }
 

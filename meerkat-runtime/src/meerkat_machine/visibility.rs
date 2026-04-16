@@ -164,8 +164,8 @@ impl MeerkatMachine {
             if let Some(slot) = slots.get(session_id) {
                 MeerkatDrainSnapshot {
                     slot_present: true,
-                    phase: Some(slot.authority.phase()),
-                    mode: slot.authority.mode(),
+                    phase: Some(slot.phase),
+                    mode: slot.mode,
                     handle_present: slot.handle.is_some(),
                 }
             } else {

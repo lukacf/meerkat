@@ -4450,14 +4450,14 @@ mod tests {
             }),
         );
 
-        let result = timeout(
+        let result = Box::pin(timeout(
             Duration::from_millis(50),
             handle_tools_call(
                 &state,
                 "meerkat_event_stream_read",
                 &json!({ "stream_id": stream_id, "no_timeout": true }),
             ),
-        )
+        ))
         .await;
         assert!(result.is_err(), "no_timeout should allow blocking reads");
     }

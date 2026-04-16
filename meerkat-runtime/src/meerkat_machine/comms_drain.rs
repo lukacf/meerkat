@@ -166,7 +166,7 @@ impl MeerkatMachine {
                 entry.dsl_authority.state.drain_phase = drain_phase_str;
                 let mode_str = format!("{mode:?}");
                 match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut entry.dsl_authority,
+                    &mut *entry.dsl_authority,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain { mode: mode_str },
                 ) {
                     Ok(transition) => {
@@ -280,7 +280,7 @@ impl MeerkatMachine {
             if let Some(entry) = sessions.get_mut(session_id) {
                 entry.dsl_authority.state.drain_phase = current_drain_phase;
                 match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut entry.dsl_authority,
+                    &mut *entry.dsl_authority,
                     dsl_input,
                 ) {
                     Ok(transition) => {

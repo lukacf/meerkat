@@ -302,14 +302,13 @@ impl McpRuntimeIngressContext {
         )
         .map_err(surface_recovery_session_error)?;
         let keep_alive = recovered.keep_alive;
-        let result = self
-            .materialize_with_state(
-                session,
-                recovered.into_deferred_create_request(),
-                keep_alive,
-                state,
-            )
-            .await?;
+        let result = Box::pin(self.materialize_with_state(
+            session,
+            recovered.into_deferred_create_request(),
+            keep_alive,
+            state,
+        ))
+        .await?;
         Ok(result.session_id)
     }
 }
@@ -534,8 +533,7 @@ async fn apply_runtime_turn(
     {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
-            context
-                .rematerialize_persisted_session(session_id, state.clone())
+            Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
                 .await
                 .map(|_| ())?;
             context
@@ -578,13 +576,13 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        apply_runtime_turn(
+        Box::pin(apply_runtime_turn(
             &self.context,
             &self.state,
             &self.session_id,
             run_id,
             &primitive,
-        )
+        ))
         .await
         .map_err(|error| CoreExecutorError::ApplyFailed {
             reason: error.to_string(),

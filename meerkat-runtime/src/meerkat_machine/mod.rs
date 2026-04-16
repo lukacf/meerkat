@@ -85,7 +85,7 @@ mod dispatch_control;
 mod dispatch_drain;
 mod dispatch_ingress;
 mod dispatch_session;
-#[allow(unused_variables, dead_code)]
+#[allow(unused_variables, dead_code, clippy::cmp_owned)]
 pub(crate) mod dsl;
 pub(crate) mod dsl_authority;
 mod llm_reconfigure;
@@ -143,7 +143,10 @@ struct RuntimeSessionEntry {
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
     /// DSL authority for coarse lifecycle phase transitions.
     /// Sync field — validates transitions, writes back phase.
-    dsl_authority: dsl::MeerkatMachineAuthority,
+    /// Boxed so the large expanded state (31 fields including several Maps/Sets)
+    /// lives on the heap — otherwise every async function that holds a
+    /// reference to a `RuntimeSessionEntry` bloats its future size by ~15KB.
+    dsl_authority: Box<dsl::MeerkatMachineAuthority>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -340,7 +343,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
         context: &str,
-    ) -> Result<dsl::MeerkatMachineState, String> {
+    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
         self.sync_session_dsl_projection(session_id)
             .await
             .map_err(|err| err.to_string())?;
@@ -352,8 +355,8 @@ impl MeerkatMachine {
             }
             .to_string()
         })?;
-        let previous_state = entry.dsl_authority.state.clone();
-        let transition = dsl::MeerkatMachineMutator::apply(&mut entry.dsl_authority, input)
+        let previous_state = Box::new(entry.dsl_authority.state.clone());
+        let transition = dsl::MeerkatMachineMutator::apply(&mut *entry.dsl_authority, input)
             .map_err(|err| dsl_authority::map_error(err, context))?;
         entry.dsl_authority.state.lifecycle_phase = transition.to_phase;
         Ok(previous_state)
@@ -362,11 +365,11 @@ impl MeerkatMachine {
     async fn restore_session_dsl_state(
         &self,
         session_id: &SessionId,
-        state: dsl::MeerkatMachineState,
+        state: Box<dsl::MeerkatMachineState>,
     ) {
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            entry.dsl_authority = dsl::MeerkatMachineAuthority::from_state(state);
+            *entry.dsl_authority = dsl::MeerkatMachineAuthority::from_state(*state);
         }
     }
 }

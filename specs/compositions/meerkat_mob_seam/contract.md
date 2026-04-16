@@ -36,7 +36,7 @@ _Generated from the Rust composition catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `meerkat-mob/src/runtime/actor.rs` — MobMachine to MeerkatMachine seam realization
-- `meerkat-runtime/src/meerkat_machine.rs` — MeerkatMachine command authority consuming seam traffic
+- `meerkat-runtime/src/meerkat_machine/mod.rs` — MeerkatMachine command authority consuming seam traffic
 
 ### Scenarios
 - `binding_round_trip` — mob runtime binding request becomes a Meerkat binding and feeds readiness back to Mob

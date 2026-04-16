@@ -1536,7 +1536,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         trait_impls: vec![
             TraitImplBoundary {
                 family_name: "runtime-control-plane".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine.rs".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/traits.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 trait_name: "RuntimeControlPlane".into(),
                 method_names: vec![
@@ -1556,18 +1556,46 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         public_inherent: vec![
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
-                path_suffix: "meerkat-runtime/src/meerkat_machine.rs".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/mod.rs".into(),
+                type_name: "MeerkatMachine".into(),
+                method_names: vec!["register_session"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
+            PublicInherentBoundary {
+                family_name: "runtime-session-adapter".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/session_management.rs".into(),
                 type_name: "MeerkatMachine".into(),
                 method_names: vec![
-                    "register_session",
                     "set_session_silent_intents",
                     "register_session_with_executor",
                     "ensure_session_with_executor",
                     "unregister_session",
                     "interrupt_current_run",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            },
+            PublicInherentBoundary {
+                family_name: "runtime-session-adapter".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/runtime_control.rs".into(),
+                type_name: "MeerkatMachine".into(),
+                method_names: vec![
                     "stop_runtime_executor",
                     "accept_input_and_run",
                     "accept_input_with_completion",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            },
+            PublicInherentBoundary {
+                family_name: "runtime-session-adapter".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
+                type_name: "MeerkatMachine".into(),
+                method_names: vec![
                     "update_peer_ingress_context",
                     "abort_comms_drains",
                     "abort_comms_drain",
@@ -1683,7 +1711,7 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
         }],
         callbacks: vec![
             CallbackBoundary {
-                path_suffix: "meerkat-runtime/src/meerkat_machine.rs".into(),
+                path_suffix: "meerkat-runtime/src/meerkat_machine/comms_drain.rs".into(),
                 owner_type_name: Some("MeerkatMachine".into()),
                 method_name: "notify_comms_drain_exited".into(),
                 compensating_family: "runtime-session-adapter".into(),
@@ -1845,7 +1873,7 @@ macro_rules! semantic_operation_entry {
 fn state_cells() -> Vec<StateCellEntry> {
     vec![
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "MeerkatMachine.sessions",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
@@ -1859,7 +1887,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "session map is identity-to-runtime-capability reachability only; registration, stale attachment normalization, and teardown are enforced by adapter publication rules rather than ad hoc shell pre-checks",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "MeerkatMachine.comms_drain_slots",
             Subsystem::Runtime,
             StateClass::CapabilityIndex,
@@ -1873,7 +1901,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "drain slots are capability reachability only; unregister aborts and removes slots before dropping session binding, and spawn/control updates ignore unregistered sessions",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.driver",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -1883,7 +1911,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "driver is an opaque capability handle; semantic state transitions are mediated through driver authorities and adapter publication rules rather than raw handle identity",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.phase",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -1893,7 +1921,7 @@ fn state_cells() -> Vec<StateCellEntry> {
             "attachment publication is liveness-gated by loop channels; stop paths do not pre-clear attachment ahead of canonical driver control transitions, and stale attached-driver states are repaired before re-publication",
         ),
         state_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "RuntimeSessionEntry.completions",
             Subsystem::Runtime,
             StateClass::CapabilityHandle,
@@ -2154,7 +2182,7 @@ fn state_cells() -> Vec<StateCellEntry> {
 fn semantic_operations() -> Vec<SemanticOperationEntry> {
     vec![
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "register_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2169,7 +2197,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "set_session_silent_intents",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2182,7 +2210,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "register_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2195,7 +2223,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "ensure_session_with_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2208,7 +2236,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "unregister_session",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2219,7 +2247,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "interrupt_current_run",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2234,7 +2262,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "stop_runtime_executor",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2245,7 +2273,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "accept_input_and_run",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2260,7 +2288,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "accept_input_with_completion",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2275,7 +2303,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "update_peer_ingress_context",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2286,7 +2314,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "notify_comms_drain_exited",
             BoundaryKind::ManualCallback,
             "MeerkatMachine",
@@ -2297,7 +2325,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "abort_comms_drains",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2308,7 +2336,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "abort_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2319,7 +2347,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "wait_comms_drain",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
@@ -2330,7 +2358,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "publish_event",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2343,7 +2371,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "retire",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2354,7 +2382,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "recycle",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2365,7 +2393,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "reset",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2376,7 +2404,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "recover",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2387,7 +2415,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "destroy",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",
@@ -2400,7 +2428,7 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine.rs",
+            "meerkat-runtime/src/meerkat_machine/mod.rs",
             "ingest",
             BoundaryKind::TraitImpl,
             "MeerkatMachine",

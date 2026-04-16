@@ -60,7 +60,10 @@ ObserveRuntimeReady(agent_runtime_id, fence_token) ==
 
 SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids) /\ (origin = "External") /\ (agent_runtime_id \in externally_addressable_runtime_ids))
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ (origin = "External")
+    /\ (agent_runtime_id \in externally_addressable_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound >>
@@ -68,7 +71,9 @@ SubmitWorkRunningExternal(agent_runtime_id, fence_token, work_id, origin) ==
 
 SubmitWorkRunningInternal(agent_runtime_id, fence_token, work_id, origin) ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids) /\ (origin = "Internal"))
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ (origin = "Internal")
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound >>
@@ -449,6 +454,22 @@ StopOrchestratorRunning ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
 
 
+StopOrchestratorStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
+StopOrchestratorCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
 ResumeOrchestratorRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
@@ -457,9 +478,41 @@ ResumeOrchestratorRunning ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
 
 
+ResumeOrchestratorStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = TRUE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
+ResumeOrchestratorCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = TRUE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
 DestroyOrchestratorRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
+DestroyOrchestratorStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ coordinator_bound' = FALSE
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
+
+
+DestroyOrchestratorCompleted ==
+    /\ phase = "Completed"
+    /\ phase' = "Completed"
     /\ model_step_count' = model_step_count + 1
     /\ coordinator_bound' = FALSE
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count >>
@@ -530,7 +583,7 @@ FinishCleanupCompleted ==
 
 RunFlowRunning ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (coordinator_bound = TRUE))
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -539,7 +592,7 @@ RunFlowRunning ==
 
 StartFlowRunning ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (coordinator_bound = TRUE))
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -548,7 +601,6 @@ StartFlowRunning ==
 
 CreateRunRunning ==
     /\ phase = "Running"
-    /\ (live_runtime_ids # {})
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -557,7 +609,6 @@ CreateRunRunning ==
 
 StartRunRunning ==
     /\ phase = "Running"
-    /\ (live_runtime_ids # {})
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) + 1
@@ -591,7 +642,8 @@ FinishRunRunning ==
 
 RetireRunning(agent_runtime_id) ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids))
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
@@ -601,7 +653,8 @@ RetireRunning(agent_runtime_id) ==
 
 RetireStopped(agent_runtime_id) ==
     /\ phase = "Stopped"
-    /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids))
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_runtime_ids' = (live_runtime_ids \ {agent_runtime_id})
@@ -650,7 +703,8 @@ DestroyFromAny ==
 
 RespawnRunning(agent_runtime_id) ==
     /\ phase = "Running"
-    /\ ((agent_runtime_id \in live_runtime_ids) /\ (coordinator_bound = TRUE))
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ (coordinator_bound = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound >>
@@ -658,7 +712,8 @@ RespawnRunning(agent_runtime_id) ==
 
 CancelAllWorkRunning(agent_runtime_id, fence_token) ==
     /\ phase = "Running"
-    /\ ((live_runtime_ids # {}) /\ (agent_runtime_id \in live_runtime_ids))
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = 0
@@ -716,8 +771,14 @@ Next ==
     \/ UnbindCoordinatorRunning
     \/ StageSpawnRunning
     \/ StopOrchestratorRunning
+    \/ StopOrchestratorStopped
+    \/ StopOrchestratorCompleted
     \/ ResumeOrchestratorRunning
+    \/ ResumeOrchestratorStopped
+    \/ ResumeOrchestratorCompleted
     \/ DestroyOrchestratorRunning
+    \/ DestroyOrchestratorStopped
+    \/ DestroyOrchestratorCompleted
     \/ ForceCancelMemberRunning
     \/ MemberPeerExposedRunning
     \/ MemberTerminalizedRunning

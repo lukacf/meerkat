@@ -14,6 +14,8 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-machine-dsl = { workspace = true }
+meerkat-machine-schema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

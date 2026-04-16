@@ -40,5 +40,8 @@ schema = ["dep:schemars"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
+[package.metadata.cargo-machete]
+ignored = ["meerkat-machine-schema", "indexmap"]
+
 [lints]
 workspace = true

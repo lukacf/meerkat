@@ -128,6 +128,47 @@ impl MeerkatMachine {
                     );
                 }
 
+                // Input lifecycle shadow: infer from outcome which transition fired
+                {
+                    let is_terminal = match &outcome {
+                        AcceptOutcome::Accepted { input_id, .. } => {
+                            let drv = driver.lock().await;
+                            drv.as_driver()
+                                .input_state(input_id)
+                                .map(|s| s.current_state().is_terminal())
+                                .unwrap_or(true)
+                        }
+                        _ => false,
+                    };
+                    let shadow_input = if is_terminal {
+                        Some(
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeOnAccept {
+                                input_id: shadow_input_id.to_string(),
+                            },
+                        )
+                    } else if matches!(&outcome, AcceptOutcome::Accepted { .. }) {
+                        Some(
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
+                                input_id: shadow_input_id.to_string(),
+                            },
+                        )
+                    } else {
+                        None // Deduplicated — no new input lifecycle transition
+                    };
+                    if let Some(input) = shadow_input {
+                        if let Err(err) = self
+                            .stage_session_dsl_input(&session_id, input, "InputLifecycle(accept)")
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %err,
+                                "DSL/runtime DISAGREEMENT on input lifecycle after accept"
+                            );
+                        }
+                    }
+                }
+
                 if signal.should_wake()
                     && let Some(ref wake_tx) = wake_tx
                 {
@@ -390,6 +431,28 @@ impl MeerkatMachine {
                         RuntimeDriverError::ValidationFailed { reason }
                     })?;
 
+                // Input lifecycle shadows: accept queued + stage for run
+                for shadow in [
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::QueueAccepted {
+                        input_id: prepared.input_id.to_string(),
+                    },
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::StageForRun {
+                        input_id: prepared.input_id.to_string(),
+                        run_id: prepared.run_id.to_string(),
+                    },
+                ] {
+                    if let Err(err) = self
+                        .stage_session_dsl_input(&session_id, shadow, "InputLifecycle(prepare)")
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %err,
+                            "DSL/runtime DISAGREEMENT on input lifecycle during prepare"
+                        );
+                    }
+                }
+
                 if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
                     self.restore_session_dsl_state(&session_id, previous_dsl_state)
                         .await;
@@ -460,6 +523,24 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Internal(format!(
                         "runtime commit failed: {err}"
                     )));
+                }
+
+                // Input lifecycle shadow: mark input consumed after successful commit
+                if let Err(err) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::ConsumeInput {
+                            input_id: shadow_input_id.to_string(),
+                        },
+                        "InputLifecycle(commit)",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "DSL/runtime DISAGREEMENT on input lifecycle after commit"
+                    );
                 }
 
                 if let Err(err) = self.sync_session_dsl_projection(&session_id).await {

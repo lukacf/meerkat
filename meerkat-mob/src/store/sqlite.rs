@@ -11,7 +11,9 @@ use super::{
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event};
-use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
+};
 use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
@@ -390,6 +392,39 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
                         ))
                     })?,
                     encode_json(&record)?,
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let agent_identity = agent_identity.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "DELETE FROM mob_runtime_binding_overlays
+                 WHERE mob_id = ?1 AND agent_identity = ?2 AND generation = ?3",
+                params![
+                    mob_id.as_str(),
+                    agent_identity.as_str(),
+                    i64::try_from(generation.get()).map_err(|_| {
+                        MobStoreError::Internal(format!(
+                            "generation {} exceeds i64::MAX",
+                            generation.get()
+                        ))
+                    })?,
                 ],
             )
             .map_err(se)?;
@@ -2136,6 +2171,7 @@ mod tests {
                 bootstrap_token: None,
                 session_id: None,
             }),
+            bootstrap_token: None,
             status: ExternalBindingOverlayStatus::Normalized,
             updated_at: Utc::now(),
         };

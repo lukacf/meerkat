@@ -1,4 +1,4 @@
-use crate::ids::{AgentIdentity, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
@@ -124,6 +124,21 @@ impl RosterAuthority {
     ) -> bool {
         self.roster
             .set_bridge_session_id(meerkat_id, bridge_session_id)
+    }
+
+    pub(crate) fn replace_backend_peer_binding_by_peer_id(
+        &mut self,
+        prior_peer_id: &str,
+        next_peer_id: &str,
+        next_address: &str,
+        bootstrap_token: Option<String>,
+    ) -> Vec<(AgentIdentity, Generation)> {
+        self.roster.replace_backend_peer_binding_by_peer_id(
+            prior_peer_id,
+            next_peer_id,
+            next_address,
+            bootstrap_token,
+        )
     }
 }
 

@@ -7,7 +7,9 @@ use super::{
 };
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
+};
 use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
@@ -139,6 +141,20 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
             .write()
             .await
             .insert(key, record.clone());
+        Ok(())
+    }
+
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobStoreError> {
+        self.external_binding_overlays.write().await.remove(&(
+            mob_id.clone(),
+            agent_identity.clone(),
+            generation,
+        ));
         Ok(())
     }
 
@@ -1081,6 +1097,7 @@ mod tests {
                 bootstrap_token: None,
                 session_id: None,
             }),
+            bootstrap_token: None,
             status: crate::store::ExternalBindingOverlayStatus::Normalized,
             updated_at: Utc::now(),
         };

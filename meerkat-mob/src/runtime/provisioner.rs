@@ -1158,14 +1158,38 @@ impl MultiBackendProvisioner {
         })
     }
 
-    async fn ensure_supervisor_authorized(&self, peer: &TrustedPeerSpec) -> Result<(), MobError> {
+    fn bridge_rejection_reason(value: &serde_json::Value) -> Option<String> {
+        match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
+            super::bridge_protocol::BridgeReply::Rejected { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    async fn ensure_supervisor_authorized(
+        &self,
+        peer: &TrustedPeerSpec,
+        binding: Option<(&str, &str, Option<&str>)>,
+    ) -> Result<TrustedPeerSpec, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
-        let _ = self
+        let value = self
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await?;
-        Ok(())
+        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+            if (reason.contains("use bind_member")
+                || reason.contains("stale supervisor")
+                || reason.contains("request sender"))
+                && let Some((peer_id, address, bootstrap_token)) = binding
+            {
+                let bind: super::bridge_protocol::BridgeBindResponse = self
+                    .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
+                    .await?;
+                return Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address);
+            }
+            return Err(MobError::WiringError(reason));
+        }
+        Ok(peer.clone())
     }
 
     async fn send_bridge_command_typed<R: DeserializeOwned>(
@@ -1249,7 +1273,7 @@ impl MultiBackendProvisioner {
             .await?;
         let member_ref = MemberRef::BackendPeer {
             peer_id: bind_response.peer_id,
-            address: bind_response.address,
+            address: super::bridge_protocol::canonicalize_bridge_address(&bind_response.address),
             bootstrap_token,
             session_id: None,
         };
@@ -1346,10 +1370,23 @@ impl MobProvisioner for MultiBackendProvisioner {
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
-                session_id: None, ..
+                peer_id,
+                address,
+                bootstrap_token,
+                session_id: None,
+                ..
             } => {
                 let peer = self.peer_only_spec(member_ref).await?;
-                self.ensure_supervisor_authorized(&peer).await?;
+                let peer = self
+                    .ensure_supervisor_authorized(
+                        &peer,
+                        Some((
+                            peer_id.as_str(),
+                            address.as_str(),
+                            bootstrap_token.as_deref(),
+                        )),
+                    )
+                    .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
                 let _ = self
@@ -1368,10 +1405,23 @@ impl MobProvisioner for MultiBackendProvisioner {
     async fn interrupt_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
-                session_id: None, ..
+                peer_id,
+                address,
+                bootstrap_token,
+                session_id: None,
+                ..
             } => {
                 let peer = self.peer_only_spec(member_ref).await?;
-                self.ensure_supervisor_authorized(&peer).await?;
+                let peer = self
+                    .ensure_supervisor_authorized(
+                        &peer,
+                        Some((
+                            peer_id.as_str(),
+                            address.as_str(),
+                            bootstrap_token.as_deref(),
+                        )),
+                    )
+                    .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
                 let _ = self
@@ -1391,10 +1441,23 @@ impl MobProvisioner for MultiBackendProvisioner {
     ) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
-                session_id: None, ..
+                peer_id,
+                address,
+                bootstrap_token,
+                session_id: None,
+                ..
             } => {
                 let peer = self.peer_only_spec(member_ref).await?;
-                self.ensure_supervisor_authorized(&peer).await?;
+                let peer = self
+                    .ensure_supervisor_authorized(
+                        &peer,
+                        Some((
+                            peer_id.as_str(),
+                            address.as_str(),
+                            bootstrap_token.as_deref(),
+                        )),
+                    )
+                    .await?;
                 let authority = self.supervisor_bridge.authority().await;
                 let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
                 let command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(

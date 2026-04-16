@@ -127,19 +127,14 @@ impl Serialize for MemberRef {
             Self::BackendPeer {
                 peer_id,
                 address,
-                bootstrap_token,
                 session_id,
+                ..
             } => {
-                let mut map = serializer.serialize_map(Some(
-                    3 + usize::from(bootstrap_token.is_some())
-                        + if session_id.is_some() { 2 } else { 0 },
-                ))?;
+                let mut map =
+                    serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
                 map.serialize_entry("kind", "backend_peer")?;
                 map.serialize_entry("peer_id", peer_id)?;
                 map.serialize_entry("address", address)?;
-                if let Some(bootstrap_token) = bootstrap_token {
-                    map.serialize_entry("bootstrap_token", bootstrap_token)?;
-                }
                 if let Some(session_id) = session_id {
                     map.serialize_entry("session_id", session_id)?;
                     map.serialize_entry("bridge_session_id", session_id)?;
@@ -790,6 +785,25 @@ mod tests {
         );
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
+    }
+
+    #[test]
+    fn test_member_ref_backend_peer_omits_bootstrap_token_in_serialized_output() {
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: "peer-123".to_string(),
+            address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: Some("secret-bootstrap-proof".to_string()),
+            session_id: None,
+        };
+
+        let value = serde_json::to_value(&member_ref).unwrap();
+        assert_eq!(value["kind"], "backend_peer");
+        assert_eq!(value["peer_id"], "peer-123");
+        assert_eq!(value["address"], "https://backend.example/peers/peer-123");
+        assert!(
+            value.get("bootstrap_token").is_none(),
+            "bootstrap proof must not be exposed through serialized member refs"
+        );
     }
 
     #[test]

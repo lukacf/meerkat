@@ -1910,6 +1910,17 @@ impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
             .await
     }
 
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: crate::ids::Generation,
+    ) -> Result<(), MobStoreError> {
+        self.inner
+            .delete_external_binding_overlay(mob_id, agent_identity, generation)
+            .await
+    }
+
     async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
         self.inner.delete_external_binding_overlays(mob_id).await
     }
@@ -2496,12 +2507,21 @@ fn canonical_external_address(address: &str) -> &str {
     address.split('?').next().unwrap_or(address)
 }
 
+#[derive(Clone)]
+struct HarnessSupervisorState {
+    supervisor: meerkat_core::comms::TrustedPeerSpec,
+    epoch: u64,
+}
+
 struct LiveExternalPeerHarness {
     binding: crate::RuntimeBinding,
     runtime: Arc<meerkat_comms::CommsRuntime>,
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
+    supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
+    fail_next_authorize: Arc<AtomicBool>,
+    fail_next_bind: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -2519,6 +2539,13 @@ impl LiveExternalPeerHarness {
             .collect()
     }
 
+    async fn remove_trusted_peer(&self, peer_id: &str) {
+        self.runtime
+            .remove_trusted_peer(peer_id)
+            .await
+            .expect("remove trusted peer from harness runtime");
+    }
+
     fn bind_count(&self) -> usize {
         self.bind_count.load(Ordering::Relaxed)
     }
@@ -2530,6 +2557,26 @@ impl LiveExternalPeerHarness {
     async fn received_intents(&self) -> Vec<String> {
         self.received_intents.read().await.clone()
     }
+
+    async fn authorized_supervisor_peer_id(&self) -> Option<String> {
+        self.supervisor_state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.supervisor.peer_id.clone())
+    }
+
+    async fn forget_supervisor(&self) {
+        let _ = self.supervisor_state.write().await.take();
+    }
+
+    fn fail_next_authorize(&self) {
+        self.fail_next_authorize.store(true, Ordering::Relaxed);
+    }
+
+    fn fail_next_bind(&self) {
+        self.fail_next_bind.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for LiveExternalPeerHarness {
@@ -2539,18 +2586,12 @@ impl Drop for LiveExternalPeerHarness {
 }
 
 async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
-    #[derive(Clone)]
-    struct HarnessSupervisorState {
-        supervisor: meerkat_core::comms::TrustedPeerSpec,
-        epoch: u64,
-    }
-
     let peer_name = peer_name.to_string();
     let runtime = Arc::new(
         meerkat_comms::CommsRuntime::inproc_only(&peer_name)
             .expect("create live external peer runtime"),
     );
-    let bootstrap_token = format!("bootstrap-{}", Uuid::new_v4());
+    let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id(),
         address: format!("inproc://{peer_name}"),
@@ -2567,6 +2608,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_received_intents = received_intents.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
+    let fail_next_authorize = Arc::new(AtomicBool::new(false));
+    let responder_fail_next_authorize = fail_next_authorize.clone();
+    let fail_next_bind = Arc::new(AtomicBool::new(false));
+    let responder_fail_next_bind = fail_next_bind.clone();
     let task = tokio::spawn(async move {
         let mut state = super::bridge_protocol::BridgeMemberRuntimeState::Idle;
         let inbox_notify = responder_runtime.inbox_notify();
@@ -2596,6 +2641,15 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                         let response = if let Ok(command) = bridge_parse {
                             match command {
                                 super::bridge_protocol::BridgeCommand::BindMember(payload) => {
+                                    if responder_fail_next_bind.swap(false, Ordering::Relaxed) {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                reason: "bind member failed: injected test failure"
+                                                    .to_string(),
+                                            },
+                                        )
+                                        .expect("bind rejection")
+                                    } else {
                                     responder_bind_count.fetch_add(1, Ordering::Relaxed);
                                     let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
                                         payload.supervisor.clone().into();
@@ -2621,43 +2675,76 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                     destroy_member: true,
                                                     wire_member: true,
                                                     unwire_member: true,
-                                                },
+                                            },
                                         },
                                     )
                                     .expect("bind response")
+                                    }
                                 }
                                 super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
                                     payload,
                                 ) => {
-                                    let mut guard = responder_supervisor_state.write().await;
-                                    if let Some(current) = guard.as_ref() {
-                                        assert!(
-                                            payload.epoch >= current.epoch,
-                                            "authorize payload must not go backwards in epoch"
-                                        );
-                                        if payload.epoch > current.epoch
-                                            || payload.supervisor.peer_id
-                                                != current.supervisor.peer_id
-                                        {
-                                            let _ = responder_runtime
-                                                .remove_trusted_peer(&current.supervisor.peer_id)
-                                                .await;
+                                    if responder_fail_next_authorize
+                                        .swap(false, Ordering::Relaxed)
+                                    {
+                                        let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
+                                            payload.supervisor.clone().into();
+                                        responder_runtime
+                                            .add_trusted_peer(supervisor_spec)
+                                            .await
+                                            .expect("trust supervisor for rejection");
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                reason: "authorize supervisor failed: injected test failure".to_string(),
+                                            },
+                                        )
+                                        .expect("authorize rejection")
+                                    } else {
+                                        let mut guard = responder_supervisor_state.write().await;
+                                        if let Some(current) = guard.as_ref() {
+                                            assert!(
+                                                payload.epoch >= current.epoch,
+                                                "authorize payload must not go backwards in epoch"
+                                            );
+                                            if payload.epoch > current.epoch
+                                                || payload.supervisor.peer_id
+                                                    != current.supervisor.peer_id
+                                            {
+                                                let _ = responder_runtime
+                                                    .remove_trusted_peer(
+                                                        &current.supervisor.peer_id,
+                                                    )
+                                                    .await;
+                                            }
+                                            let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
+                                                payload.supervisor.clone().into();
+                                            responder_runtime
+                                                .add_trusted_peer(supervisor_spec)
+                                                .await
+                                                .expect("authorize supervisor");
+                                            *guard = Some(HarnessSupervisorState {
+                                                supervisor: payload.supervisor.into(),
+                                                epoch: payload.epoch,
+                                            });
+                                            serde_json::to_value(
+                                                super::bridge_protocol::BridgeAck { ok: true },
+                                            )
+                                            .expect("authorize ack")
+                                        } else {
+                                            let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
+                                                payload.supervisor.clone().into();
+                                            responder_runtime
+                                                .add_trusted_peer(supervisor_spec)
+                                                .await
+                                                .expect("trust supervisor for initial rejection");
+                                            serde_json::to_value(
+                                                super::bridge_protocol::BridgeReply::Rejected {
+                                                    reason: "authorize supervisor failed: use bind_member to establish initial supervisor authority".to_string(),
+                                                },
+                                            )
+                                            .expect("authorize initial rejection")
                                         }
                                     }
-                                    let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                        payload.supervisor.clone().into();
-                                    responder_runtime
-                                        .add_trusted_peer(supervisor_spec)
-                                        .await
-                                        .expect("authorize supervisor");
-                                    *guard = Some(HarnessSupervisorState {
-                                        supervisor: payload.supervisor.into(),
-                                        epoch: payload.epoch,
-                                    });
-                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
-                                        ok: true,
-                                    })
-                                    .expect("authorize ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::RevokeSupervisor(
                                     payload,
@@ -2873,6 +2960,9 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         bind_count,
         delivered_inputs,
         received_intents,
+        supervisor_state,
+        fail_next_authorize,
+        fail_next_bind,
         task,
     }
 }
@@ -4266,6 +4356,7 @@ async fn test_destroy_scrubs_runtime_metadata() {
                 agent_identity: AgentIdentity::from("worker-overlay"),
                 generation: crate::ids::Generation::INITIAL,
                 normalized_member_ref: None,
+                bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Failed {
                     reason: "test overlay".to_string(),
                 },
@@ -4425,6 +4516,259 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         ),
         other => panic!("expected stale supervisor rejection, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_bind_fallback_binds_next_authority() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-bind-fallback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    external.forget_supervisor().await;
+
+    let report = handle.rotate_supervisor().await.expect("rotate supervisor");
+    let rotated = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load rotated authority")
+        .expect("rotated authority record");
+    assert_eq!(rotated.public_peer_id, report.public_peer_id);
+    assert_eq!(
+        external.authorized_supervisor_peer_id().await.as_deref(),
+        Some(rotated.public_peer_id.as_str()),
+        "bind fallback during rotation must install the next supervisor, not the old one"
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_rolls_back_remote_authorization_on_partial_failure() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-rollback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn first live external worker");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn second live external worker");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original authority")
+        .expect("original authority record");
+    external_b.fail_next_authorize();
+
+    let error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("partial authorize failure should abort rotation");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to rotate supervisor authority"),
+        "rotation failure should surface rollback context, got: {error}"
+    );
+    let current = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load authority after failed rotation")
+        .expect("authority after failed rotation");
+    assert_eq!(
+        current.public_peer_id, original.public_peer_id,
+        "failed rotation must keep the original supervisor authority active locally"
+    );
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-a"),
+            ContentInput::from("after-failed-rotation".to_string()),
+        )
+        .await
+        .expect("rolled-back remote should still accept commands from the original supervisor");
+    assert_eq!(
+        external_a.delivered_input_ids().await.len(),
+        1,
+        "good peer should remain controllable after rollback"
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_advances_local_authority_when_rollback_fails() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-rollback-failure",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn first live external worker");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn second live external worker");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original authority")
+        .expect("original authority record");
+    external_a.fail_next_bind();
+    external_b.fail_next_authorize();
+
+    let error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("rollback bind failure should abort rotation");
+    assert!(
+        error
+            .to_string()
+            .contains("local supervisor authority advanced"),
+        "rollback failure should explain the local authority cutover, got: {error}"
+    );
+
+    let current = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load authority after failed rollback")
+        .expect("authority after failed rollback");
+    assert_eq!(
+        current.epoch,
+        original.epoch + 1,
+        "mob should advance to the already-applied next authority when rollback fails"
+    );
+    assert_ne!(
+        current.public_peer_id, original.public_peer_id,
+        "failed rollback should keep the deterministic next supervisor active locally"
+    );
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-a"),
+            ContentInput::from("after-rollback-failure".to_string()),
+        )
+        .await
+        .expect("partially rotated peer should remain controllable");
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-b"),
+            ContentInput::from("recover-old-peer".to_string()),
+        )
+        .await
+        .expect("old peer should recover via bind fallback under the advanced supervisor");
+}
+
+#[tokio::test]
+async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "peer-only-rebind-after-restart",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+    assert_eq!(external.bind_count(), 1, "initial spawn should bind once");
+
+    external.forget_supervisor().await;
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("after-restart".to_string()),
+        )
+        .await
+        .expect("lost supervisor state should trigger a rebind fallback");
+    assert_eq!(
+        external.bind_count(),
+        2,
+        "restart recovery should re-establish supervisor authority via BindMember"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "rebound peer should still receive the requested input"
+    );
 }
 
 #[tokio::test]
@@ -7228,6 +7572,7 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
                     bootstrap_token: None,
                     session_id: None,
                 }),
+                bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
                 updated_at: Utc::now(),
             },
@@ -7325,6 +7670,7 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
                 agent_identity: AgentIdentity::from("w-ext"),
                 generation,
                 normalized_member_ref: None,
+                bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Failed {
                     reason: "legacy external bridge normalization failed".to_string(),
                 },
@@ -7445,6 +7791,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     bootstrap_token: None,
                     session_id: None,
                 }),
+                bootstrap_token: None,
                 status: ExternalBindingOverlayStatus::Normalized,
                 updated_at: Utc::now(),
             },
@@ -7557,9 +7904,10 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                 normalized_member_ref: Some(MemberRef::BackendPeer {
                     peer_id,
                     address,
-                    bootstrap_token,
+                    bootstrap_token: None,
                     session_id: None,
                 }),
+                bootstrap_token: bootstrap_token.clone(),
                 status: ExternalBindingOverlayStatus::Normalized,
                 updated_at: Utc::now(),
             },
@@ -8214,7 +8562,7 @@ async fn test_spawn_supports_session_and_external_backends() {
         "spawn-session-and-external",
     );
     let mob_id = definition.id.clone();
-    let (handle, _service) = create_test_mob(definition).await;
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
 
     let session_ref = handle
         .spawn_with_backend(
@@ -11907,6 +12255,84 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
             .await
             .is_none(),
         "retire should remove external backend member"
+    );
+}
+
+#[tokio::test]
+async fn test_rewire_repairs_remote_trust_for_existing_peer_only_edge() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rewire-peer-only-trust",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external_a =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-rewire")).await;
+    let external_b =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext-rewire")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-ext-rewire"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn external lead");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext-rewire"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+
+    handle
+        .wire(
+            AgentIdentity::from("l-ext-rewire"),
+            MeerkatId::from("w-ext-rewire"),
+        )
+        .await
+        .expect("initial wire");
+
+    let crate::RuntimeBinding::External {
+        peer_id: lead_peer_id,
+        ..
+    } = external_a.binding()
+    else {
+        panic!("expected external lead binding");
+    };
+    let crate::RuntimeBinding::External {
+        peer_id: worker_peer_id,
+        ..
+    } = external_b.binding()
+    else {
+        panic!("expected external worker binding");
+    };
+    external_a.remove_trusted_peer(&worker_peer_id).await;
+    external_b.remove_trusted_peer(&lead_peer_id).await;
+
+    handle
+        .wire(
+            AgentIdentity::from("l-ext-rewire"),
+            MeerkatId::from("w-ext-rewire"),
+        )
+        .await
+        .expect("rewire should reconcile both peer-only trust edges");
+
+    let lead_name = test_comms_name_for(&mob_id, "lead", "l-ext-rewire");
+    let worker_name = test_comms_name_for(&mob_id, "worker", "w-ext-rewire");
+    assert!(
+        external_a.trusted_peer_names().await.contains(&worker_name),
+        "rewire should restore worker trust on the lead peer-only runtime"
+    );
+    assert!(
+        external_b.trusted_peer_names().await.contains(&lead_name),
+        "rewire should restore lead trust on the worker peer-only runtime"
     );
 }
 

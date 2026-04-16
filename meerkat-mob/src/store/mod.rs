@@ -118,6 +118,8 @@ pub struct ExternalBindingOverlayRecord {
     pub generation: Generation,
     /// Peer-only runtime binding when normalization succeeds.
     pub normalized_member_ref: Option<MemberRef>,
+    /// Optional bootstrap proof for re-establishing supervisor control.
+    pub bootstrap_token: Option<String>,
     /// Current normalization status.
     pub status: ExternalBindingOverlayStatus,
     /// Last update time for conflict resolution and diagnostics.
@@ -204,6 +206,14 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
         &self,
         mob_id: &MobId,
         record: &ExternalBindingOverlayRecord,
+    ) -> Result<(), MobStoreError>;
+
+    /// Delete the overlay for a specific identity/generation key.
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
     ) -> Result<(), MobStoreError>;
 
     /// Delete all overlays for the given mob.

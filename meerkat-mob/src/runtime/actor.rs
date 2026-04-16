@@ -55,6 +55,7 @@ enum WiringEndpoint {
     },
     PeerOnly {
         spec: TrustedPeerSpec,
+        binding: crate::RuntimeBinding,
     },
 }
 
@@ -347,13 +348,163 @@ impl MobActor {
         })
     }
 
-    async fn ensure_supervisor_authorized(&self, peer: &TrustedPeerSpec) -> Result<(), MobError> {
+    fn bridge_bootstrap_token_from_binding(
+        binding: &crate::RuntimeBinding,
+    ) -> Result<String, MobError> {
+        match binding {
+            crate::RuntimeBinding::External {
+                address,
+                bootstrap_token,
+                ..
+            } => {
+                if let Some(token) = bootstrap_token.as_deref().filter(|token| !token.is_empty()) {
+                    return Ok(token.to_string());
+                }
+                let query = address.split_once('?').map(|(_, query)| query).ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "external runtime binding for '{address}' is missing bridge bootstrap token"
+                    ))
+                })?;
+                for pair in query.split('&') {
+                    let Some((key, value)) = pair.split_once('=') else {
+                        continue;
+                    };
+                    if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                        && !value.is_empty()
+                    {
+                        return Ok(value.to_string());
+                    }
+                }
+                Err(MobError::WiringError(format!(
+                    "external runtime binding for '{address}' is missing bootstrap token ('{}' query param or explicit field)",
+                    super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                )))
+            }
+            crate::RuntimeBinding::Session => Err(MobError::Internal(
+                "bridge bootstrap token requested for session binding".to_string(),
+            )),
+        }
+    }
+
+    async fn bind_peer_only_member_for_binding(
+        &self,
+        peer: &TrustedPeerSpec,
+        binding: &crate::RuntimeBinding,
+    ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
+        let payload = self.bridge_supervisor_payload().await?;
+        self.bind_peer_only_member_for_binding_with_payload(peer, binding, &payload)
+            .await
+    }
+
+    async fn bind_peer_only_member_for_binding_with_payload(
+        &self,
+        peer: &TrustedPeerSpec,
+        binding: &crate::RuntimeBinding,
+        payload: &super::bridge_protocol::BridgeSupervisorPayload,
+    ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
+        let crate::RuntimeBinding::External {
+            peer_id,
+            address,
+            bootstrap_token: _,
+        } = binding
+        else {
+            return Err(MobError::Internal(
+                "bind requested for non-external runtime binding".to_string(),
+            ));
+        };
+        let bootstrap_token = Self::bridge_bootstrap_token_from_binding(binding)?;
+        let command = super::bridge_protocol::BridgeCommand::BindMember(
+            super::bridge_protocol::BridgeBindPayload {
+                supervisor: payload.supervisor.clone(),
+                epoch: payload.epoch,
+                protocol_version: payload.protocol_version,
+                expected_peer_id: peer_id.clone(),
+                expected_address: address.clone(),
+                bootstrap_token,
+            },
+        );
+        self.send_bridge_command_typed(peer, &command, std::time::Duration::from_secs(30))
+            .await
+    }
+
+    fn bridge_rejection_reason(value: &serde_json::Value) -> Option<String> {
+        match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
+            super::bridge_protocol::BridgeReply::Rejected { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    async fn persist_rebound_binding(
+        &self,
+        prior_binding: &crate::RuntimeBinding,
+        bind_response: &super::bridge_protocol::BridgeBindResponse,
+    ) -> Result<(), MobError> {
+        let crate::RuntimeBinding::External {
+            peer_id: prior_peer_id,
+            bootstrap_token,
+            ..
+        } = prior_binding
+        else {
+            return Ok(());
+        };
+        let canonical_address =
+            super::bridge_protocol::canonicalize_bridge_address(&bind_response.address);
+        let updated_entries = self
+            .roster
+            .write()
+            .await
+            .replace_backend_peer_binding_by_peer_id(
+                prior_peer_id,
+                &bind_response.peer_id,
+                &canonical_address,
+                bootstrap_token.clone(),
+            );
+        for (identity, generation) in updated_entries {
+            self.runtime_metadata
+                .upsert_external_binding_overlay(
+                    &self.definition.id,
+                    &crate::store::ExternalBindingOverlayRecord {
+                        agent_identity: identity,
+                        generation,
+                        normalized_member_ref: Some(MemberRef::BackendPeer {
+                            peer_id: bind_response.peer_id.clone(),
+                            address: canonical_address.clone(),
+                            bootstrap_token: None,
+                            session_id: None,
+                        }),
+                        bootstrap_token: bootstrap_token.clone(),
+                        status: crate::store::ExternalBindingOverlayStatus::Normalized,
+                        updated_at: chrono::Utc::now(),
+                    },
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_supervisor_authorized(
+        &self,
+        peer: &TrustedPeerSpec,
+        binding: Option<&crate::RuntimeBinding>,
+    ) -> Result<(), MobError> {
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         let value = self
             .supervisor_bridge
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
             .await?;
+        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+            if reason.contains("use bind_member to establish initial supervisor authority") {
+                if let Some(binding) = binding {
+                    let bind = self
+                        .bind_peer_only_member_for_binding(peer, binding)
+                        .await?;
+                    self.persist_rebound_binding(binding, &bind).await?;
+                    return Ok(());
+                }
+            }
+            return Err(MobError::WiringError(reason));
+        }
         let _ack: super::bridge_protocol::BridgeAck =
             serde_json::from_value(value).map_err(|error| {
                 MobError::Internal(format!(
@@ -384,7 +535,8 @@ impl MobActor {
         timeout: std::time::Duration,
     ) -> Result<super::bridge_protocol::BridgeObservationResponse, MobError> {
         let peer = Self::peer_only_spec_for_binding(binding, "observe_peer_only_binding")?;
-        self.ensure_supervisor_authorized(&peer).await?;
+        self.ensure_supervisor_authorized(&peer, Some(binding))
+            .await?;
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::ObserveMember(payload);
         self.send_bridge_command_typed(&peer, &command, timeout)
@@ -397,7 +549,8 @@ impl MobActor {
         timeout: std::time::Duration,
     ) -> Result<super::bridge_protocol::BridgeDestroyResponse, MobError> {
         let peer = Self::peer_only_spec_for_binding(binding, "destroy_peer_only_binding")?;
-        self.ensure_supervisor_authorized(&peer).await?;
+        self.ensure_supervisor_authorized(&peer, Some(binding))
+            .await?;
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::DestroyMember(payload);
         self.send_bridge_command_typed(&peer, &command, timeout)
@@ -411,7 +564,8 @@ impl MobActor {
         timeout: std::time::Duration,
     ) -> Result<(), MobError> {
         let peer = Self::peer_only_spec_for_binding(binding, "revoke_supervisor_for_binding")?;
-        self.ensure_supervisor_authorized(&peer).await?;
+        self.ensure_supervisor_authorized(&peer, Some(binding))
+            .await?;
         let payload = self.bridge_supervisor_payload().await?;
         let command = super::bridge_protocol::BridgeCommand::RevokeSupervisor(payload);
         let _ack: super::bridge_protocol::BridgeAck = self
@@ -423,10 +577,12 @@ impl MobActor {
     async fn wire_peer_only_recipient(
         &self,
         recipient: &TrustedPeerSpec,
+        recipient_binding: Option<&crate::RuntimeBinding>,
         peer_spec: &TrustedPeerSpec,
         timeout: std::time::Duration,
     ) -> Result<(), MobError> {
-        self.ensure_supervisor_authorized(recipient).await?;
+        self.ensure_supervisor_authorized(recipient, recipient_binding)
+            .await?;
         let authority = self.supervisor_bridge.authority().await;
         let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
         let command = super::bridge_protocol::BridgeCommand::WireMember(
@@ -446,10 +602,12 @@ impl MobActor {
     async fn unwire_peer_only_recipient(
         &self,
         recipient: &TrustedPeerSpec,
+        recipient_binding: Option<&crate::RuntimeBinding>,
         peer_spec: &TrustedPeerSpec,
         timeout: std::time::Duration,
     ) -> Result<(), MobError> {
-        self.ensure_supervisor_authorized(recipient).await?;
+        self.ensure_supervisor_authorized(recipient, recipient_binding)
+            .await?;
         let authority = self.supervisor_bridge.authority().await;
         let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
         let command = super::bridge_protocol::BridgeCommand::UnwireMember(
@@ -3316,6 +3474,13 @@ impl MobActor {
     ) -> Result<FinalizeSpawnOutcome, MobError> {
         let identity = crate::ids::AgentIdentity::from(meerkat_id.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
+        let overlay_record =
+            self.external_binding_overlay_record(&identity, generation, provision.member_ref());
+        if let Some(overlay_record) = overlay_record.as_ref() {
+            self.runtime_metadata
+                .upsert_external_binding_overlay(&self.definition.id, overlay_record)
+                .await?;
+        }
         if let Err(append_error) = self
             .events
             .append(NewMobEvent {
@@ -3329,7 +3494,9 @@ impl MobActor {
                         agent_runtime_id.clone(),
                         profile_name.clone(),
                     )
-                    .with_bridge_member_ref(Some(provision.member_ref().clone()));
+                    .with_bridge_member_ref(Some(Self::sanitized_member_ref(
+                        provision.member_ref(),
+                    )));
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
                     event
@@ -3337,6 +3504,11 @@ impl MobActor {
             })
             .await
         {
+            if overlay_record.is_some() {
+                let _ = self
+                    .delete_external_binding_overlay_for_member(&identity, generation)
+                    .await;
+            }
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
                     "spawn append failed for '{meerkat_id}': {append_error}; archive compensation failed: {rollback_error}"
@@ -3683,6 +3855,9 @@ impl MobActor {
                 "disposal aborted at ArchiveSession: {error}"
             )));
         }
+
+        self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
+            .await?;
 
         Ok(())
     }
@@ -4181,7 +4356,7 @@ impl MobActor {
                 .resolve_wiring_endpoint(&peer_entry, "dispose_notify_peers")
                 .await?
             {
-                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
             };
 
             if let Err(error) = self
@@ -4641,7 +4816,10 @@ impl MobActor {
                     entry: entry_a,
                     ..
                 },
-                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_b,
+                    binding: binding_b,
+                },
             ) => {
                 let mut rollback = LifecycleRollback::new("unwire");
                 let supervisor_sender = self.supervisor_bridge.runtime_core().await;
@@ -4657,8 +4835,13 @@ impl MobActor {
                             .await
                     }
                 });
-                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.unwire_peer_only_recipient(
+                    spec_b,
+                    Some(binding_b),
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_unwired(spec_b, a, entry_a, &supervisor_sender)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
@@ -4699,7 +4882,10 @@ impl MobActor {
                 }
             }
             (
-                WiringEndpoint::PeerOnly { spec: spec_a, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_a,
+                    binding: _binding_a,
+                },
                 WiringEndpoint::Local {
                     comms,
                     spec: spec_b,
@@ -4709,8 +4895,13 @@ impl MobActor {
             ) => {
                 let mut rollback = LifecycleRollback::new("unwire");
                 let supervisor_sender = self.supervisor_bridge.runtime_core().await;
-                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.unwire_peer_only_recipient(
+                    spec_b,
+                    None,
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_added '{a}' -> '{b}'"), {
@@ -4763,16 +4954,32 @@ impl MobActor {
                 }
             }
             (
-                WiringEndpoint::PeerOnly { spec: spec_a, .. },
-                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_a,
+                    binding: binding_a,
+                },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_b,
+                    binding: binding_b,
+                },
             ) => {
                 let supervisor_sender = self.supervisor_bridge.runtime_core().await;
-                self.unwire_peer_only_recipient(spec_a, spec_b, std::time::Duration::from_secs(5))
-                    .await?;
+                self.unwire_peer_only_recipient(
+                    spec_a,
+                    Some(binding_a),
+                    spec_b,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_unwired(spec_a, b, &entry_b, &supervisor_sender)
                     .await?;
-                self.unwire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.unwire_peer_only_recipient(
+                    spec_b,
+                    Some(binding_b),
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_unwired(spec_b, a, &entry_a, &supervisor_sender)
                     .await?;
                 self.events
@@ -4957,11 +5164,70 @@ impl MobActor {
                 session_id: None,
             } => Some(crate::RuntimeBinding::External {
                 peer_id: peer_id.clone(),
-                address: address.clone(),
+                address: super::bridge_protocol::canonicalize_bridge_address(address),
                 bootstrap_token: bootstrap_token.clone(),
             }),
             _ => None,
         }
+    }
+
+    fn sanitized_member_ref(member_ref: &MemberRef) -> MemberRef {
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id,
+                ..
+            } => MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: super::bridge_protocol::canonicalize_bridge_address(address),
+                bootstrap_token: None,
+                session_id: session_id.clone(),
+            },
+            MemberRef::Session { session_id } => MemberRef::Session {
+                session_id: session_id.clone(),
+            },
+        }
+    }
+
+    fn external_binding_overlay_record(
+        &self,
+        agent_identity: &AgentIdentity,
+        generation: crate::ids::Generation,
+        member_ref: &MemberRef,
+    ) -> Option<crate::store::ExternalBindingOverlayRecord> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                peer_id,
+                address,
+                bootstrap_token,
+                session_id: None,
+            } => Some(crate::store::ExternalBindingOverlayRecord {
+                agent_identity: agent_identity.clone(),
+                generation,
+                normalized_member_ref: Some(MemberRef::BackendPeer {
+                    peer_id: peer_id.clone(),
+                    address: super::bridge_protocol::canonicalize_bridge_address(address),
+                    bootstrap_token: None,
+                    session_id: None,
+                }),
+                bootstrap_token: bootstrap_token.clone(),
+                status: crate::store::ExternalBindingOverlayStatus::Normalized,
+                updated_at: chrono::Utc::now(),
+            }),
+            _ => None,
+        }
+    }
+
+    async fn delete_external_binding_overlay_for_member(
+        &self,
+        agent_identity: &AgentIdentity,
+        generation: crate::ids::Generation,
+    ) -> Result<(), MobError> {
+        self.runtime_metadata
+            .delete_external_binding_overlay(&self.definition.id, agent_identity, generation)
+            .await
+            .map_err(MobError::from)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5356,22 +5622,109 @@ impl MobActor {
                     MobError::WiringError(format!("invalid rotated supervisor spec: {error}"))
                 })?
                 .into();
-            let next_command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
-                super::bridge_protocol::BridgeSupervisorPayload {
-                    supervisor: next_sup_spec,
-                    epoch: next.epoch,
-                    protocol_version: next.protocol_version,
-                },
-            );
+            let next_payload = super::bridge_protocol::BridgeSupervisorPayload {
+                supervisor: next_sup_spec,
+                epoch: next.epoch,
+                protocol_version: next.protocol_version,
+            };
+            let next_command =
+                super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(next_payload.clone());
+            let mut rotated_peers: Vec<(TrustedPeerSpec, crate::RuntimeBinding)> = Vec::new();
             for binding in remote_bindings {
                 let peer = Self::peer_only_spec_for_binding(&binding, "handle_rotate_supervisor")?;
-                let _ack: super::bridge_protocol::BridgeAck = self
-                    .send_bridge_command_typed(
-                        &peer,
-                        &next_command,
-                        std::time::Duration::from_secs(5),
-                    )
-                    .await?;
+                let mut effective_peer = peer.clone();
+                let mut effective_binding = binding.clone();
+                let authorize_result = self
+                    .supervisor_bridge
+                    .send_bridge_command(&peer, &next_command, std::time::Duration::from_secs(5))
+                    .await;
+                let authorize_error = match authorize_result {
+                    Ok(value) => {
+                        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+                            if reason.contains("use bind_member")
+                                || reason.contains("stale supervisor")
+                                || reason.contains("request sender")
+                            {
+                                let bind = self
+                                    .bind_peer_only_member_for_binding_with_payload(
+                                        &peer,
+                                        &binding,
+                                        &next_payload,
+                                    )
+                                    .await;
+                                match bind {
+                                    Ok(bind_response) => {
+                                        self.persist_rebound_binding(&binding, &bind_response)
+                                            .await?;
+                                        effective_binding = crate::RuntimeBinding::External {
+                                            peer_id: bind_response.peer_id.clone(),
+                                            address:
+                                                super::bridge_protocol::canonicalize_bridge_address(
+                                                    &bind_response.address,
+                                                ),
+                                            bootstrap_token: match &binding {
+                                                crate::RuntimeBinding::External {
+                                                    bootstrap_token,
+                                                    ..
+                                                } => bootstrap_token.clone(),
+                                                crate::RuntimeBinding::Session => None,
+                                            },
+                                        };
+                                        effective_peer = Self::peer_only_spec_for_binding(
+                                            &effective_binding,
+                                            "handle_rotate_supervisor rebound peer",
+                                        )?;
+                                        None
+                                    }
+                                    Err(bind_error) => Some(MobError::WiringError(format!(
+                                        "{reason}; bind fallback failed: {bind_error}"
+                                    ))),
+                                }
+                            } else {
+                                Some(MobError::WiringError(reason))
+                            }
+                        } else if let Err(error) =
+                            serde_json::from_value::<super::bridge_protocol::BridgeAck>(value)
+                        {
+                            Some(MobError::Internal(format!(
+                                "failed to decode rotate supervisor response: {error}"
+                            )))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(error) => Some(error),
+                };
+                if let Some(error) = authorize_error {
+                    let mut rollback_errors = Vec::new();
+                    for (rotated_peer, rotated_binding) in rotated_peers.iter().rev() {
+                        if let Err(rollback_error) = self
+                            .bind_peer_only_member_for_binding(rotated_peer, rotated_binding)
+                            .await
+                        {
+                            rollback_errors
+                                .push(format!("{}: {rollback_error}", rotated_peer.peer_id));
+                        }
+                    }
+                    let mut message = format!("failed to rotate supervisor authority: {error}");
+                    if !rollback_errors.is_empty() {
+                        message.push_str(&format!(
+                            "; rollback failures: {}",
+                            rollback_errors.join(", ")
+                        ));
+                    }
+                    if !rollback_errors.is_empty() {
+                        self.runtime_metadata
+                            .put_supervisor_authority(&self.definition.id, &next)
+                            .await?;
+                        self.supervisor_bridge.rotate(next.clone()).await?;
+                        message.push_str(
+                            "; local supervisor authority advanced to the partially applied next authority to preserve deterministic recovery",
+                        );
+                    }
+                    return Err(MobError::WiringError(message));
+                }
+                rotated_peers.push((effective_peer, effective_binding));
             }
         }
         let public_peer_id = next.public_peer_id.clone();
@@ -6299,9 +6652,8 @@ impl MobActor {
                         .resolve_wiring_endpoint(&peer_entry, "spawn rollback")
                         .await?
                     {
-                        WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => {
-                            spec
-                        }
+                        WiringEndpoint::Local { spec, .. }
+                        | WiringEndpoint::PeerOnly { spec, .. } => spec,
                     }
                 };
                 self.notify_peer_retired(&peer_spec, meerkat_id, spawned_entry, &spawned_sender)
@@ -6426,6 +6778,11 @@ impl MobActor {
         }
 
         self.dispose_remove_from_roster(&rollback_ctx).await;
+        self.delete_external_binding_overlay_for_member(
+            &rollback_ctx.entry.agent_identity,
+            rollback_ctx.entry.generation,
+        )
+        .await?;
 
         Ok(())
     }
@@ -6634,7 +6991,10 @@ impl MobActor {
                     entry: entry_a,
                     ..
                 },
-                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_b,
+                    binding: binding_b,
+                },
             ) => {
                 let mut rollback = LifecycleRollback::new("wire");
                 comms.add_trusted_peer(spec_b.clone()).await?;
@@ -6659,8 +7019,13 @@ impl MobActor {
                             .await
                     }
                 });
-                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.wire_peer_only_recipient(
+                    spec_b,
+                    Some(binding_b),
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_added(&supervisor_sender, spec_b, a, entry_a)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
@@ -6709,8 +7074,13 @@ impl MobActor {
                     }
                 });
                 let supervisor_sender = self.supervisor_bridge.runtime_core().await;
-                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.wire_peer_only_recipient(
+                    spec_b,
+                    None,
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
                     .await?;
                 rollback.defer(format!("compensating mob.peer_retired '{a}' -> '{b}'"), {
@@ -6752,16 +7122,32 @@ impl MobActor {
                 }
             }
             (
-                WiringEndpoint::PeerOnly { spec: spec_a, .. },
-                WiringEndpoint::PeerOnly { spec: spec_b, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_a,
+                    binding: binding_a,
+                },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_b,
+                    binding: binding_b,
+                },
             ) => {
                 let supervisor_sender = self.supervisor_bridge.runtime_core().await;
-                self.wire_peer_only_recipient(spec_a, spec_b, std::time::Duration::from_secs(5))
-                    .await?;
+                self.wire_peer_only_recipient(
+                    spec_a,
+                    Some(binding_a),
+                    spec_b,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_added(&supervisor_sender, spec_a, b, &entry_b)
                     .await?;
-                self.wire_peer_only_recipient(spec_b, spec_a, std::time::Duration::from_secs(5))
-                    .await?;
+                self.wire_peer_only_recipient(
+                    spec_b,
+                    Some(binding_b),
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 self.notify_peer_added(&supervisor_sender, spec_b, a, &entry_a)
                     .await?;
                 self.events
@@ -6817,13 +7203,63 @@ impl MobActor {
                 comms_a.add_trusted_peer(spec_b.clone()).await?;
                 comms_b.add_trusted_peer(spec_a.clone()).await?;
             }
-            (WiringEndpoint::Local { comms, .. }, WiringEndpoint::PeerOnly { spec, .. }) => {
+            (
+                WiringEndpoint::Local { comms, spec, .. },
+                WiringEndpoint::PeerOnly {
+                    spec: peer_spec,
+                    binding,
+                },
+            ) => {
+                self.wire_peer_only_recipient(
+                    peer_spec,
+                    Some(binding),
+                    spec,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
+                comms.add_trusted_peer(peer_spec.clone()).await?;
+            }
+            (
+                WiringEndpoint::PeerOnly {
+                    spec: peer_spec,
+                    binding,
+                },
+                WiringEndpoint::Local { comms, spec, .. },
+            ) => {
+                self.wire_peer_only_recipient(
+                    peer_spec,
+                    Some(binding),
+                    spec,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
                 comms.add_trusted_peer(spec.clone()).await?;
             }
-            (WiringEndpoint::PeerOnly { spec, .. }, WiringEndpoint::Local { comms, .. }) => {
-                comms.add_trusted_peer(spec.clone()).await?;
+            (
+                WiringEndpoint::PeerOnly {
+                    spec: spec_a,
+                    binding: binding_a,
+                },
+                WiringEndpoint::PeerOnly {
+                    spec: spec_b,
+                    binding: binding_b,
+                },
+            ) => {
+                self.wire_peer_only_recipient(
+                    spec_a,
+                    Some(binding_a),
+                    spec_b,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
+                self.wire_peer_only_recipient(
+                    spec_b,
+                    Some(binding_b),
+                    spec_a,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?;
             }
-            (WiringEndpoint::PeerOnly { .. }, WiringEndpoint::PeerOnly { .. }) => {}
         }
         Ok(())
     }
@@ -6913,7 +7349,15 @@ impl MobActor {
                     .provisioner
                     .trusted_peer_spec(&entry.member_ref, &comms_name, peer_id)
                     .await?;
-                Ok(WiringEndpoint::PeerOnly { spec })
+                Ok(WiringEndpoint::PeerOnly {
+                    spec,
+                    binding: Self::runtime_binding_for_entry(entry).ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "{context} requires external runtime binding for '{}'",
+                            entry.meerkat_id
+                        ))
+                    })?,
+                })
             }
             MemberRef::Session { .. } => Err(MobError::WiringError(format!(
                 "{context} requires comms runtime for '{}'",
@@ -6947,7 +7391,7 @@ impl MobActor {
             .resolve_wiring_endpoint(new_peer_entry, "notify_peer_added")
             .await?
         {
-            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
         sender_comms
             .add_trusted_peer(recipient_spec.clone())
@@ -6991,7 +7435,7 @@ impl MobActor {
             .resolve_wiring_endpoint(other_peer_entry, "notify_peer_event")
             .await?
         {
-            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+            WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
         };
         sender_comms
             .add_trusted_peer(recipient_spec.clone())
@@ -7070,7 +7514,7 @@ impl MobActor {
                 .resolve_wiring_endpoint(&recipient_entry, "notify_kickoff_event")
                 .await?
             {
-                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec } => spec,
+                WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
             };
             self.notify_peer_event(intent, &recipient_spec, meerkat_id, &entry, &sender_comms)
                 .await?;

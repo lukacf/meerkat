@@ -521,6 +521,37 @@ impl Roster {
         false
     }
 
+    /// Replace the projected peer-only binding for all entries currently using a
+    /// given remote peer id. Returns the identities and generations that changed.
+    pub fn replace_backend_peer_binding_by_peer_id(
+        &mut self,
+        prior_peer_id: &str,
+        next_peer_id: &str,
+        next_address: &str,
+        bootstrap_token: Option<String>,
+    ) -> Vec<(AgentIdentity, Generation)> {
+        let mut updated = Vec::new();
+        for entry in self.entries.values_mut() {
+            match &entry.member_ref {
+                MemberRef::BackendPeer {
+                    peer_id,
+                    session_id: None,
+                    ..
+                } if peer_id == prior_peer_id => {
+                    entry.member_ref = MemberRef::BackendPeer {
+                        peer_id: next_peer_id.to_string(),
+                        address: next_address.to_string(),
+                        bootstrap_token: bootstrap_token.clone(),
+                        session_id: None,
+                    };
+                    updated.push((entry.agent_identity.clone(), entry.generation));
+                }
+                _ => {}
+            }
+        }
+        updated
+    }
+
     /// List active roster entries (excludes `Retiring`).
     pub fn list(&self) -> impl Iterator<Item = &RosterEntry> {
         self.entries

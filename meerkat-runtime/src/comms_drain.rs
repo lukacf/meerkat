@@ -22,6 +22,7 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
     BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
     BridgeSupervisorPayload, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_INTENT,
+    canonicalize_bridge_address,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -340,6 +341,11 @@ fn peer_input_from_delivery_payload(
 fn advertised_bind_bootstrap_token(
     comms_runtime: &Arc<dyn CommsRuntime>,
 ) -> Result<String, String> {
+    if let Some(token) = comms_runtime.bridge_bootstrap_token()
+        && !token.is_empty()
+    {
+        return Ok(token);
+    }
     let address = comms_runtime.advertised_address().ok_or_else(|| {
         "runtime does not expose an advertised address for bind bootstrap".to_string()
     })?;
@@ -368,8 +374,11 @@ fn validate_bind_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
     sender: &str,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
-) -> Result<TrustedPeerSpec, String> {
+) -> Result<(TrustedPeerSpec, String), String> {
     let expected_bootstrap_token = advertised_bind_bootstrap_token(comms_runtime)?;
+    let advertised_address = comms_runtime.advertised_address().ok_or_else(|| {
+        "runtime does not expose an advertised address for bind bootstrap".to_string()
+    })?;
     if !sender_matches_bridge_peer(sender, &payload.supervisor) {
         return Err(format!(
             "request sender '{sender}' does not match supervisor '{}'",
@@ -387,7 +396,7 @@ fn validate_bind_request(
     if payload.bootstrap_token != expected_bootstrap_token {
         return Err("bind member failed: invalid bootstrap token".to_string());
     }
-    Ok(payload.supervisor.clone().into())
+    Ok((payload.supervisor.clone().into(), advertised_address))
 }
 
 #[derive(Debug)]
@@ -527,13 +536,14 @@ async fn try_handle_supervisor_bridge_command(
 
     match command {
         BridgeCommand::BindMember(payload) => {
-            let supervisor_spec = match validate_bind_request(comms_runtime, sender, &payload) {
-                Ok(spec) => spec,
-                Err(error) => {
-                    send_bridge_failure(comms_runtime, candidate, error).await;
-                    return true;
-                }
-            };
+            let (supervisor_spec, advertised_address) =
+                match validate_bind_request(comms_runtime, sender, &payload) {
+                    Ok(binding) => binding,
+                    Err(error) => {
+                        send_bridge_failure(comms_runtime, candidate, error).await;
+                        return true;
+                    }
+                };
             match comms_runtime.add_trusted_peer(supervisor_spec).await {
                 Ok(()) => {
                     *supervisor_state = Some(AuthorizedSupervisorState {
@@ -544,7 +554,7 @@ async fn try_handle_supervisor_bridge_command(
                         peer_id: comms_runtime
                             .public_key()
                             .unwrap_or(payload.expected_peer_id),
-                        address: payload.expected_address,
+                        address: canonicalize_bridge_address(&advertised_address),
                         capabilities: bridge_capabilities(),
                     })
                     .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
@@ -1005,6 +1015,7 @@ mod tests {
     struct BootstrapRuntime {
         peer_id: String,
         address: String,
+        bootstrap_token: Option<String>,
         inbox_notify: Arc<tokio::sync::Notify>,
     }
 
@@ -1016,6 +1027,10 @@ mod tests {
 
         fn advertised_address(&self) -> Option<String> {
             Some(self.address.clone())
+        }
+
+        fn bridge_bootstrap_token(&self) -> Option<String> {
+            self.bootstrap_token.clone()
         }
 
         async fn drain_messages(&self) -> Vec<String> {
@@ -1173,9 +1188,8 @@ mod tests {
     fn validate_bind_request_rejects_missing_or_wrong_bootstrap_token() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
-            address: format!(
-                "inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
-            ),
+            address: "inproc://receiver".to_string(),
+            bootstrap_token: Some("expected-token".to_string()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         });
         let supervisor = BridgePeerSpec {
@@ -1204,9 +1218,8 @@ mod tests {
     fn validate_bind_request_accepts_matching_bootstrap_token() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
-            address: format!(
-                "inproc://receiver?{SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM}=expected-token"
-            ),
+            address: "inproc://receiver".to_string(),
+            bootstrap_token: Some("expected-token".to_string()),
             inbox_notify: Arc::new(tokio::sync::Notify::new()),
         });
         let supervisor = BridgePeerSpec {
@@ -1223,9 +1236,39 @@ mod tests {
             bootstrap_token: "expected-token".to_string(),
         };
 
-        let authorized = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect("bind should accept the configured bootstrap token");
+        let (authorized, advertised_address) =
+            validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+                .expect("bind should accept the configured bootstrap token");
         assert_eq!(authorized.peer_id, supervisor.peer_id);
+        assert_eq!(advertised_address, runtime.advertised_address().unwrap());
+    }
+
+    #[test]
+    fn validate_bind_request_returns_runtime_advertised_address() {
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            address: "inproc://receiver-real".to_string(),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: supervisor.clone(),
+            epoch: 0,
+            protocol_version: 1,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: "inproc://receiver-stale".to_string(),
+            bootstrap_token: "expected-token".to_string(),
+        };
+
+        let (_, advertised_address) =
+            validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+                .expect("bind should canonicalize to the callee's advertised address");
+        assert_eq!(advertised_address, runtime.advertised_address().unwrap());
     }
 
     #[test]

@@ -15,6 +15,27 @@ pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 /// Address query parameter carrying the one-time bind bootstrap token.
 pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootstrap_token";
 
+/// Remove the one-time bind bootstrap token from an advertised bridge address.
+pub fn canonicalize_bridge_address(address: &str) -> String {
+    let Some((base, query)) = address.split_once('?') else {
+        return address.to_string();
+    };
+    let filtered: Vec<&str> = query
+        .split('&')
+        .filter(|pair| {
+            pair.split_once('=')
+                .map(|(key, _)| key != SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM)
+                .unwrap_or(true)
+        })
+        .filter(|pair| !pair.is_empty())
+        .collect();
+    if filtered.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", filtered.join("&"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command envelope
 // ---------------------------------------------------------------------------

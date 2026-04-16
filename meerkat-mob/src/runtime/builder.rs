@@ -590,7 +590,11 @@ impl MobBuilder {
             match &overlay.status {
                 crate::store::ExternalBindingOverlayStatus::Normalized => {
                     if let Some(normalized_member_ref) = overlay.normalized_member_ref.clone() {
-                        member_spawned.bridge_member_ref = Some(normalized_member_ref);
+                        member_spawned.bridge_member_ref =
+                            Some(Self::member_ref_with_bootstrap_token(
+                                normalized_member_ref,
+                                overlay.bootstrap_token.clone(),
+                            ));
                     }
                 }
                 crate::store::ExternalBindingOverlayStatus::Failed { reason } => {
@@ -600,7 +604,12 @@ impl MobBuilder {
                                 .as_ref()
                                 .and_then(Self::sessionless_member_ref)
                         });
-                    member_spawned.bridge_member_ref = normalized_member_ref;
+                    member_spawned.bridge_member_ref = normalized_member_ref.map(|member_ref| {
+                        Self::member_ref_with_bootstrap_token(
+                            member_ref,
+                            overlay.bootstrap_token.clone(),
+                        )
+                    });
                     diagnostics.insert(
                         MeerkatId::from(member_spawned.agent_identity.as_str()),
                         super::handle::RestoreFailureDiagnostic {
@@ -661,11 +670,34 @@ impl MobBuilder {
                 session_id: _,
             } => Some(crate::event::MemberRef::BackendPeer {
                 peer_id: peer_id.clone(),
-                address: address.clone(),
+                address: super::bridge_protocol::canonicalize_bridge_address(address),
                 bootstrap_token: bootstrap_token.clone(),
                 session_id: None,
             }),
             crate::event::MemberRef::Session { .. } => None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn member_ref_with_bootstrap_token(
+        member_ref: crate::event::MemberRef,
+        bootstrap_token: Option<String>,
+    ) -> crate::event::MemberRef {
+        match member_ref {
+            crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id,
+                ..
+            } => crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address: super::bridge_protocol::canonicalize_bridge_address(&address),
+                bootstrap_token,
+                session_id,
+            },
+            crate::event::MemberRef::Session { session_id } => {
+                crate::event::MemberRef::Session { session_id }
+            }
         }
     }
 

@@ -546,6 +546,12 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Runtime-local bootstrap proof for the initial supervisor bind, if
+    /// available.
+    fn bridge_bootstrap_token(&self) -> Option<String> {
+        None
+    }
+
     /// Register a trusted peer for future peer sends.
     ///
     /// Runtimes that manage trust dynamically should accept this as a mutable

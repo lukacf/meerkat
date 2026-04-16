@@ -338,17 +338,6 @@ impl ShellConfig {
                 }
             } else if let Ok(found) = which::which_in(candidate, path_list, &cwd) {
                 return Some(found);
-            } else {
-                #[cfg(unix)]
-                {
-                    let fallback_roots = ["/bin", "/usr/bin", "/usr/local/bin"];
-                    for root in fallback_roots {
-                        let fallback = Path::new(root).join(candidate);
-                        if fallback.exists() {
-                            return Some(fallback);
-                        }
-                    }
-                }
             }
 
             if !tried.iter().any(|entry| entry == candidate) {

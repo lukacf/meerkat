@@ -952,7 +952,6 @@ machine! {
                 || self.lifecycle_phase == Phase::Retired
                 || self.lifecycle_phase == Phase::Stopped
             }
-            guard "runtime_is_bound" { self.active_runtime_id != None }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
@@ -962,11 +961,48 @@ machine! {
             emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
 
+        // 18. Recover: preserve coarse phase while replaying runtime state.
+        transition RecoverInitializing {
+            on input Recover
+            guard { self.lifecycle_phase == Phase::Initializing }
+            update {}
+            to Initializing
+            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+        }
+        transition RecoverIdle {
+            on input Recover
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {}
+            to Idle
+            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+        }
+        transition RecoverAttached {
+            on input Recover
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {}
+            to Attached
+            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+        }
+        transition RecoverRetired {
+            on input Recover
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {}
+            to Retired
+            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+        }
+        transition RecoverStopped {
+            on input Recover
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
+            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+        }
+
         // =====================================================================
         // Absorbed transitions
         // =====================================================================
 
-        // 18. EnsureSessionWithExecutor
+        // 19. EnsureSessionWithExecutor
         // Idle → Attached (phase change)
         transition EnsureSessionWithExecutorIdle {
             on input EnsureSessionWithExecutor { session_id }

@@ -1231,8 +1231,8 @@ async fn runtime_accept(
         )
             .into_response()
     })?;
-    let outcome = match adapter.accept_input(&sid, input).await {
-        Ok(outcome) => outcome,
+    let outcome = match adapter.accept_input_with_completion(&sid, input).await {
+        Ok((outcome, _handle)) => outcome,
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
             meerkat_runtime::AcceptOutcome::Rejected {
                 reason: meerkat_runtime::RejectReason::NotReady {

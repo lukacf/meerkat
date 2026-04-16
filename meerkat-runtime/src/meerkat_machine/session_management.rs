@@ -19,6 +19,19 @@ impl MeerkatMachine {
         let (ops_lifecycle, epoch_id, cursor_state) =
             self.recover_or_create_ops_state(&session_id).await;
         let control_projection = entry.control_projection_handle();
+        let dsl_authority =
+            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
+                &session_id,
+                control_projection
+                    .read()
+                    .map(|guard| guard.phase)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
+                None,
+                None,
+                None,
+                std::collections::BTreeSet::new(),
+                None,
+            ));
         let session_entry = RuntimeSessionEntry {
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
@@ -32,7 +45,7 @@ impl MeerkatMachine {
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
             phase: RegistrationPhase::Queuing,
             detached_wake: None,
-            dsl_authority: super::dsl::MeerkatMachineAuthority::new(),
+            dsl_authority,
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -177,6 +190,20 @@ impl MeerkatMachine {
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
+                    let dsl_authority = super::dsl::MeerkatMachineAuthority::from_state(
+                        super::dsl_authority::project_state(
+                            &session_id,
+                            control_projection
+                                .read()
+                                .map(|guard| guard.phase)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
+                            None,
+                            None,
+                            None,
+                            std::collections::BTreeSet::new(),
+                            None,
+                        ),
+                    );
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
@@ -193,7 +220,7 @@ impl MeerkatMachine {
                                 SessionLlmCapabilitySurfaceStatus::Unresolved,
                             phase: RegistrationPhase::Queuing,
                             detached_wake: None,
-                            dsl_authority: super::dsl::MeerkatMachineAuthority::new(),
+                            dsl_authority,
                         },
                     );
                     (driver, completions, recovered_ops)

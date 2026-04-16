@@ -17,21 +17,16 @@ impl MeerkatMachine {
                 }
                 let sid = session_id.clone();
                 self.register_session_inner(session_id).await;
-                if let Some(entry) = self.sessions.write().await.get_mut(&sid) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::RegisterSession {
-                            session_id: mm_dsl::SessionId::from(sid.to_string()),
+                let _ = self
+                    .stage_session_dsl_input(
+                        &sid,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&sid),
                         },
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on RegisterSession"
-                        );
-                    }
-                }
+                        "RegisterSession",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
@@ -41,22 +36,19 @@ impl MeerkatMachine {
                         state: RuntimeState::Destroyed,
                     });
                 }
-                self.unregister_session_inner(&session_id).await;
-                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::UnregisterSession {
-                            session_id: mm_dsl::SessionId::from(session_id.to_string()),
+                let _ = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::UnregisterSession {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
                         },
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on UnregisterSession"
-                        );
-                    }
-                }
+                        "UnregisterSession",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                self.unregister_session_inner(&session_id).await;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::EnsureSessionWithExecutor {
@@ -122,20 +114,23 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                self.stop_runtime_executor_inner(&session_id, command)
-                    .await?;
-                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::StopRuntimeExecutor,
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on StopRuntimeExecutor"
-                        );
-                    }
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
+                        "StopRuntimeExecutor",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                if let Err(err) = self.stop_runtime_executor_inner(&session_id, command).await {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(err);
+                }
+                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(err);
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
@@ -175,24 +170,42 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Destroyed);
                 }
                 self.register_session_inner(session_id.clone()).await;
-                let sessions = self.sessions.read().await;
-                let entry = sessions
-                    .get(&session_id)
-                    .ok_or(RuntimeDriverError::Internal(format!(
-                        "session {session_id} missing after register_session_inner"
-                    )))?;
-                let mut driver = entry.driver.lock().await;
+                let (driver_handle, epoch_id, ops_lifecycle, cursor_state, tool_visibility_owner) = {
+                    let sessions = self.sessions.read().await;
+                    let entry = sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::Internal(format!(
+                            "session {session_id} missing after register_session_inner"
+                        )))?;
+                    (
+                        Arc::clone(&entry.driver),
+                        entry.epoch_id.clone(),
+                        Arc::clone(&entry.ops_lifecycle),
+                        Arc::clone(&entry.cursor_state),
+                        Arc::clone(&entry.tool_visibility_owner),
+                    )
+                };
+                let mut driver = driver_handle.lock().await;
+                let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
+                        driver.runtime_id(),
+                    ),
+                    fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
+                    generation: crate::meerkat_machine::dsl::Generation::from(0),
+                };
                 machine_prepare_bindings_projection(&mut driver)?;
                 drop(driver);
-                // TODO: DSL shadow needs field construction
+                let _ = self
+                    .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::Bindings(
                     meerkat_core::SessionRuntimeBindings {
                         session_id,
-                        epoch_id: entry.epoch_id.clone(),
-                        ops_lifecycle: Arc::clone(&entry.ops_lifecycle)
-                            as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
-                        cursor_state: Arc::clone(&entry.cursor_state),
-                        tool_visibility_owner: Arc::clone(&entry.tool_visibility_owner)
+                        epoch_id,
+                        ops_lifecycle: ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
+                        cursor_state,
+                        tool_visibility_owner: tool_visibility_owner
                             as Arc<dyn meerkat_core::ToolVisibilityOwner>,
                     },
                 ))
@@ -280,12 +293,10 @@ impl MeerkatMachine {
                         *tool_visibility_delta,
                     )
                     .await?;
-                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::ReconfigureSessionLlmIdentity {
+                let _ = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::ReconfigureSessionLlmIdentity {
                             previous_identity: dsl_previous_identity,
                             previous_visibility_state: dsl_previous_visibility_state,
                             previous_capability_surface: dsl_previous_capability_surface,
@@ -298,13 +309,10 @@ impl MeerkatMachine {
                             next_active_visibility_revision,
                             tool_visibility_delta: dsl_tool_visibility_delta,
                         },
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on ReconfigureSessionLlmIdentity"
-                        );
-                    }
-                }
+                        "ReconfigureSessionLlmIdentity",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 Ok(MeerkatMachineCommandResult::LlmReconfigured(report))
             }
             MeerkatMachineCommand::StagePersistentFilter {

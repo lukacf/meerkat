@@ -25,22 +25,24 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::SetPeerIngressContext {
+                            keep_alive,
+                        },
+                        "SetPeerIngressContext",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 let result = MeerkatMachineCommandResult::Spawned(
                     self.update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
                         .await,
                 );
-                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::SetPeerIngressContext { keep_alive },
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on SetPeerIngressContext"
-                        );
-                    }
+                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(err);
                 }
                 Ok(result)
             }
@@ -60,20 +62,22 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Destroyed);
                 }
                 let reason_str = format!("{reason:?}");
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
+                            reason: reason_str.clone(),
+                        },
+                        "NotifyDrainExited",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 self.notify_comms_drain_exited_inner(&session_id, reason)
                     .await;
-                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
-                    // DSL shadow
-                    use crate::meerkat_machine::dsl as mm_dsl;
-                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
-                        &mut entry.dsl_authority,
-                        mm_dsl::MeerkatMachineInput::NotifyDrainExited { reason: reason_str },
-                    ) {
-                        tracing::error!(
-                            error = %e,
-                            "DSL/runtime DISAGREEMENT on NotifyDrainExited"
-                        );
-                    }
+                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(err);
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }

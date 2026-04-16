@@ -4,8 +4,13 @@
 //! state representation. The DSL validates transition legality; the
 //! runtime shell executes the actual mutations.
 
+use std::collections::BTreeSet;
+
 use super::dsl as mm_dsl;
+use crate::identifiers::LogicalRuntimeId;
 use crate::runtime_state::RuntimeState;
+use meerkat_core::lifecycle::RunId;
+use meerkat_core::types::SessionId;
 
 // ---------------------------------------------------------------------------
 // Transition result returned to the runtime shell
@@ -100,6 +105,40 @@ pub(crate) fn project_phase(state: RuntimeState) -> mm_dsl::MeerkatPhase {
         RuntimeState::Retired => mm_dsl::MeerkatPhase::Retired,
         RuntimeState::Stopped => mm_dsl::MeerkatPhase::Stopped,
         RuntimeState::Destroyed => mm_dsl::MeerkatPhase::Destroyed,
+    }
+}
+
+pub(crate) fn project_state(
+    session_id: &SessionId,
+    runtime_phase: RuntimeState,
+    runtime_id: Option<&LogicalRuntimeId>,
+    current_run_id: Option<&RunId>,
+    pre_run_phase: Option<RuntimeState>,
+    silent_intent_overrides: BTreeSet<String>,
+    active_fence_token: Option<u64>,
+) -> mm_dsl::MeerkatMachineState {
+    let (effective_phase, effective_current_run_id, effective_pre_run_phase) =
+        match (runtime_phase, current_run_id, pre_run_phase) {
+            (RuntimeState::Running, None, pre_run_phase) => (
+                crate::runtime_state::run_return_phase_from_pre_run_phase(pre_run_phase),
+                None,
+                None,
+            ),
+            (RuntimeState::Running, current_run_id, pre_run_phase)
+            | (RuntimeState::Retired, current_run_id, pre_run_phase) => {
+                (runtime_phase, current_run_id, pre_run_phase)
+            }
+            (phase, _, _) => (phase, None, None),
+        };
+
+    mm_dsl::MeerkatMachineState {
+        lifecycle_phase: project_phase(effective_phase),
+        session_id: Some(mm_dsl::SessionId::from_domain(session_id)),
+        active_runtime_id: runtime_id.map(mm_dsl::AgentRuntimeId::from_domain),
+        active_fence_token: active_fence_token.map(mm_dsl::FenceToken::from),
+        current_run_id: effective_current_run_id.map(mm_dsl::RunId::from_domain),
+        pre_run_phase: effective_pre_run_phase.map(|phase| phase.to_string()),
+        silent_intent_overrides,
     }
 }
 

@@ -175,6 +175,14 @@ enum RegistrationPhase {
 }
 
 impl RuntimeSessionEntry {
+    fn dsl_active_fence_token(&self) -> Option<u64> {
+        self.dsl_authority
+            .state
+            .active_fence_token
+            .as_ref()
+            .map(|token| token.0)
+    }
+
     fn control_snapshot(&self) -> crate::driver::ephemeral::RuntimeControlProjection {
         self.control_projection
             .read()
@@ -254,6 +262,91 @@ impl RuntimeSessionEntry {
                 Some(attachment.control_tx.clone())
             }
             _ => None,
+        }
+    }
+}
+
+impl MeerkatMachine {
+    async fn sync_session_dsl_projection(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let (driver, control_snapshot, active_fence_token) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.driver.clone(),
+                entry.control_snapshot(),
+                entry.dsl_active_fence_token(),
+            )
+        };
+
+        let (runtime_id, silent_intents) = {
+            let driver = driver.lock().await;
+            (
+                driver.runtime_id().clone(),
+                driver
+                    .silent_comms_intents()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+            )
+        };
+
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .get_mut(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        entry.dsl_authority =
+            dsl::MeerkatMachineAuthority::from_state(dsl_authority::project_state(
+                session_id,
+                control_snapshot.phase,
+                Some(&runtime_id),
+                control_snapshot.current_run_id.as_ref(),
+                control_snapshot.pre_run_phase,
+                silent_intents,
+                active_fence_token,
+            ));
+        Ok(())
+    }
+
+    async fn stage_session_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<dsl::MeerkatMachineState, String> {
+        self.sync_session_dsl_projection(session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions.get_mut(session_id).ok_or_else(|| {
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            }
+            .to_string()
+        })?;
+        let previous_state = entry.dsl_authority.state.clone();
+        let transition = dsl::MeerkatMachineMutator::apply(&mut entry.dsl_authority, input)
+            .map_err(|err| dsl_authority::map_error(err, context))?;
+        entry.dsl_authority.state.lifecycle_phase = transition.to_phase;
+        Ok(previous_state)
+    }
+
+    async fn restore_session_dsl_state(
+        &self,
+        session_id: &SessionId,
+        state: dsl::MeerkatMachineState,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.dsl_authority = dsl::MeerkatMachineAuthority::from_state(state);
         }
     }
 }

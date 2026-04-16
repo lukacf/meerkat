@@ -11,8 +11,6 @@ mod driver;
 mod error;
 pub mod machines;
 mod service;
-#[cfg(test)]
-mod shadow;
 mod store;
 mod surface;
 mod tool_surface;

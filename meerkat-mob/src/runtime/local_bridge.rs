@@ -43,7 +43,8 @@ fn runtime_state_to_bridge(state: meerkat_runtime::RuntimeState) -> BridgeMember
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl MobMemberRuntimeBridge for LocalMobRuntimeBridge {
     async fn bind_member(
         &self,

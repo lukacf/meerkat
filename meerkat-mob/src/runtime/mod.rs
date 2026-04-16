@@ -79,7 +79,7 @@ pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
-#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
+#[cfg(feature = "runtime-adapter")]
 pub mod local_bridge;
 pub(crate) mod loop_iteration_authority;
 mod mob_lifecycle_authority;

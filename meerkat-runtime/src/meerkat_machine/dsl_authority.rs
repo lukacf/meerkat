@@ -12,69 +12,6 @@ use crate::runtime_state::RuntimeState;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
 
-// ---------------------------------------------------------------------------
-// Transition result returned to the runtime shell
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub(crate) struct MeerkatTransitionResult {
-    pub new_phase: MeerkatPhaseResult,
-    pub effects: Vec<mm_dsl::MeerkatMachineEffect>,
-}
-
-// ---------------------------------------------------------------------------
-// Phase conversion
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MeerkatPhaseResult {
-    Initializing,
-    Idle,
-    Attached,
-    Running,
-    Retired,
-    Stopped,
-    Destroyed,
-}
-
-impl MeerkatPhaseResult {
-    pub fn to_runtime_state(self) -> RuntimeState {
-        match self {
-            Self::Initializing => RuntimeState::Initializing,
-            Self::Idle => RuntimeState::Idle,
-            Self::Attached => RuntimeState::Attached,
-            Self::Running => RuntimeState::Running,
-            Self::Retired => RuntimeState::Retired,
-            Self::Stopped => RuntimeState::Stopped,
-            Self::Destroyed => RuntimeState::Destroyed,
-        }
-    }
-
-    pub fn to_dsl_phase(self) -> mm_dsl::MeerkatPhase {
-        match self {
-            Self::Initializing => mm_dsl::MeerkatPhase::Initializing,
-            Self::Idle => mm_dsl::MeerkatPhase::Idle,
-            Self::Attached => mm_dsl::MeerkatPhase::Attached,
-            Self::Running => mm_dsl::MeerkatPhase::Running,
-            Self::Retired => mm_dsl::MeerkatPhase::Retired,
-            Self::Stopped => mm_dsl::MeerkatPhase::Stopped,
-            Self::Destroyed => mm_dsl::MeerkatPhase::Destroyed,
-        }
-    }
-}
-
-pub(crate) fn dsl_phase_to_result(phase: mm_dsl::MeerkatPhase) -> MeerkatPhaseResult {
-    match phase {
-        mm_dsl::MeerkatPhase::Initializing => MeerkatPhaseResult::Initializing,
-        mm_dsl::MeerkatPhase::Idle => MeerkatPhaseResult::Idle,
-        mm_dsl::MeerkatPhase::Attached => MeerkatPhaseResult::Attached,
-        mm_dsl::MeerkatPhase::Running => MeerkatPhaseResult::Running,
-        mm_dsl::MeerkatPhase::Retired => MeerkatPhaseResult::Retired,
-        mm_dsl::MeerkatPhase::Stopped => MeerkatPhaseResult::Stopped,
-        mm_dsl::MeerkatPhase::Destroyed => MeerkatPhaseResult::Destroyed,
-    }
-}
-
 /// Map DSL transition errors into plain strings with context.
 pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &str) -> String {
     match err {
@@ -145,10 +82,6 @@ pub(crate) fn project_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn default_state() -> mm_dsl::MeerkatMachineState {
-        mm_dsl::MeerkatMachineState::default()
-    }
 
     #[test]
     fn project_and_write_back_round_trips() {

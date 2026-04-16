@@ -967,6 +967,22 @@ impl AgentFactory {
         self
     }
 
+    fn shell_project_root(&self) -> PathBuf {
+        self.project_root.clone().unwrap_or_else(|| {
+            // `store_path` may point at an uncreated session leaf (for example
+            // `<temp>/sessions`) or a database file. Using it directly as
+            // `current_dir` makes process spawn fail with ENOENT, so prefer the
+            // nearest existing parent directory when no explicit project root is set.
+            self.store_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| self.store_path.clone())
+                })
+        })
+    }
+
     fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
         self.runtime_root
             .clone()
@@ -2581,6 +2597,24 @@ mod tests {
         assert_eq!(provider, Provider::SelfHosted);
         assert_eq!(server_id.as_deref(), Some("other"));
     }
+
+    #[test]
+    fn shell_project_root_uses_store_parent_when_project_root_is_unset() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("sessions");
+        let factory = AgentFactory::new(store_path);
+
+        assert_eq!(factory.shell_project_root(), temp.path());
+    }
+
+    #[test]
+    fn shell_project_root_prefers_explicit_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit_root = temp.path().join("workspace");
+        let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&explicit_root);
+
+        assert_eq!(factory.shell_project_root(), explicit_root);
+    }
 }
 
 impl AgentFactory {
@@ -2630,10 +2664,7 @@ impl AgentFactory {
 
         // Create shell config if shell is enabled
         let shell_config = if effective_shell {
-            let project_root = self
-                .project_root
-                .clone()
-                .unwrap_or_else(|| self.store_path.clone());
+            let project_root = self.shell_project_root();
             let mut config = ShellConfig::with_project_root(project_root);
             if let Some(env) = shell_env {
                 config.env_vars = env;

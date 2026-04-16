@@ -91,6 +91,7 @@ pub(crate) fn project_state(
         input_terminal_outcomes: std::collections::BTreeMap::new(),
         input_attempt_counts: std::collections::BTreeMap::new(),
         input_run_associations: std::collections::BTreeMap::new(),
+        input_boundary_sequences: std::collections::BTreeMap::new(),
         next_admission_seq: 0,
         input_admission_seq: std::collections::BTreeMap::new(),
         queue_lane: std::collections::BTreeSet::new(),

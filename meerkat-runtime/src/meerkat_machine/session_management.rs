@@ -33,6 +33,7 @@ impl MeerkatMachine {
                 None,
             ));
         let session_entry = RuntimeSessionEntry {
+            mutation_gate: Arc::new(Mutex::new(())),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
             ops_lifecycle,
@@ -207,6 +208,7 @@ impl MeerkatMachine {
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
+                            mutation_gate: Arc::new(Mutex::new(())),
                             control_projection,
                             driver: driver.clone(),
                             ops_lifecycle: recovered_ops.clone(),

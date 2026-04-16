@@ -262,6 +262,12 @@ pub enum ExprDef {
         collection: Box<ExprDef>,
         value: Box<ExprDef>,
     },
+    /// Map key existence check — emits `.contains_key(&k)` (vs `Contains`
+    /// which emits `.contains(&v)` for sets).
+    MapContainsKey {
+        map: Box<ExprDef>,
+        key: Box<ExprDef>,
+    },
     Len(Box<ExprDef>),
     MapGet {
         map: Box<ExprDef>,

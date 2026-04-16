@@ -322,6 +322,11 @@ fn gen_schema_expr(expr: &ExprDef) -> TokenStream {
             let val = gen_schema_expr(value);
             quote! { Expr::Contains { collection: Box::new(#coll), value: Box::new(#val) } }
         }
+        ExprDef::MapContainsKey { map, key } => {
+            let m = gen_schema_expr(map);
+            let k = gen_schema_expr(key);
+            quote! { Expr::MapContainsKey { map: Box::new(#m), key: Box::new(#k) } }
+        }
         ExprDef::Len(inner) => {
             let inner_e = gen_schema_expr(inner);
             quote! { Expr::Len(Box::new(#inner_e)) }
@@ -767,7 +772,11 @@ fn collect_field_refs_inner(expr: &ExprDef, out: &mut Vec<String>) {
             collect_field_refs_inner(r, out);
         }
         ExprDef::IsSome(inner) | ExprDef::IsNone(inner) => collect_field_refs_inner(inner, out),
-        ExprDef::Contains { collection, value } => {
+        ExprDef::Contains { collection, value }
+        | ExprDef::MapContainsKey {
+            map: collection,
+            key: value,
+        } => {
             collect_field_refs_inner(collection, out);
             collect_field_refs_inner(value, out);
         }

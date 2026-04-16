@@ -388,6 +388,11 @@ pub(crate) fn gen_expr(expr: &ExprDef, prefix: FieldPrefix) -> TokenStream {
             let val = gen_expr(value, prefix);
             quote! { #coll.contains(&#val) }
         }
+        ExprDef::MapContainsKey { map, key } => {
+            let m = gen_expr(map, prefix);
+            let k = gen_expr(key, prefix);
+            quote! { #m.contains_key(&#k) }
+        }
         ExprDef::Len(inner) => {
             let e = gen_expr(inner, prefix);
             quote! { #e.len() }

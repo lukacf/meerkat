@@ -22,6 +22,12 @@ impl MeerkatMachine {
                     )
                 };
 
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let state = self
                     .existing_session_runtime_state(&session_id)
                     .await
@@ -92,6 +98,36 @@ impl MeerkatMachine {
                     }
                 };
 
+                let shadow_input_id = match &outcome {
+                    AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
+                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
+                    AcceptOutcome::Rejected { .. } => {
+                        unreachable!("rejected case is returned above")
+                    }
+                };
+                if let Err(err) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
+                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                &shadow_input_id,
+                            ),
+                            request_immediate_processing,
+                            interrupt_yielding: signal.should_interrupt_yielding(),
+                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(&RunId::new()),
+                        },
+                        "AcceptWithCompletion",
+                    )
+                    .await
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "DSL/runtime disagreement after AcceptWithCompletion"
+                    );
+                }
+
                 if signal.should_wake()
                     && let Some(ref wake_tx) = wake_tx
                 {
@@ -128,6 +164,12 @@ impl MeerkatMachine {
                     entry.driver.clone()
                 };
 
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let state = self
                     .existing_session_runtime_state(&session_id)
                     .await
@@ -162,6 +204,31 @@ impl MeerkatMachine {
                     );
                     result
                 };
+                let shadow_input_id = match &outcome {
+                    AcceptOutcome::Accepted { input_id, .. } => input_id.clone(),
+                    AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.clone(),
+                    AcceptOutcome::Rejected { .. } => {
+                        unreachable!("rejected case is returned above")
+                    }
+                };
+                if let Err(err) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
+                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
+                                &shadow_input_id,
+                            ),
+                        },
+                        "AcceptWithoutWake",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "DSL/runtime disagreement after AcceptWithoutWake"
+                    );
+                }
 
                 if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
                     tracing::error!(
@@ -191,6 +258,12 @@ impl MeerkatMachine {
                         })?
                         .driver
                         .clone()
+                };
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
                 };
 
                 let prepared = {
@@ -294,9 +367,37 @@ impl MeerkatMachine {
                         ),
                     }
                 };
+                let previous_dsl_state = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
+                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                                &prepared.run_id,
+                            ),
+                        },
+                        "Prepare",
+                    )
+                    .await
+                    .map_err(|reason| {
+                        tracing::error!(
+                            error = %reason,
+                            session_id = %session_id,
+                            "failed to stage DSL Prepare shadow input"
+                        );
+                        RuntimeDriverError::ValidationFailed { reason }
+                    })?;
 
                 if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    tracing::error!(error = %err, "failed to resync DSL projection after Prepare");
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    tracing::error!(
+                        error = %err,
+                        "failed to resync DSL projection after Prepare"
+                    );
+                    return Err(err);
                 }
 
                 Ok(MeerkatMachineCommandResult::Prepared(prepared))
@@ -318,6 +419,12 @@ impl MeerkatMachine {
                         })?
                         .driver
                         .clone()
+                };
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
                 };
 
                 let previous_dsl_state = self
@@ -378,6 +485,12 @@ impl MeerkatMachine {
                         })?
                         .driver
                         .clone()
+                };
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
                 };
 
                 let previous_dsl_state = self

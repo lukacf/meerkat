@@ -25,6 +25,13 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -61,6 +68,13 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let reason_str = format!("{reason:?}");
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
@@ -128,27 +142,16 @@ impl MeerkatMachine {
                 }
                 let mut slots = self.comms_drain_slots.write().await;
                 if let Some(slot) = slots.get_mut(&session_id)
-                    && slot.authority.phase()
+                    && slot.phase
                         == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
                 {
                     tracing::warn!(
                         "comms_drain: task exited without notifying authority (likely panicked), \
                          submitting Failed safety net"
                     );
-                    match protocol_comms_drain_spawn::notify_task_exited(
-                        &mut slot.authority,
-                        DrainExitReason::Failed,
-                    ) {
-                        Ok(effects) => {
-                            apply_runtime_drain_effects(slot, &effects);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "comms drain authority rejected safety-net TaskExited"
-                            );
-                        }
-                    }
+                    slot.mark_task_exit_if_running_for_safety(
+                        meerkat_core::comms_drain_lifecycle_authority::DrainExitReason::Failed,
+                    );
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }

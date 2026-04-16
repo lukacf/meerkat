@@ -99,6 +99,18 @@ pub(crate) use visibility::MachineToolVisibilityOwner;
 
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
+    /// Per-session mutation gate.
+    ///
+    /// Serializes same-session mutating commands across the full
+    /// DSL-stage → driver-mutate → DSL-sync span. Without this gate,
+    /// two concurrent commands on the same session can interleave between
+    /// the DSL projection sync (which releases `sessions` lock) and the
+    /// driver mutation (which acquires `driver` lock independently).
+    ///
+    /// This is NOT a replacement for `sessions` RwLock or `driver` Mutex —
+    /// it is an additional serialization point that spans the entire
+    /// multi-step mutation window.
+    mutation_gate: Arc<Mutex<()>>,
     /// Shared driver handle (accessed by both adapter methods and RuntimeLoop).
     driver: SharedDriver,
     /// Canonical coarse control projection for this session.
@@ -255,6 +267,18 @@ impl RuntimeSessionEntry {
 }
 
 impl MeerkatMachine {
+    /// Acquire the per-session mutation gate.
+    ///
+    /// Returns an `Arc<Mutex<()>>` that the caller must `.lock().await` and
+    /// hold across the full DSL-stage → driver-mutate → DSL-sync span.
+    /// Returns `None` if the session is not registered.
+    async fn session_mutation_gate(&self, session_id: &SessionId) -> Option<Arc<Mutex<()>>> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(&entry.mutation_gate))
+    }
+
     async fn sync_session_dsl_projection(
         &self,
         session_id: &SessionId,

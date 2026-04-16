@@ -330,6 +330,10 @@ fn validate_expr(
             validate_expr(collection, fields, bindings, helpers, errors);
             validate_expr(value, fields, bindings, helpers, errors);
         }
+        ExprDef::MapContainsKey { map, key } => {
+            validate_expr(map, fields, bindings, helpers, errors);
+            validate_expr(key, fields, bindings, helpers, errors);
+        }
         ExprDef::MapGet { map, key } => {
             validate_expr(map, fields, bindings, helpers, errors);
             validate_expr(key, fields, bindings, helpers, errors);

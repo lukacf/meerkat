@@ -84,6 +84,14 @@ impl MeerkatMachine {
                 let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
+                // Acquire the per-session mutation gate to serialize the
+                // full DSL-stage → driver-mutate → DSL-sync span.
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
@@ -144,6 +152,12 @@ impl MeerkatMachine {
                 let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
@@ -200,6 +214,12 @@ impl MeerkatMachine {
                 let (session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
@@ -238,6 +258,12 @@ impl MeerkatMachine {
             MeerkatMachineCommand::Recover { runtime_id } => {
                 let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
 
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
@@ -291,6 +317,12 @@ impl MeerkatMachine {
             MeerkatMachineCommand::Destroy { runtime_id } => {
                 let (session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
 
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed) {

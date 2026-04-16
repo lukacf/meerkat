@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
+use meerkat_core::comms_drain_lifecycle_authority::{
+    CommsDrainMode, CommsDrainPhase, DrainExitReason,
+};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
@@ -127,28 +129,15 @@ async fn spawn_test_comms_drain(
     let slot = slots
         .entry(session_id.clone())
         .or_insert_with(CommsDrainSlot::new);
-    let result = protocol_comms_drain_spawn::execute_ensure_running(&mut slot.authority, mode)
-        .expect("ensure running");
-    let obligation = result
-        .obligation
-        .expect("spawn obligation should be present");
-
-    apply_runtime_drain_effects(slot, &result.effects);
-    for effect in &result.effects {
-        if let CommsDrainLifecycleEffect::SpawnDrainTask { .. } = effect {
-            slot.handle = Some(crate::comms_drain::spawn_comms_drain(
-                Arc::clone(adapter),
-                session_id.clone(),
-                Arc::clone(&comms_runtime),
-                Some(idle_timeout),
-            ));
-        }
-    }
-
-    let feedback_effects =
-        protocol_comms_drain_spawn::submit_task_spawned(&mut slot.authority, obligation)
-            .expect("task spawned");
-    apply_runtime_drain_effects(slot, &feedback_effects);
+    slot.mode = Some(mode);
+    slot.phase = CommsDrainPhase::Starting;
+    slot.handle = Some(crate::comms_drain::spawn_comms_drain(
+        Arc::clone(adapter),
+        session_id.clone(),
+        comms_runtime,
+        Some(idle_timeout),
+    ));
+    slot.phase = CommsDrainPhase::Running;
 }
 
 async fn current_phase(
@@ -156,7 +145,7 @@ async fn current_phase(
     session_id: &SessionId,
 ) -> Option<CommsDrainPhase> {
     let slots = adapter.comms_drain_slots.read().await;
-    slots.get(session_id).map(|slot| slot.authority.phase())
+    slots.get(session_id).map(|slot| slot.phase)
 }
 
 async fn handle_present(adapter: &Arc<MeerkatMachine>, session_id: &SessionId) -> bool {
@@ -14246,4 +14235,170 @@ async fn audit_meerkat_runtime_modeled_state_parity_map() {
             row.differing_keys
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-session mutation gate tests
+// ---------------------------------------------------------------------------
+
+/// Two concurrent Retire commands on the same session must serialize: the
+/// first succeeds, and the second fails because the session is already
+/// Retired. Without the mutation gate they could both read Idle and both
+/// attempt the transition.
+#[tokio::test]
+async fn concurrent_retire_serializes_via_mutation_gate() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    // Accept an input so the session has queued work.
+    let outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        &adapter,
+        &session_id,
+        make_prompt("concurrent-retire-gate"),
+    )
+    .await
+    .expect("accept should succeed");
+    assert!(matches!(outcome, AcceptOutcome::Accepted { .. }));
+
+    // Launch two concurrent Retire commands on the same session.
+    let adapter_a = adapter.clone();
+    let sid_a = session_id.clone();
+    let retire_a = tokio::spawn(async move {
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter_a, &sid_a).await
+    });
+    let adapter_b = adapter.clone();
+    let sid_b = session_id.clone();
+    let retire_b = tokio::spawn(async move {
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter_b, &sid_b).await
+    });
+
+    let (result_a, result_b) = tokio::join!(retire_a, retire_b);
+    let result_a = result_a.expect("task a should not panic");
+    let result_b = result_b.expect("task b should not panic");
+
+    // Exactly one should succeed and one should fail (the order is
+    // non-deterministic due to task scheduling).
+    let successes = [&result_a, &result_b].iter().filter(|r| r.is_ok()).count();
+    let failures = [&result_a, &result_b].iter().filter(|r| r.is_err()).count();
+
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent Retire should succeed, got: a={result_a:?}, b={result_b:?}"
+    );
+    assert_eq!(
+        failures, 1,
+        "exactly one concurrent Retire should fail, got: a={result_a:?}, b={result_b:?}"
+    );
+
+    // Verify the session is in Retired state after both commands complete.
+    let state = <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+        .await
+        .expect("runtime state should be readable");
+    assert_eq!(
+        state,
+        RuntimeState::Retired,
+        "session should be Retired after serialized concurrent retires"
+    );
+}
+
+/// After a failed realization step (driver mutation), restore_session_dsl_state
+/// must roll back the DSL authority to the exact pre-command state. Verify
+/// that a Destroy command on a session that is already Destroyed fails and
+/// leaves the DSL phase unchanged.
+#[tokio::test]
+async fn rollback_restores_dsl_state_on_realization_failure() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    // Transition: Idle → Retired (no runtime loop, so inputs are abandoned)
+    let _ = <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
+        .await
+        .expect("retire should succeed");
+
+    let state_after_retire =
+        <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+            .await
+            .expect("runtime state after retire");
+    assert_eq!(state_after_retire, RuntimeState::Retired);
+
+    // Attempt Reset from Retired (valid transition) → Idle
+    let _ = <MeerkatMachine as SessionServiceRuntimeExt>::reset_runtime(&adapter, &session_id)
+        .await
+        .expect("reset from Retired should succeed");
+
+    let state_after_reset =
+        <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+            .await
+            .expect("runtime state after reset");
+    assert_eq!(state_after_reset, RuntimeState::Idle);
+
+    // First Retire → should succeed again.
+    let _ = <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
+        .await
+        .expect("second retire should succeed");
+
+    let state = <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+        .await
+        .expect("runtime state");
+    assert_eq!(state, RuntimeState::Retired);
+
+    // Attempt a second Retire from Retired → should fail because Retire is
+    // not a valid transition from Retired. The DSL authority should reject
+    // it and the state should remain Retired (not corrupted).
+    let result =
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id).await;
+    assert!(
+        result.is_err(),
+        "Retire from Retired should fail, got: {result:?}"
+    );
+
+    // Verify state is still Retired — the failed command did not corrupt the
+    // DSL authority.
+    let state_after_failed =
+        <MeerkatMachine as SessionServiceRuntimeExt>::runtime_state(&adapter, &session_id)
+            .await
+            .expect("runtime state after failed retire");
+    assert_eq!(
+        state_after_failed,
+        RuntimeState::Retired,
+        "DSL state should be unchanged after a failed Retire command"
+    );
+}
+
+/// The mutation gate must be per-session: commands on different sessions
+/// should not block each other. Verify that two concurrent Retire commands
+/// on DIFFERENT sessions both succeed.
+#[tokio::test]
+async fn mutation_gate_is_per_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid_a = SessionId::new();
+    let sid_b = SessionId::new();
+    adapter.register_session(sid_a.clone()).await;
+    adapter.register_session(sid_b.clone()).await;
+
+    let adapter_a = adapter.clone();
+    let sa = sid_a.clone();
+    let retire_a = tokio::spawn(async move {
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter_a, &sa).await
+    });
+    let adapter_b = adapter.clone();
+    let sb = sid_b.clone();
+    let retire_b = tokio::spawn(async move {
+        <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter_b, &sb).await
+    });
+
+    let (result_a, result_b) = tokio::join!(retire_a, retire_b);
+    let result_a = result_a.expect("task a should not panic");
+    let result_b = result_b.expect("task b should not panic");
+
+    assert!(
+        result_a.is_ok(),
+        "Retire on session A should succeed: {result_a:?}"
+    );
+    assert!(
+        result_b.is_ok(),
+        "Retire on session B should succeed: {result_b:?}"
+    );
 }

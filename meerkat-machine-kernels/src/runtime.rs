@@ -889,6 +889,14 @@ impl GeneratedMachineKernel {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 Ok(map.get(&key).cloned().unwrap_or(KernelValue::None))
             }
+            Expr::MapContainsKey { map, key } => {
+                let map = self.eval_expr(state, bindings, map, transition_name)?;
+                let map = map
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                Ok(KernelValue::Bool(map.contains_key(&key)))
+            }
             Expr::Some(inner) => Ok(option_some(self.eval_expr(
                 state,
                 bindings,

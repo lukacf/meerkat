@@ -765,6 +765,9 @@ fn render_expr(expr: &Expr) -> String {
         Expr::Contains { collection, value } => {
             format!("{} \\in {}", render_expr(value), render_expr(collection))
         }
+        Expr::MapContainsKey { map, key } => {
+            format!("{} \\in DOMAIN {}", render_expr(key), render_expr(map))
+        }
         Expr::SeqStartsWith { seq, prefix } => {
             format!("StartsWith({}, {})", render_expr(seq), render_expr(prefix))
         }

@@ -114,6 +114,13 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -256,6 +263,12 @@ impl MeerkatMachine {
                 next_active_visibility_revision,
                 tool_visibility_delta,
             } => {
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+
                 use crate::meerkat_machine::dsl as mm_dsl;
                 let dsl_previous_identity =
                     mm_dsl::SessionLlmIdentity::from_domain(previous_identity.as_ref());

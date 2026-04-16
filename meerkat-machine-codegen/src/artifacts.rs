@@ -121,6 +121,10 @@ fn collect_helper_calls(expr: &Expr, calls: &mut BTreeSet<String>) {
             collect_helper_calls(collection, calls);
             collect_helper_calls(value, calls);
         }
+        Expr::MapContainsKey { map, key } => {
+            collect_helper_calls(map, calls);
+            collect_helper_calls(key, calls);
+        }
         Expr::MapGet { map, key } => {
             collect_helper_calls(map, calls);
             collect_helper_calls(key, calls);
@@ -1753,6 +1757,29 @@ fn collect_named_literals_from_expr(
                 binding_types,
             );
         }
+        Expr::MapContainsKey { map, key } => {
+            let map_ty = infer_expr_type(map, field_types, helper_returns, binding_types);
+            let key_ty = match map_ty {
+                Some(TypeRef::Map(key_ty, _)) => Some(*key_ty),
+                _ => None,
+            };
+            collect_named_literals_from_expr(
+                samples,
+                map,
+                None,
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+            collect_named_literals_from_expr(
+                samples,
+                key,
+                key_ty.as_ref(),
+                field_types,
+                helper_returns,
+                binding_types,
+            );
+        }
         Expr::SeqStartsWith { seq, prefix } => {
             let seq_ty = infer_expr_type(seq, field_types, helper_returns, binding_types);
             collect_named_literals_from_expr(
@@ -1879,6 +1906,7 @@ fn infer_expr_type(
         | Expr::Lt(_, _)
         | Expr::Lte(_, _)
         | Expr::Contains { .. }
+        | Expr::MapContainsKey { .. }
         | Expr::SeqStartsWith { .. }
         | Expr::Quantified { .. } => Some(TypeRef::Bool),
         Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Len(_) => Some(TypeRef::U64),
@@ -5680,6 +5708,11 @@ impl<'a> MachineTlaCompiler<'a> {
                 self.render_expr_with_types(value, env, binding_env, binding_types),
                 self.render_collection_domain(collection, env, binding_env, binding_types)
             ),
+            Expr::MapContainsKey { map, key } => format!(
+                "({} \\in DOMAIN {})",
+                self.render_expr_with_types(key, env, binding_env, binding_types),
+                self.render_expr_with_types(map, env, binding_env, binding_types)
+            ),
             Expr::SeqStartsWith { seq, prefix } => format!(
                 "StartsWith({}, {})",
                 self.render_expr_with_types(seq, env, binding_env, binding_types),
@@ -6120,6 +6153,10 @@ fn collect_expr_bindings(expr: &Expr, bindings: &mut BTreeSet<String>) {
             collect_expr_bindings(collection, bindings);
             collect_expr_bindings(value, bindings);
         }
+        Expr::MapContainsKey { map, key } => {
+            collect_expr_bindings(map, bindings);
+            collect_expr_bindings(key, bindings);
+        }
         Expr::SeqStartsWith { seq, prefix } => {
             collect_expr_bindings(seq, bindings);
             collect_expr_bindings(prefix, bindings);
@@ -6196,6 +6233,10 @@ fn collect_expr_fields(expr: &Expr, fields: &mut BTreeSet<String>) {
         Expr::Contains { collection, value } => {
             collect_expr_fields(collection, fields);
             collect_expr_fields(value, fields);
+        }
+        Expr::MapContainsKey { map, key } => {
+            collect_expr_fields(map, fields);
+            collect_expr_fields(key, fields);
         }
         Expr::SeqStartsWith { seq, prefix } => {
             collect_expr_fields(seq, fields);

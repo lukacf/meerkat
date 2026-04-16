@@ -666,6 +666,15 @@ fn parse_postfix_expr(input: ParseStream) -> Result<ExprDef> {
                     value: Box::new(value),
                 };
             }
+            "contains_key" => {
+                let paren;
+                syn::parenthesized!(paren in input);
+                let key = parse_expr(&paren)?;
+                expr = ExprDef::MapContainsKey {
+                    map: Box::new(expr),
+                    key: Box::new(key),
+                };
+            }
             "len" => {
                 let paren;
                 syn::parenthesized!(paren in input);

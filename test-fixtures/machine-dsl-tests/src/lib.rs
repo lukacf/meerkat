@@ -18,6 +18,7 @@
 // Re-export for test modules
 pub use meerkat_machine_schema;
 
+pub mod map_keyed_authority;
 pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;

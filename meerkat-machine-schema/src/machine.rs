@@ -689,6 +689,10 @@ pub enum Expr {
         collection: Box<Expr>,
         value: Box<Expr>,
     },
+    MapContainsKey {
+        map: Box<Expr>,
+        key: Box<Expr>,
+    },
     SeqStartsWith {
         seq: Box<Expr>,
         prefix: Box<Expr>,
@@ -876,6 +880,26 @@ impl Expr {
                     bindings,
                 )?;
                 value.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::MapContainsKey { map, key } => {
+                map.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+                key.validate(
                     phase_names,
                     field_names,
                     input_variants,

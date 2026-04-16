@@ -393,20 +393,29 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
     }
     let trigger = parse_trigger(&content)?;
 
-    // optional guard { expr }
-    let guard = if content.peek(Ident)
+    // Zero or more guard ["name"] { expr } blocks
+    let mut guards = Vec::new();
+    while content.peek(Ident)
         && content
             .fork()
             .parse::<Ident>()
             .is_ok_and(|id| id == "guard")
     {
         let _guard_kw: Ident = content.parse()?;
+        // Optional guard name as string literal: guard "no_active_runs" { ... }
+        let gname = if content.peek(syn::LitStr) {
+            let lit: syn::LitStr = content.parse()?;
+            Some(lit.value())
+        } else {
+            None
+        };
         let guard_content;
         braced!(guard_content in content);
-        Some(parse_expr(&guard_content)?)
-    } else {
-        None
-    };
+        guards.push(GuardDef {
+            name: gname,
+            expr: parse_expr(&guard_content)?,
+        });
+    }
 
     // optional update { stmts }
     let updates = if content.peek(Ident)
@@ -441,7 +450,7 @@ fn parse_transition(input: ParseStream) -> Result<TransitionDef> {
         name,
         per_phase,
         trigger,
-        guard,
+        guards,
         updates,
         to_phase,
         effects,

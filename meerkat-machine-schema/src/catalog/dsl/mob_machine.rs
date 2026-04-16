@@ -288,7 +288,7 @@ machine! {
 
         transition MarkCompleted {
             on signal MarkCompleted
-            guard {
+            guard "no_active_runs" {
                 (self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped)
                 && self.active_run_count == 0
             }
@@ -398,7 +398,7 @@ machine! {
         // Stop: Running -> Stopped
         transition StopRunning {
             on input Stop
-            guard { self.lifecycle_phase == Phase::Running && self.active_run_count == 0 }
+            guard "no_active_runs" { self.lifecycle_phase == Phase::Running && self.active_run_count == 0 }
             update {
                 self.coordinator_bound = false;
                 self.active_run_count = 0;

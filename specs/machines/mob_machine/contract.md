@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `self` / `catalog::dsl::mob_machine`
+- Rust owner: `meerkat-mob` / `generated::mob_machine`
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
@@ -182,7 +182,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`, `Stopped`
 - On: `MarkCompleted`()
 - Guards:
-  - ``
+  - `no_active_runs`
 - Emits: `EmitMemberLifecycleNotice`
 - To: `Completed`
 
@@ -244,7 +244,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Stop`()
 - Guards:
-  - ``
+  - `no_active_runs`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Stopped`
 

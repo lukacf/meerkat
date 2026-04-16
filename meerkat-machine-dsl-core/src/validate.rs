@@ -193,16 +193,16 @@ pub fn validate(def: &MachineDef) -> Result<(), Error> {
             }
         }
 
-        // Validate field references in guard
-        if let Some(guard) = &t.guard {
-            let binding_names: HashSet<_> = t
-                .trigger
-                .bindings
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect();
+        // Validate field references in guards
+        let binding_names: HashSet<_> = t
+            .trigger
+            .bindings
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        for guard in &t.guards {
             validate_expr(
-                guard,
+                &guard.expr,
                 &field_names,
                 &binding_names,
                 &helper_names,

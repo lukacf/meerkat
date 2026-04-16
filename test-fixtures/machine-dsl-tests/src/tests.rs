@@ -1103,17 +1103,17 @@ mod order_lifecycle {
 }
 
 // ============================================================
-// Aggregate schema equivalence: DSL vs hand-written catalog
+// Aggregate schema equivalence: test-fixture DSL vs canonical catalog DSL
 // ============================================================
 
 mod aggregate_equivalence {
     use meerkat_machine_schema::catalog;
 
-    /// Verifies that ALL 4 DSL-generated schemas match their hand-written
-    /// counterparts on every structural dimension. This is the gate for
-    /// replacing the hand-written catalog with DSL schemas.
+    /// Verifies that the test-fixture DSL definitions produce schemas matching
+    /// the canonical catalog DSL definitions on every structural dimension.
+    /// This cross-validates two independent `machine!` invocations.
     #[test]
-    fn all_dsl_schemas_match_hand_written_catalog() {
+    fn all_dsl_schemas_match_canonical_catalog() {
         let dsl_schemas = crate::dsl_machine_schemas();
         let hand_schemas = catalog::canonical_machine_schemas();
 

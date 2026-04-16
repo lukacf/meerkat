@@ -5,10 +5,7 @@ use super::{
         meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
         schedule_runtime_bundle_composition,
     },
-    meerkat_machine::meerkat_machine,
-    mob_machine::mob_machine,
-    occurrence_lifecycle::occurrence_lifecycle_machine,
-    schedule_lifecycle::schedule_lifecycle_machine,
+    meerkat_machine, mob_machine, occurrence_lifecycle_machine, schedule_lifecycle_machine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

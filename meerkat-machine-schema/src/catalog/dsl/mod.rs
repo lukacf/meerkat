@@ -34,17 +34,29 @@ pub mod schedule_lifecycle;
 use crate::MachineSchema;
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
-    meerkat_machine::MeerkatMachineState::schema()
+    let mut s = meerkat_machine::MeerkatMachineState::schema();
+    s.rust.crate_name = "meerkat-runtime".into();
+    s.rust.module = "generated::meerkat_machine".into();
+    s
 }
 
 pub fn dsl_mob_machine() -> MachineSchema {
-    mob_machine::MobMachineState::schema()
+    let mut s = mob_machine::MobMachineState::schema();
+    s.rust.crate_name = "meerkat-mob".into();
+    s.rust.module = "generated::mob_machine".into();
+    s
 }
 
 pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
-    schedule_lifecycle::ScheduleLifecycleMachineState::schema()
+    let mut s = schedule_lifecycle::ScheduleLifecycleMachineState::schema();
+    s.rust.crate_name = "meerkat-schedule".into();
+    s.rust.module = "generated::schedule_lifecycle".into();
+    s
 }
 
 pub fn dsl_occurrence_lifecycle_machine() -> MachineSchema {
-    occurrence_lifecycle::OccurrenceLifecycleMachineState::schema()
+    let mut s = occurrence_lifecycle::OccurrenceLifecycleMachineState::schema();
+    s.rust.crate_name = "meerkat-schedule".into();
+    s.rust.module = "generated::occurrence_lifecycle".into();
+    s
 }

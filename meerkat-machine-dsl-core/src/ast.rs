@@ -142,6 +142,18 @@ pub struct InvariantDef {
 }
 
 // ---------------------------------------------------------------------------
+// Guards
+// ---------------------------------------------------------------------------
+
+/// A single named guard block: `guard "name" { expr }` or `guard { expr }`.
+#[derive(Debug, Clone)]
+pub struct GuardDef {
+    /// Optional name for the guard (appears in schema and TLA+).
+    pub name: Option<String>,
+    pub expr: ExprDef,
+}
+
+// ---------------------------------------------------------------------------
 // Transitions
 // ---------------------------------------------------------------------------
 
@@ -154,7 +166,9 @@ pub struct TransitionDef {
     /// prepended and a `to X` target.
     pub per_phase: Option<Vec<Ident>>,
     pub trigger: TriggerDef,
-    pub guard: Option<ExprDef>,
+    /// Zero or more named guard blocks. Each becomes a separate `Guard` in the
+    /// schema. For runtime dispatch all guards are ANDed together.
+    pub guards: Vec<GuardDef>,
     pub updates: Vec<UpdateDef>,
     pub to_phase: Ident,
     pub effects: Vec<EffectEmitDef>,

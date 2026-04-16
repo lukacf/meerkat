@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `self` / `catalog::dsl::meerkat_machine`
+- Rust owner: `meerkat-runtime` / `generated::meerkat_machine`
 
 ## State
 - Phase enum: `Initializing | Idle | Attached | Running | Retired | Stopped | Destroyed`

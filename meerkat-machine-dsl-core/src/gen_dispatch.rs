@@ -204,6 +204,24 @@ fn gen_match_arms(
     quote! { #(#arms)* }
 }
 
+/// Combine a transition's guard blocks into a single boolean expression for
+/// runtime dispatch. Multiple guards are ANDed together.
+fn combined_guard_expr(t: &TransitionDef) -> Option<TokenStream> {
+    if t.guards.is_empty() {
+        return None;
+    }
+    let exprs: Vec<_> = t
+        .guards
+        .iter()
+        .map(|g| gen_expr(&g.expr, FieldPrefix::AuthorityState))
+        .collect();
+    if exprs.len() == 1 {
+        Some(exprs.into_iter().next().unwrap_or_default())
+    } else {
+        Some(quote! { #(#exprs)&&* })
+    }
+}
+
 fn gen_transition_chain(
     def: &MachineDef,
     transitions: &[&&TransitionDef],
@@ -211,8 +229,7 @@ fn gen_transition_chain(
 ) -> TokenStream {
     if transitions.len() == 1 {
         let t = transitions[0];
-        if let Some(guard) = &t.guard {
-            let guard_expr = gen_expr(guard, FieldPrefix::AuthorityState);
+        if let Some(guard_expr) = combined_guard_expr(t) {
             let body = gen_transition_body(def, t);
             let variant_str = t.trigger.variant.to_string();
             quote! {
@@ -232,8 +249,7 @@ fn gen_transition_chain(
         let mut arms = Vec::new();
         for (i, t) in transitions.iter().enumerate() {
             let body = gen_transition_body(def, t);
-            if let Some(guard) = &t.guard {
-                let guard_expr = gen_expr(guard, FieldPrefix::AuthorityState);
+            if let Some(guard_expr) = combined_guard_expr(t) {
                 if i == 0 {
                     arms.push(quote! { if #guard_expr { #body } });
                 } else {
@@ -243,7 +259,7 @@ fn gen_transition_chain(
                 arms.push(quote! { else { #body } });
             }
         }
-        let last_has_guard = transitions.last().is_none_or(|t| t.guard.is_some());
+        let last_has_guard = transitions.last().is_none_or(|t| !t.guards.is_empty());
         if last_has_guard {
             let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {

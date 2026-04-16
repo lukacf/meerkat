@@ -3,7 +3,7 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `self` / `catalog::dsl::schedule_lifecycle`
+- Rust owner: `meerkat-schedule` / `generated::schedule_lifecycle`
 
 ## State
 - Phase enum: `Active | Paused | Deleted`

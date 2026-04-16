@@ -83,7 +83,6 @@ impl MeerkatMachine {
             MeerkatMachineCommand::Retire { runtime_id } => {
                 let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
-                let _ = session_id;
 
                 let state = Self::driver_runtime_state(&driver).await;
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
@@ -100,7 +99,21 @@ impl MeerkatMachine {
                     if let Some(ref tx) = wake_tx
                         && tx.send(()).await.is_ok()
                     {
-                        return Ok(MeerkatMachineCommandResult::RetireReport(report));
+                        let result = MeerkatMachineCommandResult::RetireReport(report);
+                        if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                            // DSL shadow
+                            use crate::meerkat_machine::dsl as mm_dsl;
+                            if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                                &mut entry.dsl_authority,
+                                mm_dsl::MeerkatMachineInput::Retire,
+                            ) {
+                                tracing::error!(
+                                    error = %e,
+                                    "DSL/runtime DISAGREEMENT on Retire"
+                                );
+                            }
+                        }
+                        return Ok(result);
                     }
 
                     let mut drv = driver.lock().await;
@@ -115,10 +128,24 @@ impl MeerkatMachine {
                     report.inputs_pending_drain = 0;
                 }
 
-                Ok(MeerkatMachineCommandResult::RetireReport(report))
+                let result = MeerkatMachineCommandResult::RetireReport(report);
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Retire,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Retire"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::Recycle { runtime_id } => {
-                let (_session_id, driver, completions, wake_tx) =
+                let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
                 let state = Self::driver_runtime_state(&driver).await;
@@ -150,12 +177,26 @@ impl MeerkatMachine {
                     let _ = tx.try_send(());
                 }
 
-                Ok(MeerkatMachineCommandResult::RecycleReport(RecycleReport {
+                let result = MeerkatMachineCommandResult::RecycleReport(RecycleReport {
                     inputs_transferred: transferred,
-                }))
+                });
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Recycle,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Recycle"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::Reset { runtime_id } => {
-                let (_session_id, driver, completions, _wake_tx) =
+                let (session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
                 let state = Self::driver_runtime_state(&driver).await;
@@ -172,10 +213,24 @@ impl MeerkatMachine {
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime reset");
 
-                Ok(MeerkatMachineCommandResult::ResetReport(report))
+                let result = MeerkatMachineCommandResult::ResetReport(report);
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Reset,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Reset"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::Recover { runtime_id } => {
-                let (_session_id, driver, completions, wake_tx) =
+                let (session_id, driver, completions, wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
                 let state = Self::driver_runtime_state(&driver).await;
@@ -208,10 +263,24 @@ impl MeerkatMachine {
                     let _ = tx.try_send(());
                 }
 
-                Ok(MeerkatMachineCommandResult::RecoveryReport(report))
+                let result = MeerkatMachineCommandResult::RecoveryReport(report);
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Recover,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Recover"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::Destroy { runtime_id } => {
-                let (_session_id, driver, completions, _wake_tx) =
+                let (session_id, driver, completions, _wake_tx) =
                     self.lookup_entry(&runtime_id).await?;
 
                 let state = Self::driver_runtime_state(&driver).await;
@@ -239,7 +308,21 @@ impl MeerkatMachine {
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");
 
-                Ok(MeerkatMachineCommandResult::DestroyReport(report))
+                let result = MeerkatMachineCommandResult::DestroyReport(report);
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Destroy,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Destroy"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {
                 let session_id = Self::resolve_session_id(&runtime_id)?;

@@ -32,6 +32,7 @@ impl MeerkatMachine {
             capability_surface_status: SessionLlmCapabilitySurfaceStatus::Unresolved,
             phase: RegistrationPhase::Queuing,
             detached_wake: None,
+            dsl_authority: super::dsl::MeerkatMachineAuthority::new(),
         };
         let mut sessions = self.sessions.write().await;
         if let Some(existing) = sessions.get_mut(&session_id) {
@@ -192,6 +193,7 @@ impl MeerkatMachine {
                                 SessionLlmCapabilitySurfaceStatus::Unresolved,
                             phase: RegistrationPhase::Queuing,
                             detached_wake: None,
+                            dsl_authority: super::dsl::MeerkatMachineAuthority::new(),
                         },
                     );
                     (driver, completions, recovered_ops)

@@ -25,10 +25,24 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                Ok(MeerkatMachineCommandResult::Spawned(
+                let result = MeerkatMachineCommandResult::Spawned(
                     self.update_peer_ingress_context_inner(&session_id, keep_alive, comms_runtime)
                         .await,
-                ))
+                );
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::SetPeerIngressContext { keep_alive },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on SetPeerIngressContext"
+                        );
+                    }
+                }
+                Ok(result)
             }
             MeerkatMachineCommand::NotifyDrainExited { session_id, reason } => {
                 // Guard: session must exist.
@@ -45,8 +59,22 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+                let reason_str = format!("{reason:?}");
                 self.notify_comms_drain_exited_inner(&session_id, reason)
                     .await;
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::NotifyDrainExited { reason: reason_str },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on NotifyDrainExited"
+                        );
+                    }
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             _ => unreachable!("non-drain command routed to drain handler"),

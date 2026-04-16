@@ -141,6 +141,9 @@ struct RuntimeSessionEntry {
     /// Detached-wake state for background op completions.
     /// Shared with the runtime loop which selects on the Notify directly.
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
+    /// DSL authority for coarse lifecycle phase transitions.
+    /// Sync field — validates transitions, writes back phase.
+    dsl_authority: dsl::MeerkatMachineAuthority,
 }
 
 /// Capability bundle for an attached runtime loop.

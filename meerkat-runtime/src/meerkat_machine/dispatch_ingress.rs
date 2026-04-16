@@ -105,6 +105,7 @@ impl MeerkatMachine {
                     );
                 }
 
+                // TODO: DSL shadow needs field construction
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {
                     outcome,
                     handle,
@@ -156,6 +157,36 @@ impl MeerkatMachine {
                     );
                     result
                 };
+
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    let dsl_input = match &outcome {
+                        AcceptOutcome::Accepted { input_id, .. } => {
+                            Some(mm_dsl::MeerkatMachineInput::AcceptWithoutWake {
+                                input_id: mm_dsl::InputId::from_domain(input_id),
+                            })
+                        }
+                        AcceptOutcome::Deduplicated { existing_id, .. } => {
+                            Some(mm_dsl::MeerkatMachineInput::AcceptWithoutWake {
+                                input_id: mm_dsl::InputId::from_domain(existing_id),
+                            })
+                        }
+                        AcceptOutcome::Rejected { .. } => None,
+                    };
+
+                    if let Some(dsl_input) = dsl_input {
+                        // DSL shadow
+                        if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                            &mut entry.dsl_authority,
+                            dsl_input,
+                        ) {
+                            tracing::error!(
+                                error = %e,
+                                "DSL/runtime DISAGREEMENT on AcceptWithoutWake"
+                            );
+                        }
+                    }
+                }
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
             }
@@ -282,6 +313,23 @@ impl MeerkatMachine {
                     }
                 };
 
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Prepare {
+                            session_id: mm_dsl::SessionId::from(session_id.to_string()),
+                            run_id: mm_dsl::RunId::from_domain(&prepared.run_id),
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Prepare"
+                        );
+                    }
+                }
+
                 Ok(MeerkatMachineCommandResult::Prepared(prepared))
             }
             MeerkatMachineCommand::Commit {
@@ -290,6 +338,8 @@ impl MeerkatMachine {
                 run_id,
                 output,
             } => {
+                let shadow_input_id = input_id.clone();
+                let shadow_run_id = run_id.clone();
                 let driver = {
                     let sessions = self.sessions.read().await;
                     sessions
@@ -320,6 +370,23 @@ impl MeerkatMachine {
                     )));
                 }
 
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Commit {
+                            input_id: mm_dsl::InputId::from_domain(&shadow_input_id),
+                            run_id: mm_dsl::RunId::from_domain(&shadow_run_id),
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Commit"
+                        );
+                    }
+                }
+
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::Fail {
@@ -327,6 +394,7 @@ impl MeerkatMachine {
                 run_id,
                 error,
             } => {
+                let shadow_fail_run_id = run_id.clone();
                 let driver = {
                     let sessions = self.sessions.read().await;
                     sessions
@@ -343,6 +411,22 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Internal(format!(
                         "failed to persist runtime failure snapshot: {run_err}"
                     )));
+                }
+
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::Fail {
+                            run_id: mm_dsl::RunId::from_domain(&shadow_fail_run_id),
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on Fail"
+                        );
+                    }
                 }
 
                 Ok(MeerkatMachineCommandResult::Unit)

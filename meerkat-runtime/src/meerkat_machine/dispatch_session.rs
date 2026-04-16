@@ -15,7 +15,23 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
+                let sid = session_id.clone();
                 self.register_session_inner(session_id).await;
+                if let Some(entry) = self.sessions.write().await.get_mut(&sid) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::RegisterSession {
+                            session_id: mm_dsl::SessionId::from(sid.to_string()),
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on RegisterSession"
+                        );
+                    }
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::UnregisterSession { session_id } => {
@@ -26,6 +42,21 @@ impl MeerkatMachine {
                     });
                 }
                 self.unregister_session_inner(&session_id).await;
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::UnregisterSession {
+                            session_id: mm_dsl::SessionId::from(session_id.to_string()),
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on UnregisterSession"
+                        );
+                    }
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::EnsureSessionWithExecutor {
@@ -92,8 +123,21 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Destroyed);
                 }
                 self.stop_runtime_executor_inner(&session_id, command)
-                    .await
-                    .map(|()| MeerkatMachineCommandResult::Unit)
+                    .await?;
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::StopRuntimeExecutor,
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on StopRuntimeExecutor"
+                        );
+                    }
+                }
+                Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::ContainsSession { session_id } => {
                 Ok(MeerkatMachineCommandResult::Bool(
@@ -140,6 +184,7 @@ impl MeerkatMachine {
                 let mut driver = entry.driver.lock().await;
                 machine_prepare_bindings_projection(&mut driver)?;
                 drop(driver);
+                // TODO: DSL shadow needs field construction
                 Ok(MeerkatMachineCommandResult::Bindings(
                     meerkat_core::SessionRuntimeBindings {
                         session_id,
@@ -194,23 +239,74 @@ impl MeerkatMachine {
                 target_identity,
                 target_capability_surface,
                 next_visibility_state,
-                next_capability_base_filter: _next_capability_base_filter,
-                next_active_visibility_revision: _next_active_visibility_revision,
+                next_capability_base_filter,
+                next_active_visibility_revision,
                 tool_visibility_delta,
-            } => self
-                .reconfigure_session_llm_identity_inner(
-                    &session_id,
-                    *previous_identity,
-                    *previous_visibility_state,
-                    previous_capability_surface,
-                    previous_capability_surface_status,
-                    *target_identity,
-                    *target_capability_surface,
-                    *next_visibility_state,
-                    *tool_visibility_delta,
-                )
-                .await
-                .map(MeerkatMachineCommandResult::LlmReconfigured),
+            } => {
+                use crate::meerkat_machine::dsl as mm_dsl;
+                let dsl_previous_identity =
+                    mm_dsl::SessionLlmIdentity::from_domain(previous_identity.as_ref());
+                let dsl_previous_visibility_state = mm_dsl::SessionToolVisibilityState::from_domain(
+                    previous_visibility_state.as_ref(),
+                );
+                let dsl_previous_capability_surface = previous_capability_surface
+                    .as_ref()
+                    .map(mm_dsl::SessionLlmCapabilitySurface::from_domain);
+                let dsl_previous_capability_surface_status =
+                    mm_dsl::SessionLlmCapabilitySurfaceStatus::from_domain(
+                        &previous_capability_surface_status,
+                    );
+                let dsl_target_identity =
+                    mm_dsl::SessionLlmIdentity::from_domain(target_identity.as_ref());
+                let dsl_target_capability_surface =
+                    mm_dsl::SessionLlmCapabilitySurface::from_domain(&target_capability_surface);
+                let dsl_next_visibility_state =
+                    mm_dsl::SessionToolVisibilityState::from_domain(next_visibility_state.as_ref());
+                let dsl_next_capability_base_filter =
+                    mm_dsl::ToolFilter::from_domain(&next_capability_base_filter);
+                let dsl_tool_visibility_delta =
+                    mm_dsl::SessionToolVisibilityDelta::from_domain(tool_visibility_delta.as_ref());
+
+                let report = self
+                    .reconfigure_session_llm_identity_inner(
+                        &session_id,
+                        *previous_identity,
+                        *previous_visibility_state,
+                        previous_capability_surface,
+                        previous_capability_surface_status,
+                        *target_identity,
+                        *target_capability_surface,
+                        *next_visibility_state,
+                        *tool_visibility_delta,
+                    )
+                    .await?;
+                if let Some(entry) = self.sessions.write().await.get_mut(&session_id) {
+                    // DSL shadow
+                    use crate::meerkat_machine::dsl as mm_dsl;
+                    if let Err(e) = mm_dsl::MeerkatMachineMutator::apply(
+                        &mut entry.dsl_authority,
+                        mm_dsl::MeerkatMachineInput::ReconfigureSessionLlmIdentity {
+                            previous_identity: dsl_previous_identity,
+                            previous_visibility_state: dsl_previous_visibility_state,
+                            previous_capability_surface: dsl_previous_capability_surface,
+                            previous_capability_surface_status:
+                                dsl_previous_capability_surface_status,
+                            target_identity: dsl_target_identity,
+                            target_capability_surface: dsl_target_capability_surface,
+                            next_visibility_state: dsl_next_visibility_state,
+                            next_capability_base_filter: dsl_next_capability_base_filter,
+                            next_active_visibility_revision,
+                            tool_visibility_delta: dsl_tool_visibility_delta,
+                        },
+                    ) {
+                        tracing::error!(
+                            error = %e,
+                            "DSL/runtime DISAGREEMENT on ReconfigureSessionLlmIdentity"
+                        );
+                    }
+                }
+                Ok(MeerkatMachineCommandResult::LlmReconfigured(report))
+            }
             MeerkatMachineCommand::StagePersistentFilter {
                 session_id,
                 filter,

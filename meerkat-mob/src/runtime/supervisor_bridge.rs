@@ -234,17 +234,8 @@ impl MobSupervisorBridge {
 
         match status {
             meerkat_core::interaction::ResponseStatus::Completed
-            | meerkat_core::interaction::ResponseStatus::Accepted => Ok(Some(result.clone())),
-            meerkat_core::interaction::ResponseStatus::Failed => {
-                let detail = if let Some(message) = result.as_str() {
-                    message.to_string()
-                } else {
-                    serde_json::to_string(result).unwrap_or_else(|_| result.to_string())
-                };
-                Err(MobError::Internal(format!(
-                    "supervisor request '{request_envelope_id}' failed: {detail}"
-                )))
-            }
+            | meerkat_core::interaction::ResponseStatus::Accepted
+            | meerkat_core::interaction::ResponseStatus::Failed => Ok(Some(result.clone())),
         }
     }
 }

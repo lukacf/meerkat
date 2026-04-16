@@ -95,6 +95,12 @@ pub trait MobProvisioner: Send + Sync {
         fallback_name: &str,
         fallback_peer_id: &str,
     ) -> Result<TrustedPeerSpec, MobError>;
+    async fn reconcile_member_trust(
+        &self,
+        member_ref: &MemberRef,
+        desired_specs: &[TrustedPeerSpec],
+        candidate_specs: &[TrustedPeerSpec],
+    ) -> Result<(), MobError>;
     /// Resolve the live canonical mob-child lifecycle operation for an
     /// existing member bridge.
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId>;
@@ -427,7 +433,9 @@ impl RuntimeSessionState {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{runtime_completion_to_mob_result, session_turn_error_to_mob_error};
+    use super::{
+        MultiBackendProvisioner, runtime_completion_to_mob_result, session_turn_error_to_mob_error,
+    };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
@@ -482,6 +490,21 @@ mod tests {
             }
             other => panic!("expected callback-pending mob error, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn validated_external_peer_spec_preserves_the_validated_peer_name() {
+        let spec = MultiBackendProvisioner::validated_external_peer_spec(
+            "mob/worker/member-1",
+            "ed25519:member-1",
+            "tcp://example.invalid/member-1",
+        )
+        .expect("external peer spec should validate");
+
+        assert_eq!(spec.name, "mob/worker/member-1");
+        assert_eq!(spec.peer_id, "ed25519:member-1");
+        assert_eq!(spec.address, "tcp://example.invalid/member-1");
     }
 }
 
@@ -958,6 +981,36 @@ impl MobProvisioner for SessionBackend {
         Ok(trusted_peer)
     }
 
+    async fn reconcile_member_trust(
+        &self,
+        member_ref: &MemberRef,
+        desired_specs: &[TrustedPeerSpec],
+        _candidate_specs: &[TrustedPeerSpec],
+    ) -> Result<(), MobError> {
+        let Some(comms) = self.comms_runtime(member_ref).await else {
+            return if desired_specs.is_empty() {
+                Ok(())
+            } else {
+                Err(MobError::WiringError(format!(
+                    "resume requires comms runtime for wired member '{member_ref:?}'"
+                )))
+            };
+        };
+        let desired_peer_ids = desired_specs
+            .iter()
+            .map(|spec| spec.peer_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for peer in comms.peers().await {
+            if !desired_peer_ids.contains(&peer.peer_id) {
+                let _ = comms.remove_trusted_peer(&peer.peer_id).await?;
+            }
+        }
+        for spec in desired_specs {
+            comms.add_trusted_peer(spec.clone()).await?;
+        }
+        Ok(())
+    }
+
     async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
         let bridge_session_id = member_ref.bridge_session_id()?;
         self.ops_adapter
@@ -1037,13 +1090,6 @@ fn is_valid_external_peer_name(peer_name: &str) -> bool {
     [mob_id, profile, meerkat_id]
         .iter()
         .all(|part| is_valid_peer_name_component(part))
-}
-
-fn synthetic_backend_peer_session_id(peer_id: &str, address: &str) -> SessionId {
-    SessionId::from_uuid(Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("meerkat-mob/backend-peer/{peer_id}/{address}").as_bytes(),
-    ))
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1139,6 +1185,23 @@ impl MultiBackendProvisioner {
         .map_err(|error| MobError::WiringError(format!("invalid peer-only spec: {error}")))
     }
 
+    fn validated_external_peer_spec(
+        peer_name: &str,
+        peer_id: &str,
+        address: &str,
+    ) -> Result<TrustedPeerSpec, MobError> {
+        TrustedPeerSpec::new(
+            peer_name.to_string(),
+            peer_id.to_string(),
+            address.to_string(),
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "invalid external peer spec for '{peer_name}': {error}"
+            ))
+        })
+    }
+
     fn bridge_bootstrap_token_from_binding(
         address: &str,
         bootstrap_token: Option<&str>,
@@ -1183,6 +1246,9 @@ impl MultiBackendProvisioner {
     }
 
     fn bridge_rejection_reason(value: &serde_json::Value) -> Option<String> {
+        if let Some(reason) = value.as_str() {
+            return Some(reason.to_string());
+        }
         match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
             super::bridge_protocol::BridgeReply::Rejected { reason } => Some(reason),
             _ => None,
@@ -1209,9 +1275,11 @@ impl MultiBackendProvisioner {
                 let bind: super::bridge_protocol::BridgeBindResponse = self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
                     .await?;
+                let effective_bootstrap_token =
+                    Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
                 self.persist_rebound_binding(
                     peer_id,
-                    bootstrap_token.map(std::string::ToString::to_string),
+                    Some(effective_bootstrap_token.clone()),
                     &bind,
                 )
                 .await?;
@@ -1232,6 +1300,9 @@ impl MultiBackendProvisioner {
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await?;
+        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+            return Err(MobError::WiringError(reason));
+        }
         serde_json::from_value(value).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
         })
@@ -1305,6 +1376,71 @@ impl MultiBackendProvisioner {
         Ok(())
     }
 
+    async fn reconcile_peer_only_binding_trust(
+        &self,
+        binding: &RuntimeBinding,
+        desired_specs: &[TrustedPeerSpec],
+        candidate_specs: &[TrustedPeerSpec],
+    ) -> Result<(), MobError> {
+        let RuntimeBinding::External {
+            peer_id,
+            address,
+            bootstrap_token,
+        } = binding
+        else {
+            return Err(MobError::Internal(
+                "peer-only trust reconciliation requires an external binding".to_string(),
+            ));
+        };
+        let peer = Self::peer_only_spec_from_parts(peer_id, address)?;
+        let peer = self
+            .ensure_supervisor_authorized(
+                &peer,
+                Some((
+                    peer_id.as_str(),
+                    address.as_str(),
+                    bootstrap_token.as_deref(),
+                )),
+            )
+            .await?;
+        let authority = self.supervisor_bridge.authority().await;
+        let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
+        let desired_peer_ids = desired_specs
+            .iter()
+            .map(|spec| spec.peer_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for candidate in candidate_specs {
+            if desired_peer_ids.contains(candidate.peer_id.as_str()) {
+                continue;
+            }
+            let command = super::bridge_protocol::BridgeCommand::UnwireMember(
+                super::bridge_protocol::BridgePeerWiringPayload {
+                    supervisor: sup_spec.clone().into(),
+                    epoch: authority.epoch,
+                    protocol_version: authority.protocol_version,
+                    peer_spec: candidate.clone().into(),
+                },
+            );
+            let _ack: super::bridge_protocol::BridgeAck = self
+                .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
+                .await?;
+        }
+        for desired in desired_specs {
+            let command = super::bridge_protocol::BridgeCommand::WireMember(
+                super::bridge_protocol::BridgePeerWiringPayload {
+                    supervisor: sup_spec.clone().into(),
+                    epoch: authority.epoch,
+                    protocol_version: authority.protocol_version,
+                    peer_spec: desired.clone().into(),
+                },
+            );
+            let _ack: super::bridge_protocol::BridgeAck = self
+                .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn external_member_ref(
         &self,
         _create_session: CreateSessionRequest,
@@ -1318,6 +1454,8 @@ impl MultiBackendProvisioner {
             address: real_address,
             bootstrap_token,
         } = target;
+        let effective_bootstrap_token =
+            Self::bridge_bootstrap_token_from_binding(&real_address, bootstrap_token.as_deref())?;
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
                 "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
@@ -1336,19 +1474,19 @@ impl MultiBackendProvisioner {
             address = %real_address,
             "ExternalBackend::external_member_ref success (real identity)"
         );
-        let peer = Self::peer_only_spec_from_parts(&real_peer_id, &real_address)?;
+        let peer = Self::validated_external_peer_spec(&peer_name, &real_peer_id, &real_address)?;
         let bind_response = self
             .bind_peer_only_member(
                 &peer,
                 &real_peer_id,
                 &real_address,
-                bootstrap_token.as_deref(),
+                Some(effective_bootstrap_token.as_str()),
             )
             .await?;
         let member_ref = MemberRef::BackendPeer {
             peer_id: bind_response.peer_id,
             address: super::bridge_protocol::canonicalize_bridge_address(&bind_response.address),
-            bootstrap_token,
+            bootstrap_token: Some(effective_bootstrap_token),
             session_id: None,
         };
         if let (Some(owner_bridge_session_id), Some(registry)) =
@@ -1521,6 +1659,12 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id: None,
                 ..
             } => {
+                if req.event_tx.is_some() {
+                    return Err(MobError::UnsupportedForMode {
+                        mode: crate::MobRuntimeMode::TurnDriven,
+                        reason: "tracked turn event streams are not supported for peer-only members in phase 1".to_string(),
+                    });
+                }
                 let peer = self.peer_only_spec(member_ref).await?;
                 let peer = self
                     .ensure_supervisor_authorized(
@@ -1560,27 +1704,6 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .ops_adapter
                     .report_member_progress(member_ref, "turn dispatched")
                     .await?;
-                if let (
-                    MemberRef::BackendPeer {
-                        peer_id, address, ..
-                    },
-                    Some(event_tx),
-                ) = (member_ref, req.event_tx)
-                {
-                    let synthetic_session_id = synthetic_backend_peer_session_id(peer_id, address);
-                    let _ = event_tx
-                        .send(meerkat_core::event::EventEnvelope::new(
-                            format!("backend_peer:{peer_id}"),
-                            1,
-                            None,
-                            meerkat_core::event::AgentEvent::RunCompleted {
-                                session_id: synthetic_session_id,
-                                result: "\"Peer-only external turn dispatched\"".to_string(),
-                                usage: meerkat_core::types::Usage::default(),
-                            },
-                        ))
-                        .await;
-                }
                 Ok(())
             }
             _ => self.session.start_turn(member_ref, req).await,
@@ -1658,30 +1781,48 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
     }
 
-    async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
+    async fn reconcile_member_trust(
+        &self,
+        member_ref: &MemberRef,
+        desired_specs: &[TrustedPeerSpec],
+        candidate_specs: &[TrustedPeerSpec],
+    ) -> Result<(), MobError> {
         match member_ref {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: None,
                 ..
             } => {
-                if let Some(operation_id) = self
-                    .session
+                self.reconcile_peer_only_binding_trust(
+                    &RuntimeBinding::External {
+                        peer_id: peer_id.clone(),
+                        address: address.clone(),
+                        bootstrap_token: bootstrap_token.clone(),
+                    },
+                    desired_specs,
+                    candidate_specs,
+                )
+                .await
+            }
+            _ => {
+                self.session
+                    .reconcile_member_trust(member_ref, desired_specs, candidate_specs)
+                    .await
+            }
+        }
+    }
+
+    async fn active_operation_id_for_member(&self, member_ref: &MemberRef) -> Option<OperationId> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => {
+                self.session
                     .ops_adapter
                     .active_operation_id_for_member(member_ref)
                     .await
-                {
-                    return Some(operation_id);
-                }
-                self.session
-                    .ops_adapter
-                    .mark_member_provisioned_for_member(
-                        member_ref,
-                        &format!("mob_member/backend_peer/{peer_id}@{address}"),
-                    )
-                    .await
-                    .ok()
             }
             _ => {
                 let bridge_session_id = member_ref.bridge_session_id()?;

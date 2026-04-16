@@ -2651,15 +2651,22 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         .expect("bind rejection")
                                     } else {
                                     responder_bind_count.fetch_add(1, Ordering::Relaxed);
-                                    let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                        payload.supervisor.clone().into();
+                                    let supervisor_spec =
+                                        meerkat_core::comms::TrustedPeerSpec::try_from(
+                                            payload.supervisor.clone(),
+                                        )
+                                        .expect("valid supervisor spec");
                                     responder_runtime
                                         .add_trusted_peer(supervisor_spec)
                                         .await
                                         .expect("bind supervisor");
                                     *responder_supervisor_state.write().await =
                                         Some(HarnessSupervisorState {
-                                            supervisor: payload.supervisor.clone().into(),
+                                            supervisor:
+                                                meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                    payload.supervisor.clone(),
+                                                )
+                                                .expect("valid supervisor spec"),
                                             epoch: payload.epoch,
                                         });
                                     serde_json::to_value(
@@ -2687,8 +2694,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     if responder_fail_next_authorize
                                         .swap(false, Ordering::Relaxed)
                                     {
-                                        let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                            payload.supervisor.clone().into();
+                                        let supervisor_spec =
+                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                payload.supervisor.clone(),
+                                            )
+                                            .expect("valid supervisor spec");
                                         responder_runtime
                                             .add_trusted_peer(supervisor_spec)
                                             .await
@@ -2716,14 +2726,21 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                     )
                                                     .await;
                                             }
-                                            let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                                payload.supervisor.clone().into();
+                                            let supervisor_spec =
+                                                meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                    payload.supervisor.clone(),
+                                                )
+                                                .expect("valid supervisor spec");
                                             responder_runtime
                                                 .add_trusted_peer(supervisor_spec)
                                                 .await
                                                 .expect("authorize supervisor");
                                             *guard = Some(HarnessSupervisorState {
-                                                supervisor: payload.supervisor.into(),
+                                                supervisor:
+                                                    meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                        payload.supervisor,
+                                                    )
+                                                    .expect("valid supervisor spec"),
                                                 epoch: payload.epoch,
                                             });
                                             serde_json::to_value(
@@ -2731,8 +2748,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             )
                                             .expect("authorize ack")
                                         } else {
-                                            let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                                payload.supervisor.clone().into();
+                                            let supervisor_spec =
+                                                meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                    payload.supervisor.clone(),
+                                                )
+                                                .expect("valid supervisor spec");
                                             responder_runtime
                                                 .add_trusted_peer(supervisor_spec)
                                                 .await
@@ -2803,8 +2823,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         serde_json::to_value(existing)
                                             .expect("existing delivery response")
                                     } else {
-                                        let supervisor_spec: meerkat_core::comms::TrustedPeerSpec =
-                                            payload.supervisor.into();
+                                        let supervisor_spec =
+                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                payload.supervisor,
+                                            )
+                                            .expect("valid supervisor spec");
                                         responder_runtime
                                             .add_trusted_peer(supervisor_spec)
                                             .await
@@ -2832,8 +2855,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     }
                                 }
                                 super::bridge_protocol::BridgeCommand::WireMember(payload) => {
-                                    let peer_spec: meerkat_core::comms::TrustedPeerSpec =
-                                        payload.peer_spec.into();
+                                    let peer_spec =
+                                        meerkat_core::comms::TrustedPeerSpec::try_from(
+                                            payload.peer_spec,
+                                        )
+                                        .expect("valid peer spec");
                                     responder_runtime
                                         .add_trusted_peer(peer_spec)
                                         .await
@@ -4768,6 +4794,76 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
         external.delivered_input_ids().await.len(),
         1,
         "rebound peer should still receive the requested input"
+    );
+}
+
+#[tokio::test]
+async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "peer-only-query-bootstrap-rebind",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
+    let bootstrap_token = bootstrap_token.expect("live external binding bootstrap token");
+    let binding = crate::RuntimeBinding::External {
+        peer_id,
+        address: format!(
+            "{}?{}={}",
+            address,
+            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
+            bootstrap_token
+        ),
+        bootstrap_token: None,
+    };
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            binding,
+        )
+        .await
+        .expect("spawn live external worker with query-only bootstrap token");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("spawned query-bootstrap entry");
+    match entry.member_ref {
+        MemberRef::BackendPeer {
+            bootstrap_token: Some(ref token),
+            ..
+        } => assert_eq!(
+            token, &bootstrap_token,
+            "spawn should persist the effective bootstrap token even when it came from the address query"
+        ),
+        ref other => panic!("expected backend peer member ref, got {other:?}"),
+    }
+
+    external.forget_supervisor().await;
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("after-query-bootstrap-restart".to_string()),
+        )
+        .await
+        .expect("query-sourced bootstrap token should support rebind fallback");
+    assert_eq!(
+        external.bind_count(),
+        2,
+        "query-sourced bootstrap token should remain available for restart recovery"
     );
 }
 
@@ -8101,6 +8197,98 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         trusted_sub.iter().any(|addr| addr == &old_ext_addr),
         "mixed resume should re-establish trust using the external member's real transport address"
     );
+}
+
+#[tokio::test]
+async fn test_resume_reconciles_peer_only_trust_edges() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "resume-peer-only-trust-edges",
+    );
+    let mut definition = definition;
+    for profile in definition
+        .profiles
+        .values_mut()
+        .filter_map(|binding| binding.as_inline_mut())
+    {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let mob_id = definition.id.clone();
+    let service = Arc::new(RealCommsSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn external a");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn external b");
+    handle
+        .wire(AgentIdentity::from("w-a"), MeerkatId::from("w-b"))
+        .await
+        .expect("wire peer-only pair");
+
+    let crate::RuntimeBinding::External {
+        peer_id: a_peer_id, ..
+    } = external_a.binding()
+    else {
+        panic!("expected external a binding");
+    };
+    let crate::RuntimeBinding::External {
+        peer_id: b_peer_id, ..
+    } = external_b.binding()
+    else {
+        panic!("expected external b binding");
+    };
+
+    handle.stop().await.expect("stop mob");
+    external_a.remove_trusted_peer(&b_peer_id).await;
+    external_b.remove_trusted_peer(&a_peer_id).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume peer-only trust topology");
+
+    let name_a = test_comms_name_for(&mob_id, "worker", "w-a");
+    let name_b = test_comms_name_for(&mob_id, "worker", "w-b");
+    assert!(
+        external_a.trusted_peer_names().await.contains(&name_b),
+        "resume should restore worker b trust on peer-only worker a"
+    );
+    assert!(
+        external_b.trusted_peer_names().await.contains(&name_a),
+        "resume should restore worker a trust on peer-only worker b"
+    );
+
+    resumed.stop().await.expect("stop resumed mob");
 }
 
 #[tokio::test]
@@ -12161,10 +12349,21 @@ async fn test_external_backend_autonomous_flow_dispatch_normalizes_to_peer_only_
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
     assert_eq!(
         terminal.status,
-        MobRunStatus::Completed,
-        "peer-only external flow dispatch failed: failures={:?} steps={:?}",
+        MobRunStatus::Failed,
+        "peer-only external flow dispatch should fail explicitly without remote event-stream fan-in: failures={:?} steps={:?}",
         terminal.failure_ledger,
         terminal.step_ledger
+    );
+    let failure_reasons = terminal
+        .failure_ledger
+        .iter()
+        .map(|entry| entry.reason.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        failure_reasons
+            .iter()
+            .any(|message| message.contains("tracked turn event streams are not supported")),
+        "peer-only external flow dispatch should fail with an explicit unsupported-mode message, got: {failure_reasons:?}"
     );
 
     let non_host_start_turn = service
@@ -12179,6 +12378,39 @@ async fn test_external_backend_autonomous_flow_dispatch_normalizes_to_peer_only_
         0,
         "peer-only external flow dispatch should not rely on local injector routing"
     );
+}
+
+#[tokio::test]
+async fn test_subscribe_all_agent_events_keeps_session_backed_members_in_mixed_roster() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "mixed-subscribe-all",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-local"), None)
+        .await
+        .expect("spawn local lead");
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext-sub")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext-sub"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+
+    let streams = handle
+        .subscribe_all_agent_events()
+        .await
+        .expect("mixed roster should still expose session-backed event streams");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].0, AgentIdentity::from("l-local"));
 }
 
 #[tokio::test]

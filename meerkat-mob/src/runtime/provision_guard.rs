@@ -206,6 +206,15 @@ mod tests {
             Err(MobError::Internal("not implemented".into()))
         }
 
+        async fn reconcile_member_trust(
+            &self,
+            _member_ref: &MemberRef,
+            _desired_specs: &[TrustedPeerSpec],
+            _candidate_specs: &[TrustedPeerSpec],
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+
         async fn active_operation_id_for_member(
             &self,
             _member_ref: &MemberRef,

@@ -12,6 +12,7 @@ use crate::runtime::bridge_protocol::{
 use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
 use meerkat_runtime::MeerkatMachine;
+use meerkat_runtime::identifiers::LogicalRuntimeId;
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use std::sync::Arc;
@@ -86,7 +87,10 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
-                source: InputOrigin::Operator,
+                source: InputOrigin::Peer {
+                    peer_id: format!("local-bridge:{}", self.session_id),
+                    runtime_id: Some(LogicalRuntimeId::new(self.session_id.to_string())),
+                },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
                 idempotency_key: Some(meerkat_runtime::identifiers::IdempotencyKey::new(

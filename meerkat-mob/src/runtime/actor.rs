@@ -428,6 +428,9 @@ impl MobActor {
     }
 
     fn bridge_rejection_reason(value: &serde_json::Value) -> Option<String> {
+        if let Some(reason) = value.as_str() {
+            return Some(reason.to_string());
+        }
         match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
             super::bridge_protocol::BridgeReply::Rejected { reason } => Some(reason),
             _ => None,
@@ -441,12 +444,12 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let crate::RuntimeBinding::External {
             peer_id: prior_peer_id,
-            bootstrap_token,
             ..
         } = prior_binding
         else {
             return Ok(());
         };
+        let bootstrap_token = Some(Self::bridge_bootstrap_token_from_binding(prior_binding)?);
         let canonical_address =
             super::bridge_protocol::canonicalize_bridge_address(&bind_response.address);
         let updated_entries = self
@@ -502,17 +505,13 @@ impl MobActor {
                 let bind = self
                     .bind_peer_only_member_for_binding(peer, binding)
                     .await?;
+                let effective_bootstrap_token = Self::bridge_bootstrap_token_from_binding(binding)?;
                 self.persist_rebound_binding(binding, &bind).await?;
                 return Self::peer_only_spec_for_binding(
                     &crate::RuntimeBinding::External {
                         peer_id: bind.peer_id,
                         address: super::bridge_protocol::canonicalize_bridge_address(&bind.address),
-                        bootstrap_token: match binding {
-                            crate::RuntimeBinding::External {
-                                bootstrap_token, ..
-                            } => bootstrap_token.clone(),
-                            crate::RuntimeBinding::Session => None,
-                        },
+                        bootstrap_token: Some(effective_bootstrap_token),
                     },
                     "ensure_supervisor_authorized rebound peer",
                 );
@@ -538,6 +537,9 @@ impl MobActor {
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await?;
+        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+            return Err(MobError::WiringError(reason));
+        }
         serde_json::from_value(value).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
         })
@@ -2298,19 +2300,12 @@ impl MobActor {
                 MobCommand::SubscribeAllAgentEvents { reply_tx } => {
                     let result = async {
                         let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
-                        if let Some(peer_only_entry) = entries
-                            .iter()
-                            .find(|entry| entry.member_ref.bridge_session_id().is_none())
-                        {
-                            return Err(MobError::UnsupportedForMode {
-                                mode: peer_only_entry.runtime_mode,
-                                reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
-                            });
-                        }
                         let mut streams = Vec::with_capacity(entries.len());
+                        let mut unsupported_mode: Option<crate::MobRuntimeMode> = None;
                         for entry in entries {
                             let Some(session_id) = entry.member_ref.bridge_session_id().cloned()
                             else {
+                                unsupported_mode.get_or_insert(entry.runtime_mode);
                                 continue;
                             };
                             if let Ok(stream) = crate::runtime::session_service::MobSessionService::subscribe_session_events(
@@ -2321,6 +2316,14 @@ impl MobActor {
                             {
                                 streams.push((entry.meerkat_id.clone(), stream));
                             }
+                        }
+                        if streams.is_empty()
+                            && let Some(mode) = unsupported_mode
+                        {
+                            return Err(MobError::UnsupportedForMode {
+                                mode,
+                                reason: "agent event subscriptions are not supported for peer-only members in phase 1".to_string(),
+                            });
                         }
                         Ok(streams)
                     }
@@ -5348,20 +5351,35 @@ impl MobActor {
             }
         }
 
+        let mut revoke_failed = false;
         if let Err(error) = self
             .revoke_supervisor_for_binding(&binding, std::time::Duration::from_secs(5))
             .await
         {
-            outcome
-                .errors
-                .push(format!("supervisor revoke failed: {error}"));
+            let error_text = error.to_string().to_ascii_lowercase();
+            let expected_after_destroy = remote_cleanup_complete
+                && (error_text.contains("peer not found")
+                    || error_text.contains("peer offline")
+                    || error_text.contains("no authorized supervisor registered"));
+            if expected_after_destroy {
+                let peer_id = match &binding {
+                    crate::RuntimeBinding::External { peer_id, .. } => peer_id.as_str(),
+                    crate::RuntimeBinding::Session => "session",
+                };
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    error = %error,
+                    "destroy cleanup: supervisor revoke failed after terminal remote cleanup"
+                );
+            } else {
+                revoke_failed = true;
+                outcome
+                    .errors
+                    .push(format!("supervisor revoke failed: {error}"));
+            }
         }
 
-        outcome.orphaned = !remote_cleanup_complete
-            || outcome
-                .errors
-                .iter()
-                .any(|error| error.starts_with("supervisor revoke failed"));
+        outcome.orphaned = !remote_cleanup_complete || revoke_failed;
         outcome
     }
 
@@ -5673,6 +5691,8 @@ impl MobActor {
                                     .await;
                                 match bind {
                                     Ok(bind_response) => {
+                                        let effective_bootstrap_token =
+                                            Self::bridge_bootstrap_token_from_binding(&binding)?;
                                         self.persist_rebound_binding(&binding, &bind_response)
                                             .await?;
                                         effective_binding = crate::RuntimeBinding::External {
@@ -5681,13 +5701,7 @@ impl MobActor {
                                                 super::bridge_protocol::canonicalize_bridge_address(
                                                     &bind_response.address,
                                                 ),
-                                            bootstrap_token: match &binding {
-                                                crate::RuntimeBinding::External {
-                                                    bootstrap_token,
-                                                    ..
-                                                } => bootstrap_token.clone(),
-                                                crate::RuntimeBinding::Session => None,
-                                            },
+                                            bootstrap_token: Some(effective_bootstrap_token),
                                         };
                                         effective_peer = Self::peer_only_spec_for_binding(
                                             &effective_binding,

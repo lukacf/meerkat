@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 /// Address query parameter carrying the one-time bind bootstrap token.
 pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootstrap_token";
+/// Current supervisor bridge wire protocol version.
+pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 
 /// Remove the one-time bind bootstrap token from an advertised bridge address.
 pub fn canonicalize_bridge_address(address: &str) -> String {
@@ -143,16 +145,23 @@ impl From<meerkat_core::comms::TrustedPeerSpec> for BridgePeerSpec {
     }
 }
 
-impl From<BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
-    fn from(spec: BridgePeerSpec) -> Self {
-        // Bypass PeerName validation — the spec was already validated when
-        // originally constructed. This conversion is infallible because both
-        // types carry the same validated fields.
-        Self {
-            name: spec.name,
-            peer_id: spec.peer_id,
-            address: spec.address,
-        }
+impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+    type Error = String;
+
+    fn try_from(spec: BridgePeerSpec) -> Result<Self, Self::Error> {
+        meerkat_core::comms::TrustedPeerSpec::new(spec.name, spec.peer_id, spec.address)
+    }
+}
+
+impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerSpec {
+    type Error = String;
+
+    fn try_from(spec: &BridgePeerSpec) -> Result<Self, Self::Error> {
+        meerkat_core::comms::TrustedPeerSpec::new(
+            spec.name.clone(),
+            spec.peer_id.clone(),
+            spec.address.clone(),
+        )
     }
 }
 

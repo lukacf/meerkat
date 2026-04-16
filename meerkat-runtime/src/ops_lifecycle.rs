@@ -26,6 +26,7 @@ use meerkat_core::ops_lifecycle::{
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::meerkat_machine::dsl as mm_dsl;
 use crate::ops_lifecycle_authority::{
     OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
 };
@@ -254,6 +255,41 @@ struct ShellState {
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
     persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
+    /// DSL shadow authority for ops lifecycle validation.
+    ///
+    /// Tracks ops-related state fields in parallel with the handwritten
+    /// authority. On each successful authority transition, the corresponding
+    /// DSL input is applied here; disagreements are logged as errors.
+    dsl_shadow: DslShadow,
+}
+
+/// Wrapper around the DSL authority that provides `Debug` output.
+///
+/// The generated `MeerkatMachineAuthority` does not derive `Debug`, but
+/// `ShellState` requires it. This wrapper delegates to the inner state's
+/// `Debug` impl.
+struct DslShadow(mm_dsl::MeerkatMachineAuthority);
+
+impl std::fmt::Debug for DslShadow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DslShadow")
+            .field("state", &self.0.state)
+            .finish()
+    }
+}
+
+/// Create a DSL shadow authority initialized with `lifecycle_phase: Idle`
+/// and all ops-related fields at their defaults.
+///
+/// Ops lifecycle DSL transitions use `per_phase [Idle, Attached, Running, Retired, Stopped]`
+/// and always transition back to `Idle`, so the shadow stays in `Idle` permanently.
+/// Non-ops fields are left at DSL defaults since ops transitions never guard on them.
+fn new_ops_dsl_shadow() -> DslShadow {
+    let state = mm_dsl::MeerkatMachineState {
+        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+        ..mm_dsl::MeerkatMachineState::default()
+    };
+    DslShadow(mm_dsl::MeerkatMachineAuthority::from_state(state))
 }
 
 impl ShellState {
@@ -271,6 +307,7 @@ impl ShellState {
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
+            dsl_shadow: new_ops_dsl_shadow(),
         }
     }
 
@@ -461,6 +498,26 @@ impl ShellState {
         }
     }
 
+    /// Shadow-validate a DSL input against the ops-local DSL authority.
+    ///
+    /// Called after each successful handwritten authority transition.
+    /// On disagreement, logs `tracing::error!` but does NOT fail the
+    /// operation — the handwritten authority remains the real owner.
+    fn shadow_validate_dsl(&mut self, input: mm_dsl::MeerkatMachineInput, context: &str) {
+        match mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl_shadow.0, input) {
+            Ok(transition) => {
+                self.dsl_shadow.0.state.lifecycle_phase = transition.to_phase;
+            }
+            Err(err) => {
+                tracing::error!(
+                    context = context,
+                    error = %err,
+                    "DSL shadow DISAGREEMENT in ops lifecycle: authority accepted but DSL rejected"
+                );
+            }
+        }
+    }
+
     fn shell_record_mut(
         &mut self,
         id: &OperationId,
@@ -636,6 +693,7 @@ impl RuntimeOpsLifecycleRegistry {
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
+            dsl_shadow: new_ops_dsl_shadow(),
         };
 
         Self {
@@ -837,6 +895,15 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 kind,
             })?;
 
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::RegisterOp {
+                operation_id: mm_dsl::OperationId::from_domain(&operation_id).0,
+                kind: mm_dsl::OperationKind::from_domain(&kind).0,
+            },
+            "RegisterOp",
+        );
+
         // Insert shell record.
         state.records.insert(operation_id, ShellRecord::new(spec));
 
@@ -853,6 +920,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .apply(OpsLifecycleInput::ProvisioningSucceeded {
                 operation_id: id.clone(),
             })?;
+
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::StartOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "StartOp (provisioning_succeeded)",
+        );
 
         // Shell concern: record the started timestamp.
         if let Some(shell) = state.records.get_mut(id) {
@@ -875,6 +950,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .apply(OpsLifecycleInput::ProvisioningFailed {
                 operation_id: id.clone(),
             })?;
+
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "FailOp (provisioning_failed)",
+        );
 
         // Patch the real terminal outcome (authority uses placeholder).
         state
@@ -961,6 +1044,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 operation_id: id.clone(),
             })?;
 
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::CompleteOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "CompleteOp",
+        );
+
         // Patch the real terminal outcome (authority uses placeholder).
         state
             .authority
@@ -977,6 +1068,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let transition = state.authority.apply(OpsLifecycleInput::FailOperation {
             operation_id: id.clone(),
         })?;
+
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::FailOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "FailOp",
+        );
 
         // Patch the real terminal outcome.
         state
@@ -1001,6 +1100,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 operation_id: id.clone(),
             })?;
 
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::AbortOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "AbortOp",
+        );
+
         state
             .authority
             .patch_terminal_outcome(id, OperationTerminalOutcome::Aborted { reason });
@@ -1020,6 +1127,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let transition = state.authority.apply(OpsLifecycleInput::CancelOperation {
             operation_id: id.clone(),
         })?;
+
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::CancelOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "CancelOp",
+        );
 
         // Patch the real terminal outcome.
         state

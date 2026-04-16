@@ -238,21 +238,11 @@ pub struct BridgeDestroyResponse {
 /// Response to an observe command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeObservationResponse {
-    /// Backward-compatible mirror of [`Self::state`] kept so mixed-version
-    /// peers can continue decoding observation replies during rollout.
-    ///
-    /// New consumers should read [`Self::state`].
-    pub phase: BridgeMemberRuntimeState,
-    /// Canonical bridged runtime state for the observed member.
+    /// Bridged runtime state for the observed member.
     pub state: BridgeMemberRuntimeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepting_inputs: Option<bool>,
-    /// Backward-compatible mirror of [`Self::current_run_id`].
-    ///
-    /// New consumers should read [`Self::current_run_id`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_run: Option<String>,
-    /// Canonical current run identifier reported by the member runtime.
+    /// Current run identifier reported by the member runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,8 +254,7 @@ pub struct BridgeObservationResponse {
 }
 
 impl BridgeObservationResponse {
-    /// Build an observation reply while keeping the legacy compatibility
-    /// mirrors (`phase`, `current_run`) aligned with the canonical fields.
+    /// Build an observation reply.
     pub fn new(
         state: BridgeMemberRuntimeState,
         accepting_inputs: Option<bool>,
@@ -275,25 +264,13 @@ impl BridgeObservationResponse {
         observed_at: String,
     ) -> Self {
         Self {
-            phase: state,
             state,
             accepting_inputs,
-            current_run: current_run_id.clone(),
             current_run_id,
             peer_connectivity,
             last_error,
             observed_at,
         }
-    }
-
-    /// Canonical runtime state to use when interpreting an observation.
-    pub fn canonical_state(&self) -> BridgeMemberRuntimeState {
-        self.state
-    }
-
-    /// Canonical current run identifier to use when interpreting an observation.
-    pub fn canonical_current_run_id(&self) -> Option<&str> {
-        self.current_run_id.as_deref()
     }
 }
 
@@ -302,7 +279,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn observation_response_keeps_compatibility_mirrors_aligned() {
+    fn observation_response_new_sets_observation_fields() {
         let response = BridgeObservationResponse::new(
             BridgeMemberRuntimeState::Running,
             Some(true),
@@ -312,15 +289,12 @@ mod tests {
             "2026-04-16T07:00:00Z".to_string(),
         );
 
-        assert_eq!(response.phase, response.state);
+        assert_eq!(response.state, BridgeMemberRuntimeState::Running);
+        assert_eq!(response.current_run_id.as_deref(), Some("run-1"));
+        assert_eq!(response.accepting_inputs, Some(true));
         assert_eq!(
-            response.current_run.as_deref(),
-            response.current_run_id.as_deref()
+            response.peer_connectivity,
+            Some(BridgePeerConnectivity::Reachable)
         );
-        assert_eq!(
-            response.canonical_state(),
-            BridgeMemberRuntimeState::Running
-        );
-        assert_eq!(response.canonical_current_run_id(), Some("run-1"));
     }
 }

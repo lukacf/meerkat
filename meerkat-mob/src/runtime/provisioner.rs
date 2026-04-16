@@ -1,5 +1,5 @@
 #[cfg(feature = "runtime-adapter")]
-use super::bridge::MobMemberRuntimeBridge;
+use super::bridge::MobBoundMemberRuntimeBridge;
 #[cfg(feature = "runtime-adapter")]
 use super::local_bridge::LocalMobRuntimeBridge;
 use super::*;

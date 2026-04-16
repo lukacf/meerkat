@@ -2753,23 +2753,21 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 }
                                 super::bridge_protocol::BridgeCommand::ObserveMember(_) => {
                                     serde_json::to_value(
-                                        super::bridge_protocol::BridgeObservationResponse {
-                                            phase: state,
+                                        super::bridge_protocol::BridgeObservationResponse::new(
                                             state,
-                                            accepting_inputs: Some(matches!(
+                                            Some(matches!(
                                                 state,
                                                 super::bridge_protocol::BridgeMemberRuntimeState::Idle
                                                     | super::bridge_protocol::BridgeMemberRuntimeState::Attached
                                                     | super::bridge_protocol::BridgeMemberRuntimeState::Running
                                             )),
-                                            current_run: None,
-                                            current_run_id: None,
-                                            peer_connectivity: Some(
+                                            None,
+                                            Some(
                                                 super::bridge_protocol::BridgePeerConnectivity::Reachable,
                                             ),
-                                            last_error: None,
-                                            observed_at: Utc::now().to_rfc3339(),
-                                        },
+                                            None,
+                                            Utc::now().to_rfc3339(),
+                                        ),
                                     )
                                     .expect("observe response")
                                 }

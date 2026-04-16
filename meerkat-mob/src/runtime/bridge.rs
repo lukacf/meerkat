@@ -1,41 +1,30 @@
-//! `MobMemberRuntimeBridge` — typed protocol boundary between MobMachine and
-//! the MeerkatMachine instances it supervises.
+//! Typed protocol boundary between a mob supervisor and the member runtimes it
+//! supervises.
 //!
-//! All member lifecycle operations go through this trait. The mob crate owns
-//! the contract; the runtime crate implements it.
+//! The mob crate owns the contract; the runtime crate and local bridge adapters
+//! implement it.
 //!
-//! - **Local members:** implemented by `LocalMobRuntimeBridge` wrapping
-//!   `Arc<MeerkatMachine>`.
-//! - **Remote members:** implemented by `RemoteMobRuntimeBridge` sending
-//!   typed [`BridgeCommand`](meerkat_contracts::BridgeCommand) envelopes over
-//!   comms.
+//! - **Bound member operations:** exposed through [`MobBoundMemberRuntimeBridge`]
+//!   and implemented by both local and remote bridges.
+//! - **Remote bind admission:** exposed through [`MobMemberRuntimeBridge`] and
+//!   only implemented by remote bridges.
 
 use super::bridge_protocol::{
     BridgeAck, BridgeBindResponse, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerSpec, BridgeRetireResponse,
+    BridgeObservationResponse, BridgePeerSpec, BridgeRetireResponse,
 };
 use crate::error::MobError;
 use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode};
 
-/// Protocol boundary between MobMachine and the MeerkatMachine instances
-/// it supervises. All member lifecycle operations go through this trait.
+/// Protocol boundary for operations on a member runtime that has already been
+/// bound into the mob.
 ///
 /// Local members: implemented by a wrapper around MeerkatMachine.
 /// Remote members: implemented by a comms-based protocol client.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-pub trait MobMemberRuntimeBridge: Send + Sync {
-    // --- Binding ---
-
-    /// Bind a remote runtime to this mob. Stages the runtime, authorizes the
-    /// supervisor, commits the binding, and returns a `BridgeBindResponse`.
-    async fn bind_member(
-        &self,
-        expected_peer_id: &str,
-        expected_address: &str,
-    ) -> Result<BridgeBindResponse, MobError>;
-
+pub trait MobBoundMemberRuntimeBridge: Send + Sync {
     // --- Supervisor authority ---
 
     /// Authorize (or re-authorize) the supervisor for this member.
@@ -81,12 +70,29 @@ pub trait MobMemberRuntimeBridge: Send + Sync {
     async fn unwire_member(&self, peer_spec: BridgePeerSpec) -> Result<BridgeAck, MobError>;
 }
 
+/// Full remote-member bridge contract.
+///
+/// `bind_member` only applies before a remote runtime has been admitted into
+/// the mob. Local bridges intentionally do not implement this trait; callers
+/// should branch by member kind before attempting to bind.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobMemberRuntimeBridge: MobBoundMemberRuntimeBridge {
+    /// Bind a remote runtime to this mob. Stages the runtime, authorizes the
+    /// supervisor, commits the binding, and returns a `BridgeBindResponse`.
+    async fn bind_member(
+        &self,
+        expected_peer_id: &str,
+        expected_address: &str,
+    ) -> Result<BridgeBindResponse, MobError>;
+}
+
 /// Observe whether a member is in a terminal runtime state.
 pub fn observation_is_terminal(observation: &BridgeObservationResponse) -> bool {
     matches!(
-        observation.state,
-        BridgeMemberRuntimeState::Retired
-            | BridgeMemberRuntimeState::Stopped
-            | BridgeMemberRuntimeState::Destroyed
+        observation.canonical_state(),
+        super::bridge_protocol::BridgeMemberRuntimeState::Retired
+            | super::bridge_protocol::BridgeMemberRuntimeState::Stopped
+            | super::bridge_protocol::BridgeMemberRuntimeState::Destroyed
     )
 }

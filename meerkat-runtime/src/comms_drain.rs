@@ -865,16 +865,14 @@ async fn try_handle_supervisor_bridge_command(
                                 .map(|run_id| run_id.to_string())
                         });
                     let bridge_state = runtime_state_to_bridge(state);
-                    let response = serde_json::to_value(BridgeObservationResponse {
-                        phase: bridge_state,
-                        state: bridge_state,
-                        accepting_inputs: Some(state.can_accept_input()),
-                        current_run: current_run_id.clone(),
+                    let response = serde_json::to_value(BridgeObservationResponse::new(
+                        bridge_state,
+                        Some(state.can_accept_input()),
                         current_run_id,
-                        peer_connectivity: Some(BridgePeerConnectivity::Reachable),
-                        last_error: None,
-                        observed_at: chrono::Utc::now().to_rfc3339(),
-                    })
+                        Some(BridgePeerConnectivity::Reachable),
+                        None,
+                        chrono::Utc::now().to_rfc3339(),
+                    ))
                     .unwrap_or_else(|_| serde_json::json!({ "state": bridge_state.to_string() }));
                     send_bridge_response(
                         comms_runtime,

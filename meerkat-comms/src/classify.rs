@@ -12,12 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &[
-    "supervisor.bridge",
-    // Legacy intents kept for backward compatibility during migration.
-    "mob.runtime.bind_member",
-    "mob.runtime.authorize_supervisor",
-];
+const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &["supervisor.bridge"];
 
 /// Receiver-owned context for synchronous ingress classification.
 ///
@@ -518,15 +513,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_untrusted_bind_member_remains_admissible() {
+    fn classify_untrusted_supervisor_bridge_request_remains_admissible() {
         let sender = make_keypair();
         let trusted = TrustedPeers::new(); // sender NOT trusted yet
         let ctx = make_context(true, trusted, vec![]);
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
-                intent: "mob.runtime.bind_member".to_string(),
+                intent: "supervisor.bridge".to_string(),
                 params: serde_json::json!({
+                    "command": "bind_member",
                     "supervisor": {
                         "name": "mob/__mob_supervisor__",
                         "peer_id": sender.public_key().to_peer_id(),
@@ -546,6 +542,27 @@ mod tests {
             .expect("bind_member should remain admissible");
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
         assert_eq!(result.from_peer, Some(sender.public_key().to_peer_id()));
+    }
+
+    #[test]
+    fn classify_untrusted_legacy_bridge_intent_drops_at_ingress() {
+        let sender = make_keypair();
+        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let ctx = make_context(true, trusted, vec![]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "mob.runtime.bind_member".to_string(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx.classify(&item);
+        assert!(
+            result.is_none(),
+            "legacy bridge intents should no longer bypass auth at ingress"
+        );
     }
 
     #[test]

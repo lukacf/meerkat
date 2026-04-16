@@ -1,12 +1,13 @@
-//! `LocalMobRuntimeBridge` — local implementation of `MobMemberRuntimeBridge`
-//! that forwards to `MeerkatMachine` for in-process mob members.
+//! `LocalMobRuntimeBridge` — local implementation of
+//! `MobBoundMemberRuntimeBridge` that forwards to `MeerkatMachine` for
+//! in-process mob members.
 
 use crate::error::MobError;
-use crate::runtime::bridge::MobMemberRuntimeBridge;
+use crate::runtime::bridge::MobBoundMemberRuntimeBridge;
 use crate::runtime::bridge_protocol::{
-    BridgeAck, BridgeBindResponse, BridgeDeliveryOutcome, BridgeDeliveryResponse,
-    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
-    BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
+    BridgeAck, BridgeDeliveryOutcome, BridgeDeliveryResponse, BridgeDestroyResponse,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgeRetireResponse,
 };
 use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
@@ -39,24 +40,19 @@ fn runtime_state_to_bridge(state: meerkat_runtime::RuntimeState) -> BridgeMember
         meerkat_runtime::RuntimeState::Retired => BridgeMemberRuntimeState::Retired,
         meerkat_runtime::RuntimeState::Stopped => BridgeMemberRuntimeState::Stopped,
         meerkat_runtime::RuntimeState::Destroyed => BridgeMemberRuntimeState::Destroyed,
-        _ => BridgeMemberRuntimeState::Idle,
+        other => {
+            tracing::warn!(
+                runtime_state = %other,
+                "unmapped runtime state observed over LocalMobRuntimeBridge; projecting idle for compatibility"
+            );
+            BridgeMemberRuntimeState::Idle
+        }
     }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl MobMemberRuntimeBridge for LocalMobRuntimeBridge {
-    async fn bind_member(
-        &self,
-        _expected_peer_id: &str,
-        _expected_address: &str,
-    ) -> Result<BridgeBindResponse, MobError> {
-        // Local members don't need binding — they're already in-process.
-        Err(MobError::Internal(
-            "bind_member is not supported for local members".to_string(),
-        ))
-    }
-
+impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
     async fn authorize_supervisor(&self) -> Result<BridgeAck, MobError> {
         // Local members don't need supervisor authorization.
         Ok(BridgeAck { ok: true })
@@ -175,16 +171,14 @@ impl MobMemberRuntimeBridge for LocalMobRuntimeBridge {
                     .map(|run_id| run_id.to_string())
             });
 
-        Ok(BridgeObservationResponse {
-            phase: runtime_state_to_bridge(state),
-            state: runtime_state_to_bridge(state),
-            accepting_inputs: Some(state.can_accept_input()),
-            current_run: current_run_id.clone(),
+        Ok(BridgeObservationResponse::new(
+            runtime_state_to_bridge(state),
+            Some(state.can_accept_input()),
             current_run_id,
-            peer_connectivity: Some(BridgePeerConnectivity::Reachable),
-            last_error: None,
-            observed_at: chrono::Utc::now().to_rfc3339(),
-        })
+            Some(BridgePeerConnectivity::Reachable),
+            None,
+            chrono::Utc::now().to_rfc3339(),
+        ))
     }
 
     async fn interrupt_member(&self) -> Result<BridgeAck, MobError> {
@@ -263,17 +257,6 @@ mod tests {
 
         assert_eq!(report.inputs_abandoned, 0);
         assert_eq!(report.inputs_pending_drain, 0);
-    }
-
-    #[tokio::test]
-    async fn local_bridge_bind_is_unsupported() {
-        let machine = Arc::new(MeerkatMachine::ephemeral());
-        let session_id = SessionId::new();
-
-        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
-        let result = bridge.bind_member("peer-1", "inproc://peer-1").await;
-
-        assert!(result.is_err());
     }
 
     #[tokio::test]

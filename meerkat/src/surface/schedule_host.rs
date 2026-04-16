@@ -236,7 +236,7 @@ impl ScheduleTargetProbe for SharedScheduleTargetAdapter {
         &self,
         occurrence: &Occurrence,
     ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
-        match &occurrence.target_snapshot {
+        match &occurrence.context.target_snapshot {
             TargetBinding::Session(binding) => {
                 self.session_host.probe_session_target(binding).await
             }
@@ -251,7 +251,7 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
         &self,
         occurrence: &Occurrence,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-        match &occurrence.target_snapshot {
+        match &occurrence.context.target_snapshot {
             TargetBinding::Session(binding) => {
                 let resolved = match self.resolve_session(occurrence, binding).await {
                     Ok(resolved) => resolved,

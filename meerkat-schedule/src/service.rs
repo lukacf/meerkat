@@ -225,10 +225,10 @@ impl ScheduleService {
         if current.revision != occurrence.schedule_revision {
             return Ok(occurrence);
         }
-        if occurrence.target_snapshot == current.target {
+        if occurrence.context.target_snapshot == current.target {
             return Ok(occurrence);
         }
-        occurrence.target_snapshot = current.target.clone();
+        occurrence.context.target_snapshot = current.target.clone();
         self.store.put_occurrence(occurrence.clone()).await?;
         Ok(occurrence)
     }
@@ -267,6 +267,7 @@ impl ScheduleService {
                 continue;
             }
             if pending_occurrence
+                .context
                 .target_snapshot
                 .bind_materialized_session(session_id)
             {

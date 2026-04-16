@@ -46,10 +46,10 @@ pub use trigger::{CronAuthoringSpec, next_due_after, occurrences_for_horizon};
 pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
-    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule, ScheduleId,
-    SchedulePhase, ScheduleRevision, ScheduleSpawnTooling, ScheduledMobAction,
-    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceContext, OccurrenceFailureClass,
+    OccurrenceId, OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot,
+    Schedule, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
+    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     UpdateScheduleRequest,
 };

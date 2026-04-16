@@ -263,7 +263,7 @@ impl ScheduleDriver {
         match self.probe.probe_target(&occurrence).await? {
             TargetProbeOutcome::Ready => {}
             TargetProbeOutcome::Busy { detail } => {
-                if occurrence.overlap_policy == OverlapPolicy::AllowConcurrent {
+                if occurrence.context.overlap_policy == OverlapPolicy::AllowConcurrent {
                     // Delivery continues for explicit concurrent schedules.
                 } else {
                     self.terminalize_occurrence(
@@ -282,7 +282,7 @@ impl ScheduleDriver {
             }
             TargetProbeOutcome::Missing { detail } => {
                 let lifecycle = if matches!(
-                    occurrence.missing_target_policy,
+                    occurrence.context.missing_target_policy,
                     crate::types::MissingTargetPolicy::Skip
                 ) {
                     OccurrenceLifecycleInput::Skip {

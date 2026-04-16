@@ -391,7 +391,7 @@ pub(crate) mod occurrence {
             schedule_id: ScheduleId(occ.schedule_id.0.to_string()),
             schedule_revision: occ.schedule_revision.0,
             occurrence_ordinal: occ.occurrence_ordinal.0,
-            target_binding_key: occ.target_snapshot.stable_key(),
+            target_binding_key: occ.context.target_snapshot.stable_key(),
             due_at_utc_ms: dt_to_ms(occ.due_at_utc),
             claimed_by: occ.claimed_by.clone(),
             lease_expires_at_utc_ms: occ.lease_expires_at_utc.map(dt_to_ms),

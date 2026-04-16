@@ -911,20 +911,31 @@ impl Schedule {
     }
 }
 
+/// Immutable context captured at occurrence planning time.
+///
+/// These fields are snapshots of the parent schedule's configuration and are
+/// never mutated by lifecycle authority transitions.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OccurrenceContext {
+    pub trigger_snapshot: TriggerSpec,
+    pub target_snapshot: TargetBinding,
+    pub misfire_policy: MisfirePolicy,
+    pub overlap_policy: OverlapPolicy,
+    pub missing_target_policy: MissingTargetPolicy,
+    pub created_at_utc: DateTime<Utc>,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Occurrence {
+    // Machine state fields — mutated by authority transitions
     pub occurrence_id: OccurrenceId,
     pub schedule_id: ScheduleId,
     pub schedule_revision: ScheduleRevision,
     pub occurrence_ordinal: OccurrenceOrdinal,
     pub phase: OccurrencePhase,
     pub due_at_utc: DateTime<Utc>,
-    pub trigger_snapshot: TriggerSpec,
-    pub target_snapshot: TargetBinding,
-    pub misfire_policy: MisfirePolicy,
-    pub overlap_policy: OverlapPolicy,
-    pub missing_target_policy: MissingTargetPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -942,7 +953,6 @@ pub struct Occurrence {
     pub failure_detail: Option<String>,
     #[serde(default)]
     pub attempt_count: u32,
-    pub created_at_utc: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_at_utc: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -951,6 +961,9 @@ pub struct Occurrence {
     pub completed_at_utc: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by_revision: Option<ScheduleRevision>,
+    // Context — immutable after planning
+    #[serde(flatten)]
+    pub context: OccurrenceContext,
 }
 
 impl Occurrence {
@@ -966,11 +979,6 @@ impl Occurrence {
             occurrence_ordinal,
             phase: OccurrencePhase::Pending,
             due_at_utc,
-            trigger_snapshot: schedule.trigger.clone(),
-            target_snapshot: schedule.target.clone(),
-            misfire_policy: schedule.misfire_policy.clone(),
-            overlap_policy: schedule.overlap_policy.clone(),
-            missing_target_policy: schedule.missing_target_policy.clone(),
             claimed_by: None,
             lease_expires_at_utc: None,
             claim_token: None,
@@ -979,11 +987,18 @@ impl Occurrence {
             failure_class: None,
             failure_detail: None,
             attempt_count: 0,
-            created_at_utc: Utc::now(),
             claimed_at_utc: None,
             dispatched_at_utc: None,
             completed_at_utc: None,
             superseded_by_revision: None,
+            context: OccurrenceContext {
+                trigger_snapshot: schedule.trigger.clone(),
+                target_snapshot: schedule.target.clone(),
+                misfire_policy: schedule.misfire_policy.clone(),
+                overlap_policy: schedule.overlap_policy.clone(),
+                missing_target_policy: schedule.missing_target_policy.clone(),
+                created_at_utc: Utc::now(),
+            },
         }
     }
 
@@ -996,13 +1011,17 @@ impl Occurrence {
         self.phase == OccurrencePhase::Pending
             && self.due_at_utc <= now_utc
             && !self
+                .context
                 .misfire_policy
                 .allows_pending_delivery_at(self.due_at_utc, now_utc)
     }
 
     pub fn misfire_detail_at(&self, now_utc: DateTime<Utc>) -> Option<String> {
-        self.should_misfire_at(now_utc)
-            .then(|| self.misfire_policy.misfire_detail(self.due_at_utc, now_utc))
+        self.should_misfire_at(now_utc).then(|| {
+            self.context
+                .misfire_policy
+                .misfire_detail(self.due_at_utc, now_utc)
+        })
     }
 
     pub fn is_reclaimable_at(&self, now_utc: DateTime<Utc>) -> bool {

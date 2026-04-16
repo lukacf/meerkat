@@ -1192,12 +1192,19 @@ impl MobBuilder {
             session_service: handle_session_service.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
         };
-        let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
-            session_service,
-            runtime_adapter.clone(),
-            external_backend,
-            supervisor_bridge.clone(),
-        ));
+        let provisioner: Arc<dyn MobProvisioner> = Arc::new(
+            MultiBackendProvisioner::new(
+                session_service,
+                runtime_adapter.clone(),
+                external_backend,
+                supervisor_bridge.clone(),
+            )
+            .with_binding_persistence(
+                definition.id.clone(),
+                runtime_metadata.clone(),
+                roster.clone(),
+            ),
+        );
         let max_orphaned_turns = definition
             .limits
             .as_ref()

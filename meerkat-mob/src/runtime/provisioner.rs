@@ -1051,6 +1051,7 @@ pub struct MultiBackendProvisioner {
     session: SessionBackend,
     external: Option<ExternalBackend>,
     supervisor_bridge: Arc<super::MobSupervisorBridge>,
+    binding_persistence: Option<ProvisionerBindingPersistence>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1059,6 +1060,14 @@ struct ExternalBindingTarget {
     peer_id: String,
     address: String,
     bootstrap_token: Option<String>,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[derive(Clone)]
+struct ProvisionerBindingPersistence {
+    mob_id: crate::MobId,
+    runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+    roster: Arc<RwLock<super::roster_authority::RosterAuthority>>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1075,7 +1084,22 @@ impl MultiBackendProvisioner {
             session,
             external,
             supervisor_bridge,
+            binding_persistence: None,
         }
+    }
+
+    pub fn with_binding_persistence(
+        mut self,
+        mob_id: crate::MobId,
+        runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        roster: Arc<RwLock<super::roster_authority::RosterAuthority>>,
+    ) -> Self {
+        self.binding_persistence = Some(ProvisionerBindingPersistence {
+            mob_id,
+            runtime_metadata,
+            roster,
+        });
+        self
     }
 
     async fn peer_only_spec(&self, member_ref: &MemberRef) -> Result<TrustedPeerSpec, MobError> {
@@ -1185,6 +1209,12 @@ impl MultiBackendProvisioner {
                 let bind: super::bridge_protocol::BridgeBindResponse = self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
                     .await?;
+                self.persist_rebound_binding(
+                    peer_id,
+                    bootstrap_token.map(std::string::ToString::to_string),
+                    &bind,
+                )
+                .await?;
                 return Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address);
             }
             return Err(MobError::WiringError(reason));
@@ -1229,6 +1259,50 @@ impl MultiBackendProvisioner {
         );
         self.send_bridge_command_typed(peer, &command, Duration::from_secs(30))
             .await
+    }
+
+    async fn persist_rebound_binding(
+        &self,
+        prior_peer_id: &str,
+        bootstrap_token: Option<String>,
+        bind: &super::bridge_protocol::BridgeBindResponse,
+    ) -> Result<(), MobError> {
+        let Some(persistence) = self.binding_persistence.as_ref() else {
+            return Ok(());
+        };
+        let canonical_address = super::bridge_protocol::canonicalize_bridge_address(&bind.address);
+        let updated_entries = persistence
+            .roster
+            .write()
+            .await
+            .replace_backend_peer_binding_by_peer_id(
+                prior_peer_id,
+                &bind.peer_id,
+                &canonical_address,
+                bootstrap_token.clone(),
+            );
+        for (identity, generation) in updated_entries {
+            persistence
+                .runtime_metadata
+                .upsert_external_binding_overlay(
+                    &persistence.mob_id,
+                    &crate::store::ExternalBindingOverlayRecord {
+                        agent_identity: identity,
+                        generation,
+                        normalized_member_ref: Some(MemberRef::BackendPeer {
+                            peer_id: bind.peer_id.clone(),
+                            address: canonical_address.clone(),
+                            bootstrap_token: None,
+                            session_id: None,
+                        }),
+                        bootstrap_token: bootstrap_token.clone(),
+                        status: crate::store::ExternalBindingOverlayStatus::Normalized,
+                        updated_at: chrono::Utc::now(),
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn external_member_ref(

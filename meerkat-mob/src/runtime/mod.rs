@@ -69,6 +69,8 @@ pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod local_bridge;
 pub(crate) mod loop_iteration_authority;
 mod mob_lifecycle_authority;
 mod mob_member_bootstrap_authority;

@@ -326,9 +326,9 @@ impl MobActor {
         context: &'static str,
     ) -> Result<TrustedPeerSpec, MobError> {
         match binding {
-            crate::RuntimeBinding::External { peer_id, address } => {
-                Self::peer_only_spec_from_parts(peer_id, address, context)
-            }
+            crate::RuntimeBinding::External {
+                peer_id, address, ..
+            } => Self::peer_only_spec_from_parts(peer_id, address, context),
             crate::RuntimeBinding::Session => Err(MobError::Internal(format!(
                 "{context}: peer-only runtime spec requested for session binding"
             ))),
@@ -3725,10 +3725,14 @@ impl MobActor {
                 .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
-                    peer_id, address, ..
+                    peer_id,
+                    address,
+                    bootstrap_token,
+                    ..
                 } => crate::RuntimeBinding::External {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    bootstrap_token: bootstrap_token.clone(),
                 },
                 crate::event::MemberRef::Session { .. } => crate::RuntimeBinding::Session,
             };
@@ -4949,10 +4953,12 @@ impl MobActor {
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: None,
             } => Some(crate::RuntimeBinding::External {
                 peer_id: peer_id.clone(),
                 address: address.clone(),
+                bootstrap_token: bootstrap_token.clone(),
             }),
             _ => None,
         }

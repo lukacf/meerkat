@@ -89,6 +89,8 @@ pub enum MemberRef {
         peer_id: String,
         /// Backend-provided address string.
         address: String,
+        /// Optional bootstrap proof for re-establishing supervisor control.
+        bootstrap_token: Option<String>,
         /// Optional bridge session binding when this member is bridged to a
         /// local session. Serialized additively as both `session_id` and
         /// `bridge_session_id` for compatibility.
@@ -125,13 +127,19 @@ impl Serialize for MemberRef {
             Self::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id,
             } => {
-                let mut map =
-                    serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
+                let mut map = serializer.serialize_map(Some(
+                    3 + usize::from(bootstrap_token.is_some())
+                        + if session_id.is_some() { 2 } else { 0 },
+                ))?;
                 map.serialize_entry("kind", "backend_peer")?;
                 map.serialize_entry("peer_id", peer_id)?;
                 map.serialize_entry("address", address)?;
+                if let Some(bootstrap_token) = bootstrap_token {
+                    map.serialize_entry("bootstrap_token", bootstrap_token)?;
+                }
                 if let Some(session_id) = session_id {
                     map.serialize_entry("session_id", session_id)?;
                     map.serialize_entry("bridge_session_id", session_id)?;
@@ -161,6 +169,8 @@ enum MemberRefCanonical {
         peer_id: String,
         address: String,
         #[serde(default)]
+        bootstrap_token: Option<String>,
+        #[serde(default)]
         session_id: Option<SessionId>,
         #[serde(default)]
         bridge_session_id: Option<SessionId>,
@@ -187,11 +197,13 @@ impl<'de> Deserialize<'de> for MemberRef {
             MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id,
                 bridge_session_id,
             }) => Self::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: bridge_session_id.or(session_id),
             },
         })
@@ -766,6 +778,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: None,
             session_id: Some(SessionId::from_uuid(Uuid::nil())),
         };
 

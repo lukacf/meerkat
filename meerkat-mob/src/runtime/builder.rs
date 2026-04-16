@@ -552,7 +552,7 @@ impl MobBuilder {
                 MOB_RUNTIME_BRIDGE_PROTOCOL_VERSION,
             );
             runtime_metadata
-                .put_supervisor_authority(&mob_id, &record)
+                .put_supervisor_authority_if_absent(&mob_id, &record)
                 .await?;
         }
 
@@ -657,10 +657,12 @@ impl MobBuilder {
             crate::event::MemberRef::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: _,
             } => Some(crate::event::MemberRef::BackendPeer {
                 peer_id: peer_id.clone(),
                 address: address.clone(),
+                bootstrap_token: bootstrap_token.clone(),
                 session_id: None,
             }),
             crate::event::MemberRef::Session { .. } => None,

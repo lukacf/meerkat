@@ -470,10 +470,14 @@ impl Roster {
             entry.member_ref = match &entry.member_ref {
                 MemberRef::Session { .. } => MemberRef::from_bridge_session_id(bridge_session_id),
                 MemberRef::BackendPeer {
-                    peer_id, address, ..
+                    peer_id,
+                    address,
+                    bootstrap_token,
+                    ..
                 } => MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    bootstrap_token: bootstrap_token.clone(),
                     session_id: Some(bridge_session_id),
                 },
             };
@@ -801,6 +805,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                bootstrap_token: None,
                 session_id: Some(old_sid),
             },
         );
@@ -815,6 +820,7 @@ mod tests {
                 peer_id,
                 address,
                 session_id,
+                ..
             } => {
                 assert_eq!(peer_id, "peer-ext-1");
                 assert_eq!(address, "https://backend.example.invalid/mesh/ext-1");
@@ -1296,6 +1302,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                bootstrap_token: None,
                 session_id: Some(sid.clone()),
             },
         );
@@ -1314,6 +1321,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-2".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-2".to_string(),
+                bootstrap_token: None,
                 session_id: None,
             },
         );

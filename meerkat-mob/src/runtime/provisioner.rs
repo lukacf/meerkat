@@ -1054,6 +1054,14 @@ pub struct MultiBackendProvisioner {
 }
 
 #[cfg(feature = "runtime-adapter")]
+struct ExternalBindingTarget {
+    peer_name: String,
+    peer_id: String,
+    address: String,
+    bootstrap_token: Option<String>,
+}
+
+#[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -1076,6 +1084,7 @@ impl MultiBackendProvisioner {
                 peer_id,
                 address,
                 session_id: None,
+                ..
             } => TrustedPeerSpec::new(
                 address
                     .strip_prefix("inproc://")
@@ -1106,13 +1115,19 @@ impl MultiBackendProvisioner {
         .map_err(|error| MobError::WiringError(format!("invalid peer-only spec: {error}")))
     }
 
-    fn bridge_bootstrap_token_from_address(address: &str) -> Result<String, MobError> {
+    fn bridge_bootstrap_token_from_binding(
+        address: &str,
+        bootstrap_token: Option<&str>,
+    ) -> Result<String, MobError> {
+        if let Some(token) = bootstrap_token.filter(|token| !token.is_empty()) {
+            return Ok(token.to_string());
+        }
         let query = address
             .split_once('?')
             .map(|(_, query)| query)
             .ok_or_else(|| {
                 MobError::WiringError(format!(
-                    "external runtime address '{address}' is missing bridge bootstrap token"
+                    "external runtime binding for '{address}' is missing bridge bootstrap token"
                 ))
             })?;
         for pair in query.split('&') {
@@ -1126,7 +1141,7 @@ impl MultiBackendProvisioner {
             }
         }
         Err(MobError::WiringError(format!(
-            "external runtime address '{address}' is missing '{}' query param",
+            "external runtime binding for '{address}' is missing bootstrap token ('{}' query param or explicit field)",
             super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
         )))
     }
@@ -1173,8 +1188,9 @@ impl MultiBackendProvisioner {
         peer: &TrustedPeerSpec,
         peer_id: &str,
         address: &str,
+        bootstrap_token: Option<&str>,
     ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
-        let bootstrap_token = Self::bridge_bootstrap_token_from_address(address)?;
+        let bootstrap_token = Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
         let authority = self.supervisor_bridge.authority().await;
         let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
         let command = super::bridge_protocol::BridgeCommand::BindMember(
@@ -1194,12 +1210,16 @@ impl MultiBackendProvisioner {
     async fn external_member_ref(
         &self,
         _create_session: CreateSessionRequest,
-        peer_name: String,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
-        real_peer_id: String,
-        real_address: String,
+        target: ExternalBindingTarget,
     ) -> Result<MemberSpawnReceipt, MobError> {
+        let ExternalBindingTarget {
+            peer_name,
+            peer_id: real_peer_id,
+            address: real_address,
+            bootstrap_token,
+        } = target;
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
                 "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
@@ -1220,11 +1240,17 @@ impl MultiBackendProvisioner {
         );
         let peer = Self::peer_only_spec_from_parts(&real_peer_id, &real_address)?;
         let bind_response = self
-            .bind_peer_only_member(&peer, &real_peer_id, &real_address)
+            .bind_peer_only_member(
+                &peer,
+                &real_peer_id,
+                &real_address,
+                bootstrap_token.as_deref(),
+            )
             .await?;
         let member_ref = MemberRef::BackendPeer {
             peer_id: bind_response.peer_id,
             address: bind_response.address,
+            bootstrap_token,
             session_id: None,
         };
         if let (Some(owner_bridge_session_id), Some(registry)) =
@@ -1269,14 +1295,21 @@ impl MobProvisioner for MultiBackendProvisioner {
                     })
                     .await
             }
-            RuntimeBinding::External { peer_id, address } => {
+            RuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            } => {
                 self.external_member_ref(
                     req.create_session,
-                    req.peer_name,
                     req.owner_bridge_session_id,
                     req.ops_registry,
-                    peer_id,
-                    address,
+                    ExternalBindingTarget {
+                        peer_name: req.peer_name,
+                        peer_id,
+                        address,
+                        bootstrap_token,
+                    },
                 )
                 .await
             }
@@ -1460,6 +1493,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 peer_id,
                 address,
                 session_id,
+                ..
             } => {
                 if let Some(session_id) = session_id {
                     // External members keep a local bridge session for lifecycle
@@ -1493,6 +1527,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 peer_id,
                 address,
                 session_id: None,
+                ..
             } => {
                 if let Some(operation_id) = self
                     .session
@@ -1532,6 +1567,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                 peer_id,
                 address,
                 session_id: None,
+                ..
             } => {
                 let display_name = format!("mob_member/backend_peer/{peer_id}@{address}");
                 self.session.ops_adapter.bind_member_registry(

@@ -42,11 +42,13 @@ impl MemberOpsKey {
             MemberRef::BackendPeer {
                 peer_id: _,
                 address: _,
+                bootstrap_token: _,
                 session_id: Some(session_id),
             } => Some(Self::Session(session_id.clone())),
             MemberRef::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token: _,
                 session_id: None,
             } => Some(Self::BackendPeer {
                 peer_id: peer_id.clone(),

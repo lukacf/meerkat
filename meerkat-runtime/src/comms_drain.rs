@@ -390,6 +390,51 @@ fn validate_bind_request(
     Ok(payload.supervisor.clone().into())
 }
 
+#[derive(Debug)]
+enum AuthorizeSupervisorGate {
+    IdempotentAck,
+    Proceed,
+}
+
+fn validate_authorize_supervisor_request(
+    sender: &str,
+    payload: &BridgeSupervisorPayload,
+    supervisor_state: &Option<AuthorizedSupervisorState>,
+) -> Result<AuthorizeSupervisorGate, String> {
+    if let Some(current) = supervisor_state.as_ref() {
+        if payload.epoch < current.epoch {
+            return Err(format!(
+                "authorize supervisor failed: stale supervisor epoch {} (current {})",
+                payload.epoch, current.epoch
+            ));
+        }
+        if !sender_matches_supervisor(sender, &current.supervisor) {
+            return Err(format!(
+                "authorize supervisor failed: request sender '{sender}' does not match authorized supervisor '{}'",
+                current.supervisor.peer_id
+            ));
+        }
+        if payload.epoch == current.epoch
+            && payload.supervisor.peer_id == current.supervisor.peer_id
+        {
+            return Ok(AuthorizeSupervisorGate::IdempotentAck);
+        }
+        return Ok(AuthorizeSupervisorGate::Proceed);
+    }
+
+    if !sender_matches_bridge_peer(sender, &payload.supervisor) {
+        return Err(format!(
+            "authorize supervisor failed: request sender '{sender}' does not match supervisor '{}'",
+            payload.supervisor.peer_id
+        ));
+    }
+
+    Err(
+        "authorize supervisor failed: use bind_member to establish initial supervisor authority"
+            .to_string(),
+    )
+}
+
 async fn send_bridge_response(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
@@ -523,36 +568,8 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::AuthorizeSupervisor(payload) => {
-            if let Some(current) = supervisor_state.as_ref()
-                && payload.epoch < current.epoch
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    format!(
-                        "authorize supervisor failed: stale supervisor epoch {} (current {})",
-                        payload.epoch, current.epoch
-                    ),
-                )
-                .await;
-                return true;
-            }
-            if let Some(current) = supervisor_state.as_ref() {
-                if !sender_matches_supervisor(sender, &current.supervisor) {
-                    send_bridge_failure(
-                        comms_runtime,
-                        candidate,
-                        format!(
-                            "authorize supervisor failed: request sender '{sender}' does not match authorized supervisor '{}'",
-                            current.supervisor.peer_id
-                        ),
-                    )
-                    .await;
-                    return true;
-                }
-                if payload.epoch == current.epoch
-                    && payload.supervisor.peer_id == current.supervisor.peer_id
-                {
+            match validate_authorize_supervisor_request(sender, &payload, supervisor_state) {
+                Ok(AuthorizeSupervisorGate::IdempotentAck) => {
                     let response = serde_json::to_value(BridgeAck { ok: true })
                         .unwrap_or(serde_json::Value::Bool(true));
                     send_bridge_response(
@@ -564,17 +581,11 @@ async fn try_handle_supervisor_bridge_command(
                     .await;
                     return true;
                 }
-            } else if !sender_matches_bridge_peer(sender, &payload.supervisor) {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    format!(
-                        "authorize supervisor failed: request sender '{sender}' does not match supervisor '{}'",
-                        payload.supervisor.peer_id
-                    ),
-                )
-                .await;
-                return true;
+                Ok(AuthorizeSupervisorGate::Proceed) => {}
+                Err(error) => {
+                    send_bridge_failure(comms_runtime, candidate, error).await;
+                    return true;
+                }
             }
 
             let old_supervisor = supervisor_state.as_ref().map(|s| s.supervisor.clone());
@@ -1215,6 +1226,27 @@ mod tests {
         let authorized = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
             .expect("bind should accept the configured bootstrap token");
         assert_eq!(authorized.peer_id, supervisor.peer_id);
+    }
+
+    #[test]
+    fn validate_authorize_supervisor_rejects_initial_claim_without_bind() {
+        let payload = BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec {
+                name: "mob/__mob_supervisor__".to_string(),
+                peer_id: "ed25519:supervisor".to_string(),
+                address: "inproc://mob/__mob_supervisor__".to_string(),
+            },
+            epoch: 0,
+            protocol_version: 1,
+        };
+
+        let error =
+            validate_authorize_supervisor_request(&payload.supervisor.peer_id, &payload, &None)
+                .expect_err("first supervisor claim must go through bind_member");
+        assert!(
+            error.contains("bind_member"),
+            "initial authorize rejection should direct callers to bind_member, got: {error}"
+        );
     }
 }
 

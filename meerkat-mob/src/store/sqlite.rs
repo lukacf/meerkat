@@ -259,6 +259,29 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
         .await
     }
 
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_runtime_supervisors (mob_id, record_json) VALUES (?1, ?2)",
+                    params![mob_id.as_str(), encode_json(&record)?],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
     async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         let mob_id = mob_id.clone();
@@ -2110,6 +2133,7 @@ mod tests {
             normalized_member_ref: Some(MemberRef::BackendPeer {
                 peer_id: "peer-worker-1".to_string(),
                 address: "tcp://worker-1".to_string(),
+                bootstrap_token: None,
                 session_id: None,
             }),
             status: ExternalBindingOverlayStatus::Normalized,
@@ -2181,6 +2205,35 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "supervisor delete should remove the stored record"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_runtime_metadata_store_put_supervisor_if_absent_preserves_existing_record()
+    {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        let mob_id = MobId::from("mob");
+        let first = SupervisorAuthorityRecord::generate(1);
+        let second = SupervisorAuthorityRecord::generate(1);
+
+        assert!(
+            store
+                .put_supervisor_authority_if_absent(&mob_id, &first)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_supervisor_authority_if_absent(&mob_id, &second)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first)
         );
     }
 

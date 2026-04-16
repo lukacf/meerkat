@@ -1864,6 +1864,16 @@ impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
         self.inner.put_supervisor_authority(mob_id, record).await
     }
 
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .put_supervisor_authority_if_absent(mob_id, record)
+            .await
+    }
+
     async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
         self.inner.delete_supervisor_authority(mob_id).await
     }
@@ -2477,10 +2487,8 @@ fn test_external_binding(meerkat_id: &str) -> crate::RuntimeBinding {
     let bootstrap_token = format!("bootstrap-{meerkat_id}");
     crate::RuntimeBinding::External {
         peer_id: format!("ed25519:test-key:{meerkat_id}"),
-        address: format!(
-            "tcp://test.invalid/{meerkat_id}?{}={bootstrap_token}",
-            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-        ),
+        address: format!("tcp://test.invalid/{meerkat_id}"),
+        bootstrap_token: Some(bootstrap_token),
     }
 }
 
@@ -2545,10 +2553,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let bootstrap_token = format!("bootstrap-{}", Uuid::new_v4());
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id(),
-        address: format!(
-            "inproc://{peer_name}?{}={bootstrap_token}",
-            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-        ),
+        address: format!("inproc://{peer_name}"),
+        bootstrap_token: Some(bootstrap_token),
     };
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2679,14 +2685,30 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         .await
                                         .clone()
                                         .expect("delivery supervisor state");
-                                    assert_eq!(
-                                        payload.epoch, current.epoch,
-                                        "delivery should use the current supervisor epoch"
-                                    );
-                                    assert_eq!(
-                                        payload.supervisor.peer_id, current.supervisor.peer_id,
-                                        "delivery should use the current supervisor identity"
-                                    );
+                                    if payload.epoch != current.epoch {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                reason: format!(
+                                                    "stale supervisor epoch {} (current {})",
+                                                    payload.epoch, current.epoch
+                                                ),
+                                            },
+                                        )
+                                        .expect("stale delivery rejection")
+                                    } else if payload.supervisor.peer_id
+                                        != current.supervisor.peer_id
+                                    {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                reason: format!(
+                                                    "stale supervisor peer '{}' (current '{}')",
+                                                    payload.supervisor.peer_id,
+                                                    current.supervisor.peer_id
+                                                ),
+                                            },
+                                        )
+                                        .expect("stale supervisor rejection")
+                                    } else {
                                     let mut responses = responder_delivery_responses.write().await;
                                     if let Some(existing) =
                                         responses.get(&payload.input_id).cloned()
@@ -2719,6 +2741,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         responses
                                             .insert(payload.input_id.clone(), response.clone());
                                         serde_json::to_value(response).expect("delivery response")
+                                    }
                                     }
                                 }
                                 super::bridge_protocol::BridgeCommand::WireMember(payload) => {
@@ -4356,7 +4379,12 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
         "rotated supervisor should still be able to deliver one logical input"
     );
 
-    let crate::RuntimeBinding::External { peer_id, address } = external.binding() else {
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token: _,
+    } = external.binding()
+    else {
         panic!("live external peer must expose external binding");
     };
     let peer = meerkat_core::comms::TrustedPeerSpec::new(
@@ -4384,16 +4412,19 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
             handling_mode: HandlingMode::Queue,
         },
     );
-    let error = old_bridge
+    let stale_reply = old_bridge
         .send_bridge_command(&peer, &stale_command, std::time::Duration::from_secs(1))
         .await
-        .expect_err("old supervisor epoch should be rejected once rotation completes");
-    assert!(
-        error.to_string().contains("stale supervisor")
-            || error.to_string().contains("authorize supervisor failed")
-            || error.to_string().contains("request"),
-        "stale supervisor should be rejected with a bridge error, got: {error}"
-    );
+        .expect("bridge should return a rejected reply for stale supervisor epochs");
+    let stale_reply: super::bridge_protocol::BridgeReply =
+        serde_json::from_value(stale_reply).expect("decode stale bridge reply");
+    match stale_reply {
+        super::bridge_protocol::BridgeReply::Rejected { reason } => assert!(
+            reason.contains("stale supervisor"),
+            "stale supervisor should be rejected explicitly, got: {reason}"
+        ),
+        other => panic!("expected stale supervisor rejection, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -7103,6 +7134,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
             ref peer_id,
             ref address,
             ref session_id,
+            ..
         } => (peer_id.clone(), address.clone(), session_id.clone()),
         ref other => panic!("expected external backend member ref, got {other:?}"),
     };
@@ -7130,6 +7162,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(peer_id, old_peer_id, "resume must preserve backend peer_id");
             assert_eq!(address, old_address, "resume must preserve backend address");
@@ -7176,6 +7209,7 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
                 .with_bridge_member_ref(Some(MemberRef::BackendPeer {
                     peer_id: old_peer_id.clone(),
                     address: old_address.clone(),
+                    bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
                 })),
             ),
@@ -7191,6 +7225,7 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
                 normalized_member_ref: Some(MemberRef::BackendPeer {
                     peer_id: old_peer_id.clone(),
                     address: old_address.clone(),
+                    bootstrap_token: None,
                     session_id: None,
                 }),
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -7217,6 +7252,7 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(peer_id, old_peer_id, "overlay must preserve peer identity");
             assert_eq!(address, old_address, "overlay must preserve peer address");
@@ -7275,6 +7311,7 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
                 .with_bridge_member_ref(Some(MemberRef::BackendPeer {
                     peer_id: "ed25519:test-key:w-ext".to_string(),
                     address: "tcp://test.invalid/w-ext".to_string(),
+                    bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
                 })),
             ),
@@ -7389,6 +7426,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                 .with_bridge_member_ref(Some(MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    bootstrap_token: None,
                     session_id: Some(old_sid.clone()),
                 })),
             ),
@@ -7404,6 +7442,7 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                 normalized_member_ref: Some(MemberRef::BackendPeer {
                     peer_id,
                     address,
+                    bootstrap_token: None,
                     session_id: None,
                 }),
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -7477,7 +7516,12 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
         .expect("create mob");
     handle.stop().await.expect("stop");
     let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
-    let crate::RuntimeBinding::External { peer_id, address } = external.binding() else {
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
         panic!("live external peer must produce external binding");
     };
     let old_sid = SessionId::new();
@@ -7497,6 +7541,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                 .with_bridge_member_ref(Some(MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    bootstrap_token: bootstrap_token.clone(),
                     session_id: Some(old_sid.clone()),
                 })),
             ),
@@ -7512,6 +7557,7 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                 normalized_member_ref: Some(MemberRef::BackendPeer {
                     peer_id,
                     address,
+                    bootstrap_token,
                     session_id: None,
                 }),
                 status: ExternalBindingOverlayStatus::Normalized,
@@ -7634,6 +7680,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
             ref peer_id,
             ref address,
             ref session_id,
+            ..
         } => (peer_id.clone(), address.clone(), session_id.clone()),
         ref other => panic!("expected external backend member ref, got {other:?}"),
     };
@@ -7681,6 +7728,7 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(peer_id, old_ext_peer_id, "external peer_id must be stable");
             assert_eq!(address, old_ext_addr, "external address must be stable");
@@ -8186,6 +8234,7 @@ async fn test_spawn_supports_session_and_external_backends() {
     let crate::RuntimeBinding::External {
         peer_id: expected_peer_id,
         address: expected_address,
+        bootstrap_token: _expected_bootstrap_token,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -8204,6 +8253,7 @@ async fn test_spawn_supports_session_and_external_backends() {
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(
                 peer_id, expected_peer_id,
@@ -17093,6 +17143,7 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
     let crate::RuntimeBinding::External {
         peer_id: expected_peer_id,
         address: expected_address,
+        bootstrap_token: _expected_bootstrap_token,
     } = external.binding()
     else {
         panic!("live external peer must produce external binding");
@@ -17116,6 +17167,7 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(
                 peer_id, &expected_peer_id,
@@ -17186,7 +17238,12 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
     let (handle, service) = create_test_mob_with_real_comms(definition).await;
     let external_name = test_comms_name_for(&mob_id, "worker", "w-bridge");
     let external = spawn_live_external_peer(&external_name).await;
-    let crate::RuntimeBinding::External { peer_id, address } = external.binding() else {
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
         panic!("live external peer must produce external binding");
     };
 
@@ -17194,6 +17251,7 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
     spec.binding = Some(crate::RuntimeBinding::External {
         peer_id: peer_id.clone(),
         address: address.clone(),
+        bootstrap_token: bootstrap_token.clone(),
     });
     let _member_ref = handle
         .spawn_spec(spec)

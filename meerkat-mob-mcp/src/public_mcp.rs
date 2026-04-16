@@ -870,9 +870,15 @@ fn build_spawn_spec(
 fn runtime_binding_from_wire(wb: WireRuntimeBinding) -> meerkat_mob::RuntimeBinding {
     match wb {
         WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
-        WireRuntimeBinding::External { peer_id, address } => {
-            meerkat_mob::RuntimeBinding::External { peer_id, address }
-        }
+        WireRuntimeBinding::External {
+            peer_id,
+            address,
+            bootstrap_token,
+        } => meerkat_mob::RuntimeBinding::External {
+            peer_id,
+            address,
+            bootstrap_token,
+        },
     }
 }
 

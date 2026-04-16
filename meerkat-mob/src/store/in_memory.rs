@@ -75,6 +75,19 @@ impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
         Ok(())
     }
 
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let mut guard = self.supervisor_records.write().await;
+        if guard.contains_key(mob_id) {
+            return Ok(false);
+        }
+        guard.insert(mob_id.clone(), record.clone());
+        Ok(true)
+    }
+
     async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
         self.supervisor_records.write().await.remove(mob_id);
         Ok(())
@@ -1065,6 +1078,7 @@ mod tests {
             normalized_member_ref: Some(crate::event::MemberRef::BackendPeer {
                 peer_id: "ed25519:test-worker-1".to_string(),
                 address: "inproc://worker-1".to_string(),
+                bootstrap_token: None,
                 session_id: None,
             }),
             status: crate::store::ExternalBindingOverlayStatus::Normalized,
@@ -1103,6 +1117,31 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_metadata_store_put_supervisor_if_absent_preserves_existing_record() {
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("mob-runtime");
+        let first = SupervisorAuthorityRecord::generate(1);
+        let second = SupervisorAuthorityRecord::generate(1);
+
+        assert!(
+            store
+                .put_supervisor_authority_if_absent(&mob_id, &first)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_supervisor_authority_if_absent(&mob_id, &second)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first)
         );
     }
 

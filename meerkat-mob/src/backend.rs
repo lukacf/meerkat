@@ -38,6 +38,9 @@ pub enum RuntimeBinding {
         peer_id: String,
         /// Real comms transport address of the external process.
         address: String,
+        /// One-time bootstrap proof for the initial supervisor bind.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bootstrap_token: Option<String>,
     },
 }
 

@@ -170,6 +170,16 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
         record: &SupervisorAuthorityRecord,
     ) -> Result<(), MobStoreError>;
 
+    /// Insert the mob-owned supervisor authority record if it is missing.
+    ///
+    /// Returns `true` when the caller won initialization, `false` when an
+    /// existing record already owned the key.
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError>;
+
     /// Delete the mob-owned supervisor authority record.
     async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError>;
 

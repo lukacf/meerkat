@@ -68,14 +68,11 @@ pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
 pub(crate) mod loop_iteration_authority;
-mod mob_lifecycle_authority;
 mod mob_member_bootstrap_authority;
 mod mob_member_lifecycle_authority;
-mod mob_orchestrator_authority;
 mod mob_runtime_bridge_authority;
 mod mob_wiring_authority;
 mod ops_adapter;
-mod orchestrator_kernel;
 pub mod path;
 mod pending_spawn_lineage;
 mod provision_guard;
@@ -116,15 +113,15 @@ pub use handle::{
     MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
     SpawnResult,
 };
-#[cfg(test)]
-pub(crate) use mob_lifecycle_authority::MobLifecycleSnapshot;
-pub use mob_orchestrator_authority::MobOrchestratorSnapshot;
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
+#[cfg(test)]
+pub(crate) use state::MobLifecycleSnapshot;
+pub use state::MobOrchestratorSnapshot;
 pub use state::MobState;
 pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 

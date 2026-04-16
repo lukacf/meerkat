@@ -1,12 +1,8 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
-use super::mob_lifecycle_authority::{MobLifecycleAuthority, MobLifecycleInput};
 use super::mob_member_bootstrap_authority::{
     MobMemberBootstrapAuthority, MobMemberBootstrapEffect, MobMemberBootstrapInput,
-};
-use super::mob_orchestrator_authority::{
-    MobOrchestratorAuthority, MobOrchestratorInput, MobOrchestratorTransition,
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::mob_wiring_authority::{
@@ -222,7 +218,9 @@ pub(super) struct MobActor {
     pub(super) provisioner: Arc<dyn MobProvisioner>,
     pub(super) flow_engine: FlowEngine,
     pub(super) flow_kernel: FlowRunKernel,
-    pub(super) orchestrator: Option<MobOrchestratorAuthority>,
+    /// Whether this mob's definition declares an orchestrator.
+    /// Gates orchestrator-specific transitions and notification fan-out.
+    pub(super) has_orchestrator: bool,
     pub(super) run_tasks: BTreeMap<RunId, tokio::task::JoinHandle<()>>,
     pub(super) run_cancel_tokens: BTreeMap<RunId, (tokio_util::sync::CancellationToken, FlowId)>,
     pub(super) flow_streams:
@@ -248,7 +246,6 @@ pub(super) struct MobActor {
         Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
-    pub(super) lifecycle_authority: MobLifecycleAuthority,
     pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
@@ -449,38 +446,31 @@ impl MobActor {
         self.run_cancel_tokens.len() as u32
     }
 
+    /// Project an observable orchestrator snapshot from DSL state, if this mob
+    /// has an orchestrator. Returns `None` for plain mobs.
+    #[cfg(test)]
     fn machine_orchestrator_snapshot(&self, phase: MobState) -> Option<MobOrchestratorSnapshot> {
-        self.orchestrator
-            .as_ref()
-            .map(|orch| orch.snapshot_in_phase(phase, self.machine_active_run_count()))
-    }
-
-    #[allow(dead_code)]
-    fn machine_orchestrator_can_accept(
-        &self,
-        phase: MobState,
-        input: MobOrchestratorInput,
-    ) -> bool {
-        self.orchestrator.as_ref().is_some_and(|orch| {
-            orch.can_accept_in_phase(phase, self.machine_active_run_count(), input)
+        if !self.has_orchestrator {
+            return None;
+        }
+        let coordinator_bound = self.dsl_authority.state.coordinator_bound;
+        Some(MobOrchestratorSnapshot {
+            phase,
+            coordinator_bound,
+            pending_spawn_count: self.dsl_authority.state.pending_spawn_count as u32,
+            active_flow_count: self.machine_active_run_count(),
+            // topology_revision and supervisor_active are shell diagnostics not
+            // tracked by the DSL; project supervisor_active from coordinator_bound
+            // to preserve existing test expectations.
+            topology_revision: 0,
+            supervisor_active: coordinator_bound,
         })
     }
 
-    fn machine_apply_orchestrator(
-        &mut self,
-        phase: MobState,
-        input: MobOrchestratorInput,
-    ) -> Result<Option<MobOrchestratorTransition>, MobError> {
-        let active_run_count = self.machine_active_run_count();
-        self.orchestrator
-            .as_mut()
-            .map(|orch| orch.apply_in_phase(phase, active_run_count, input))
-            .transpose()
-    }
-
     fn machine_coordinator_bound(&self) -> bool {
-        self.machine_orchestrator_snapshot(self.state())
-            .is_none_or(|snapshot| snapshot.coordinator_bound)
+        // Plain mobs (no orchestrator) are always considered coordinator-bound
+        // for the purposes of spawn/run-flow admission checks.
+        !self.has_orchestrator || self.dsl_authority.state.coordinator_bound
     }
 
     fn require_mob_machine_stop(&self) -> Result<(), MobError> {
@@ -701,11 +691,11 @@ impl MobActor {
     }
 
     fn pending_spawn_alignment_violation(&self) -> Option<String> {
-        let expected = self.orchestrator.as_ref().map(|orchestrator| {
-            orchestrator
-                .snapshot_in_phase(self.state(), self.machine_active_run_count())
-                .pending_spawn_count as usize
-        });
+        let expected = if self.has_orchestrator {
+            Some(self.dsl_authority.state.pending_spawn_count as usize)
+        } else {
+            None
+        };
         self.pending_spawns.alignment_violation(expected)
     }
 
@@ -786,28 +776,19 @@ impl MobActor {
 
     fn stage_orchestrator_spawn(&mut self) -> Result<(), MobError> {
         let mut topology_advanced = false;
-        let phase = self.state();
-        if self.orchestrator.is_some() {
+        if self.has_orchestrator {
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::StageSpawn, "stage_spawn")?;
             topology_advanced = true;
         }
         if topology_advanced {
             self.flow_engine.note_topology_spawn_boundary();
         }
-        #[cfg(debug_assertions)]
-        {
-            if let Err(e) = self.machine_apply_orchestrator(phase, MobOrchestratorInput::StageSpawn)
-            {
-                tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-            }
-        }
         Ok(())
     }
 
     fn complete_orchestrator_spawn(&mut self, spawn_ticket: Option<u64>, context: &'static str) {
         let mut topology_advanced = false;
-        let phase = self.state();
-        if self.orchestrator.is_some() {
+        if self.has_orchestrator {
             match self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteSpawn, "complete_spawn")
             {
                 Ok(()) => {
@@ -833,14 +814,6 @@ impl MobActor {
         }
         if topology_advanced {
             self.flow_engine.note_topology_spawn_boundary();
-        }
-        #[cfg(debug_assertions)]
-        {
-            if let Err(e) =
-                self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteSpawn)
-            {
-                tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-            }
         }
     }
 
@@ -1420,16 +1393,6 @@ impl MobActor {
                 {
                     tracing::warn!(error = %e, "authority rejected Stop");
                 }
-                #[cfg(debug_assertions)]
-                {
-                    if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                        self.state(),
-                        self.machine_active_run_count(),
-                        MobLifecycleInput::Stop,
-                    ) {
-                        tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                    }
-                }
             } else if let Err(error) = self.ensure_autonomous_runtimes_from_roster().await {
                 tracing::error!(
                     mob_id = %self.definition.id,
@@ -1455,16 +1418,6 @@ impl MobActor {
                     "startup_error_stop_runtimes",
                 ) {
                     tracing::warn!(error = %e, "authority rejected Stop");
-                }
-                #[cfg(debug_assertions)]
-                {
-                    if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                        self.state(),
-                        self.machine_active_run_count(),
-                        MobLifecycleInput::Stop,
-                    ) {
-                        tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                    }
                 }
             }
         }
@@ -1689,10 +1642,11 @@ impl MobActor {
                 }
                 #[cfg(test)]
                 MobCommand::LifecycleSnapshot { reply_tx } => {
-                    let _ = reply_tx.send(
-                        self.lifecycle_authority
-                            .snapshot_in_phase(self.state(), self.machine_active_run_count()),
-                    );
+                    let _ = reply_tx.send(super::state::MobLifecycleSnapshot {
+                        phase: self.state(),
+                        active_run_count: self.machine_active_run_count(),
+                        cleanup_pending: false,
+                    });
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.require_mob_machine_stop() {
@@ -1734,8 +1688,7 @@ impl MobActor {
                             }
                             if stop_result.is_ok() {
                                 let mut topology_unbound = false;
-                                let _phase = self.state();
-                                if self.orchestrator.is_some() {
+                                if self.has_orchestrator {
                                     match self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::StopOrchestrator,
                                         "stop_orchestrator",
@@ -1753,7 +1706,6 @@ impl MobActor {
                                 if topology_unbound {
                                     self.flow_engine.unbind_topology_coordinator();
                                 }
-                                let phase = self.state();
                                 if stop_result.is_ok()
                                     && let Err(error) = self.apply_dsl_input(
                                         mob_dsl::MobMachineInput::Stop,
@@ -1763,22 +1715,6 @@ impl MobActor {
                                     stop_result = Err(MobError::Internal(format!(
                                         "lifecycle Stop transition failed during stop: {error}"
                                     )));
-                                }
-                                #[cfg(debug_assertions)]
-                                {
-                                    if let Err(e) = self.machine_apply_orchestrator(
-                                        phase,
-                                        MobOrchestratorInput::StopOrchestrator,
-                                    ) {
-                                        tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                                    }
-                                    if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                                        phase,
-                                        self.machine_active_run_count(),
-                                        MobLifecycleInput::Stop,
-                                    ) {
-                                        tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                                    }
                                 }
                             }
                             if stop_result.is_err() {
@@ -1826,8 +1762,7 @@ impl MobActor {
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
                                 let mut topology_bound = false;
-                                let _phase = self.state();
-                                if self.orchestrator.is_some() {
+                                if self.has_orchestrator {
                                     match self.apply_dsl_signal(
                                         mob_dsl::MobMachineSignal::ResumeOrchestrator,
                                         "resume_orchestrator",
@@ -1845,7 +1780,6 @@ impl MobActor {
                                 if topology_bound {
                                     self.flow_engine.bind_topology_coordinator();
                                 }
-                                let phase = self.state();
                                 if resume_result.is_ok()
                                     && let Err(error) = self.apply_dsl_input(
                                         mob_dsl::MobMachineInput::Resume,
@@ -1855,22 +1789,6 @@ impl MobActor {
                                     resume_result = Err(MobError::Internal(format!(
                                         "lifecycle Resume transition failed during resume: {error}"
                                     )));
-                                }
-                                #[cfg(debug_assertions)]
-                                {
-                                    if let Err(e) = self.machine_apply_orchestrator(
-                                        phase,
-                                        MobOrchestratorInput::ResumeOrchestrator,
-                                    ) {
-                                        tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                                    }
-                                    if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                                        phase,
-                                        self.machine_active_run_count(),
-                                        MobLifecycleInput::Resume,
-                                    ) {
-                                        tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                                    }
                                 }
                                 if let Err(error) = resume_result {
                                     if let Err(stop_error) =
@@ -2129,16 +2047,6 @@ impl MobActor {
                             result = Err(MobError::Internal(format!(
                                 "lifecycle Stop transition failed during shutdown: {error}"
                             )));
-                        }
-                    }
-                    #[cfg(debug_assertions)]
-                    {
-                        if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                            self.state(),
-                            self.machine_active_run_count(),
-                            MobLifecycleInput::Stop,
-                        ) {
-                            tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
                         }
                     }
                     let _ = reply_tx.send(result);
@@ -4546,7 +4454,6 @@ impl MobActor {
                 kind: MobEventKind::MobCompleted,
             })
             .await?;
-        let phase = self.state();
         // Apply Complete input to set active_run_count = 0 and transition to Completed phase
         self.apply_dsl_input(mob_dsl::MobMachineInput::Complete, "complete_input")
             .map_err(|error| {
@@ -4554,22 +4461,6 @@ impl MobActor {
                     "lifecycle Complete transition failed during complete: {error}"
                 ))
             })?;
-        #[cfg(debug_assertions)]
-        {
-            if self.orchestrator.is_some()
-                && let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::MarkCompleted)
-            {
-                tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-            }
-            if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                phase,
-                self.machine_active_run_count(),
-                MobLifecycleInput::MarkCompleted,
-            ) {
-                tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-            }
-        }
         self.ensure_pending_spawn_alignment("handle_complete completion")?;
         self.ensure_flow_tracker_alignment("handle_complete completion")
             .await?;
@@ -4589,8 +4480,7 @@ impl MobActor {
         self.cleanup_namespace().await?;
         self.edge_locks.clear().await;
         // Transition through StopOrchestrator then Destroy.
-        let phase = self.state();
-        if self.orchestrator.is_some() {
+        if self.has_orchestrator {
             let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
@@ -4618,19 +4508,6 @@ impl MobActor {
                 mob_dsl::MobMachineSignal::DestroyOrchestrator,
                 "destroy_orchestrator",
             )?;
-            #[cfg(debug_assertions)]
-            {
-                if let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
-                if let Err(e) = self
-                    .machine_apply_orchestrator(phase, MobOrchestratorInput::DestroyOrchestrator)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
-            }
         }
         self.apply_dsl_input(mob_dsl::MobMachineInput::Destroy, "destroy_input")
             .map_err(|error| {
@@ -4638,16 +4515,6 @@ impl MobActor {
                     "lifecycle Destroy transition failed during destroy: {error}"
                 ))
             })?;
-        #[cfg(debug_assertions)]
-        {
-            if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                phase,
-                self.machine_active_run_count(),
-                MobLifecycleInput::Destroy,
-            ) {
-                tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-            }
-        }
         self.ensure_pending_spawn_alignment("handle_destroy completion")?;
         self.ensure_flow_tracker_alignment("handle_destroy completion")
             .await?;
@@ -4662,16 +4529,6 @@ impl MobActor {
             self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "fail_reset_to_stopped")
         {
             tracing::warn!(error = %e, "authority rejected Stop in fail_reset_to_stopped");
-        }
-        #[cfg(debug_assertions)]
-        {
-            if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                self.state(),
-                self.machine_active_run_count(),
-                MobLifecycleInput::Stop,
-            ) {
-                tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-            }
         }
     }
 
@@ -4754,7 +4611,7 @@ impl MobActor {
             return Err(error);
         }
 
-        let mut phase = self.state();
+        let phase = self.state();
         // Ensure we're in Stopped state before orchestrator work
         if phase == MobState::Running {
             // Stop transition (requires no active runs and moves coordinator_bound=false)
@@ -4764,18 +4621,6 @@ impl MobActor {
                         "lifecycle Stop transition failed during reset: {error}"
                     ))
                 })?;
-            phase = MobState::Stopped;
-            #[cfg(debug_assertions)]
-            {
-                let old_phase = phase;
-                if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                    old_phase,
-                    self.machine_active_run_count(),
-                    MobLifecycleInput::Stop,
-                ) {
-                    tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                }
-            }
         } else if phase == MobState::Completed {
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishCleanup, "finish_cleanup")
                 .map_err(|error| {
@@ -4783,19 +4628,8 @@ impl MobActor {
                         "lifecycle FinishCleanup transition failed during reset from completed: {error}"
                     ))
                 })?;
-            phase = MobState::Stopped;
-            #[cfg(debug_assertions)]
-            {
-                if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                    phase,
-                    self.machine_active_run_count(),
-                    MobLifecycleInput::FinishCleanup,
-                ) {
-                    tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                }
-            }
         }
-        if self.orchestrator.is_some() {
+        if self.has_orchestrator {
             let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
@@ -4820,38 +4654,13 @@ impl MobActor {
                 "resume_orchestrator_reset",
             )?;
             self.flow_engine.bind_topology_coordinator();
-            #[cfg(debug_assertions)]
-            {
-                if let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::StopOrchestrator)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
-                if let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::ResumeOrchestrator)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
-            }
         }
-        // Sync phase from actual state before Resume
-        phase = self.state();
         self.apply_dsl_input(mob_dsl::MobMachineInput::Resume, "resume_input_reset")
             .map_err(|error| {
                 MobError::Internal(format!(
                     "lifecycle Resume transition failed during reset: {error}"
                 ))
             })?;
-        #[cfg(debug_assertions)]
-        {
-            if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                phase,
-                self.machine_active_run_count(),
-                MobLifecycleInput::Resume,
-            ) {
-                tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-            }
-        }
         self.ensure_pending_spawn_alignment("handle_reset completion")?;
         self.ensure_flow_tracker_alignment("handle_reset completion")
             .await?;
@@ -5146,9 +4955,8 @@ impl MobActor {
             .flow_kernel
             .create_pending_run(&config, activation_params.clone())
             .await?;
-        let phase = self.state();
         self.sync_dsl_roster_state().await;
-        if self.orchestrator.is_some()
+        if self.has_orchestrator
             && let Err(error) =
                 self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartFlow, "start_flow")
         {
@@ -5168,7 +4976,7 @@ impl MobActor {
         if let Err(error) = self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartRun, "start_run")
         {
             let mut details = Vec::new();
-            if self.orchestrator.is_some()
+            if self.has_orchestrator
                 && let Err(rollback_error) = self.apply_dsl_signal(
                     mob_dsl::MobMachineSignal::CompleteFlow,
                     "complete_flow_rollback",
@@ -5177,26 +4985,6 @@ impl MobActor {
                 details.push(format!(
                     "orchestrator CompleteFlow rollback failed: {rollback_error}"
                 ));
-            }
-            #[cfg(debug_assertions)]
-            {
-                if let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::StartFlow)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
-                if let Err(e) = self.lifecycle_authority.apply_in_phase(
-                    phase,
-                    self.machine_active_run_count(),
-                    MobLifecycleInput::StartRun,
-                ) {
-                    tracing::error!(error = %e, "DSL/legacy authority DISAGREEMENT");
-                }
-                if let Err(e) =
-                    self.machine_apply_orchestrator(phase, MobOrchestratorInput::CompleteFlow)
-                {
-                    tracing::error!(error = %e, "DSL/legacy orchestrator DISAGREEMENT");
-                }
             }
             if let Err(terminalize_error) = self
                 .flow_kernel

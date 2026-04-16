@@ -268,6 +268,17 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(self.public_key.to_peer_id())
     }
 
+    fn advertised_address(&self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(crate::runtime::comms_runtime::CommsRuntime::advertised_address(self))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
     async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
         let public_key = PubKey::from_peer_id(&peer.peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;

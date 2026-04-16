@@ -2474,10 +2474,18 @@ async fn wait_for_run_terminal(
 
 /// Build a test RuntimeBinding::External for a given meerkat_id.
 fn test_external_binding(meerkat_id: &str) -> crate::RuntimeBinding {
+    let bootstrap_token = format!("bootstrap-{meerkat_id}");
     crate::RuntimeBinding::External {
         peer_id: format!("ed25519:test-key:{meerkat_id}"),
-        address: format!("tcp://test.invalid/{meerkat_id}"),
+        address: format!(
+            "tcp://test.invalid/{meerkat_id}?{}={bootstrap_token}",
+            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+        ),
     }
+}
+
+fn canonical_external_address(address: &str) -> &str {
+    address.split('?').next().unwrap_or(address)
 }
 
 struct LiveExternalPeerHarness {
@@ -2534,9 +2542,13 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         meerkat_comms::CommsRuntime::inproc_only(&peer_name)
             .expect("create live external peer runtime"),
     );
+    let bootstrap_token = format!("bootstrap-{}", Uuid::new_v4());
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id(),
-        address: format!("inproc://{peer_name}"),
+        address: format!(
+            "inproc://{peer_name}?{}={bootstrap_token}",
+            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+        ),
     };
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4350,7 +4362,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
     let peer = meerkat_core::comms::TrustedPeerSpec::new(
         address
             .strip_prefix("inproc://")
-            .map(str::to_string)
+            .map(|value| value.split('?').next().unwrap_or(value).to_string())
             .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
         peer_id.clone(),
         address.clone(),
@@ -8198,8 +8210,9 @@ async fn test_spawn_supports_session_and_external_backends() {
                 "external backend should use the committed peer_id returned by bind_member"
             );
             assert_eq!(
-                address, expected_address,
-                "external backend should use the committed address returned by bind_member"
+                address,
+                canonical_external_address(&expected_address),
+                "external backend should use the committed transport address returned by bind_member"
             );
             assert!(
                 session_id.is_none(),
@@ -14963,7 +14976,7 @@ async fn test_mob_resume_fails_when_runtime_metadata_store_unavailable() {
             mob_id: definition.id.clone(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: Box::new(definition),
+                definition: Box::new(definition.clone()),
             },
         })
         .await
@@ -14989,16 +15002,15 @@ async fn test_mob_resume_fails_when_runtime_metadata_store_unavailable() {
 }
 
 #[tokio::test]
-async fn test_mob_resume_fails_when_supervisor_runtime_metadata_missing() {
+async fn test_mob_resume_seeds_missing_supervisor_runtime_metadata() {
     let definition = sample_definition();
     let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
-    let runtime_metadata: Arc<dyn MobRuntimeMetadataStore> =
-        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
     let storage = MobStorage::custom_with_runtime_metadata(
         events.clone(),
         Arc::new(InMemoryMobRunStore::new()),
         Arc::new(InMemoryMobSpecStore::new()),
-        runtime_metadata,
+        runtime_metadata.clone(),
     );
 
     events
@@ -15006,7 +15018,7 @@ async fn test_mob_resume_fails_when_supervisor_runtime_metadata_missing() {
             mob_id: definition.id.clone(),
             timestamp: None,
             kind: MobEventKind::MobCreated {
-                definition: Box::new(definition),
+                definition: Box::new(definition.clone()),
             },
         })
         .await
@@ -15014,20 +15026,21 @@ async fn test_mob_resume_fails_when_supervisor_runtime_metadata_missing() {
 
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let error = match MobBuilder::for_resume(storage)
+    let resumed = MobBuilder::for_resume(storage)
         .with_session_service(service)
         .resume()
         .await
-    {
-        Ok(_) => panic!("resume must fail when supervisor runtime metadata is missing"),
-        Err(error) => error,
-    };
+        .expect("resume should seed missing supervisor runtime metadata");
 
+    assert_eq!(resumed.status(), MobState::Running);
+    let supervisor_authority = runtime_metadata
+        .load_supervisor_authority(&definition.id)
+        .await
+        .expect("load supervisor authority")
+        .expect("resume should seed supervisor authority");
     assert!(
-        error
-            .to_string()
-            .contains("missing supervisor runtime metadata"),
-        "resume should fail hard when supervisor metadata is absent, got: {error}"
+        !supervisor_authority.public_peer_id.is_empty(),
+        "seeded supervisor authority should have a real public peer id"
     );
 }
 
@@ -17109,8 +17122,9 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
                 "BackendPeer.peer_id must be the committed external process key"
             );
             assert_eq!(
-                address, &expected_address,
-                "BackendPeer.address must be the committed external process address"
+                address,
+                canonical_external_address(&expected_address),
+                "BackendPeer.address must be the committed external process transport address"
             );
             assert!(
                 session_id.is_none(),
@@ -17213,7 +17227,7 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
         .expect("lead should trust the real external peer");
 
     assert!(
-        trusted_peer.address == address,
+        trusted_peer.address == canonical_external_address(&address),
         "peer-only trust specs should use the real external address. Got: {trusted_peers:?}",
     );
     assert!(

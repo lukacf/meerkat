@@ -309,7 +309,7 @@ impl MobActor {
         TrustedPeerSpec::new(
             address
                 .strip_prefix("inproc://")
-                .map(str::to_string)
+                .map(|value| value.split('?').next().unwrap_or(value).to_string())
                 .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
             peer_id.to_string(),
             address.to_string(),

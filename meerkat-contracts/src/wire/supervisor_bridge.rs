@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 /// The sender sets this as the request `intent`; the receiver checks for it
 /// before attempting to deserialize `params` as [`BridgeCommand`].
 pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
+/// Address query parameter carrying the one-time bind bootstrap token.
+pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootstrap_token";
 
 // ---------------------------------------------------------------------------
 // Command envelope
@@ -153,6 +155,7 @@ pub struct BridgeBindPayload {
     pub protocol_version: u32,
     pub expected_peer_id: String,
     pub expected_address: String,
+    pub bootstrap_token: String,
 }
 
 /// Capabilities advertised by a member runtime on bind.

@@ -391,8 +391,11 @@ impl MobBuilder {
             .filter(|event| event.mob_id == definition.id)
             .collect();
         // Runtime metadata is authoritative for supervisor and external-binding
-        // normalization state. Resume must fail hard if that authority cannot
-        // be loaded, even when the event log itself is readable.
+        // normalization state. Older mobs created before bridge metadata
+        // existed will not have a supervisor record yet, so resume must seed
+        // one before treating absence as corruption.
+        Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
+            .await?;
         let supervisor_authority = storage
             .runtime_metadata
             .load_supervisor_authority(&definition.id)

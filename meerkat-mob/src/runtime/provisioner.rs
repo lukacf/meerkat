@@ -1079,7 +1079,7 @@ impl MultiBackendProvisioner {
             } => TrustedPeerSpec::new(
                 address
                     .strip_prefix("inproc://")
-                    .map(str::to_string)
+                    .map(|value| value.split('?').next().unwrap_or(value).to_string())
                     .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
                 peer_id.clone(),
                 address.clone(),
@@ -1098,12 +1098,37 @@ impl MultiBackendProvisioner {
         TrustedPeerSpec::new(
             address
                 .strip_prefix("inproc://")
-                .map(str::to_string)
+                .map(|value| value.split('?').next().unwrap_or(value).to_string())
                 .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
             peer_id.to_string(),
             address.to_string(),
         )
         .map_err(|error| MobError::WiringError(format!("invalid peer-only spec: {error}")))
+    }
+
+    fn bridge_bootstrap_token_from_address(address: &str) -> Result<String, MobError> {
+        let query = address
+            .split_once('?')
+            .map(|(_, query)| query)
+            .ok_or_else(|| {
+                MobError::WiringError(format!(
+                    "external runtime address '{address}' is missing bridge bootstrap token"
+                ))
+            })?;
+        for pair in query.split('&') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+                && !value.is_empty()
+            {
+                return Ok(value.to_string());
+            }
+        }
+        Err(MobError::WiringError(format!(
+            "external runtime address '{address}' is missing '{}' query param",
+            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+        )))
     }
 
     async fn bridge_supervisor_payload(
@@ -1149,6 +1174,7 @@ impl MultiBackendProvisioner {
         peer_id: &str,
         address: &str,
     ) -> Result<super::bridge_protocol::BridgeBindResponse, MobError> {
+        let bootstrap_token = Self::bridge_bootstrap_token_from_address(address)?;
         let authority = self.supervisor_bridge.authority().await;
         let sup_spec = self.supervisor_bridge.supervisor_spec().await?;
         let command = super::bridge_protocol::BridgeCommand::BindMember(
@@ -1158,6 +1184,7 @@ impl MultiBackendProvisioner {
                 protocol_version: authority.protocol_version,
                 expected_peer_id: peer_id.to_string(),
                 expected_address: address.to_string(),
+                bootstrap_token,
             },
         );
         self.send_bridge_command_typed(peer, &command, Duration::from_secs(30))

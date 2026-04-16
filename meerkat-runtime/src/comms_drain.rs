@@ -21,7 +21,7 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
     BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
     BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
-    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
+    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_INTENT,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -126,7 +126,6 @@ pub fn spawn_comms_drain(
                     PeerInputClass::PeerLifecycleAdded
                     | PeerInputClass::PeerLifecycleRetired
                     | PeerInputClass::PeerLifecycleUnwired => {
-                        reconcile_lifecycle_peer_trust(&comms_runtime, &candidate).await;
                         // Lifecycle events must be injected as session context
                         // so the LLM knows when peers connect/disconnect.
                         // comms_drain is the sole keep-alive inbox consumer.
@@ -338,78 +337,59 @@ fn peer_input_from_delivery_payload(
     })
 }
 
-fn lifecycle_peer_spec_from_params(params: &serde_json::Value) -> Result<TrustedPeerSpec, String> {
-    if let Some(spec_value) = params.get("peer_spec") {
-        return serde_json::from_value(spec_value.clone())
-            .map_err(|error| format!("invalid peer_spec in lifecycle request: {error}"));
+fn advertised_bind_bootstrap_token(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+) -> Result<String, String> {
+    let address = comms_runtime.advertised_address().ok_or_else(|| {
+        "runtime does not expose an advertised address for bind bootstrap".to_string()
+    })?;
+    let query = address
+        .split_once('?')
+        .map(|(_, query)| query)
+        .ok_or_else(|| {
+            format!(
+                "runtime advertised address '{address}' is missing '{}' query param",
+                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+            )
+        })?;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM && !value.is_empty() {
+            return Ok(value.to_string());
+        }
     }
-
-    let peer_name = params
-        .get("peer_name")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing peer_name in lifecycle request".to_string())?;
-    let peer_id = params
-        .get("peer_id")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing peer_id in lifecycle request".to_string())?;
-    let address = params
-        .get("address")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing address in lifecycle request".to_string())?;
-
-    TrustedPeerSpec::new(
-        peer_name.to_string(),
-        peer_id.to_string(),
-        address.to_string(),
-    )
-    .map_err(|error| format!("invalid lifecycle peer spec: {error}"))
+    Err(format!(
+        "runtime advertised address '{address}' is missing '{}' query param",
+        SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+    ))
 }
 
-async fn reconcile_lifecycle_peer_trust(
+fn validate_bind_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
-    candidate: &PeerInputCandidate,
-) {
-    let InteractionContent::Request { params, .. } = &candidate.interaction.content else {
-        return;
-    };
-
-    let peer_spec = match lifecycle_peer_spec_from_params(params) {
-        Ok(spec) => spec,
-        Err(error) => {
-            tracing::warn!(
-                interaction_id = %candidate.interaction.id,
-                class = ?candidate.class,
-                error = %error,
-                "comms_drain: failed to parse lifecycle peer spec"
-            );
-            return;
-        }
-    };
-
-    match candidate.class {
-        PeerInputClass::PeerLifecycleAdded => {
-            if let Err(error) = comms_runtime.add_trusted_peer(peer_spec).await {
-                tracing::warn!(
-                    interaction_id = %candidate.interaction.id,
-                    error = %error,
-                    "comms_drain: failed to add trusted peer from lifecycle notice"
-                );
-            }
-        }
-        PeerInputClass::PeerLifecycleRetired | PeerInputClass::PeerLifecycleUnwired => {
-            if let Err(error) = comms_runtime.remove_trusted_peer(&peer_spec.peer_id).await {
-                tracing::warn!(
-                    interaction_id = %candidate.interaction.id,
-                    error = %error,
-                    "comms_drain: failed to remove trusted peer from lifecycle notice"
-                );
-            }
-        }
-        _ => {}
+    sender: &str,
+    payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
+) -> Result<TrustedPeerSpec, String> {
+    let expected_bootstrap_token = advertised_bind_bootstrap_token(comms_runtime)?;
+    if !sender_matches_bridge_peer(sender, &payload.supervisor) {
+        return Err(format!(
+            "request sender '{sender}' does not match supervisor '{}'",
+            payload.supervisor.peer_id
+        ));
     }
+    if let Some(actual_peer_id) = comms_runtime.public_key()
+        && actual_peer_id != payload.expected_peer_id
+    {
+        return Err(format!(
+            "bind peer_id mismatch: expected '{}', actual '{actual_peer_id}'",
+            payload.expected_peer_id
+        ));
+    }
+    if payload.bootstrap_token != expected_bootstrap_token {
+        return Err("bind member failed: invalid bootstrap token".to_string());
+    }
+    Ok(payload.supervisor.clone().into())
 }
 
 async fn send_bridge_response(
@@ -504,33 +484,13 @@ async fn try_handle_supervisor_bridge_command(
 
     match command {
         BridgeCommand::BindMember(payload) => {
-            if !sender_matches_bridge_peer(sender, &payload.supervisor) {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    format!(
-                        "request sender '{sender}' does not match supervisor '{}'",
-                        payload.supervisor.peer_id
-                    ),
-                )
-                .await;
-                return true;
-            }
-            if let Some(actual_peer_id) = comms_runtime.public_key()
-                && actual_peer_id != payload.expected_peer_id
-            {
-                send_bridge_failure(
-                    comms_runtime,
-                    candidate,
-                    format!(
-                        "bind peer_id mismatch: expected '{}', actual '{actual_peer_id}'",
-                        payload.expected_peer_id
-                    ),
-                )
-                .await;
-                return true;
-            }
-            let supervisor_spec: TrustedPeerSpec = payload.supervisor.clone().into();
+            let supervisor_spec = match validate_bind_request(comms_runtime, sender, &payload) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    send_bridge_failure(comms_runtime, candidate, error).await;
+                    return true;
+                }
+            };
             match comms_runtime.add_trusted_peer(supervisor_spec).await {
                 Ok(()) => {
                     *supervisor_state = Some(AuthorizedSupervisorState {
@@ -1027,10 +987,40 @@ fn interaction_terminal_event(
 mod tests {
     use super::*;
     use meerkat_core::InteractionId;
+    use meerkat_core::SendError;
     use meerkat_core::interaction::InboxInteraction;
     use meerkat_core::types::HandlingMode;
     use serde_json::json;
     use uuid::Uuid;
+
+    struct BootstrapRuntime {
+        peer_id: String,
+        address: String,
+        inbox_notify: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for BootstrapRuntime {
+        fn public_key(&self) -> Option<String> {
+            Some(self.peer_id.clone())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(self.address.clone())
+        }
+
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            self.inbox_notify.clone()
+        }
+
+        async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+            Ok(())
+        }
+    }
 
     fn lifecycle_candidate(
         class: PeerInputClass,
@@ -1082,7 +1072,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_lifecycle_added_syncs_trust_to_comms_runtime() {
+    async fn peer_lifecycle_added_does_not_change_comms_trust() {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-added").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
@@ -1101,19 +1091,26 @@ mod tests {
             }),
         );
 
-        reconcile_lifecycle_peer_trust(&runtime, &candidate).await;
-
+        let peers_before = runtime.peers().await;
+        assert!(
+            peers_before.is_empty(),
+            "test runtime should start without trust"
+        );
+        let input =
+            classified_interaction_to_runtime_input(&candidate, &LogicalRuntimeId::new("s-1"));
+        assert!(
+            matches!(input, Input::Peer(_)),
+            "lifecycle candidate should still route as peer input"
+        );
         let peers = runtime.peers().await;
         assert!(
-            peers
-                .iter()
-                .any(|entry| entry.name.as_str() == "peer-added"),
-            "peer lifecycle add should materialize comms trust"
+            peers.is_empty(),
+            "peer lifecycle add must not materialize comms trust before topology validation"
         );
     }
 
     #[tokio::test]
-    async fn peer_lifecycle_unwired_and_retired_remove_trust_from_comms_runtime() {
+    async fn peer_lifecycle_unwired_and_retired_do_not_revoke_comms_trust() {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
@@ -1133,14 +1130,14 @@ mod tests {
                 "peer_spec": peer_spec.clone(),
             }),
         );
-        reconcile_lifecycle_peer_trust(&runtime, &unwired).await;
+        let _ = classified_interaction_to_runtime_input(&unwired, &LogicalRuntimeId::new("s-1"));
         assert!(
-            !runtime
+            runtime
                 .peers()
                 .await
                 .iter()
                 .any(|entry| entry.name.as_str() == "peer-removed"),
-            "peer lifecycle unwire should revoke comms trust"
+            "peer lifecycle unwire must not revoke comms trust before topology validation"
         );
 
         runtime.add_trusted_peer(peer_spec.clone()).await.unwrap();
@@ -1152,15 +1149,76 @@ mod tests {
                 "peer_spec": peer_spec,
             }),
         );
-        reconcile_lifecycle_peer_trust(&runtime, &retired).await;
+        let _ = classified_interaction_to_runtime_input(&retired, &LogicalRuntimeId::new("s-1"));
         assert!(
-            !runtime
+            runtime
                 .peers()
                 .await
                 .iter()
                 .any(|entry| entry.name.as_str() == "peer-removed"),
-            "peer lifecycle retire should revoke comms trust"
+            "peer lifecycle retire must not revoke comms trust before topology validation"
         );
+    }
+
+    #[test]
+    fn validate_bind_request_rejects_missing_or_wrong_bootstrap_token() {
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            address: format!(
+                "inproc://receiver?{}=expected-token",
+                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+            ),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: supervisor.clone(),
+            epoch: 0,
+            protocol_version: 1,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: runtime.advertised_address().unwrap(),
+            bootstrap_token: "wrong-token".to_string(),
+        };
+
+        let error = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            .expect_err("bind must reject incorrect bootstrap token");
+        assert!(
+            error.contains("invalid bootstrap token"),
+            "bind rejection should explain the bootstrap proof failure, got: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_bind_request_accepts_matching_bootstrap_token() {
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            address: format!(
+                "inproc://receiver?{}=expected-token",
+                SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
+            ),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+        });
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: supervisor.clone(),
+            epoch: 0,
+            protocol_version: 1,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: runtime.advertised_address().unwrap(),
+            bootstrap_token: "expected-token".to_string(),
+        };
+
+        let authorized = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            .expect("bind should accept the configured bootstrap token");
+        assert_eq!(authorized.peer_id, supervisor.peer_id);
     }
 }
 

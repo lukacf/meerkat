@@ -292,6 +292,7 @@ machine! {
             input_terminal_outcomes: Map<String, String>,
             input_attempt_counts: Map<String, u64>,
             input_run_associations: Map<String, String>,
+            input_boundary_sequences: Map<String, u64>,
             next_admission_seq: u64,
             input_admission_seq: Map<String, u64>,
             queue_lane: Set<String>,
@@ -330,6 +331,7 @@ machine! {
             input_terminal_outcomes = EmptyMap,
             input_attempt_counts = EmptyMap,
             input_run_associations = EmptyMap,
+            input_boundary_sequences = EmptyMap,
             next_admission_seq = 0,
             input_admission_seq = EmptyMap,
             queue_lane = EmptySet,
@@ -418,10 +420,13 @@ machine! {
             StageForRun { input_id: String, run_id: String },
             RollbackStaged { input_id: String },
             MarkApplied { input_id: String },
+            MarkAppliedPendingConsumption { input_id: String },
             ConsumeInput { input_id: String },
+            ConsumeOnAccept { input_id: String },
             SupersedeInput { input_id: String },
             CoalesceInput { input_id: String },
             AbandonInput { input_id: String },
+            RecordBoundarySeq { input_id: String, seq: u64 },
             // Ops lifecycle inputs
             RegisterOp { operation_id: String, kind: String },
             StartOp { operation_id: String },
@@ -619,6 +624,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.registration_phase = "Queuing";
             }
             to Idle
         }
@@ -632,6 +638,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.registration_phase = "Queuing";
             }
             to Idle
         }
@@ -645,6 +652,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.registration_phase = "Queuing";
             }
             to Idle
         }
@@ -658,6 +666,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.registration_phase = "Queuing";
             }
             to Idle
         }
@@ -671,6 +680,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
+                self.registration_phase = "Queuing";
             }
             to Idle
         }
@@ -1045,6 +1055,7 @@ machine! {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
+                self.registration_phase = "Queuing";
             }
             to Destroyed
             emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
@@ -1092,24 +1103,30 @@ machine! {
         // =====================================================================
 
         // 19. EnsureSessionWithExecutor
-        // Idle → Attached (phase change)
+        // Idle → Attached (phase change), sets registration to Active
         transition EnsureSessionWithExecutorIdle {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Idle }
-            update {}
+            update {
+                self.registration_phase = "Active";
+            }
             to Attached
         }
-        // Attached, Running: self-loop
+        // Attached, Running: self-loop (already Active)
         transition EnsureSessionWithExecutorAttached {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Attached }
-            update {}
+            update {
+                self.registration_phase = "Active";
+            }
             to Attached
         }
         transition EnsureSessionWithExecutorRunning {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            update {
+                self.registration_phase = "Active";
+            }
             to Running
         }
         // Retired, Stopped: self-loop
@@ -1769,6 +1786,44 @@ machine! {
             }
             to Idle
             emit InputLifecycleNotice
+        }
+
+        // MarkAppliedPendingConsumption: Applied → AppliedPendingConsumption
+        transition MarkAppliedPendingConsumption {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input MarkAppliedPendingConsumption { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "AppliedPendingConsumption");
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // ConsumeOnAccept: direct Accepted → Consumed (skip queue)
+        transition ConsumeOnAccept {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ConsumeOnAccept { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_phases.insert(input_id, "Consumed");
+                self.queue_lane.remove(input_id);
+                self.steer_lane.remove(input_id);
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+
+        // RecordBoundarySeq: record boundary sequence for crash recovery
+        transition RecordBoundarySeq {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecordBoundarySeq { input_id, seq }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_boundary_sequences.insert(input_id, seq);
+            }
+            to Idle
+            emit RecordBoundarySequence
         }
 
         // ConsumeInput: terminal — mark input consumed, remove from lanes

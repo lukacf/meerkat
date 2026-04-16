@@ -2689,6 +2689,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-machine-dsl"
+version = "0.5.2"
+dependencies = [
+ "meerkat-machine-dsl-core",
+]
+
+[[package]]
+name = "meerkat-machine-dsl-core"
+version = "0.5.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "meerkat-machine-kernels"
 version = "0.5.2"
 dependencies = [
@@ -2702,6 +2718,7 @@ name = "meerkat-machine-schema"
 version = "0.5.2"
 dependencies = [
  "indexmap",
+ "meerkat-machine-dsl",
 ]
 
 [[package]]

@@ -1358,15 +1358,11 @@ stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
 stub_newtype!(Generation);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationKind {
+    #[default]
     ToolCall,
     Completion,
-}
-impl Default for OperationKind {
-    fn default() -> Self {
-        Self::ToolCall
-    }
 }
 
 // =====================================================================

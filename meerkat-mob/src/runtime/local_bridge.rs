@@ -221,14 +221,23 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
     }
 
     async fn wire_member(&self, _peer_spec: BridgePeerSpec) -> Result<BridgeAck, MobError> {
-        // Local wiring is handled directly through comms runtime, not through
-        // the bridge. This is a no-op for local members.
-        Ok(BridgeAck { ok: true })
+        // Local members wire through direct AgentRuntimeId dispatch in the
+        // comms runtime, not through the bridge trait. Any caller that reaches
+        // this method is branching wrong and should select the member kind
+        // before calling.
+        Err(MobError::Internal(
+            "local bridge wire_member called — callers must branch on MemberRef".to_string(),
+        ))
     }
 
     async fn unwire_member(&self, _peer_spec: BridgePeerSpec) -> Result<BridgeAck, MobError> {
-        // Local unwiring is handled directly through comms runtime.
-        Ok(BridgeAck { ok: true })
+        // Local members unwire through direct AgentRuntimeId dispatch in the
+        // comms runtime, not through the bridge trait. Any caller that reaches
+        // this method is branching wrong and should select the member kind
+        // before calling.
+        Err(MobError::Internal(
+            "local bridge unwire_member called — callers must branch on MemberRef".to_string(),
+        ))
     }
 }
 
@@ -272,5 +281,63 @@ mod tests {
         let ack = bridge.authorize_supervisor().await.unwrap();
 
         assert!(ack.ok);
+    }
+
+    fn sample_peer_spec() -> BridgePeerSpec {
+        BridgePeerSpec {
+            name: "peer-a".to_string(),
+            peer_id: "peer-a-id".to_string(),
+            address: "inproc://peer-a".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_bridge_wire_is_programming_error() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
+        let err = bridge.wire_member(sample_peer_spec()).await.unwrap_err();
+
+        match err {
+            MobError::Internal(reason) => {
+                assert_eq!(
+                    reason,
+                    "local bridge wire_member called — callers must branch on MemberRef",
+                );
+            }
+            other => panic!("expected MobError::Internal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_bridge_unwire_is_programming_error() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+
+        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
+        let err = bridge.unwire_member(sample_peer_spec()).await.unwrap_err();
+
+        match err {
+            MobError::Internal(reason) => {
+                assert_eq!(
+                    reason,
+                    "local bridge unwire_member called — callers must branch on MemberRef",
+                );
+            }
+            other => panic!("expected MobError::Internal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_bridge_destroy_returns_report() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine.register_session(session_id.clone()).await;
+
+        let bridge = LocalMobRuntimeBridge::new(machine, session_id);
+        let report = bridge.destroy_member().await.unwrap();
+
+        assert_eq!(report.inputs_abandoned, 0);
     }
 }

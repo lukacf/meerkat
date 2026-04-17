@@ -74,7 +74,46 @@ pub enum BridgeReply {
     Delivery(BridgeDeliveryResponse),
     Retire(BridgeRetireResponse),
     Destroy(BridgeDestroyResponse),
-    Rejected { reason: String },
+    Rejected {
+        cause: BridgeRejectionCause,
+        reason: String,
+    },
+}
+
+/// Typed vocabulary for why a bridge command was rejected.
+///
+/// Callers branch on the typed `cause` to drive recovery logic; the
+/// accompanying `reason` string is for operator diagnostics only and must
+/// not be pattern-matched. Reserve `Internal` for true invariant
+/// violations — ordinary validation failures get a specific cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BridgeRejectionCause {
+    /// No supervisor is bound yet; caller must `bind_member` first.
+    NotBound,
+    /// The request targets an older epoch than the bound authority.
+    StaleSupervisor,
+    /// The authenticated sender does not match the authorized supervisor.
+    SenderMismatch,
+    /// A different supervisor is already bound; rotation must go through
+    /// `authorize_supervisor`, not `bind_member`.
+    AlreadyBound,
+    /// The bootstrap token did not match the runtime's expected value.
+    InvalidBootstrapToken,
+    /// The wire protocol version is not supported by this runtime.
+    UnsupportedProtocolVersion,
+    /// The embedded supervisor peer spec failed validation.
+    InvalidSupervisorSpec,
+    /// The embedded trusted-peer spec failed validation.
+    InvalidPeerSpec,
+    /// The `expected_address` in the bind payload does not match this
+    /// runtime's advertised address.
+    AddressMismatch,
+    /// The command variant is not currently handled by this runtime.
+    Unsupported,
+    /// An unexpected invariant was violated while handling the command.
+    Internal,
 }
 
 // ---------------------------------------------------------------------------
@@ -460,16 +499,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 2. BridgeReply::Rejected round-trip with current shape.
+    // 2. BridgeReply::Rejected round-trip with typed cause.
     // -----------------------------------------------------------------------
     //
-    // TODO(c4): Worker 1's H1 adds a typed `cause: BridgeRejectionCause` field
-    // to this variant. This test pins the current `{ result, reason }` shape
-    // so the c4 diff is a clean extension rather than a rewrite.
+    // Pins the `{ result, cause, reason }` wire shape. Callers branch on
+    // the typed `cause`; `reason` is a human-readable diagnostic and must
+    // not be pattern-matched.
 
     #[test]
-    fn bridge_reply_rejected_round_trip_current_shape() {
+    fn bridge_reply_rejected_round_trip_with_typed_cause() {
         let reply = BridgeReply::Rejected {
+            cause: BridgeRejectionCause::StaleSupervisor,
             reason: "epoch too low".to_string(),
         };
         let value = serde_json::to_value(&reply).expect("serialize rejected reply");
@@ -477,13 +517,15 @@ mod tests {
             value,
             json!({
                 "result": "rejected",
+                "cause": "stale_supervisor",
                 "reason": "epoch too low",
             }),
-            "current wire shape must tag rejection with `result` + `reason`"
+            "wire shape must tag rejection with `result` + `cause` + `reason`"
         );
         let decoded: BridgeReply = serde_json::from_value(value.clone()).expect("decode reply");
         match decoded {
-            BridgeReply::Rejected { ref reason } => {
+            BridgeReply::Rejected { cause, ref reason } => {
+                assert_eq!(cause, BridgeRejectionCause::StaleSupervisor);
                 assert_eq!(reason, "epoch too low");
             }
             other => panic!("expected BridgeReply::Rejected, got {other:?}"),

@@ -2664,6 +2664,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     if responder_fail_next_bind.swap(false, Ordering::Relaxed) {
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::Internal,
                                                 reason: "bind member failed: injected test failure"
                                                     .to_string(),
                                             },
@@ -2725,6 +2726,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             .expect("trust supervisor for rejection");
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::Internal,
                                                 reason: "authorize supervisor failed: injected test failure".to_string(),
                                             },
                                         )
@@ -2779,6 +2781,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 .expect("trust supervisor for initial rejection");
                                             serde_json::to_value(
                                                 super::bridge_protocol::BridgeReply::Rejected {
+                                                    cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
                                                     reason: "authorize supervisor failed: use bind_member to establish initial supervisor authority".to_string(),
                                                 },
                                             )
@@ -2815,6 +2818,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     if payload.epoch != current.epoch {
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
                                                 reason: format!(
                                                     "stale supervisor epoch {} (current {})",
                                                     payload.epoch, current.epoch
@@ -2827,6 +2831,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     {
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
                                                 reason: format!(
                                                     "stale supervisor peer '{}' (current '{}')",
                                                     payload.supervisor.peer_id,
@@ -4556,10 +4561,17 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
     let stale_reply: super::bridge_protocol::BridgeReply =
         serde_json::from_value(stale_reply).expect("decode stale bridge reply");
     match stale_reply {
-        super::bridge_protocol::BridgeReply::Rejected { reason } => assert!(
-            reason.contains("stale supervisor"),
-            "stale supervisor should be rejected explicitly, got: {reason}"
-        ),
+        super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+            assert_eq!(
+                cause,
+                super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                "stale supervisor should be rejected with typed cause, got reason: {reason}"
+            );
+            assert!(
+                reason.contains("stale supervisor"),
+                "stale supervisor should be rejected explicitly, got: {reason}"
+            );
+        }
         other => panic!("expected stale supervisor rejection, got {other:?}"),
     }
 }

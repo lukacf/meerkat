@@ -1245,12 +1245,19 @@ impl MultiBackendProvisioner {
         })
     }
 
-    fn bridge_rejection_reason(value: &serde_json::Value) -> Option<String> {
+    fn bridge_rejection_reason(
+        value: &serde_json::Value,
+    ) -> Option<(super::bridge_protocol::BridgeRejectionCause, String)> {
         if let Some(reason) = value.as_str() {
-            return Some(reason.to_string());
+            return Some((
+                super::bridge_protocol::BridgeRejectionCause::Internal,
+                reason.to_string(),
+            ));
         }
         match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
-            super::bridge_protocol::BridgeReply::Rejected { reason } => Some(reason),
+            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+                Some((cause, reason))
+            }
             _ => None,
         }
     }
@@ -1266,11 +1273,13 @@ impl MultiBackendProvisioner {
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await?;
-        if let Some(reason) = Self::bridge_rejection_reason(&value) {
-            if (reason.contains("use bind_member")
-                || reason.contains("stale supervisor")
-                || reason.contains("request sender"))
-                && let Some((peer_id, address, bootstrap_token)) = binding
+        if let Some((cause, reason)) = Self::bridge_rejection_reason(&value) {
+            if matches!(
+                cause,
+                super::bridge_protocol::BridgeRejectionCause::NotBound
+                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
+                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch
+            ) && let Some((peer_id, address, bootstrap_token)) = binding
             {
                 let bind: super::bridge_protocol::BridgeBindResponse = self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
@@ -1300,7 +1309,7 @@ impl MultiBackendProvisioner {
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await?;
-        if let Some(reason) = Self::bridge_rejection_reason(&value) {
+        if let Some((_cause, reason)) = Self::bridge_rejection_reason(&value) {
             return Err(MobError::WiringError(reason));
         }
         serde_json::from_value(value).map_err(|error| {

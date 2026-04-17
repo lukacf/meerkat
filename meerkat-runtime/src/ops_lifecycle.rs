@@ -1018,6 +1018,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             operation_id: id.clone(),
         })?;
 
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::PeerReadyOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "PeerReadyOp",
+        );
+
         // Shell concern: store the peer handle.
         if let Some(shell) = state.records.get_mut(id) {
             shell.peer_handle = Some(peer);
@@ -1072,6 +1080,14 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let transition = state.authority.apply(OpsLifecycleInput::ProgressReported {
             operation_id: id.clone(),
         })?;
+
+        // DSL shadow validation.
+        state.shadow_validate_dsl(
+            mm_dsl::MeerkatMachineInput::ProgressReportedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "ProgressReportedOp",
+        );
 
         state.execute_effects(&transition.effects);
         Ok(())

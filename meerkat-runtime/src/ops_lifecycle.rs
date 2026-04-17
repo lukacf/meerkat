@@ -1004,12 +1004,9 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Ok(OperationCompletionWatch::already_resolved(outcome.clone()));
         }
 
-        // Delegate to authority for watcher_count bookkeeping.
-        let _transition = state.authority.apply(OpsLifecycleInput::RegisterWatcher {
-            operation_id: id.clone(),
-        })?;
-
         // Shell concern: create the channel and store the sender.
+        // Watcher tracking lives in shell.watchers Vec — no authority
+        // bookkeeping needed.
         let shell = state.shell_record_mut(id)?;
         let (tx, watch) = OperationCompletionWatch::channel();
         shell.watchers.push(tx);

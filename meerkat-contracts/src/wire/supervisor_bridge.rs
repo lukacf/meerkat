@@ -713,4 +713,244 @@ mod tests {
             assert_eq!(decoded, *variant);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // 6. BridgeRejectionCause — snake_case round-trip for every variant.
+    // -----------------------------------------------------------------------
+    //
+    // Mob-side fallback logic (see `should_fall_back_to_bind`) branches on
+    // typed causes. Any accidental rename or new variant that skipped the
+    // snake_case convention would silently change fallback behavior, so pin
+    // the full matrix.
+
+    #[test]
+    fn bridge_rejection_cause_snake_case_round_trip_all_variants() {
+        let cases: &[(BridgeRejectionCause, &str)] = &[
+            (BridgeRejectionCause::NotBound, "not_bound"),
+            (BridgeRejectionCause::StaleSupervisor, "stale_supervisor"),
+            (BridgeRejectionCause::SenderMismatch, "sender_mismatch"),
+            (BridgeRejectionCause::AlreadyBound, "already_bound"),
+            (
+                BridgeRejectionCause::InvalidBootstrapToken,
+                "invalid_bootstrap_token",
+            ),
+            (
+                BridgeRejectionCause::UnsupportedProtocolVersion,
+                "unsupported_protocol_version",
+            ),
+            (
+                BridgeRejectionCause::InvalidSupervisorSpec,
+                "invalid_supervisor_spec",
+            ),
+            (BridgeRejectionCause::InvalidPeerSpec, "invalid_peer_spec"),
+            (BridgeRejectionCause::AddressMismatch, "address_mismatch"),
+            (BridgeRejectionCause::Unsupported, "unsupported"),
+            (BridgeRejectionCause::Internal, "internal"),
+        ];
+        for (cause, expected) in cases {
+            let value = serde_json::to_value(cause).expect("serialize cause");
+            assert_eq!(
+                value,
+                json!(expected),
+                "cause {cause:?} must serialize as {expected:?}"
+            );
+            let decoded: BridgeRejectionCause =
+                serde_json::from_value(value).expect("decode cause");
+            assert_eq!(decoded, *cause);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. BridgeReply — protocol v2 round-trip for every success variant.
+    // -----------------------------------------------------------------------
+    //
+    // The dispatcher in `comms_drain.rs` constructs exactly these variants;
+    // the mob side decodes them via `send_bridge_command_typed`. A rename
+    // would break the typed dispatch silently, so pin every `result` tag.
+
+    fn assert_reply_round_trip(reply: BridgeReply, expected: serde_json::Value) {
+        let value = serde_json::to_value(&reply).expect("serialize reply");
+        assert_eq!(value, expected, "reply wire shape must be stable");
+        let _decoded: BridgeReply = serde_json::from_value(value).expect("decode reply");
+    }
+
+    #[test]
+    fn bridge_reply_bind_member_ack_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::BindMember(BridgeBindResponse {
+                peer_id: "peer-x".to_string(),
+                address: "inproc://peer-x".to_string(),
+                capabilities: BridgeCapabilities::default(),
+            }),
+            json!({
+                "result": "bind_member",
+                "peer_id": "peer-x",
+                "address": "inproc://peer-x",
+                "capabilities": {
+                    "deliver_member_input": false,
+                    "observe_member": false,
+                    "interrupt_member": false,
+                    "retire_member": false,
+                    "destroy_member": false,
+                    "wire_member": false,
+                    "unwire_member": false,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn bridge_reply_ack_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::Ack(BridgeAck { ok: true }),
+            json!({ "result": "ack", "ok": true }),
+        );
+    }
+
+    #[test]
+    fn bridge_reply_observation_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::Observation(BridgeObservationResponse {
+                state: BridgeMemberRuntimeState::Running,
+                accepting_inputs: None,
+                current_run_id: None,
+                peer_connectivity: None,
+                last_error: None,
+                observed_at: "2026-04-17T00:00:00Z".to_string(),
+            }),
+            json!({
+                "result": "observation",
+                "state": "running",
+                "observed_at": "2026-04-17T00:00:00Z",
+            }),
+        );
+    }
+
+    #[test]
+    fn bridge_reply_delivery_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::Delivery(BridgeDeliveryResponse {
+                input_id: "in-1".to_string(),
+                canonical_input_id: None,
+                outcome: BridgeDeliveryOutcome::Accepted,
+            }),
+            json!({
+                "result": "delivery",
+                "input_id": "in-1",
+                "canonical_input_id": null,
+                "outcome": { "outcome": "accepted" },
+            }),
+        );
+    }
+
+    #[test]
+    fn bridge_reply_retire_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::Retire(BridgeRetireResponse {
+                inputs_abandoned: 2,
+                inputs_pending_drain: 0,
+            }),
+            json!({
+                "result": "retire",
+                "inputs_abandoned": 2,
+                "inputs_pending_drain": 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn bridge_reply_destroy_round_trip() {
+        assert_reply_round_trip(
+            BridgeReply::Destroy(BridgeDestroyResponse {
+                inputs_abandoned: 3,
+            }),
+            json!({
+                "result": "destroy",
+                "inputs_abandoned": 3,
+            }),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. BridgeBootstrapToken::fmt::Debug must redact the body.
+    // -----------------------------------------------------------------------
+    //
+    // The whole point of the newtype is that `{:?}` in tracing/panic
+    // messages never leaks the raw secret. Regressing the Debug impl to the
+    // default derive would silently reintroduce the leak, so pin the format.
+
+    #[test]
+    fn bridge_bootstrap_token_debug_redacts_nonempty_body() {
+        let token = BridgeBootstrapToken::new("super-secret-bootstrap");
+        let rendered = format!("{token:?}");
+        assert_eq!(
+            rendered,
+            format!(
+                "BridgeBootstrapToken(<redacted, {}B>)",
+                "super-secret-bootstrap".len()
+            )
+        );
+        assert!(
+            !rendered.contains("super-secret-bootstrap"),
+            "Debug output must not contain the raw token body"
+        );
+    }
+
+    #[test]
+    fn bridge_bootstrap_token_debug_marks_empty_token() {
+        let token = BridgeBootstrapToken::new("");
+        assert_eq!(format!("{token:?}"), "BridgeBootstrapToken(empty)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. BridgeBootstrapToken — `#[serde(transparent)]` round-trip.
+    // -----------------------------------------------------------------------
+    //
+    // Wire format is a bare JSON string. Older clients and persisted
+    // records that store `"tok-abc"` must still decode unchanged.
+
+    #[test]
+    fn bridge_bootstrap_token_serde_is_transparent_over_string() {
+        let token = BridgeBootstrapToken::new("tok-abc");
+        let value = serde_json::to_value(&token).expect("serialize token");
+        assert_eq!(value, json!("tok-abc"));
+        let decoded: BridgeBootstrapToken =
+            serde_json::from_value(json!("tok-abc")).expect("decode token");
+        assert_eq!(decoded, token);
+        // And as a plain string
+        let s = serde_json::to_string(&token).expect("serialize string");
+        assert_eq!(s, "\"tok-abc\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Wire compat on M1: pre-newtype raw JSON must deserialize into the
+    //     newtype BridgeBindPayload and serialize back byte-for-byte.
+    // -----------------------------------------------------------------------
+    //
+    // Pins that introducing BridgeBootstrapToken did NOT break wire compat
+    // with supervisors/members that emit a plain string bootstrap_token.
+
+    #[test]
+    fn bridge_bind_payload_wire_compat_with_plain_string_bootstrap_token() {
+        let raw = json!({
+            "supervisor": {
+                "name": "mob/__mob_supervisor__",
+                "peer_id": "ed25519:supervisor",
+                "address": "inproc://mob/__mob_supervisor__",
+            },
+            "epoch": 7,
+            "protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            "expected_peer_id": "ed25519:member",
+            "expected_address": "inproc://member",
+            "bootstrap_token": "tok-raw-string",
+        });
+        let payload: BridgeBindPayload =
+            serde_json::from_value(raw.clone()).expect("decode pre-newtype payload");
+        assert_eq!(payload.bootstrap_token.as_str(), "tok-raw-string");
+        let reencoded = serde_json::to_value(&payload).expect("reserialize payload");
+        assert_eq!(
+            reencoded, raw,
+            "newtype round-trip must preserve the pre-newtype wire shape"
+        );
+    }
 }

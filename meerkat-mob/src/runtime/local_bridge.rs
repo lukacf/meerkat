@@ -340,4 +340,27 @@ mod tests {
 
         assert_eq!(report.inputs_abandoned, 0);
     }
+
+    // Negative-path coverage for `observe_member` when the bridged session
+    // was never registered with the runtime — plan test #20. Exercises the
+    // error path instead of relying on callers to guarantee registration.
+    #[tokio::test]
+    async fn local_bridge_observe_with_unregistered_session_surfaces_internal_error() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let bridge = LocalMobRuntimeBridge::new(machine, SessionId::new());
+
+        let err = bridge
+            .observe_member()
+            .await
+            .expect_err("observe on unregistered session must return MobError, not succeed");
+        match err {
+            MobError::Internal(reason) => {
+                assert!(
+                    reason.starts_with("observe_member failed:"),
+                    "error should identify the observe path, got: {reason}"
+                );
+            }
+            other => panic!("expected MobError::Internal, got {other:?}"),
+        }
+    }
 }

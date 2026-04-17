@@ -1907,6 +1907,103 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // 10. Strict gate production path: the BindMember rebind is rejected
+    //     with a *typed* `AlreadyBound` cause on the wire, not just by
+    //     state preservation. Complements
+    //     `bind_member_handler_rejects_rebind_after_supervisor_bound`,
+    //     which asserts the state-side invariant.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bind_member_handler_rebind_reply_is_typed_already_bound() {
+        let sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(CapturingRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            advertised_address: Some("inproc://receiver".to_string()),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            sent: sent.clone(),
+        });
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let current = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            "ed25519:current-supervisor",
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid supervisor spec");
+        let mut supervisor_state = Some(AuthorizedSupervisorState {
+            supervisor: current.clone(),
+            epoch: 1,
+        });
+
+        // A different supervisor tries to rebind. Under the strict gate this
+        // must be rejected with typed `AlreadyBound` — the mob-side bridge
+        // fallback logic branches on the typed cause, not on reason text.
+        let adversary = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:different-supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let command = BridgeCommand::BindMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+                supervisor: adversary,
+                epoch: 2,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                expected_peer_id: "ed25519:receiver".to_string(),
+                expected_address: "inproc://receiver".to_string(),
+                bootstrap_token: "expected-token".into(),
+            },
+        );
+        let candidate = bridge_candidate("ed25519:different-supervisor", &command);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &runtime,
+                &candidate,
+                &mut supervisor_state,
+            )
+            .await,
+            "bridge handler must own the BindMember command"
+        );
+
+        // State is preserved (already covered elsewhere, pinned again here).
+        let state = supervisor_state.expect("state preserved");
+        assert_eq!(state.supervisor.peer_id, current.peer_id);
+
+        // The reply on the wire carries a typed `AlreadyBound` cause.
+        let (result, status) = sent
+            .lock()
+            .await
+            .iter()
+            .find_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { result, status, .. } => {
+                    Some((result.clone(), *status))
+                }
+                _ => None,
+            })
+            .expect("handler must send a PeerResponse for the rejection");
+        assert!(
+            matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
+            "rebind rejection must surface as Failed status"
+        );
+        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        match reply {
+            BridgeReply::Rejected { cause, .. } => {
+                assert_eq!(
+                    cause,
+                    BridgeRejectionCause::AlreadyBound,
+                    "different-supervisor rebind must be rejected as AlreadyBound",
+                );
+            }
+            other => unreachable!("expected Rejected reply, got {other:?}"),
+        }
+    }
+
     /// Capturing runtime that lets a test inspect every `CommsCommand` sent
     /// through the bridge handler. Also deliberately returns `None` for
     /// `advertised_address` so we can exercise the idempotent-ack invariant
@@ -2126,6 +2223,100 @@ mod tests {
             error.contains("unsupported bridge protocol version"),
             "authorize rejection should explain the protocol mismatch, got: {error}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Empty bootstrap token must be rejected with a typed cause.
+    // -----------------------------------------------------------------------
+    //
+    // `advertised_bind_bootstrap_token` is the single point where the
+    // runtime asserts the bootstrap token is non-empty. An empty token
+    // would make the initial bind handshake unverifiable, so pin the
+    // typed rejection.
+
+    #[test]
+    fn validate_bind_request_rejects_empty_bootstrap_token_at_runtime() {
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            address: "inproc://receiver".to_string(),
+            bootstrap_token: Some(String::new()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            remove_trusted_peer_error: None,
+        });
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: supervisor.clone(),
+            epoch: 0,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: runtime.advertised_address().unwrap(),
+            bootstrap_token: "whatever".into(),
+        };
+
+        let (cause, _error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            .expect_err("runtime with empty token must refuse to validate");
+        assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. Protocol v1 downgrade: every command's handler must reject a v1
+    //     payload at the version check, never proceed with defaulted fields.
+    // -----------------------------------------------------------------------
+    //
+    // `validate_bind_request_rejects_explicit_v1_protocol_under_v2` already
+    // covers the bind path. Extend the contract to AuthorizeSupervisor
+    // (gating rotation) and the broader require_authorized_supervisor flow
+    // that backs revoke/observe/interrupt/retire/destroy/deliver and
+    // wire/unwire.
+
+    #[test]
+    fn validate_authorize_supervisor_rejects_explicit_v1_protocol_under_v2() {
+        let payload = BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec {
+                name: "mob/__mob_supervisor__".to_string(),
+                peer_id: "ed25519:supervisor".to_string(),
+                address: "inproc://mob/__mob_supervisor__".to_string(),
+            },
+            epoch: 0,
+            protocol_version: 1,
+        };
+        let (cause, _error) =
+            validate_authorize_supervisor_request(&payload.supervisor.peer_id, &payload, &None)
+                .expect_err("v1 authorize must be rejected under v2+");
+        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
+    }
+
+    #[test]
+    fn require_authorized_supervisor_rejects_explicit_v1_protocol_under_v2() {
+        // Back-stops every command that calls `require_authorized_supervisor`
+        // (revoke/observe/interrupt/retire/destroy/deliver/wire/unwire). A v1
+        // payload must not coast on idempotent-ack or sender-match.
+        let supervisor = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            "ed25519:supervisor",
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid supervisor spec");
+        let state = Some(AuthorizedSupervisorState {
+            supervisor: supervisor.clone(),
+            epoch: 3,
+        });
+        let payload = BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec {
+                name: supervisor.name.clone(),
+                peer_id: supervisor.peer_id.clone(),
+                address: supervisor.address.clone(),
+            },
+            epoch: 3,
+            protocol_version: 1,
+        };
+        let (cause, _error) = require_authorized_supervisor(&supervisor.peer_id, &payload, &state)
+            .expect_err("v1 authorized-supervisor payload must be rejected");
+        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
     }
 
     fn bridge_candidate(sender: &str, command: &BridgeCommand) -> PeerInputCandidate {

@@ -84,7 +84,9 @@ The system is formally modeled as canonical machines plus closed-world compositi
 
 **Design rule:** centralized `meerkat-machine-kernels` is the enforced layout. Owner crates do NOT have `machines/mod.rs` re-export modules. The xtask verification explicitly rejects parallel owner modules.
 
-**Machines:** InputLifecycleMachine, RuntimeControlMachine, RuntimeIngressMachine, OpsLifecycleMachine, PeerCommsMachine, ExternalToolSurfaceMachine, TurnExecutionMachine, SessionTurnAdmissionMachine, MobLifecycleMachine, MobMemberBootstrapMachine, MobMemberLifecycleMachine, MobRuntimeBridgeMachine, MobWiringMachine, MobOrchestratorMachine, FlowRunMachine, FlowFrameMachine, LoopIterationMachine, ScheduleLifecycleMachine, OccurrenceLifecycleMachine, PeerDirectoryReachabilityMachine, plus seam-focused machines such as CommsDrainLifecycleMachine where an async boundary has its own lifecycle truth.
+**Two-kernel architecture** (post-absorption): there are exactly **four** canonical machines — **MeerkatMachine** (session-scoped execution kernel), **MobMachine** (mob-scoped orchestration), and two perimeter machines **ScheduleLifecycleMachine** + **OccurrenceLifecycleMachine** — plus composition protocols (`meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`).
+
+Previously-standalone machines (`InputLifecycleMachine`, `RuntimeIngressMachine`, `OpsLifecycleMachine`, `CommsDrainLifecycleMachine`, `TurnExecutionMachine`, `SessionTurnAdmissionMachine`, `ExternalToolSurfaceMachine`, `PeerCommsMachine`, `PeerDirectoryReachabilityMachine`) are absorbed as substate regions/inputs inside `MeerkatMachine`. `MobLifecycleMachine`, `MobOrchestratorMachine`, `MobMemberBootstrapMachine`, `MobMemberLifecycleMachine`, `MobRuntimeBridgeMachine`, `MobWiringMachine`, `FlowRunMachine`, `FlowFrameMachine`, `LoopIterationMachine` are absorbed into `MobMachine`.
 
 **Verification:** `cargo xtask machine-codegen --all` (regenerate), `cargo xtask machine-check-drift --all` (detect stale artifacts), `cargo xtask machine-verify --all` (TLC model checking + owner tests).
 

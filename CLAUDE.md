@@ -184,6 +184,10 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 
 **Architecture:** Each session gets a dedicated tokio task that exclusively owns the `Agent` (no mutex needed for `cancel(&mut self)`). The `SessionRuntime` dispatches commands via channels. `AgentFactory.build_agent()` consolidates the agent construction pipeline shared across all surfaces.
 
+## Mob Orchestration
+
+**Bridge rotation rollback is best-effort once a remote has rotated forward.** The supervisor-bridge strict `BindMember` gate rejects rollback attempts against an already-rotated remote, so partial-failure during `handle_rotate_supervisor` falls through to the `advance local authority` path rather than reverting peers — see `meerkat-mob/src/runtime/actor.rs::handle_rotate_supervisor` (around line 5756). This is expected behavior: after a successful forward rotation the local authority is the source of truth, and deterministic recovery requires the local state to match the partially applied next authority rather than the superseded previous one. Callers observing `MobError::WiringError` with `rollback failures: ...` should treat it as a rotation-completed-then-local-advanced outcome, not a fully reverted rotation.
+
 ## Key Files
 
 - `meerkat-core/src/agent.rs` - Main agent execution loop

@@ -67,6 +67,19 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 
+# ## Features
+#
+# - `runtime-adapter` (default): pulls in `meerkat-runtime` so mob orchestration
+#   can attach to an in-process `MeerkatMachine` via the `LocalMobRuntimeBridge`
+#   adapter. Required for the embedded single-host deployment (CLI, RPC, WASM).
+# - Building with `--no-default-features` omits `meerkat-runtime` and exposes only
+#   the transport-agnostic `MobMemberRuntimeBridge` trait plus the
+#   `MobSupervisorBridge` comms transport. This is the supported configuration
+#   for remote-only / cross-host deployments where the runtime is reached over
+#   the supervisor-bridge comms channel rather than in-process. CI exercises
+#   both shapes via `make test-feature-matrix-lib`.
+# - `integration-real-tests`: opt-in suite for end-to-end smoke tests that boot
+#   real sessions (see `[[test]]` entries below).
 [features]
 default = ["runtime-adapter"]
 runtime-adapter = ["dep:meerkat-runtime"]

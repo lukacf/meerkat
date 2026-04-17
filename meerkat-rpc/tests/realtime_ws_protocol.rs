@@ -4,7 +4,16 @@
 //! typed frame protocol plus the current channel-host mapping for session and
 //! member targets without promoting the websocket shell into the semantic owner.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    // Phase 1a added ~6 DSL fields to MeerkatMachineState (realtime +
+    // live-topology), pushing several test futures past the default
+    // clippy::large_futures 16384-byte stack budget. These are integration
+    // tests; the heap/stack tradeoff doesn't matter here.
+    clippy::large_futures
+)]
 
 use std::pin::Pin;
 use std::sync::Arc;

@@ -3718,7 +3718,14 @@ fn system_context_error_to_rpc(err: SessionControlError) -> RpcError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    // Phase 1a added ~6 DSL fields to MeerkatMachineState pushing several
+    // test futures past the default 16384-byte stack budget. Tests only.
+    clippy::large_futures
+)]
 mod tests {
     use super::*;
 

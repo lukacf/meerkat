@@ -951,19 +951,20 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 operation_id: id.clone(),
             })?;
 
-        // DSL shadow validation.
+        let terminal_outcome = OperationTerminalOutcome::Failed { error };
+        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+
+        // DSL shadow validation with real outcome payload.
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: String::new(),
+                outcome: outcome_serialized,
             },
             "FailOp (provisioning_failed)",
         );
 
         // Patch the real terminal outcome (authority uses placeholder).
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
+        state.authority.patch_terminal_outcome(id, terminal_outcome);
 
         state.execute_effects(&transition.effects);
         Ok(())
@@ -1042,19 +1043,20 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 operation_id: id.clone(),
             })?;
 
-        // DSL shadow validation.
+        let terminal_outcome = OperationTerminalOutcome::Completed(result);
+        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+
+        // DSL shadow validation with real outcome payload.
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::CompleteOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: String::new(),
+                outcome: outcome_serialized,
             },
             "CompleteOp",
         );
 
         // Patch the real terminal outcome (authority uses placeholder).
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Completed(result));
+        state.authority.patch_terminal_outcome(id, terminal_outcome);
 
         state.execute_effects(&transition.effects);
         state.maybe_persist();
@@ -1068,19 +1070,20 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             operation_id: id.clone(),
         })?;
 
+        let terminal_outcome = OperationTerminalOutcome::Failed { error };
+        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+
         // DSL shadow validation.
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: String::new(),
+                outcome: outcome_serialized,
             },
             "FailOp",
         );
 
         // Patch the real terminal outcome.
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Failed { error });
+        state.authority.patch_terminal_outcome(id, terminal_outcome);
 
         state.execute_effects(&transition.effects);
         state.maybe_persist();
@@ -1100,18 +1103,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 operation_id: id.clone(),
             })?;
 
+        let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
+        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+
         // DSL shadow validation.
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::AbortOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: String::new(),
+                outcome: outcome_serialized,
             },
             "AbortOp",
         );
 
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Aborted { reason });
+        state.authority.patch_terminal_outcome(id, terminal_outcome);
 
         state.execute_effects(&transition.effects);
         state.maybe_persist();
@@ -1129,11 +1133,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             operation_id: id.clone(),
         })?;
 
+        let terminal_outcome = OperationTerminalOutcome::Cancelled {
+            reason: reason.clone(),
+        };
+        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+
         // DSL shadow validation.
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::CancelOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
-                outcome: String::new(),
+                outcome: outcome_serialized,
             },
             "CancelOp",
         );

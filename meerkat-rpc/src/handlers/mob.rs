@@ -1084,7 +1084,7 @@ pub async fn handle_mob_turn_start(
     state: &Arc<MobMcpState>,
     runtime: Arc<SessionRuntime>,
     notification_sink: &crate::router::NotificationSink,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let mob_params: MobTurnStartParams = match parse_params(params) {

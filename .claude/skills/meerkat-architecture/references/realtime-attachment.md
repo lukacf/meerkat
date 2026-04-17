@@ -4,6 +4,12 @@ Load this reference when working on realtime attachment state, the
 live-topology reconfigure flow, provider callback authority epochs, or
 the peer-response-terminal context append path.
 
+User-facing companion: `docs/guides/realtime.mdx`. That guide is the
+source of truth for the public attach/detach surface, the state enum
+table, and the authority-epoch contract. This reference covers the
+internal DSL fields, invariants, and shell↔DSL routing used when
+modifying the implementation.
+
 ## Public vocabulary
 
 Public API surfaces describe `realtime`, not `voice`. Converged terms:

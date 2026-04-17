@@ -153,4 +153,5 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
 - `docs/architecture/meerkat-runtime-dogma.md` — full dogma
 - `docs/architecture/identity-first-live-voice-proposal.md` — realtime + identity-first design notes
+- `docs/guides/realtime.mdx` — user-facing realtime voice guide (public vocabulary, state enum, reconfigure flow)
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog

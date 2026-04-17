@@ -108,8 +108,20 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         // ChatGPT account metadata lifted from the persisted OAuth bundle
         // (account_id → ChatGPT-Account-ID wire header; is_fedramp →
         // X-OpenAI-Fedramp wire header).
+        #[cfg_attr(
+            not(all(not(target_arch = "wasm32"), feature = "oauth")),
+            allow(unused_mut)
+        )]
         let mut chatgpt_account_id: Option<String> = None;
+        #[cfg_attr(
+            not(all(not(target_arch = "wasm32"), feature = "oauth")),
+            allow(unused_mut)
+        )]
         let mut chatgpt_is_fedramp: Option<bool> = None;
+        #[cfg_attr(
+            not(all(not(target_arch = "wasm32"), feature = "oauth")),
+            allow(unused_mut)
+        )]
         let mut chatgpt_plan_type: Option<String> = None;
 
         let shim_credential = match auth_method {
@@ -296,10 +308,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .unwrap_or_else(|| OpenAiBackendKind::ChatGptBackend.default_base_url().into());
                 let mut extra_headers: Vec<(String, String)> = Vec::new();
                 if let Some(acct) = account_id {
-                    extra_headers.push((oauth::CHATGPT_ACCOUNT_HEADER.to_string(), acct));
+                    extra_headers.push((auth::CHATGPT_ACCOUNT_HEADER.to_string(), acct));
                 }
                 if matches!(is_fedramp, Some(true)) {
-                    extra_headers.push((oauth::FEDRAMP_HEADER.to_string(), "true".to_string()));
+                    extra_headers.push((auth::FEDRAMP_HEADER.to_string(), "true".to_string()));
                 }
                 let client = crate::openai::OpenAiClient::new_with_base_url(secret, base_url)
                     .with_extra_headers(extra_headers);

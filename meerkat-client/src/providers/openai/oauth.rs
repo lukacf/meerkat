@@ -45,10 +45,9 @@ pub const CHATGPT_SCOPES: &[&str] = &[
     "api.connectors.invoke",
 ];
 
-/// Wire header carrying the ChatGPT account ID on every API call.
-pub const CHATGPT_ACCOUNT_HEADER: &str = "ChatGPT-Account-ID";
-/// Optional wire header for Fedramp-restricted accounts.
-pub const FEDRAMP_HEADER: &str = "X-OpenAI-Fedramp";
+// Wire header constants are defined in `auth.rs` (unconditional module) so
+// they remain available when the interactive OAuth flow is feature-gated off.
+pub use super::auth::{CHATGPT_ACCOUNT_HEADER, FEDRAMP_HEADER};
 
 // ---------------------------------------------------------------------
 // Endpoints

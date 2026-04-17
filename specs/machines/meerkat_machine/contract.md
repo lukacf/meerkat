@@ -13,6 +13,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
+- `auth_valid_leases`: `Set<String>`
+- `auth_expiring_leases`: `Set<String>`
+- `auth_refreshing_leases`: `Set<String>`
+- `auth_reauth_required_leases`: `Set<String>`
+- `auth_expires_at`: `Map<String, u64>`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -52,6 +57,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
 - `Recycle`
+- `AcquireAuthLease`(binding_key: String, expires_at: u64)
+- `MarkAuthExpiring`(binding_key: String)
+- `BeginAuthRefresh`(binding_key: String)
+- `CompleteAuthRefresh`(binding_key: String, new_expires_at: u64, now: u64)
+- `AuthRefreshFailed`(binding_key: String, permanent: Bool)
+- `MarkReauthRequired`(binding_key: String)
+- `ReleaseAuthLease`(binding_key: String)
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -127,6 +139,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitExternalToolDelta`
 - `CloseSurfaceConnection`
 - `RejectSurfaceCall`
+- `EmitAuthLifecycleEvent`(binding_key: String, new_state: String)
+- `EmitAuthReauthNotice`(binding_key: String)
+- `WakeRefreshLoop`(binding_key: String)
 
 ## Invariants
 - `fence_requires_bound_runtime`
@@ -1180,6 +1195,311 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_is_bound`
 - Emits: `InitiateRecycle`
 - To: `Attached`
+
+### `AcquireAuthLeaseIdle`
+- From: `Idle`
+- On: `AcquireAuthLease`(binding_key, expires_at)
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Idle`
+
+### `AcquireAuthLeaseAttached`
+- From: `Attached`
+- On: `AcquireAuthLease`(binding_key, expires_at)
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Attached`
+
+### `AcquireAuthLeaseRunning`
+- From: `Running`
+- On: `AcquireAuthLease`(binding_key, expires_at)
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Running`
+
+### `AcquireAuthLeaseRetired`
+- From: `Retired`
+- On: `AcquireAuthLease`(binding_key, expires_at)
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Retired`
+
+### `AcquireAuthLeaseStopped`
+- From: `Stopped`
+- On: `AcquireAuthLease`(binding_key, expires_at)
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Stopped`
+
+### `MarkAuthExpiringIdle`
+- From: `Idle`
+- On: `MarkAuthExpiring`(binding_key)
+- Guards:
+  - `lease_is_valid`
+- Emits: `EmitAuthLifecycleEvent`, `WakeRefreshLoop`
+- To: `Idle`
+
+### `MarkAuthExpiringAttached`
+- From: `Attached`
+- On: `MarkAuthExpiring`(binding_key)
+- Guards:
+  - `lease_is_valid`
+- Emits: `EmitAuthLifecycleEvent`, `WakeRefreshLoop`
+- To: `Attached`
+
+### `MarkAuthExpiringRunning`
+- From: `Running`
+- On: `MarkAuthExpiring`(binding_key)
+- Guards:
+  - `lease_is_valid`
+- Emits: `EmitAuthLifecycleEvent`, `WakeRefreshLoop`
+- To: `Running`
+
+### `MarkAuthExpiringRetired`
+- From: `Retired`
+- On: `MarkAuthExpiring`(binding_key)
+- Guards:
+  - `lease_is_valid`
+- Emits: `EmitAuthLifecycleEvent`, `WakeRefreshLoop`
+- To: `Retired`
+
+### `MarkAuthExpiringStopped`
+- From: `Stopped`
+- On: `MarkAuthExpiring`(binding_key)
+- Guards:
+  - `lease_is_valid`
+- Emits: `EmitAuthLifecycleEvent`, `WakeRefreshLoop`
+- To: `Stopped`
+
+### `BeginAuthRefreshIdle`
+- From: `Idle`
+- On: `BeginAuthRefresh`(binding_key)
+- Guards:
+  - `lease_not_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Idle`
+
+### `BeginAuthRefreshAttached`
+- From: `Attached`
+- On: `BeginAuthRefresh`(binding_key)
+- Guards:
+  - `lease_not_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Attached`
+
+### `BeginAuthRefreshRunning`
+- From: `Running`
+- On: `BeginAuthRefresh`(binding_key)
+- Guards:
+  - `lease_not_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Running`
+
+### `BeginAuthRefreshRetired`
+- From: `Retired`
+- On: `BeginAuthRefresh`(binding_key)
+- Guards:
+  - `lease_not_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Retired`
+
+### `BeginAuthRefreshStopped`
+- From: `Stopped`
+- On: `BeginAuthRefresh`(binding_key)
+- Guards:
+  - `lease_not_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Stopped`
+
+### `CompleteAuthRefreshIdle`
+- From: `Idle`
+- On: `CompleteAuthRefresh`(binding_key, new_expires_at, now)
+- Guards:
+  - `lease_is_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Idle`
+
+### `CompleteAuthRefreshAttached`
+- From: `Attached`
+- On: `CompleteAuthRefresh`(binding_key, new_expires_at, now)
+- Guards:
+  - `lease_is_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Attached`
+
+### `CompleteAuthRefreshRunning`
+- From: `Running`
+- On: `CompleteAuthRefresh`(binding_key, new_expires_at, now)
+- Guards:
+  - `lease_is_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Running`
+
+### `CompleteAuthRefreshRetired`
+- From: `Retired`
+- On: `CompleteAuthRefresh`(binding_key, new_expires_at, now)
+- Guards:
+  - `lease_is_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Retired`
+
+### `CompleteAuthRefreshStopped`
+- From: `Stopped`
+- On: `CompleteAuthRefresh`(binding_key, new_expires_at, now)
+- Guards:
+  - `lease_is_refreshing`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Stopped`
+
+### `AuthRefreshFailedTransientIdle`
+- From: `Idle`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `not_permanent`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Idle`
+
+### `AuthRefreshFailedTransientAttached`
+- From: `Attached`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `not_permanent`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Attached`
+
+### `AuthRefreshFailedTransientRunning`
+- From: `Running`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `not_permanent`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Running`
+
+### `AuthRefreshFailedTransientRetired`
+- From: `Retired`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `not_permanent`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Retired`
+
+### `AuthRefreshFailedTransientStopped`
+- From: `Stopped`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `not_permanent`
+- Emits: `EmitAuthLifecycleEvent`
+- To: `Stopped`
+
+### `AuthRefreshFailedPermanentIdle`
+- From: `Idle`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `is_permanent`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Idle`
+
+### `AuthRefreshFailedPermanentAttached`
+- From: `Attached`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `is_permanent`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Attached`
+
+### `AuthRefreshFailedPermanentRunning`
+- From: `Running`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `is_permanent`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Running`
+
+### `AuthRefreshFailedPermanentRetired`
+- From: `Retired`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `is_permanent`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Retired`
+
+### `AuthRefreshFailedPermanentStopped`
+- From: `Stopped`
+- On: `AuthRefreshFailed`(binding_key, permanent)
+- Guards:
+  - `lease_is_refreshing`
+  - `is_permanent`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Stopped`
+
+### `MarkReauthRequiredIdle`
+- From: `Idle`
+- On: `MarkReauthRequired`(binding_key)
+- Guards:
+  - `lease_exists`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Idle`
+
+### `MarkReauthRequiredAttached`
+- From: `Attached`
+- On: `MarkReauthRequired`(binding_key)
+- Guards:
+  - `lease_exists`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Attached`
+
+### `MarkReauthRequiredRunning`
+- From: `Running`
+- On: `MarkReauthRequired`(binding_key)
+- Guards:
+  - `lease_exists`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Running`
+
+### `MarkReauthRequiredRetired`
+- From: `Retired`
+- On: `MarkReauthRequired`(binding_key)
+- Guards:
+  - `lease_exists`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Retired`
+
+### `MarkReauthRequiredStopped`
+- From: `Stopped`
+- On: `MarkReauthRequired`(binding_key)
+- Guards:
+  - `lease_exists`
+- Emits: `EmitAuthLifecycleEvent`, `EmitAuthReauthNotice`
+- To: `Stopped`
+
+### `ReleaseAuthLeaseIdle`
+- From: `Idle`
+- On: `ReleaseAuthLease`(binding_key)
+- To: `Idle`
+
+### `ReleaseAuthLeaseAttached`
+- From: `Attached`
+- On: `ReleaseAuthLease`(binding_key)
+- To: `Attached`
+
+### `ReleaseAuthLeaseRunning`
+- From: `Running`
+- On: `ReleaseAuthLease`(binding_key)
+- To: `Running`
+
+### `ReleaseAuthLeaseRetired`
+- From: `Retired`
+- On: `ReleaseAuthLease`(binding_key)
+- To: `Retired`
+
+### `ReleaseAuthLeaseStopped`
+- From: `Stopped`
+- On: `ReleaseAuthLease`(binding_key)
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

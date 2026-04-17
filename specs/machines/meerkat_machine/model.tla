@@ -15,6 +15,7 @@ OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
 OptionSessionLlmCapabilitySurfaceValues == {None} \cup {Some(x) : x \in SessionLlmCapabilitySurfaceValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
 MapStringToolVisibilityWitnessValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ToolVisibilityWitnessValues }
+MapStringU64Values == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in NatValues }
 
 MapLookup(map, key) == IF key \in DOMAIN map THEN map[key] ELSE None
 MapSet(map, key, value) == [x \in DOMAIN map \cup {key} |-> IF x = key THEN value ELSE map[x]]
@@ -26,9 +27,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides
+VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at
 
-vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 Init ==
     /\ phase = "Initializing"
@@ -39,6 +40,11 @@ Init ==
     /\ current_run_id = None
     /\ pre_run_phase = None
     /\ silent_intent_overrides = {}
+    /\ auth_valid_leases = {}
+    /\ auth_expiring_leases = {}
+    /\ auth_refreshing_leases = {}
+    /\ auth_reauth_required_leases = {}
+    /\ auth_expires_at = [x \in {} |-> None]
 
 TerminalStutter ==
     /\ phase = "Destroyed"
@@ -48,7 +54,7 @@ Initialize ==
     /\ phase = "Initializing"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RegisterSessionIdle(arg_session_id) ==
@@ -56,7 +62,7 @@ RegisterSessionIdle(arg_session_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RegisterSessionAttached(arg_session_id) ==
@@ -64,7 +70,7 @@ RegisterSessionAttached(arg_session_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RegisterSessionRunning(arg_session_id) ==
@@ -72,7 +78,7 @@ RegisterSessionRunning(arg_session_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RegisterSessionRetired(arg_session_id) ==
@@ -80,7 +86,7 @@ RegisterSessionRetired(arg_session_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RegisterSessionStopped(arg_session_id) ==
@@ -88,7 +94,7 @@ RegisterSessionStopped(arg_session_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 UnregisterSessionIdle(arg_session_id) ==
@@ -101,7 +107,7 @@ UnregisterSessionIdle(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides >>
+    /\ UNCHANGED << silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 UnregisterSessionAttached(arg_session_id) ==
@@ -114,7 +120,7 @@ UnregisterSessionAttached(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides >>
+    /\ UNCHANGED << silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 UnregisterSessionRunning(arg_session_id) ==
@@ -127,7 +133,7 @@ UnregisterSessionRunning(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides >>
+    /\ UNCHANGED << silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 UnregisterSessionRetired(arg_session_id) ==
@@ -140,7 +146,7 @@ UnregisterSessionRetired(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides >>
+    /\ UNCHANGED << silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 UnregisterSessionStopped(arg_session_id) ==
@@ -153,7 +159,7 @@ UnregisterSessionStopped(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides >>
+    /\ UNCHANGED << silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
@@ -162,7 +168,7 @@ ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_sta
     /\ (active_runtime_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
@@ -171,7 +177,7 @@ ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_stat
     /\ (active_runtime_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StagePersistentFilterIdle(filter, witnesses) ==
@@ -179,7 +185,7 @@ StagePersistentFilterIdle(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StagePersistentFilterAttached(filter, witnesses) ==
@@ -187,7 +193,7 @@ StagePersistentFilterAttached(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StagePersistentFilterRunning(filter, witnesses) ==
@@ -195,7 +201,7 @@ StagePersistentFilterRunning(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StagePersistentFilterRetired(filter, witnesses) ==
@@ -203,7 +209,7 @@ StagePersistentFilterRetired(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StagePersistentFilterStopped(filter, witnesses) ==
@@ -211,7 +217,7 @@ StagePersistentFilterStopped(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RequestDeferredToolsIdle(names, witnesses) ==
@@ -219,7 +225,7 @@ RequestDeferredToolsIdle(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RequestDeferredToolsAttached(names, witnesses) ==
@@ -227,7 +233,7 @@ RequestDeferredToolsAttached(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RequestDeferredToolsRunning(names, witnesses) ==
@@ -235,7 +241,7 @@ RequestDeferredToolsRunning(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RequestDeferredToolsRetired(names, witnesses) ==
@@ -243,7 +249,7 @@ RequestDeferredToolsRetired(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RequestDeferredToolsStopped(names, witnesses) ==
@@ -251,7 +257,7 @@ RequestDeferredToolsStopped(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
@@ -260,7 +266,7 @@ PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
@@ -269,7 +275,7 @@ PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
@@ -278,7 +284,7 @@ PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
@@ -287,7 +293,7 @@ PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
@@ -296,7 +302,7 @@ PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
@@ -305,7 +311,7 @@ PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetPeerIngressContextIdle(keep_alive) ==
@@ -313,7 +319,7 @@ SetPeerIngressContextIdle(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetPeerIngressContextAttached(keep_alive) ==
@@ -321,7 +327,7 @@ SetPeerIngressContextAttached(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetPeerIngressContextRunning(keep_alive) ==
@@ -329,7 +335,7 @@ SetPeerIngressContextRunning(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetPeerIngressContextRetired(keep_alive) ==
@@ -337,7 +343,7 @@ SetPeerIngressContextRetired(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetPeerIngressContextStopped(keep_alive) ==
@@ -345,7 +351,7 @@ SetPeerIngressContextStopped(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 NotifyDrainExitedIdle(reason) ==
@@ -353,7 +359,7 @@ NotifyDrainExitedIdle(reason) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 NotifyDrainExitedAttached(reason) ==
@@ -361,7 +367,7 @@ NotifyDrainExitedAttached(reason) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 NotifyDrainExitedRunning(reason) ==
@@ -369,7 +375,7 @@ NotifyDrainExitedRunning(reason) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 NotifyDrainExitedRetired(reason) ==
@@ -377,7 +383,7 @@ NotifyDrainExitedRetired(reason) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 NotifyDrainExitedStopped(reason) ==
@@ -385,42 +391,42 @@ NotifyDrainExitedStopped(reason) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 InterruptCurrentRunAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 InterruptCurrentRun ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CancelAfterBoundaryAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CancelAfterBoundary ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 BoundaryAppliedPublish(revision) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -431,7 +437,7 @@ PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_de
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -442,7 +448,7 @@ PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requeste
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -453,7 +459,7 @@ PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -464,7 +470,7 @@ PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -475,14 +481,14 @@ PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RetireRequestedFromIdle ==
     /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Running"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 Reset ==
@@ -493,7 +499,7 @@ Reset ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StopRuntimeExecutorUnbound ==
@@ -503,7 +509,7 @@ StopRuntimeExecutorUnbound ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StopRuntimeExecutorAttached ==
@@ -511,7 +517,7 @@ StopRuntimeExecutorAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StopRuntimeExecutorRunning ==
@@ -519,7 +525,7 @@ StopRuntimeExecutorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 Destroy ==
@@ -530,42 +536,42 @@ Destroy ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureSessionWithExecutorIdle(arg_session_id) ==
     /\ phase = "Idle"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureSessionWithExecutorAttached(arg_session_id) ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureSessionWithExecutorRunning(arg_session_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureSessionWithExecutorRetired(arg_session_id) ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureSessionWithExecutorStopped(arg_session_id) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetSilentIntentsIdle(arg_session_id, intents) ==
@@ -574,7 +580,7 @@ SetSilentIntentsIdle(arg_session_id, intents) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetSilentIntentsAttached(arg_session_id, intents) ==
@@ -583,7 +589,7 @@ SetSilentIntentsAttached(arg_session_id, intents) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetSilentIntentsRunning(arg_session_id, intents) ==
@@ -592,7 +598,7 @@ SetSilentIntentsRunning(arg_session_id, intents) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetSilentIntentsRetired(arg_session_id, intents) ==
@@ -601,7 +607,7 @@ SetSilentIntentsRetired(arg_session_id, intents) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SetSilentIntentsStopped(arg_session_id, intents) ==
@@ -609,7 +615,7 @@ SetSilentIntentsStopped(arg_session_id, intents) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortIdle(arg_session_id) ==
@@ -617,7 +623,7 @@ AbortIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAttached(arg_session_id) ==
@@ -625,7 +631,7 @@ AbortAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortRunning(arg_session_id) ==
@@ -633,7 +639,7 @@ AbortRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortRetired(arg_session_id) ==
@@ -641,7 +647,7 @@ AbortRetired(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortStopped(arg_session_id) ==
@@ -649,7 +655,7 @@ AbortStopped(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 WaitIdle(arg_session_id) ==
@@ -657,7 +663,7 @@ WaitIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 WaitAttached(arg_session_id) ==
@@ -665,7 +671,7 @@ WaitAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 WaitRunning(arg_session_id) ==
@@ -673,7 +679,7 @@ WaitRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 WaitRetired(arg_session_id) ==
@@ -681,7 +687,7 @@ WaitRetired(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 WaitStopped(arg_session_id) ==
@@ -689,42 +695,42 @@ WaitStopped(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAllIdle ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAllAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAllRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAllRetired ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AbortAllStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureDrainRunningAttached ==
@@ -732,7 +738,7 @@ EnsureDrainRunningAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 EnsureDrainRunningRunning ==
@@ -740,7 +746,7 @@ EnsureDrainRunningRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 IngestIdle(runtime_id, work_id, origin) ==
@@ -748,7 +754,7 @@ IngestIdle(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 IngestAttached(runtime_id, work_id, origin) ==
@@ -756,7 +762,7 @@ IngestAttached(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 IngestRunning(runtime_id, work_id, origin) ==
@@ -764,7 +770,7 @@ IngestRunning(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishEventIdle(kind) ==
@@ -772,7 +778,7 @@ PublishEventIdle(kind) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishEventAttached(kind) ==
@@ -780,7 +786,7 @@ PublishEventAttached(kind) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishEventRunning(kind) ==
@@ -788,7 +794,7 @@ PublishEventRunning(kind) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishEventRetired(kind) ==
@@ -796,7 +802,7 @@ PublishEventRetired(kind) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PublishEventStopped(kind) ==
@@ -804,7 +810,7 @@ PublishEventStopped(kind) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -814,7 +820,7 @@ AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -824,7 +830,7 @@ AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interr
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -836,7 +842,7 @@ AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, in
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("attached")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -846,7 +852,7 @@ AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, inter
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -856,7 +862,7 @@ AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing,
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -866,7 +872,7 @@ AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_process
     /\ (interrupt_yielding = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, interrupt_yielding, run_id) ==
@@ -876,7 +882,7 @@ AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, int
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithoutWakeIdle(input_id) ==
@@ -884,7 +890,7 @@ AcceptWithoutWakeIdle(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithoutWakeAttached(input_id) ==
@@ -892,7 +898,7 @@ AcceptWithoutWakeAttached(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 AcceptWithoutWakeRunning(input_id) ==
@@ -900,7 +906,7 @@ AcceptWithoutWakeRunning(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ClassifyExternalEnvelopeAttached ==
@@ -908,7 +914,7 @@ ClassifyExternalEnvelopeAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ClassifyExternalEnvelopeRunning ==
@@ -916,7 +922,7 @@ ClassifyExternalEnvelopeRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ClassifyPlainEventAttached ==
@@ -924,7 +930,7 @@ ClassifyPlainEventAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ClassifyPlainEventRunning ==
@@ -932,7 +938,7 @@ ClassifyPlainEventRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareIdle(arg_session_id, run_id) ==
@@ -942,7 +948,7 @@ PrepareIdle(arg_session_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("idle")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PrepareAttached(arg_session_id, run_id) ==
@@ -952,7 +958,7 @@ PrepareAttached(arg_session_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("attached")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 DrainQueuedRunRetired(run_id) ==
@@ -961,7 +967,7 @@ DrainQueuedRunRetired(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("retired")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StartConversationRunAttached ==
@@ -969,7 +975,7 @@ StartConversationRunAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StartImmediateAppendAttached ==
@@ -977,7 +983,7 @@ StartImmediateAppendAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StartImmediateContextAttached ==
@@ -985,7 +991,7 @@ StartImmediateContextAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CommitRunningToIdle(input_id, run_id) ==
@@ -996,7 +1002,7 @@ CommitRunningToIdle(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CommitRunningToAttached(input_id, run_id) ==
@@ -1007,7 +1013,7 @@ CommitRunningToAttached(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CommitRunningToRetired(input_id, run_id) ==
@@ -1018,7 +1024,7 @@ CommitRunningToRetired(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FailRunningToIdle(run_id) ==
@@ -1029,7 +1035,7 @@ FailRunningToIdle(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FailRunningToAttached(run_id) ==
@@ -1040,7 +1046,7 @@ FailRunningToAttached(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FailRunningToRetired(run_id) ==
@@ -1051,7 +1057,7 @@ FailRunningToRetired(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageAddAttached ==
@@ -1059,7 +1065,7 @@ StageAddAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageAddRunning ==
@@ -1067,7 +1073,7 @@ StageAddRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageRemoveAttached ==
@@ -1075,7 +1081,7 @@ StageRemoveAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageRemoveRunning ==
@@ -1083,7 +1089,7 @@ StageRemoveRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageReloadAttached ==
@@ -1091,7 +1097,7 @@ StageReloadAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 StageReloadRunning ==
@@ -1099,7 +1105,7 @@ StageReloadRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ApplySurfaceBoundaryAttached ==
@@ -1107,7 +1113,7 @@ ApplySurfaceBoundaryAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ApplySurfaceBoundaryRunning ==
@@ -1115,7 +1121,7 @@ ApplySurfaceBoundaryRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PendingSucceededAttached ==
@@ -1123,7 +1129,7 @@ PendingSucceededAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PendingSucceededRunning ==
@@ -1131,7 +1137,7 @@ PendingSucceededRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PendingFailedAttached ==
@@ -1139,7 +1145,7 @@ PendingFailedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 PendingFailedRunning ==
@@ -1147,7 +1153,7 @@ PendingFailedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CallStartedAttached ==
@@ -1155,7 +1161,7 @@ CallStartedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CallStartedRunning ==
@@ -1163,7 +1169,7 @@ CallStartedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CallFinishedAttached ==
@@ -1171,7 +1177,7 @@ CallFinishedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 CallFinishedRunning ==
@@ -1179,7 +1185,7 @@ CallFinishedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FinalizeRemovalCleanAttached ==
@@ -1187,7 +1193,7 @@ FinalizeRemovalCleanAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FinalizeRemovalCleanRunning ==
@@ -1195,7 +1201,7 @@ FinalizeRemovalCleanRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FinalizeRemovalForcedAttached ==
@@ -1203,7 +1209,7 @@ FinalizeRemovalForcedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 FinalizeRemovalForcedRunning ==
@@ -1211,7 +1217,7 @@ FinalizeRemovalForcedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SnapshotAlignedAttached ==
@@ -1219,7 +1225,7 @@ SnapshotAlignedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 SnapshotAlignedRunning ==
@@ -1227,7 +1233,7 @@ SnapshotAlignedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ShutdownSurfaceAttached ==
@@ -1235,7 +1241,7 @@ ShutdownSurfaceAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 ShutdownSurfaceRunning ==
@@ -1243,7 +1249,7 @@ ShutdownSurfaceRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RecycleFromIdleOrRetired ==
@@ -1253,7 +1259,7 @@ RecycleFromIdleOrRetired ==
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None
     /\ current_run_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
 
 
 RecycleFromAttached ==
@@ -1263,7 +1269,457 @@ RecycleFromAttached ==
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None
     /\ current_run_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides >>
+    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AcquireAuthLeaseIdle(binding_key, expires_at) ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+AcquireAuthLeaseAttached(binding_key, expires_at) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+AcquireAuthLeaseRunning(binding_key, expires_at) ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+AcquireAuthLeaseRetired(binding_key, expires_at) ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+AcquireAuthLeaseStopped(binding_key, expires_at) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+MarkAuthExpiringIdle(binding_key) ==
+    /\ phase = "Idle"
+    /\ (binding_key \in auth_valid_leases)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+MarkAuthExpiringAttached(binding_key) ==
+    /\ phase = "Attached"
+    /\ (binding_key \in auth_valid_leases)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+MarkAuthExpiringRunning(binding_key) ==
+    /\ phase = "Running"
+    /\ (binding_key \in auth_valid_leases)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+MarkAuthExpiringRetired(binding_key) ==
+    /\ phase = "Retired"
+    /\ (binding_key \in auth_valid_leases)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+MarkAuthExpiringStopped(binding_key) ==
+    /\ phase = "Stopped"
+    /\ (binding_key \in auth_valid_leases)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_refreshing_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+BeginAuthRefreshIdle(binding_key) ==
+    /\ phase = "Idle"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_reauth_required_leases, auth_expires_at >>
+
+
+BeginAuthRefreshAttached(binding_key) ==
+    /\ phase = "Attached"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_reauth_required_leases, auth_expires_at >>
+
+
+BeginAuthRefreshRunning(binding_key) ==
+    /\ phase = "Running"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_reauth_required_leases, auth_expires_at >>
+
+
+BeginAuthRefreshRetired(binding_key) ==
+    /\ phase = "Retired"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_reauth_required_leases, auth_expires_at >>
+
+
+BeginAuthRefreshStopped(binding_key) ==
+    /\ phase = "Stopped"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_reauth_required_leases, auth_expires_at >>
+
+
+CompleteAuthRefreshIdle(binding_key, new_expires_at, now) ==
+    /\ phase = "Idle"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, new_expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expiring_leases, auth_reauth_required_leases >>
+
+
+CompleteAuthRefreshAttached(binding_key, new_expires_at, now) ==
+    /\ phase = "Attached"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, new_expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expiring_leases, auth_reauth_required_leases >>
+
+
+CompleteAuthRefreshRunning(binding_key, new_expires_at, now) ==
+    /\ phase = "Running"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, new_expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expiring_leases, auth_reauth_required_leases >>
+
+
+CompleteAuthRefreshRetired(binding_key, new_expires_at, now) ==
+    /\ phase = "Retired"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, new_expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expiring_leases, auth_reauth_required_leases >>
+
+
+CompleteAuthRefreshStopped(binding_key, new_expires_at, now) ==
+    /\ phase = "Stopped"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_expires_at' = MapSet(auth_expires_at, binding_key, new_expires_at)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expiring_leases, auth_reauth_required_leases >>
+
+
+AuthRefreshFailedTransientIdle(binding_key, permanent) ==
+    /\ phase = "Idle"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = FALSE)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AuthRefreshFailedTransientAttached(binding_key, permanent) ==
+    /\ phase = "Attached"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = FALSE)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AuthRefreshFailedTransientRunning(binding_key, permanent) ==
+    /\ phase = "Running"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = FALSE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AuthRefreshFailedTransientRetired(binding_key, permanent) ==
+    /\ phase = "Retired"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = FALSE)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AuthRefreshFailedTransientStopped(binding_key, permanent) ==
+    /\ phase = "Stopped"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = FALSE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_expiring_leases' = (auth_expiring_leases \cup {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_reauth_required_leases, auth_expires_at >>
+
+
+AuthRefreshFailedPermanentIdle(binding_key, permanent) ==
+    /\ phase = "Idle"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = TRUE)
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_expires_at >>
+
+
+AuthRefreshFailedPermanentAttached(binding_key, permanent) ==
+    /\ phase = "Attached"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = TRUE)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_expires_at >>
+
+
+AuthRefreshFailedPermanentRunning(binding_key, permanent) ==
+    /\ phase = "Running"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = TRUE)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_expires_at >>
+
+
+AuthRefreshFailedPermanentRetired(binding_key, permanent) ==
+    /\ phase = "Retired"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = TRUE)
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_expires_at >>
+
+
+AuthRefreshFailedPermanentStopped(binding_key, permanent) ==
+    /\ phase = "Stopped"
+    /\ (binding_key \in auth_refreshing_leases)
+    /\ (permanent = TRUE)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_valid_leases, auth_expiring_leases, auth_expires_at >>
+
+
+MarkReauthRequiredIdle(binding_key) ==
+    /\ phase = "Idle"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases) \/ (binding_key \in auth_refreshing_leases))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expires_at >>
+
+
+MarkReauthRequiredAttached(binding_key) ==
+    /\ phase = "Attached"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases) \/ (binding_key \in auth_refreshing_leases))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expires_at >>
+
+
+MarkReauthRequiredRunning(binding_key) ==
+    /\ phase = "Running"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases) \/ (binding_key \in auth_refreshing_leases))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expires_at >>
+
+
+MarkReauthRequiredRetired(binding_key) ==
+    /\ phase = "Retired"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases) \/ (binding_key \in auth_refreshing_leases))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expires_at >>
+
+
+MarkReauthRequiredStopped(binding_key) ==
+    /\ phase = "Stopped"
+    /\ ((binding_key \in auth_valid_leases) \/ (binding_key \in auth_expiring_leases) \/ (binding_key \in auth_refreshing_leases))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \cup {binding_key})
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, auth_expires_at >>
+
+
+ReleaseAuthLeaseIdle(binding_key) ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapRemove(auth_expires_at, binding_key)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+ReleaseAuthLeaseAttached(binding_key) ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapRemove(auth_expires_at, binding_key)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+ReleaseAuthLeaseRunning(binding_key) ==
+    /\ phase = "Running"
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapRemove(auth_expires_at, binding_key)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+ReleaseAuthLeaseRetired(binding_key) ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapRemove(auth_expires_at, binding_key)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+ReleaseAuthLeaseStopped(binding_key) ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ auth_valid_leases' = (auth_valid_leases \ {binding_key})
+    /\ auth_expiring_leases' = (auth_expiring_leases \ {binding_key})
+    /\ auth_refreshing_leases' = (auth_refreshing_leases \ {binding_key})
+    /\ auth_reauth_required_leases' = (auth_reauth_required_leases \ {binding_key})
+    /\ auth_expires_at' = MapRemove(auth_expires_at, binding_key)
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
 
 
 Next ==
@@ -1409,14 +1865,54 @@ Next ==
     \/ ShutdownSurfaceRunning
     \/ RecycleFromIdleOrRetired
     \/ RecycleFromAttached
+    \/ \E binding_key \in StringValues : \E expires_at \in 0..2 : AcquireAuthLeaseIdle(binding_key, expires_at)
+    \/ \E binding_key \in StringValues : \E expires_at \in 0..2 : AcquireAuthLeaseAttached(binding_key, expires_at)
+    \/ \E binding_key \in StringValues : \E expires_at \in 0..2 : AcquireAuthLeaseRunning(binding_key, expires_at)
+    \/ \E binding_key \in StringValues : \E expires_at \in 0..2 : AcquireAuthLeaseRetired(binding_key, expires_at)
+    \/ \E binding_key \in StringValues : \E expires_at \in 0..2 : AcquireAuthLeaseStopped(binding_key, expires_at)
+    \/ \E binding_key \in StringValues : MarkAuthExpiringIdle(binding_key)
+    \/ \E binding_key \in StringValues : MarkAuthExpiringAttached(binding_key)
+    \/ \E binding_key \in StringValues : MarkAuthExpiringRunning(binding_key)
+    \/ \E binding_key \in StringValues : MarkAuthExpiringRetired(binding_key)
+    \/ \E binding_key \in StringValues : MarkAuthExpiringStopped(binding_key)
+    \/ \E binding_key \in StringValues : BeginAuthRefreshIdle(binding_key)
+    \/ \E binding_key \in StringValues : BeginAuthRefreshAttached(binding_key)
+    \/ \E binding_key \in StringValues : BeginAuthRefreshRunning(binding_key)
+    \/ \E binding_key \in StringValues : BeginAuthRefreshRetired(binding_key)
+    \/ \E binding_key \in StringValues : BeginAuthRefreshStopped(binding_key)
+    \/ \E binding_key \in StringValues : \E new_expires_at \in 0..2 : \E now \in 0..2 : CompleteAuthRefreshIdle(binding_key, new_expires_at, now)
+    \/ \E binding_key \in StringValues : \E new_expires_at \in 0..2 : \E now \in 0..2 : CompleteAuthRefreshAttached(binding_key, new_expires_at, now)
+    \/ \E binding_key \in StringValues : \E new_expires_at \in 0..2 : \E now \in 0..2 : CompleteAuthRefreshRunning(binding_key, new_expires_at, now)
+    \/ \E binding_key \in StringValues : \E new_expires_at \in 0..2 : \E now \in 0..2 : CompleteAuthRefreshRetired(binding_key, new_expires_at, now)
+    \/ \E binding_key \in StringValues : \E new_expires_at \in 0..2 : \E now \in 0..2 : CompleteAuthRefreshStopped(binding_key, new_expires_at, now)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedTransientIdle(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedTransientAttached(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedTransientRunning(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedTransientRetired(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedTransientStopped(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedPermanentIdle(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedPermanentAttached(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedPermanentRunning(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedPermanentRetired(binding_key, permanent)
+    \/ \E binding_key \in StringValues : \E permanent \in BOOLEAN : AuthRefreshFailedPermanentStopped(binding_key, permanent)
+    \/ \E binding_key \in StringValues : MarkReauthRequiredIdle(binding_key)
+    \/ \E binding_key \in StringValues : MarkReauthRequiredAttached(binding_key)
+    \/ \E binding_key \in StringValues : MarkReauthRequiredRunning(binding_key)
+    \/ \E binding_key \in StringValues : MarkReauthRequiredRetired(binding_key)
+    \/ \E binding_key \in StringValues : MarkReauthRequiredStopped(binding_key)
+    \/ \E binding_key \in StringValues : ReleaseAuthLeaseIdle(binding_key)
+    \/ \E binding_key \in StringValues : ReleaseAuthLeaseAttached(binding_key)
+    \/ \E binding_key \in StringValues : ReleaseAuthLeaseRunning(binding_key)
+    \/ \E binding_key \in StringValues : ReleaseAuthLeaseRetired(binding_key)
+    \/ \E binding_key \in StringValues : ReleaseAuthLeaseStopped(binding_key)
     \/ TerminalStutter
 
 fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))
 running_has_current_run == ((phase # "Running") \/ (current_run_id # None))
 current_run_only_while_running_or_retired == ((current_run_id = None) \/ (phase = "Running") \/ (phase = "Retired"))
 
-CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(silent_intent_overrides) <= 1
-DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 2
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(silent_intent_overrides) <= 1 /\ Cardinality(auth_valid_leases) <= 1 /\ Cardinality(auth_expiring_leases) <= 1 /\ Cardinality(auth_refreshing_leases) <= 1 /\ Cardinality(auth_reauth_required_leases) <= 1 /\ Cardinality(DOMAIN auth_expires_at) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 2 /\ Cardinality(auth_valid_leases) <= 2 /\ Cardinality(auth_expiring_leases) <= 2 /\ Cardinality(auth_refreshing_leases) <= 2 /\ Cardinality(auth_reauth_required_leases) <= 2 /\ Cardinality(DOMAIN auth_expires_at) <= 2
 
 Spec == Init /\ [][Next]_vars
 

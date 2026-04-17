@@ -90,6 +90,12 @@ pub(crate) fn project_state(
         extraction_attempts: 0,
         max_extraction_retries: 0,
         silent_intent_overrides,
+        // Auth lease lifecycle substate (Phase 1.5-rev) — initialised empty.
+        auth_valid_leases: std::collections::BTreeSet::new(),
+        auth_expiring_leases: std::collections::BTreeSet::new(),
+        auth_refreshing_leases: std::collections::BTreeSet::new(),
+        auth_reauth_required_leases: std::collections::BTreeSet::new(),
+        auth_expires_at: std::collections::BTreeMap::new(),
         // Absorbed substate fields — initialised to DSL defaults.
         // These are projected from their respective authority owners
         // during the Phase 3 cutover; until then they carry defaults.

@@ -1,5 +1,16 @@
 //! OpenAI auth methods (typed, provider-owned).
 
+/// Wire header for the ChatGPT account id lifted from OAuth metadata.
+///
+/// Kept in this unconditional module (rather than `oauth.rs`) so it remains
+/// available on default/wasm builds where the interactive OAuth flow is
+/// feature-gated off but the ChatGPT backend wire headers are still emitted
+/// whenever metadata is present.
+pub const CHATGPT_ACCOUNT_HEADER: &str = "ChatGPT-Account-ID";
+
+/// Wire header for ChatGPT accounts flagged `chatgpt_account_is_fedramp`.
+pub const FEDRAMP_HEADER: &str = "X-OpenAI-Fedramp";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpenAiAuthMethod {
     ApiKey,

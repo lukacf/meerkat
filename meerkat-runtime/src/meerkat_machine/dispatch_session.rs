@@ -306,6 +306,9 @@ impl MeerkatMachine {
                                 &shared_handle_authority,
                             )),
                         ),
+                        auth_lease: Arc::new(crate::handles::RuntimeAuthLeaseHandle::new(
+                            Arc::clone(&shared_handle_authority),
+                        )),
                     },
                 ))
             }

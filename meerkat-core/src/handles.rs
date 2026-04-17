@@ -348,3 +348,67 @@ pub trait SessionAdmissionHandle: Send + Sync {
     /// Fire the `Recycle` input — session transitions into the recycle path.
     fn recycle(&self) -> Result<(), DslTransitionError>;
 }
+
+// ---------------------------------------------------------------------------
+// AuthLeaseHandle (Phase 1.5-rev)
+// ---------------------------------------------------------------------------
+
+/// Observable snapshot of an auth lease's DSL state for a given binding_key.
+///
+/// Returned by [`AuthLeaseHandle::snapshot`]. The `state` field is one of the
+/// DSL-defined states: `"valid"`, `"expiring"`, `"refreshing"`,
+/// `"reauth_required"`. If the binding is not tracked at all, `state` is
+/// `None` and `expires_at` is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthLeaseSnapshot {
+    pub state: Option<String>,
+    pub expires_at: Option<u64>,
+}
+
+/// Auth lease lifecycle DSL handle.
+///
+/// Covers the auth-lifecycle inputs on the MeerkatMachine DSL. Each method
+/// drives the corresponding DSL transition and returns
+/// `Err(DslTransitionError)` if the guard rejects.
+pub trait AuthLeaseHandle: Send + Sync {
+    /// Fire `AcquireAuthLease { binding_key, expires_at }` — unconditional.
+    ///
+    /// Moves the binding into `auth_valid_leases` and records its expiry.
+    fn acquire_lease(&self, binding_key: &str, expires_at: u64) -> Result<(), DslTransitionError>;
+
+    /// Fire `MarkAuthExpiring { binding_key }` — only legal from `valid`.
+    fn mark_expiring(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `BeginAuthRefresh { binding_key }` — legal from `valid` or
+    /// `expiring`.
+    ///
+    /// Provides the DSL-level refresh dedup: once the binding is in
+    /// `auth_refreshing_leases`, no concurrent `BeginAuthRefresh` is
+    /// permitted until `CompleteAuthRefresh` or `AuthRefreshFailed` moves
+    /// it back out.
+    fn begin_refresh(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `CompleteAuthRefresh { binding_key, new_expires_at, now }` — only
+    /// legal from `refreshing`.
+    fn complete_refresh(
+        &self,
+        binding_key: &str,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<(), DslTransitionError>;
+
+    /// Fire `AuthRefreshFailed { binding_key, permanent }` — only legal from
+    /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
+    /// reauth notice; `permanent=false` routes back to `expiring`.
+    fn refresh_failed(&self, binding_key: &str, permanent: bool) -> Result<(), DslTransitionError>;
+
+    /// Fire `MarkReauthRequired { binding_key }` — any known state → reauth.
+    fn mark_reauth_required(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `ReleaseAuthLease { binding_key }` — removes the binding from all
+    /// sets and the expiry map.
+    fn release_lease(&self, binding_key: &str) -> Result<(), DslTransitionError>;
+
+    /// Observe the current DSL-level state of a binding.
+    fn snapshot(&self, binding_key: &str) -> AuthLeaseSnapshot;
+}

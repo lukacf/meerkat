@@ -870,6 +870,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             session_admission: Arc::new(
                                 meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral(),
                             ),
+                            auth_lease: Arc::new(
+                                meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral(),
+                            ),
                         },
                     )
                 })

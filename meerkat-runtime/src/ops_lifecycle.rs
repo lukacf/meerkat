@@ -407,15 +407,15 @@ impl ShellState {
                     operation_id,
                     kind,
                 } => {
-                    // Build a CompletionEntry from authority + shell data and
-                    // push to the shared feed buffer.
+                    // Build a CompletionEntry. Prefer DSL state for outcome,
+                    // fall back to authority if DSL has no entry.
+                    let outcome = self.dsl_terminal_outcome(operation_id).or_else(|| {
+                        self.authority
+                            .operation(operation_id)
+                            .and_then(|op| op.terminal_outcome().cloned())
+                    });
                     let (display_name, terminal_outcome, completed_at_ms) =
-                        if let Some(canonical) = self.authority.operation(operation_id) {
-                            let outcome = canonical.terminal_outcome().cloned().unwrap_or(
-                                OperationTerminalOutcome::Terminated {
-                                    reason: "missing outcome".into(),
-                                },
-                            );
+                        if let Some(outcome) = outcome {
                             let completed_ms = self.records.get(operation_id).and_then(|r| {
                                 r.completed_at.map(|i| r.epoch_millis_for_instant(i))
                             });
@@ -1029,14 +1029,24 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<OperationCompletionWatch, OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // Check authority for terminal outcome first (already-resolved path).
-        let canonical = state
-            .authority
-            .operation(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        // Existence check: DSL state is source of truth for which operations
+        // are registered. Fall back to authority for legacy records that
+        // haven't flowed through a DSL transition yet.
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let exists_in_dsl = state.dsl_shadow.0.state.op_statuses.contains_key(&id_key);
+        if !exists_in_dsl && state.authority.operation(id).is_none() {
+            return Err(OpsLifecycleError::NotFound(id.clone()));
+        }
 
-        if let Some(outcome) = canonical.terminal_outcome() {
-            return Ok(OperationCompletionWatch::already_resolved(outcome.clone()));
+        // Terminal outcome — prefer DSL, fall back to authority.
+        let terminal_outcome = state.dsl_terminal_outcome(id).or_else(|| {
+            state
+                .authority
+                .operation(id)
+                .and_then(|op| op.terminal_outcome().cloned())
+        });
+        if let Some(outcome) = terminal_outcome {
+            return Ok(OperationCompletionWatch::already_resolved(outcome));
         }
 
         // Shell concern: create the channel and store the sender.

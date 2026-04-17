@@ -142,6 +142,12 @@ machine! {
             member_kickoff_failed: Set<String>,
             member_kickoff_cancelled: Set<String>,
             member_kickoff_error: Map<String, String>,
+            // Durable per-member realtime voice intent. Keyed on
+            // AgentIdentity so the fact survives respawn (new
+            // AgentRuntimeId) for the same identity. The shell reconciles
+            // this into the runtime MeerkatMachine's realtime-attachment
+            // authority. Must stay in sync with catalog DSL.
+            member_voice_intent: Set<AgentIdentity>,
         }
 
         init(Running) {
@@ -158,6 +164,7 @@ machine! {
             member_kickoff_failed = EmptySet,
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
+            member_voice_intent = EmptySet,
         }
 
         terminal [Destroyed]
@@ -213,6 +220,9 @@ machine! {
             KickoffMarkStarting { member_id: String },
             KickoffResolveOutcome { member_id: String, outcome: String },
             KickoffCancelRequested { member_id: String },
+            // Per-member realtime voice intent inputs.
+            SetMemberVoiceIntent { agent_identity: AgentIdentity },
+            ClearMemberVoiceIntent { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -282,6 +292,9 @@ machine! {
             PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: String },
+            // Per-member realtime voice intent effects.
+            MemberVoiceIntentSet { agent_identity: AgentIdentity },
+            MemberVoiceIntentCleared { agent_identity: AgentIdentity },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -303,6 +316,8 @@ machine! {
         disposition PersistKickoffUpdate => local,
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
+        disposition MemberVoiceIntentSet => external,
+        disposition MemberVoiceIntentCleared => external,
 
         // =====================================================================
         // Direct transitions
@@ -1290,6 +1305,30 @@ machine! {
             }
             to Running
             emit FlowTerminalized
+        }
+
+        // =====================================================================
+        // Per-member realtime voice intent
+        // =====================================================================
+
+        transition SetMemberVoiceIntent {
+            on input SetMemberVoiceIntent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_voice_intent.insert(agent_identity);
+            }
+            to Running
+            emit MemberVoiceIntentSet { agent_identity: agent_identity }
+        }
+
+        transition ClearMemberVoiceIntent {
+            on input ClearMemberVoiceIntent { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_voice_intent.remove(agent_identity);
+            }
+            to Running
+            emit MemberVoiceIntentCleared { agent_identity: agent_identity }
         }
     }
 }

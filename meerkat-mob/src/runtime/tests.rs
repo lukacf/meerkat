@@ -20662,6 +20662,7 @@ enum MobRuntimeParityOutcomeKind {
 struct MobRuntimeParitySnapshotSummary {
     phase: String,
     live_intent_identities: BTreeSet<String>,
+    member_voice_intent: BTreeSet<String>,
     live_runtime_ids: BTreeSet<String>,
     externally_addressable_runtime_ids: BTreeSet<String>,
     runtime_fence_tokens: BTreeMap<String, u64>,
@@ -21256,9 +21257,18 @@ async fn mob_runtime_parity_snapshot_summary(
         .collect::<Vec<_>>();
     formal_unavailable_fields.sort();
 
+    // member_voice_intent mirrors live_intent_identities: both represent
+    // the set of AgentIdentities for which the operator requested live
+    // voice. The catalog DSL models this as a separate Set<AgentIdentity>
+    // field so shell reconcilers can drive runtime realtime-attachment
+    // intent per identity; the runtime projection is derived from the
+    // same roster source.
+    let member_voice_intent = live_intent_identities.clone();
+
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
         live_intent_identities,
+        member_voice_intent,
         live_runtime_ids,
         externally_addressable_runtime_ids,
         runtime_fence_tokens,
@@ -21303,6 +21313,9 @@ fn mob_runtime_parity_field_value(
     match field {
         "live_intent_identities" => Some(MobRuntimeParityExprValue::Set(
             snapshot.live_intent_identities.clone(),
+        )),
+        "member_voice_intent" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.member_voice_intent.clone(),
         )),
         "live_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.live_runtime_ids.clone(),

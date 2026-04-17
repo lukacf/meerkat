@@ -258,6 +258,77 @@ impl RealmConnectionSet {
         })
     }
 
+    /// Synthesize a default [`RealmConnectionSet`] for a given provider,
+    /// sourcing credentials from a well-known env var. Used by surface
+    /// factories when no explicit realm config exists but the user has
+    /// set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` in
+    /// the environment — the synthesized realm is consumed by the same
+    /// `ProviderRuntimeRegistry` path as explicit realms, so env-var auth
+    /// and realm-config auth share one resolution pipeline.
+    ///
+    /// Returns a realm with id `"env_default"` containing one binding
+    /// `"default"` pointing at:
+    /// - BackendProfile `"default"` with the provider's default
+    ///   backend_kind and base_url=None (provider client uses its default).
+    /// - AuthProfile `"default"` with `source = Env { env: <ENV_VAR> }`,
+    ///   `auth_method = "api_key"`, storage = Ephemeral.
+    ///
+    /// The ENV_VAR name is per-provider:
+    /// - Anthropic: `ANTHROPIC_API_KEY`
+    /// - OpenAI:   `OPENAI_API_KEY`
+    /// - Google:   `GEMINI_API_KEY`
+    ///
+    /// Callers should also honor `RKAT_*`-prefixed overrides via
+    /// `ResolverEnvironment::with_process_env()`; that lookup is applied
+    /// inside the registry's resolve path when it reads the env source.
+    pub fn synthesize_env_default(provider: Provider) -> Self {
+        let (backend_kind, env_var) = match provider {
+            Provider::Anthropic => ("anthropic_api", "ANTHROPIC_API_KEY"),
+            Provider::OpenAI => ("openai_api", "OPENAI_API_KEY"),
+            Provider::Gemini => ("google_genai", "GEMINI_API_KEY"),
+            Provider::SelfHosted => ("self_hosted", "RKAT_SELF_HOSTED_API_KEY"),
+            Provider::Other => ("other_api", "RKAT_OTHER_API_KEY"),
+        };
+        let backend = BackendProfile {
+            id: "default".to_string(),
+            provider,
+            backend_kind: backend_kind.to_string(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        };
+        let auth = AuthProfile {
+            id: "default".to_string(),
+            provider,
+            auth_method: "api_key".to_string(),
+            source: CredentialSourceSpec::Env {
+                env: env_var.to_string(),
+            },
+            storage: CredentialStorageSpec::Ephemeral,
+            constraints: AuthConstraints::default(),
+            metadata_defaults: AuthMetadataDefaults::default(),
+        };
+        let binding = ProviderBinding {
+            id: "default".to_string(),
+            backend_profile: "default".to_string(),
+            auth_profile: "default".to_string(),
+            default_model: None,
+            policy: BindingPolicy::default(),
+        };
+        let mut backends = BTreeMap::new();
+        backends.insert("default".to_string(), backend);
+        let mut auth_profiles = BTreeMap::new();
+        auth_profiles.insert("default".to_string(), auth);
+        let mut bindings = BTreeMap::new();
+        bindings.insert("default".to_string(), binding);
+        Self {
+            realm_id: "env_default".to_string(),
+            backends,
+            auth_profiles,
+            bindings,
+            default_binding: Some("default".to_string()),
+        }
+    }
+
     /// Resolve a binding by id. Returns the binding plus its referenced
     /// backend and auth profiles.
     pub fn lookup_binding(

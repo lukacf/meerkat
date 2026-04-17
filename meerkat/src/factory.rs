@@ -1689,27 +1689,69 @@ impl AgentFactory {
         let provider_tool_defaults =
             Self::resolve_provider_tool_defaults(&registry, provider, &build_config.model, config);
 
-        // 3. Create LLM client. Precedence: llm_client_override > connection_ref
-        //    (Phase 3 ProviderRuntimeRegistry) > flat resolve_provider_credentials
-        //    (removed in Phase 6). The model-inferred `provider` from step 2
-        //    stays authoritative for SessionMetadata except when connection_ref
-        //    resolves through the registry — that returns a different provider
-        //    (which is the whole point of the binding indirection).
+        // 3. Create LLM client. Precedence:
+        //    1. llm_client_override (test/embedded path)
+        //    2. connection_ref → ProviderRuntimeRegistry
+        //    3. env-var fallback → synthesized default realm →
+        //       same ProviderRuntimeRegistry path
+        //    4. SelfHosted → legacy resolve_provider_credentials path
+        //       (SelfHosted backends don't fit the standard
+        //        backend_kind taxonomy yet; tracked for post-0.6.0)
+        //
+        // The model-inferred `provider` from step 2 stays authoritative for
+        // SessionMetadata except when connection_ref resolves through the
+        // registry — that returns a different provider (which is the whole
+        // point of the binding indirection). Env-var synthesized realms use
+        // the same provider as the model-inferred one.
         let mut provider = provider;
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
             Some(client) => Arc::clone(client),
-            None => match &build_config.connection_ref {
-                Some(conn_ref) => {
-                    // Phase 3 realm-scoped binding resolution.
-                    let section = config.realm.get(&conn_ref.realm_id).ok_or_else(|| {
-                        BuildAgentError::ConnectionResolution(format!(
-                            "realm '{}' not found in config.realm",
-                            conn_ref.realm_id
-                        ))
-                    })?;
-                    let realm =
-                        meerkat_core::RealmConnectionSet::from_config(&conn_ref.realm_id, section)
-                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+            None => {
+                // Self-hosted routes through the legacy path until it's
+                // folded into the backend-kind taxonomy.
+                if matches!(provider, Provider::SelfHosted) && build_config.connection_ref.is_none()
+                {
+                    self.build_self_hosted_client_from_registry(
+                        &registry,
+                        &SessionLlmIdentity {
+                            model: build_config.model.clone(),
+                            provider,
+                            self_hosted_server_id: self_hosted_server_id.clone(),
+                            provider_params: build_config.provider_params.clone(),
+                        },
+                    )
+                    .map_err(BuildAgentError::LlmClient)?
+                } else {
+                    // Resolve the target realm: explicit from connection_ref,
+                    // or synthesized from env vars for a default binding.
+                    let (realm, binding_id): (meerkat_core::RealmConnectionSet, String) =
+                        match &build_config.connection_ref {
+                            Some(conn_ref) => {
+                                let section =
+                                    config.realm.get(&conn_ref.realm_id).ok_or_else(|| {
+                                        BuildAgentError::ConnectionResolution(format!(
+                                            "realm '{}' not found in config.realm",
+                                            conn_ref.realm_id
+                                        ))
+                                    })?;
+                                let realm = meerkat_core::RealmConnectionSet::from_config(
+                                    &conn_ref.realm_id,
+                                    section,
+                                )
+                                .map_err(|e| {
+                                    BuildAgentError::ConnectionResolution(e.to_string())
+                                })?;
+                                (realm, conn_ref.binding_id.clone())
+                            }
+                            None => {
+                                let realm =
+                                    meerkat_core::RealmConnectionSet::synthesize_env_default(
+                                        provider,
+                                    );
+                                (realm, "default".to_string())
+                            }
+                        };
+
                     // Provider-runtime registry needs the OAuth-backed
                     // TokenStore attached so persisted tokens (written by
                     // `rkat auth login`, server-side OAuth completion, etc.)
@@ -1725,46 +1767,29 @@ impl AgentFactory {
                             env = env.with_refresh_coordinator(coord);
                         }
                     }
-                    let registry = meerkat_client::ProviderRuntimeRegistry::default();
-                    let connection = registry
-                        .resolve(&realm, &conn_ref.binding_id, &env)
+                    let provider_registry = meerkat_client::ProviderRuntimeRegistry::default();
+                    let is_env_default = build_config.connection_ref.is_none();
+                    let connection = provider_registry
+                        .resolve(&realm, &binding_id, &env)
                         .await
-                        .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
-                    // The binding's provider is authoritative for downstream
-                    // SessionMetadata — overrides the model-inferred provider
-                    // when they disagree.
+                        .map_err(|e| {
+                            // Preserve MissingApiKey error shape for the
+                            // env-var fallback so CLI surfaces continue to
+                            // prompt the user with a precise message.
+                            if is_env_default {
+                                BuildAgentError::MissingApiKey {
+                                    provider: provider_key(provider).to_string(),
+                                }
+                            } else {
+                                BuildAgentError::ConnectionResolution(e.to_string())
+                            }
+                        })?;
                     provider = connection.provider;
-                    registry
+                    provider_registry
                         .build_client(connection)
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
                 }
-                None => {
-                    // Legacy flat path — removed in Phase 6.
-                    if matches!(provider, Provider::SelfHosted) {
-                        self.build_self_hosted_client_from_registry(
-                            &registry,
-                            &SessionLlmIdentity {
-                                model: build_config.model.clone(),
-                                provider,
-                                self_hosted_server_id: self_hosted_server_id.clone(),
-                                provider_params: build_config.provider_params.clone(),
-                            },
-                        )
-                        .map_err(BuildAgentError::LlmClient)?
-                    } else {
-                        let (api_key, base_url) =
-                            self.resolve_provider_credentials(provider, config);
-                        if api_key.is_none() {
-                            return Err(BuildAgentError::MissingApiKey {
-                                provider: provider_key(provider).to_string(),
-                            });
-                        }
-                        self.build_llm_client(provider, api_key, base_url)
-                            .await
-                            .map_err(BuildAgentError::LlmClient)?
-                    }
-                }
-            },
+            }
         };
 
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)

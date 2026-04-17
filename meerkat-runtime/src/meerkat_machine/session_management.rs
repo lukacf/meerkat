@@ -679,11 +679,17 @@ impl MeerkatMachine {
     /// Begin a live attachment and return the authority token minted by the
     /// DSL transition. Subsequent provider callbacks present this token and
     /// the DSL validates their `authority_epoch` before mutating state.
+    ///
+    /// Shell precondition: the session must have a live executor binding
+    /// (runtime state == Attached or Running). Callers hitting Idle sessions
+    /// get `RuntimeDriverError::NotReady`, matching the pre-DSL contract used
+    /// by the realtime attachment host.
     pub async fn attach_live(
         &self,
         session_id: &SessionId,
     ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
     {
+        self.require_live_executor_for_realtime(session_id).await?;
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::BeginRealtimeBinding,
@@ -701,6 +707,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
     ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
     {
+        self.require_live_executor_for_realtime(session_id).await?;
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::ReplaceRealtimeBinding,
@@ -710,6 +717,24 @@ impl MeerkatMachine {
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         self.read_session_realtime_authority(session_id, "replace_realtime_attachment")
             .await
+    }
+
+    async fn require_live_executor_for_realtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if !entry.attachment_is_live() {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle,
+            });
+        }
+        Ok(())
     }
 
     /// Detach the runtime-owned binding. Preserves the durable intent bit so

@@ -721,7 +721,7 @@ CancelAllWorkRunning(agent_runtime_id, fence_token) ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_voice_intent >>
 
 
-SetMemberVoiceIntent(agent_identity) ==
+RealtimeAttach(agent_identity) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -729,7 +729,7 @@ SetMemberVoiceIntent(agent_identity) ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound >>
 
 
-ClearMemberVoiceIntent(agent_identity) ==
+RealtimeDetach(agent_identity) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
@@ -820,8 +820,8 @@ Next ==
     \/ DestroyFromAny
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RespawnRunning(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : CancelAllWorkRunning(agent_runtime_id, fence_token)
-    \/ \E agent_identity \in AgentIdentityValues : SetMemberVoiceIntent(agent_identity)
-    \/ \E agent_identity \in AgentIdentityValues : ClearMemberVoiceIntent(agent_identity)
+    \/ \E agent_identity \in AgentIdentityValues : RealtimeAttach(agent_identity)
+    \/ \E agent_identity \in AgentIdentityValues : RealtimeDetach(agent_identity)
     \/ TerminalStutter
 
 

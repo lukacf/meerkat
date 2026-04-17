@@ -262,10 +262,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelAllWorkRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `SetMemberVoiceIntent`
+- `RealtimeAttach`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `ClearMemberVoiceIntent`
+- `RealtimeDetach`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 

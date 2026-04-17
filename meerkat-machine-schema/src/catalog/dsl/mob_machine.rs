@@ -79,9 +79,11 @@ machine! {
             SetSpawnPolicy,
             Shutdown,
             ForceCancel,
-            // Per-member realtime voice intent inputs.
-            SetMemberVoiceIntent { agent_identity: AgentIdentity },
-            ClearMemberVoiceIntent { agent_identity: AgentIdentity },
+            // Per-member realtime attachment inputs. These are the public
+            // mob/realtime_attach / mob/realtime_detach surface names and
+            // must match the MobMachineCommand runtime manifest variants.
+            RealtimeAttach { agent_identity: AgentIdentity },
+            RealtimeDetach { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -1033,8 +1035,8 @@ machine! {
         // Per-member realtime voice intent
         // =====================================================================
 
-        transition SetMemberVoiceIntent {
-            on input SetMemberVoiceIntent { agent_identity }
+        transition RealtimeAttach {
+            on input RealtimeAttach { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_voice_intent.insert(agent_identity);
@@ -1043,8 +1045,8 @@ machine! {
             emit MemberVoiceIntentSet { agent_identity: agent_identity }
         }
 
-        transition ClearMemberVoiceIntent {
-            on input ClearMemberVoiceIntent { agent_identity }
+        transition RealtimeDetach {
+            on input RealtimeDetach { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_voice_intent.remove(agent_identity);

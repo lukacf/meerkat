@@ -220,9 +220,11 @@ machine! {
             KickoffMarkStarting { member_id: String },
             KickoffResolveOutcome { member_id: String, outcome: String },
             KickoffCancelRequested { member_id: String },
-            // Per-member realtime voice intent inputs.
-            SetMemberVoiceIntent { agent_identity: AgentIdentity },
-            ClearMemberVoiceIntent { agent_identity: AgentIdentity },
+            // Per-member realtime attachment inputs matching the public
+            // mob/realtime_attach / mob/realtime_detach surface (and the
+            // MobMachineCommand::RealtimeAttach/RealtimeDetach manifest).
+            RealtimeAttach { agent_identity: AgentIdentity },
+            RealtimeDetach { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -1311,8 +1313,8 @@ machine! {
         // Per-member realtime voice intent
         // =====================================================================
 
-        transition SetMemberVoiceIntent {
-            on input SetMemberVoiceIntent { agent_identity }
+        transition RealtimeAttach {
+            on input RealtimeAttach { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_voice_intent.insert(agent_identity);
@@ -1321,8 +1323,8 @@ machine! {
             emit MemberVoiceIntentSet { agent_identity: agent_identity }
         }
 
-        transition ClearMemberVoiceIntent {
-            on input ClearMemberVoiceIntent { agent_identity }
+        transition RealtimeDetach {
+            on input RealtimeDetach { agent_identity }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.member_voice_intent.remove(agent_identity);

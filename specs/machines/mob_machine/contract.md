@@ -55,8 +55,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
-- `SetMemberVoiceIntent`(agent_identity: AgentIdentity)
-- `ClearMemberVoiceIntent`(agent_identity: AgentIdentity)
+- `RealtimeAttach`(agent_identity: AgentIdentity)
+- `RealtimeDetach`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -647,15 +647,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `FlowTerminalized`
 - To: `Running`
 
-### `SetMemberVoiceIntent`
+### `RealtimeAttach`
 - From: `Running`
-- On: `SetMemberVoiceIntent`(agent_identity)
+- On: `RealtimeAttach`(agent_identity)
 - Emits: `MemberVoiceIntentSet`
 - To: `Running`
 
-### `ClearMemberVoiceIntent`
+### `RealtimeDetach`
 - From: `Running`
-- On: `ClearMemberVoiceIntent`(agent_identity)
+- On: `RealtimeDetach`(agent_identity)
 - Emits: `MemberVoiceIntentCleared`
 - To: `Running`
 

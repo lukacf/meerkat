@@ -688,9 +688,10 @@ async fn try_handle_supervisor_bridge_command(
         return false;
     };
 
-    // Accept both the canonical typed intent and legacy per-command intents.
-    let is_bridge = intent == SUPERVISOR_BRIDGE_INTENT;
-    if !is_bridge {
+    // All supervisor bridge commands arrive under a single typed intent
+    // (`SUPERVISOR_BRIDGE_INTENT`); per-command intents were never part of
+    // the wire contract. Any other intent is left for other dispatchers.
+    if intent != SUPERVISOR_BRIDGE_INTENT {
         return false;
     }
 

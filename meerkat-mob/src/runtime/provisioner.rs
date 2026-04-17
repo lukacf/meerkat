@@ -1274,12 +1274,8 @@ impl MultiBackendProvisioner {
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await?;
         if let Some((cause, reason)) = Self::bridge_rejection_reason(&value) {
-            if matches!(
-                cause,
-                super::bridge_protocol::BridgeRejectionCause::NotBound
-                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
-                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch
-            ) && let Some((peer_id, address, bootstrap_token)) = binding
+            if super::bridge_fallback::should_fall_back_to_bind(cause)
+                && let Some((peer_id, address, bootstrap_token)) = binding
             {
                 let bind: super::bridge_protocol::BridgeBindResponse = self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)

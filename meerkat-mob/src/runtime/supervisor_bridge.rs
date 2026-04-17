@@ -16,6 +16,12 @@ pub(crate) struct MobSupervisorBridge {
     authority: RwLock<SupervisorAuthorityRecord>,
     runtime: RwLock<Arc<meerkat_comms::CommsRuntime>>,
     buffered_candidates: Mutex<VecDeque<PeerInputCandidate>>,
+    /// Serializes bridge command requests so that at most one
+    /// request/response round-trip is in flight on this supervisor bridge
+    /// at any time. Held for the full duration of `send_bridge_command`
+    /// from `add_trusted_peer` through reply receipt, which keeps the
+    /// comms `PeerResponse` correlation free of concurrent interleaving
+    /// and makes rotation / bind fallbacks deterministic.
     request_lock: Mutex<()>,
 }
 

@@ -504,12 +504,8 @@ impl MobActor {
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
             .await?;
         if let Some((cause, reason)) = Self::bridge_rejection_reason(&value) {
-            if matches!(
-                cause,
-                super::bridge_protocol::BridgeRejectionCause::NotBound
-                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
-                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch
-            ) && let Some(binding) = binding
+            if super::bridge_fallback::should_fall_back_to_bind(cause)
+                && let Some(binding) = binding
             {
                 let bind = self
                     .bind_peer_only_member_for_binding(peer, binding)
@@ -5694,12 +5690,7 @@ impl MobActor {
                 let authorize_error = match authorize_result {
                     Ok(value) => {
                         if let Some((cause, reason)) = Self::bridge_rejection_reason(&value) {
-                            if matches!(
-                                cause,
-                                super::bridge_protocol::BridgeRejectionCause::NotBound
-                                    | super::bridge_protocol::BridgeRejectionCause::StaleSupervisor
-                                    | super::bridge_protocol::BridgeRejectionCause::SenderMismatch
-                            ) {
+                            if super::bridge_fallback::should_fall_back_to_bind(cause) {
                                 let bind = self
                                     .bind_peer_only_member_for_binding_with_payload(
                                         &peer,

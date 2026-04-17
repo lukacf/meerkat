@@ -20,6 +20,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, is_dataclass
 import json
 import os
 import platform
@@ -36,7 +37,12 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    RealtimeCapabilitiesResult,
+    RealtimeOpenInfo,
+    RealtimeOpenRequest,
+    RealtimeStatusResult,
     RuntimeAcceptResult,
+    RuntimeRealtimeAttachmentStatusResult,
     RuntimeResetResult,
     RuntimeRetireResult,
     RuntimeStateResult,
@@ -112,6 +118,12 @@ RenderMetadata = TypedDict(
     "RenderMetadata",
     {"class": RenderClass, "salience": NotRequired[RenderSalience]},
 )
+
+
+def _wire_params(value: Any) -> dict[str, Any]:
+    if is_dataclass(value):
+        return {key: item for key, item in asdict(value).items() if item is not None}
+    return dict(value)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -1228,6 +1240,24 @@ class MeerkatClient:
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
 
+    async def attach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/realtime_attach",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def detach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/realtime_detach",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def attach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
+        await self.attach_mob_member_live(mob_id, agent_identity)
+
+    async def detach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
+        await self.detach_mob_member_live(mob_id, agent_identity)
+
     async def mob_turn_start(
         self,
         mob_id: str,
@@ -1271,6 +1301,11 @@ class MeerkatClient:
             ),
             "tokens_used": int(result.get("tokens_used", 0)),
             "is_final": bool(result.get("is_final", False)),
+            **(
+                {"realtime_attachment_status": str(result["realtime_attachment_status"])}
+                if result.get("realtime_attachment_status") is not None
+                else {}
+            ),
             **(
                 {"peer_connectivity": result["peer_connectivity"]}
                 if isinstance(result.get("peer_connectivity"), dict)
@@ -1744,6 +1779,31 @@ class MeerkatClient:
         raw = await self._request("runtime/state", {"session_id": session_id})
         return RuntimeStateResult(**raw)
 
+    async def runtime_realtime_attachment_status(
+        self, session_id: str
+    ) -> RuntimeRealtimeAttachmentStatusResult:
+        raw = await self._request(
+            "runtime/realtime_attachment_status",
+            {"session_id": session_id},
+        )
+        return RuntimeRealtimeAttachmentStatusResult(**raw)
+
+    async def realtime_open_info(
+        self, request: RealtimeOpenRequest | dict[str, Any]
+    ) -> RealtimeOpenInfo:
+        raw = await self._request("realtime/open_info", _wire_params(request))
+        return RealtimeOpenInfo(**raw)
+
+    async def realtime_status(self, params: dict[str, Any]) -> RealtimeStatusResult:
+        raw = await self._request("realtime/status", _wire_params(params))
+        return RealtimeStatusResult(**raw)
+
+    async def realtime_capabilities(
+        self, params: dict[str, Any]
+    ) -> RealtimeCapabilitiesResult:
+        raw = await self._request("realtime/capabilities", _wire_params(params))
+        return RealtimeCapabilitiesResult(**raw)
+
     async def runtime_accept(
         self,
         session_id: str,
@@ -1957,7 +2017,7 @@ class MeerkatClient:
     ) -> list[str]:
         if legacy:
             return ["rpc"]
-        args: list[str] = []
+        args: list[str] = ["--realtime-ws", "127.0.0.1:0"]
         if isolated:
             args.append("--isolated")
         if realm_id:

@@ -101,6 +101,11 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
+- Public realtime attachment capability is named `realtime`, not `voice`: surfaces should describe `runtime/realtime_attachment_status`, `mob/realtime_attach`, `mob/realtime_detach`, and `mob/member_status.realtime_attachment_status`.
+- OpenAI realtime integration is an internal runtime-backed companion, not a
+  public protocol authority: host/facade composition may wire it, but RPC/REST
+  methods should continue to expose only the canonical `runtime/*` and `mob/*`
+  realtime attachment surfaces above.
 
 ### Mob lifecycle (standard/default usage)
 

@@ -2082,8 +2082,8 @@ mod tests {
         EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter,
     };
     use crate::types::{
-        AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCallView, ToolDef,
-        ToolResult, Usage, UserMessage,
+        AssistantBlock, ContentBlock, ImageData, Message, StopReason, ToolCall, ToolCallView,
+        ToolDef, ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
     use serde_json::Value;
@@ -3712,6 +3712,103 @@ mod tests {
         assert!(
             dispatched.is_empty(),
             "hidden tools should not be dispatched, but got: {dispatched:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_tool_dispatch_uses_visible_dispatcher() {
+        let client = Arc::new(StaticLlmClient);
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut agent = AgentBuilder::new()
+            .build(client, tools.clone(), Arc::new(NoopStore))
+            .await;
+
+        let outcome = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "tool-call-1".to_string(),
+                "visible".to_string(),
+                serde_json::json!({ "value": 1 }),
+            ))
+            .await
+            .expect("visible external tool dispatch should succeed");
+
+        assert_eq!(outcome.result.tool_use_id, "tool-call-1");
+        assert_eq!(outcome.result.text_content(), "dispatched visible");
+        assert_eq!(tools.dispatched(), vec!["visible".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn external_tool_dispatch_blocks_hidden_tools() {
+        let client = Arc::new(StaticLlmClient);
+        let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
+        let mut agent = AgentBuilder::new()
+            .build(client, tools.clone(), Arc::new(NoopStore))
+            .await;
+        agent
+            .stage_external_tool_filter(ToolFilter::Deny(
+                ["secret".to_string()].into_iter().collect(),
+            ))
+            .expect("stage hidden-tool filter");
+        let visibility_state = agent
+            .tool_scope
+            .promote_staged_visibility()
+            .expect("promote staged filter");
+        agent
+            .tool_scope
+            .apply_staged_projection(
+                tools.tools(),
+                std::collections::HashSet::new(),
+                std::collections::HashSet::new(),
+                &visibility_state,
+            )
+            .expect("apply staged filter at boundary");
+
+        let error = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "tool-call-hidden".to_string(),
+                "secret".to_string(),
+                serde_json::json!({}),
+            ))
+            .await
+            .expect_err("hidden external tool dispatch should be rejected");
+
+        assert!(
+            matches!(error, AgentError::ToolError(ref message) if message.contains("secret")),
+            "expected hidden tool rejection, got {error:?}"
+        );
+        assert!(
+            tools.dispatched().is_empty(),
+            "hidden tools must not reach the dispatcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_tool_dispatch_applies_session_effects() {
+        let client = Arc::new(StaticLlmClient);
+        let tools = Arc::new(DeferredLoadDispatcher::new());
+        let mut agent = AgentBuilder::new()
+            .build(client, tools, Arc::new(NoopStore))
+            .await;
+
+        let outcome = agent
+            .dispatch_external_tool_call(ToolCall::new(
+                "tool-call-2".to_string(),
+                "tool_catalog_load".to_string(),
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("external tool dispatch should apply deferred-tool effects");
+
+        assert_eq!(outcome.result.tool_use_id, "tool-call-2");
+        let visibility_state = agent
+            .session()
+            .tool_visibility_state()
+            .expect("session effects should publish canonical visibility state");
+        assert!(
+            visibility_state
+                .staged_requested_deferred_names
+                .contains("deferred_tool"),
+            "expected deferred_tool to be staged after tool session effects"
         );
     }
 

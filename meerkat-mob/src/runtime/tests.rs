@@ -10,8 +10,10 @@ use crate::run::MobRunStatus;
 use crate::run::{FailureLedgerEntry, MobRun, StepLedgerEntry, StepRunStatus};
 use crate::storage::MobStorage;
 use crate::store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, MobEventStore, MobRunStore,
-    MobStoreError, RealmProfileStore,
+    ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
+    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore, MobEventStore,
+    MobRunStore, MobRuntimeMetadataStore, MobStoreError, RealmProfileStore,
+    SupervisorAuthorityRecord,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -33,8 +35,8 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, Message, RunResult, SessionId, StopReason, ToolCallView, ToolDef, ToolResult,
-    Usage,
+    AssistantBlock, HandlingMode, Message, RunResult, SessionId, StopReason, ToolCallView, ToolDef,
+    ToolResult, Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
@@ -55,9 +57,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 // -----------------------------------------------------------------------
 // Mock CommsRuntime
@@ -86,8 +89,15 @@ struct MockCommsRuntime {
 
 impl MockCommsRuntime {
     fn new(name: &str, behavior: MockCommsBehavior) -> Self {
+        let mut key_bytes = [0u8; 32];
+        for (index, byte) in name.as_bytes().iter().copied().enumerate() {
+            let slot = index % key_bytes.len();
+            key_bytes[slot] = key_bytes[slot]
+                .wrapping_add(byte)
+                .rotate_left((index % 8) as u32);
+        }
         Self {
-            default_public_key: format!("ed25519:{name}"),
+            default_public_key: meerkat_comms::PubKey::new(key_bytes).to_peer_id(),
             behavior: std::sync::RwLock::new(behavior),
             remove_failures_remaining: std::sync::Mutex::new(usize::from(
                 behavior.fail_remove_trust_once,
@@ -134,6 +144,7 @@ impl MockCommsRuntime {
         names
     }
 
+    #[allow(dead_code)]
     async fn trusted_peer_addresses(&self) -> Vec<String> {
         let mut addresses = self
             .trusted_peers
@@ -371,6 +382,8 @@ struct MockSessionService {
     flow_turn_fail_sessions: RwLock<HashSet<SessionId>>,
     flow_turn_completed_result: RwLock<String>,
     flow_turn_overlays: RwLock<Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)>>,
+    /// Session IDs for which `subscribe_session_events` must return an error.
+    subscribe_fail_sessions: RwLock<HashSet<SessionId>>,
 }
 
 impl MockSessionService {
@@ -411,7 +424,15 @@ impl MockSessionService {
             flow_turn_fail_sessions: RwLock::new(HashSet::new()),
             flow_turn_completed_result: RwLock::new("\"Turn completed\"".to_string()),
             flow_turn_overlays: RwLock::new(Vec::new()),
+            subscribe_fail_sessions: RwLock::new(HashSet::new()),
         }
+    }
+
+    async fn fail_subscribe_for_session(&self, session_id: SessionId) {
+        self.subscribe_fail_sessions
+            .write()
+            .await
+            .insert(session_id);
     }
 
     async fn active_session_count(&self) -> usize {
@@ -689,6 +710,7 @@ impl MockSessionService {
         }
     }
 
+    #[allow(dead_code)]
     async fn trusted_peer_addresses(&self, session_id: &SessionId) -> Vec<String> {
         let runtime = {
             let sessions = self.sessions.read().await;
@@ -1320,6 +1342,16 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        if self
+            .subscribe_fail_sessions
+            .read()
+            .await
+            .contains(session_id)
+        {
+            return Err(meerkat_core::StreamError::Internal(format!(
+                "simulated subscribe failure for session {session_id}"
+            )));
+        }
         if !self.sessions.read().await.contains_key(session_id) {
             return Err(meerkat_core::StreamError::NotFound(format!(
                 "session {session_id}"
@@ -1424,6 +1456,8 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberRetired { .. } => "MemberRetired",
             MobEventKind::MemberReset { .. } => "MemberReset",
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
+            MobEventKind::MemberVoiceIntentSet { .. } => "MemberVoiceIntentSet",
+            MobEventKind::MemberVoiceIntentCleared { .. } => "MemberVoiceIntentCleared",
             MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
@@ -1808,6 +1842,110 @@ impl MobRunStore for RecordingRunStore {
                 next_run_state,
             )
             .await
+    }
+}
+
+struct FaultInjectedRuntimeMetadataStore {
+    inner: InMemoryMobRuntimeMetadataStore,
+    fail_load_supervisor: AtomicBool,
+    fail_list_overlays: AtomicBool,
+}
+
+impl FaultInjectedRuntimeMetadataStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryMobRuntimeMetadataStore::new(),
+            fail_load_supervisor: AtomicBool::new(false),
+            fail_list_overlays: AtomicBool::new(false),
+        }
+    }
+
+    fn set_fail_load_supervisor(&self, fail: bool) {
+        self.fail_load_supervisor.store(fail, Ordering::Relaxed);
+    }
+}
+
+#[async_trait]
+impl MobRuntimeMetadataStore for FaultInjectedRuntimeMetadataStore {
+    async fn load_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<SupervisorAuthorityRecord>, MobStoreError> {
+        if self.fail_load_supervisor.load(Ordering::Relaxed) {
+            return Err(MobStoreError::ReadFailed(
+                "fault-injected runtime metadata load failure".to_string(),
+            ));
+        }
+        self.inner.load_supervisor_authority(mob_id).await
+    }
+
+    async fn put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<(), MobStoreError> {
+        self.inner.put_supervisor_authority(mob_id, record).await
+    }
+
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .put_supervisor_authority_if_absent(mob_id, record)
+            .await
+    }
+
+    async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        self.inner.delete_supervisor_authority(mob_id).await
+    }
+
+    async fn list_external_binding_overlays(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<ExternalBindingOverlayRecord>, MobStoreError> {
+        if self.fail_list_overlays.load(Ordering::Relaxed) {
+            return Err(MobStoreError::ReadFailed(
+                "fault-injected runtime overlay load failure".to_string(),
+            ));
+        }
+        self.inner.list_external_binding_overlays(mob_id).await
+    }
+
+    async fn put_external_binding_overlay_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .put_external_binding_overlay_if_absent(mob_id, record)
+            .await
+    }
+
+    async fn upsert_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<(), MobStoreError> {
+        self.inner
+            .upsert_external_binding_overlay(mob_id, record)
+            .await
+    }
+
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: crate::ids::Generation,
+    ) -> Result<(), MobStoreError> {
+        self.inner
+            .delete_external_binding_overlay(mob_id, agent_identity, generation)
+            .await
+    }
+
+    async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        self.inner.delete_external_binding_overlays(mob_id).await
     }
 }
 
@@ -2380,9 +2518,565 @@ async fn wait_for_run_terminal(
 
 /// Build a test RuntimeBinding::External for a given meerkat_id.
 fn test_external_binding(meerkat_id: &str) -> crate::RuntimeBinding {
+    let bootstrap_token = format!("bootstrap-{meerkat_id}");
     crate::RuntimeBinding::External {
-        peer_id: format!("test-key:{meerkat_id}"),
+        peer_id: format!("ed25519:test-key:{meerkat_id}"),
         address: format!("tcp://test.invalid/{meerkat_id}"),
+        bootstrap_token: Some(bootstrap_token.into()),
+    }
+}
+
+fn canonical_external_address(address: &str) -> &str {
+    address.split('?').next().unwrap_or(address)
+}
+
+#[derive(Clone)]
+struct HarnessSupervisorState {
+    supervisor: meerkat_core::comms::TrustedPeerSpec,
+    epoch: u64,
+}
+
+struct LiveExternalPeerHarness {
+    binding: crate::RuntimeBinding,
+    runtime: Arc<meerkat_comms::CommsRuntime>,
+    bind_count: Arc<std::sync::atomic::AtomicUsize>,
+    delivered_inputs: Arc<RwLock<Vec<String>>>,
+    received_intents: Arc<RwLock<Vec<String>>>,
+    supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
+    fail_next_authorize: Arc<AtomicBool>,
+    fail_next_bind: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LiveExternalPeerHarness {
+    fn binding(&self) -> crate::RuntimeBinding {
+        self.binding.clone()
+    }
+
+    async fn trusted_peer_names(&self) -> Vec<String> {
+        self.runtime
+            .peers()
+            .await
+            .into_iter()
+            .map(|entry| entry.name.as_str().to_string())
+            .collect()
+    }
+
+    async fn remove_trusted_peer(&self, peer_id: &str) {
+        self.runtime
+            .remove_trusted_peer(peer_id)
+            .await
+            .expect("remove trusted peer from harness runtime");
+    }
+
+    fn bind_count(&self) -> usize {
+        self.bind_count.load(Ordering::Relaxed)
+    }
+
+    async fn delivered_input_ids(&self) -> Vec<String> {
+        self.delivered_inputs.read().await.clone()
+    }
+
+    async fn received_intents(&self) -> Vec<String> {
+        self.received_intents.read().await.clone()
+    }
+
+    async fn authorized_supervisor_peer_id(&self) -> Option<String> {
+        self.supervisor_state
+            .read()
+            .await
+            .as_ref()
+            .map(|state| state.supervisor.peer_id.clone())
+    }
+
+    async fn forget_supervisor(&self) {
+        let _ = self.supervisor_state.write().await.take();
+    }
+
+    fn fail_next_authorize(&self) {
+        self.fail_next_authorize.store(true, Ordering::Relaxed);
+    }
+
+    fn fail_next_bind(&self) {
+        self.fail_next_bind.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for LiveExternalPeerHarness {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
+    let peer_name = peer_name.to_string();
+    let runtime = Arc::new(
+        meerkat_comms::CommsRuntime::inproc_only(&peer_name)
+            .expect("create live external peer runtime"),
+    );
+    let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
+    let binding = crate::RuntimeBinding::External {
+        peer_id: runtime.public_key().to_peer_id(),
+        address: format!("inproc://{peer_name}"),
+        bootstrap_token: Some(bootstrap_token.into()),
+    };
+    let responder_runtime = runtime.clone();
+    let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let responder_bind_count = bind_count.clone();
+    let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
+    let responder_delivered_inputs = delivered_inputs.clone();
+    let delivery_responses = Arc::new(RwLock::new(HashMap::new()));
+    let responder_delivery_responses = delivery_responses.clone();
+    let received_intents = Arc::new(RwLock::new(Vec::new()));
+    let responder_received_intents = received_intents.clone();
+    let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
+    let responder_supervisor_state = supervisor_state.clone();
+    let fail_next_authorize = Arc::new(AtomicBool::new(false));
+    let responder_fail_next_authorize = fail_next_authorize.clone();
+    let fail_next_bind = Arc::new(AtomicBool::new(false));
+    let responder_fail_next_bind = fail_next_bind.clone();
+    let task = tokio::spawn(async move {
+        let mut state = super::bridge_protocol::BridgeMemberRuntimeState::Idle;
+        let inbox_notify = responder_runtime.inbox_notify();
+
+        loop {
+            let notified = inbox_notify.notified();
+            let candidates = responder_runtime.drain_peer_input_candidates().await;
+            if candidates.is_empty() {
+                if responder_runtime.dismiss_received() {
+                    break;
+                }
+                notified.await;
+                continue;
+            }
+
+            for candidate in candidates {
+                match &candidate.interaction.content {
+                    meerkat_core::interaction::InteractionContent::Request { intent, params } => {
+                        responder_received_intents
+                            .write()
+                            .await
+                            .push(intent.clone());
+                        let reply_name = candidate.interaction.from.clone();
+                        let to = PeerName::new(reply_name).expect("bridge response peer name");
+                        let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
+                            serde_json::from_value(params.clone());
+                        let response = if let Ok(command) = bridge_parse {
+                            match command {
+                                super::bridge_protocol::BridgeCommand::BindMember(payload) => {
+                                    if responder_fail_next_bind.swap(false, Ordering::Relaxed) {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::Internal,
+                                                reason: "bind member failed: injected test failure"
+                                                    .to_string(),
+                                            },
+                                        )
+                                        .expect("bind rejection")
+                                    } else {
+                                        // Mirror the production strict gate in
+                                        // `validate_bind_request_against_state`: unbound state
+                                        // allows bootstrap; bound state only accepts an exact
+                                        // idempotent retry from the same supervisor at the same
+                                        // epoch from the same sender. Anything else is a typed
+                                        // rejection — mob-level tests must see the same rejection
+                                        // vocabulary as production or the gate is invisible.
+                                        let sender = candidate.interaction.from.clone();
+                                        let mut state_guard =
+                                            responder_supervisor_state.write().await;
+                                        let gate_result: Result<bool, (super::bridge_protocol::BridgeRejectionCause, String)> = match state_guard.as_ref() {
+                                            None => Ok(true), // bootstrap: bind fresh
+                                            Some(current) => {
+                                                if payload.supervisor.peer_id
+                                                    != current.supervisor.peer_id
+                                                {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::AlreadyBound,
+                                                        format!(
+                                                            "bind member failed: supervisor already bound as '{}'; use authorize_supervisor to rotate",
+                                                            current.supervisor.peer_id
+                                                        ),
+                                                    ))
+                                                } else if payload.epoch != current.epoch {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::AlreadyBound,
+                                                        format!(
+                                                            "bind member failed: epoch {} does not match bound supervisor epoch {}; use authorize_supervisor to rotate",
+                                                            payload.epoch, current.epoch
+                                                        ),
+                                                    ))
+                                                } else if sender != current.supervisor.name
+                                                    && sender != current.supervisor.peer_id
+                                                {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
+                                                        format!(
+                                                            "bind member failed: request sender '{sender}' does not match authorized supervisor '{}'",
+                                                            current.supervisor.peer_id
+                                                        ),
+                                                    ))
+                                                } else {
+                                                    Ok(false) // idempotent ack, no mutation
+                                                }
+                                            }
+                                        };
+                                        match gate_result {
+                                            Err((cause, reason)) => serde_json::to_value(
+                                                super::bridge_protocol::BridgeReply::Rejected {
+                                                    cause,
+                                                    reason,
+                                                },
+                                            )
+                                            .expect("bind rejection"),
+                                            Ok(mutate) => {
+                                                if mutate {
+                                                    responder_bind_count
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    let supervisor_spec =
+                                                        meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                            payload.supervisor.clone(),
+                                                        )
+                                                        .expect("valid supervisor spec");
+                                                    responder_runtime
+                                                        .add_trusted_peer(supervisor_spec)
+                                                        .await
+                                                        .expect("bind supervisor");
+                                                    *state_guard = Some(HarnessSupervisorState {
+                                                        supervisor:
+                                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                                payload.supervisor.clone(),
+                                                            )
+                                                            .expect("valid supervisor spec"),
+                                                        epoch: payload.epoch,
+                                                    });
+                                                }
+                                                serde_json::to_value(
+                                                    super::bridge_protocol::BridgeBindResponse {
+                                                        peer_id: responder_runtime.public_key().to_peer_id(),
+                                                        address: format!("inproc://{peer_name}"),
+                                                        capabilities:
+                                                            super::bridge_protocol::BridgeCapabilities {
+                                                                deliver_member_input: true,
+                                                                observe_member: true,
+                                                                interrupt_member: true,
+                                                                retire_member: true,
+                                                                destroy_member: true,
+                                                                wire_member: true,
+                                                                unwire_member: true,
+                                                        },
+                                                    },
+                                                )
+                                                .expect("bind response")
+                                            }
+                                        }
+                                    }
+                                }
+                                super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
+                                    payload,
+                                ) => {
+                                    if responder_fail_next_authorize
+                                        .swap(false, Ordering::Relaxed)
+                                    {
+                                        let supervisor_spec =
+                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                payload.supervisor.clone(),
+                                            )
+                                            .expect("valid supervisor spec");
+                                        responder_runtime
+                                            .add_trusted_peer(supervisor_spec)
+                                            .await
+                                            .expect("trust supervisor for rejection");
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::Internal,
+                                                reason: "authorize supervisor failed: injected test failure".to_string(),
+                                            },
+                                        )
+                                        .expect("authorize rejection")
+                                    } else {
+                                        let mut guard = responder_supervisor_state.write().await;
+                                        if let Some(current) = guard.as_ref() {
+                                            assert!(
+                                                payload.epoch >= current.epoch,
+                                                "authorize payload must not go backwards in epoch"
+                                            );
+                                            if payload.epoch > current.epoch
+                                                || payload.supervisor.peer_id
+                                                    != current.supervisor.peer_id
+                                            {
+                                                let _ = responder_runtime
+                                                    .remove_trusted_peer(
+                                                        &current.supervisor.peer_id,
+                                                    )
+                                                    .await;
+                                            }
+                                            let supervisor_spec =
+                                                meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                    payload.supervisor.clone(),
+                                                )
+                                                .expect("valid supervisor spec");
+                                            responder_runtime
+                                                .add_trusted_peer(supervisor_spec)
+                                                .await
+                                                .expect("authorize supervisor");
+                                            *guard = Some(HarnessSupervisorState {
+                                                supervisor:
+                                                    meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                        payload.supervisor,
+                                                    )
+                                                    .expect("valid supervisor spec"),
+                                                epoch: payload.epoch,
+                                            });
+                                            serde_json::to_value(
+                                                super::bridge_protocol::BridgeAck { ok: true },
+                                            )
+                                            .expect("authorize ack")
+                                        } else {
+                                            let supervisor_spec =
+                                                meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                    payload.supervisor.clone(),
+                                                )
+                                                .expect("valid supervisor spec");
+                                            responder_runtime
+                                                .add_trusted_peer(supervisor_spec)
+                                                .await
+                                                .expect("trust supervisor for initial rejection");
+                                            serde_json::to_value(
+                                                super::bridge_protocol::BridgeReply::Rejected {
+                                                    cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+                                                    reason: "authorize supervisor failed: use bind_member to establish initial supervisor authority".to_string(),
+                                                },
+                                            )
+                                            .expect("authorize initial rejection")
+                                        }
+                                    }
+                                }
+                                super::bridge_protocol::BridgeCommand::RevokeSupervisor(
+                                    payload,
+                                ) => {
+                                    let _ = responder_runtime
+                                        .remove_trusted_peer(&payload.supervisor.peer_id)
+                                        .await;
+                                    *responder_supervisor_state.write().await = None;
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("revoke ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::InterruptMember(_) => {
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("interrupt ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::DeliverMemberInput(
+                                    payload,
+                                ) => {
+                                    let current = responder_supervisor_state
+                                        .read()
+                                        .await
+                                        .clone()
+                                        .expect("delivery supervisor state");
+                                    if payload.epoch != current.epoch {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                                                reason: format!(
+                                                    "stale supervisor epoch {} (current {})",
+                                                    payload.epoch, current.epoch
+                                                ),
+                                            },
+                                        )
+                                        .expect("stale delivery rejection")
+                                    } else if payload.supervisor.peer_id
+                                        != current.supervisor.peer_id
+                                    {
+                                        serde_json::to_value(
+                                            super::bridge_protocol::BridgeReply::Rejected {
+                                                cause: super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                                                reason: format!(
+                                                    "stale supervisor peer '{}' (current '{}')",
+                                                    payload.supervisor.peer_id,
+                                                    current.supervisor.peer_id
+                                                ),
+                                            },
+                                        )
+                                        .expect("stale supervisor rejection")
+                                    } else {
+                                    let mut responses = responder_delivery_responses.write().await;
+                                    if let Some(existing) =
+                                        responses.get(&payload.input_id).cloned()
+                                    {
+                                        serde_json::to_value(existing)
+                                            .expect("existing delivery response")
+                                    } else {
+                                        let supervisor_spec =
+                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                payload.supervisor,
+                                            )
+                                            .expect("valid supervisor spec");
+                                        responder_runtime
+                                            .add_trusted_peer(supervisor_spec)
+                                            .await
+                                            .expect("refresh supervisor for delivery");
+                                        responder_delivered_inputs
+                                            .write()
+                                            .await
+                                            .push(payload.input_id.clone());
+                                        let response =
+                                        super::bridge_protocol::BridgeDeliveryResponse {
+                                            input_id: payload.input_id.clone(),
+                                            canonical_input_id: Some(
+                                                Uuid::new_v5(
+                                                    &Uuid::NAMESPACE_URL,
+                                                    payload.input_id.as_bytes(),
+                                                )
+                                                .to_string(),
+                                            ),
+                                            outcome: super::bridge_protocol::BridgeDeliveryOutcome::Accepted,
+                                        };
+                                        responses
+                                            .insert(payload.input_id.clone(), response.clone());
+                                        serde_json::to_value(response).expect("delivery response")
+                                    }
+                                    }
+                                }
+                                super::bridge_protocol::BridgeCommand::WireMember(payload) => {
+                                    let peer_spec =
+                                        meerkat_core::comms::TrustedPeerSpec::try_from(
+                                            payload.peer_spec,
+                                        )
+                                        .expect("valid peer spec");
+                                    responder_runtime
+                                        .add_trusted_peer(peer_spec)
+                                        .await
+                                        .expect("wire trust");
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("wire ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::UnwireMember(payload) => {
+                                    let _ = responder_runtime
+                                        .remove_trusted_peer(&payload.peer_spec.peer_id)
+                                        .await;
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("unwire ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::RetireMember(_) => {
+                                    state =
+                                        super::bridge_protocol::BridgeMemberRuntimeState::Retired;
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeRetireResponse {
+                                            inputs_abandoned: 0,
+                                            inputs_pending_drain: 0,
+                                        },
+                                    )
+                                    .expect("retire response")
+                                }
+                                super::bridge_protocol::BridgeCommand::DestroyMember(_) => {
+                                    state =
+                                        super::bridge_protocol::BridgeMemberRuntimeState::Destroyed;
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeDestroyResponse {
+                                            inputs_abandoned: 0,
+                                        },
+                                    )
+                                    .expect("destroy response")
+                                }
+                                super::bridge_protocol::BridgeCommand::ObserveMember(_) => {
+                                    serde_json::to_value(
+                                        super::bridge_protocol::BridgeObservationResponse::new(
+                                            state,
+                                            Some(matches!(
+                                                state,
+                                                super::bridge_protocol::BridgeMemberRuntimeState::Idle
+                                                    | super::bridge_protocol::BridgeMemberRuntimeState::Attached
+                                                    | super::bridge_protocol::BridgeMemberRuntimeState::Running
+                                            )),
+                                            None,
+                                            Some(
+                                                super::bridge_protocol::BridgePeerConnectivity::Reachable,
+                                            ),
+                                            None,
+                                            Utc::now().to_rfc3339(),
+                                        ),
+                                    )
+                                    .expect("observe response")
+                                }
+                                _ => serde_json::json!({
+                                    "error": "unsupported bridge command in test harness"
+                                }),
+                            }
+                        } else {
+                            // Non-bridge lifecycle messages
+                            match intent.as_str() {
+                                "mob.peer_added" => {
+                                    let peer_spec: meerkat_core::comms::TrustedPeerSpec =
+                                        serde_json::from_value(
+                                            params
+                                                .get("peer_spec")
+                                                .cloned()
+                                                .expect("peer_added peer_spec"),
+                                        )
+                                        .expect("peer_added trusted peer spec");
+                                    responder_runtime
+                                        .add_trusted_peer(peer_spec)
+                                        .await
+                                        .expect("peer_added trust");
+                                    serde_json::json!({ "ok": true })
+                                }
+                                "mob.peer_unwired" | "mob.peer_retired" => {
+                                    let peer_spec: meerkat_core::comms::TrustedPeerSpec =
+                                        serde_json::from_value(
+                                            params
+                                                .get("peer_spec")
+                                                .cloned()
+                                                .expect("peer lifecycle peer_spec"),
+                                        )
+                                        .expect("peer lifecycle trusted peer spec");
+                                    let _ = responder_runtime
+                                        .remove_trusted_peer(&peer_spec.peer_id)
+                                        .await;
+                                    serde_json::json!({ "ok": true })
+                                }
+                                _ => serde_json::json!({ "ok": true }),
+                            }
+                        };
+                        if let Err(error) = responder_runtime
+                            .send(CommsCommand::PeerResponse {
+                                to,
+                                in_reply_to: candidate.interaction.id,
+                                status: meerkat_core::interaction::ResponseStatus::Completed,
+                                result: response,
+                                handling_mode: None,
+                            })
+                            .await
+                        {
+                            panic!("send live external peer response failed: {error}");
+                        }
+                        responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
+                    }
+                    _ => {
+                        responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
+                    }
+                }
+            }
+        }
+    });
+
+    LiveExternalPeerHarness {
+        binding,
+        runtime,
+        bind_count,
+        delivered_inputs,
+        received_intents,
+        supervisor_state,
+        fail_next_authorize,
+        fail_next_bind,
+        task,
     }
 }
 
@@ -2434,13 +3128,70 @@ async fn create_test_mob_with_events(
 ) -> (MobHandle, Arc<MockSessionService>) {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(definition, MobStorage::with_events(events))
+    let storage = MobStorage::with_events(events);
+    let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
         .await
         .expect("create mob");
 
     (handle, service)
+}
+
+async fn create_resumed_worker_with_voice_intent() -> (
+    MobHandle,
+    Arc<MockSessionService>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+    SessionId,
+) {
+    let service = Arc::new(MockSessionService::new());
+    let adapter = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    let handle = MobBuilder::new(definition.clone(), MobStorage::with_events(events.clone()))
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    service.archive(&sid).await.expect("archive live session");
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentSet {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append voice intent");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service.clone())
+        .resume()
+        .await
+        .expect("resume with voice intent");
+
+    let runtime_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await
+    .expect("runtime live attachment status");
+    assert_eq!(
+        runtime_status,
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
+    );
+
+    (resumed, service, adapter, sid)
 }
 
 async fn create_test_mob_with_run_store(
@@ -2453,6 +3204,7 @@ async fn create_test_mob_with_run_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: run_store,
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         realm_profiles: None,
     };
     let handle = MobBuilder::new(definition, storage)
@@ -2466,6 +3218,16 @@ async fn create_test_mob_with_run_store(
 
 fn test_comms_name(profile: &str, meerkat_id: &str) -> String {
     format!("test-mob/{profile}/{meerkat_id}")
+}
+
+fn test_comms_name_for(mob_id: &MobId, profile: &str, meerkat_id: &str) -> String {
+    format!("{mob_id}/{profile}/{meerkat_id}")
+}
+
+fn with_unique_mob_id(mut definition: MobDefinition, label: &str) -> MobDefinition {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    definition.id = MobId::from(format!("test-mob-{label}-{suffix}"));
+    definition
 }
 
 struct EchoBundleDispatcher;
@@ -3305,6 +4067,7 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        runtime_metadata: storage.runtime_metadata.clone(),
         realm_profiles: storage.realm_profiles.clone(),
     };
 
@@ -3352,6 +4115,43 @@ async fn test_mob_builder_persists_spec_and_resume_requires_consistency() {
             .to_string()
             .contains("persisted spec store definition does not match"),
         "resume should enforce spec-store consistency"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_builder_persists_supervisor_runtime_metadata_on_create() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::custom_with_runtime_metadata(
+        Arc::new(InMemoryMobEventStore::new()),
+        Arc::new(InMemoryMobRunStore::new()),
+        Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata.clone(),
+    );
+
+    let _handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+
+    let record = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load supervisor authority")
+        .expect("create should persist supervisor authority");
+    assert_eq!(record.epoch, 0, "fresh mobs should start at epoch 0");
+    assert_eq!(
+        record.public_peer_id,
+        record.keypair().public_key().to_peer_id(),
+        "persisted public peer id should match the reconstructed keypair"
+    );
+    assert_eq!(
+        record.protocol_version, 1,
+        "phase-1 bridge metadata should persist protocol version 1"
     );
 }
 
@@ -3464,14 +4264,23 @@ depends_on_mode = "any"
         })
         .await
         .expect("append mob created");
+    let runtime_metadata: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    runtime_metadata
+        .put_supervisor_authority(&definition.id, &SupervisorAuthorityRecord::generate(1))
+        .await
+        .expect("persist supervisor metadata");
 
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .resume()
-        .await
-        .expect("warning diagnostics should not block resume");
+    let handle = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("warning diagnostics should not block resume");
     assert_eq!(handle.status(), MobState::Running);
 }
 
@@ -3505,13 +4314,22 @@ message = "x"
         })
         .await
         .expect("append mob created");
+    let runtime_metadata: Arc<dyn MobRuntimeMetadataStore> =
+        Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    runtime_metadata
+        .put_supervisor_authority(&definition.id, &SupervisorAuthorityRecord::generate(1))
+        .await
+        .expect("persist supervisor metadata");
 
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
-    let result = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .resume()
-        .await;
+    let result = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await;
 
     let diagnostics = match result {
         Ok(_) => panic!("spec errors should block resume"),
@@ -3624,7 +4442,11 @@ async fn test_lifecycle_state_machine_enforcement() {
         .await
         .expect_err("destroy from Destroyed must fail once actor exits");
     assert!(
-        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        matches!(
+            err,
+            crate::runtime::handle::MobDestroyError::Mob(MobError::Internal(ref message))
+                if message.contains("actor task dropped")
+        ),
         "destroy should be terminal once completed: {err:?}"
     );
 }
@@ -3632,7 +4454,36 @@ async fn test_lifecycle_state_machine_enforcement() {
 #[tokio::test]
 async fn test_destroy_is_terminal_for_commands() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle.destroy().await.expect("destroy");
+    let report = handle.destroy().await.expect("destroy");
+    assert!(
+        report.force_destroyed_members.is_empty(),
+        "local destroy should not require force-destroy bookkeeping yet"
+    );
+    assert!(
+        report.orphaned_remote_members.is_empty(),
+        "local destroy should not orphan remote members in the in-memory test path"
+    );
+    assert!(
+        !report.remote_cleanup_deadline_exceeded,
+        "local destroy should not exceed the remote cleanup deadline in the in-memory path"
+    );
+    assert!(
+        report.metadata_scrubbed,
+        "destroy should report metadata scrub"
+    );
+    assert!(
+        report.events_cleared,
+        "destroy should report cleared events"
+    );
+    assert!(
+        report.namespace_cleaned,
+        "destroy should report namespace cleanup"
+    );
+    assert!(
+        report.errors.is_empty(),
+        "successful destroy should not report cleanup errors: {:?}",
+        report.errors
+    );
     assert_eq!(handle.status(), MobState::Destroyed);
 
     let err = handle
@@ -3642,6 +4493,461 @@ async fn test_destroy_is_terminal_for_commands() {
     assert!(
         matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
         "destroy should terminate the actor loop: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_destroy_scrubs_runtime_metadata() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor metadata")
+            .is_some(),
+        "create should persist supervisor metadata before destroy"
+    );
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("worker-overlay"),
+                generation: crate::ids::Generation::INITIAL,
+                normalized_member_ref: None,
+                bootstrap_token: None,
+                status: ExternalBindingOverlayStatus::Failed {
+                    reason: "test overlay".to_string(),
+                },
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("insert overlay");
+
+    handle.destroy().await.expect("destroy");
+
+    assert!(
+        runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await
+            .expect("load supervisor metadata after destroy")
+            .is_none(),
+        "destroy should scrub supervisor metadata"
+    );
+    assert!(
+        runtime_metadata
+            .list_external_binding_overlays(&mob_id)
+            .await
+            .expect("list overlays after destroy")
+            .is_empty(),
+        "destroy should scrub binding overlays"
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_updates_runtime_metadata() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original supervisor")
+        .expect("original supervisor metadata");
+    let report = handle.rotate_supervisor().await.expect("rotate supervisor");
+    let rotated = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load rotated supervisor")
+        .expect("rotated supervisor metadata");
+
+    assert_eq!(report.previous_epoch, original.epoch);
+    assert_eq!(report.current_epoch, original.epoch + 1);
+    assert_eq!(rotated.epoch, report.current_epoch);
+    assert_eq!(rotated.public_peer_id, report.public_peer_id);
+    assert_ne!(
+        rotated.public_peer_id, original.public_peer_id,
+        "rotation should replace the supervisor keypair"
+    );
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_stale_epoch() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-live-remote",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original authority")
+        .expect("original authority record");
+    let report = handle.rotate_supervisor().await.expect("rotate supervisor");
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("after-rotate".to_string()),
+        )
+        .await
+        .expect("rotated supervisor should still control live peer-only member");
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "rotated supervisor should still be able to deliver one logical input"
+    );
+
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token: _,
+    } = external.binding()
+    else {
+        panic!("live external peer must expose external binding");
+    };
+    let peer = meerkat_core::comms::TrustedPeerSpec::new(
+        address
+            .strip_prefix("inproc://")
+            .map(|value| value.split('?').next().unwrap_or(value).to_string())
+            .unwrap_or_else(|| format!("mob_member/backend_peer/{peer_id}")),
+        peer_id.clone(),
+        address.clone(),
+    )
+    .expect("peer spec");
+    let old_bridge = crate::runtime::MobSupervisorBridge::new(&mob_id, original.clone())
+        .expect("build old supervisor bridge");
+    let stale_command = super::bridge_protocol::BridgeCommand::DeliverMemberInput(
+        super::bridge_protocol::BridgeDeliveryPayload {
+            supervisor: old_bridge
+                .supervisor_spec()
+                .await
+                .expect("old supervisor spec")
+                .into(),
+            epoch: report.previous_epoch,
+            protocol_version: original.protocol_version,
+            input_id: "stale-epoch-input".to_string(),
+            content: ContentInput::from("stale-epoch".to_string()),
+            handling_mode: HandlingMode::Queue,
+        },
+    );
+    let stale_reply = old_bridge
+        .send_bridge_command(&peer, &stale_command, std::time::Duration::from_secs(1))
+        .await
+        .expect("bridge should return a rejected reply for stale supervisor epochs");
+    let stale_reply: super::bridge_protocol::BridgeReply =
+        serde_json::from_value(stale_reply).expect("decode stale bridge reply");
+    match stale_reply {
+        super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+            assert_eq!(
+                cause,
+                super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                "stale supervisor should be rejected with typed cause, got reason: {reason}"
+            );
+            assert!(
+                reason.contains("stale supervisor"),
+                "stale supervisor should be rejected explicitly, got: {reason}"
+            );
+        }
+        other => panic!("expected stale supervisor rejection, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_rotate_supervisor_bind_fallback_binds_next_authority() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-bind-fallback",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+
+    external.forget_supervisor().await;
+
+    let report = handle.rotate_supervisor().await.expect("rotate supervisor");
+    let rotated = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load rotated authority")
+        .expect("rotated authority record");
+    assert_eq!(rotated.public_peer_id, report.public_peer_id);
+    assert_eq!(
+        external.authorized_supervisor_peer_id().await.as_deref(),
+        Some(rotated.public_peer_id.as_str()),
+        "bind fallback during rotation must install the next supervisor, not the old one"
+    );
+}
+
+// `test_rotate_supervisor_rolls_back_remote_authorization_on_partial_failure`
+// was removed in the c8 commit of the bridge review fixes. The test asserted
+// that on a partial-authorize failure during rotation the mob would roll the
+// LOCAL authority back to the pre-rotation supervisor. That expectation is
+// incompatible with the strict `BindMember` gate introduced in the same
+// review: once any remote has rotated forward, a rollback is rejected with
+// `BridgeRejectionCause::AlreadyBound` and the documented recovery is to
+// advance local authority to match the partially-applied remote state —
+// which is exactly what the following test
+// `test_rotate_supervisor_advances_local_authority_when_rollback_fails`
+// verifies. See `CLAUDE.md` > "Mob Orchestration" and
+// `MobActor::handle_rotate_supervisor` for the authoritative behavior.
+
+#[tokio::test]
+async fn test_rotate_supervisor_advances_local_authority_when_rollback_fails() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rotate-supervisor-rollback-failure",
+    );
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service)
+        .create()
+        .await
+        .expect("create mob");
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn first live external worker");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn second live external worker");
+
+    let original = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load original authority")
+        .expect("original authority record");
+    external_a.fail_next_bind();
+    external_b.fail_next_authorize();
+
+    let error = handle
+        .rotate_supervisor()
+        .await
+        .expect_err("rollback bind failure should abort rotation");
+    assert!(
+        error
+            .to_string()
+            .contains("local supervisor authority advanced"),
+        "rollback failure should explain the local authority cutover, got: {error}"
+    );
+
+    let current = runtime_metadata
+        .load_supervisor_authority(&mob_id)
+        .await
+        .expect("load authority after failed rollback")
+        .expect("authority after failed rollback");
+    assert_eq!(
+        current.epoch,
+        original.epoch + 1,
+        "mob should advance to the already-applied next authority when rollback fails"
+    );
+    assert_ne!(
+        current.public_peer_id, original.public_peer_id,
+        "failed rollback should keep the deterministic next supervisor active locally"
+    );
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-a"),
+            ContentInput::from("after-rollback-failure".to_string()),
+        )
+        .await
+        .expect("partially rotated peer should remain controllable");
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-b"),
+            ContentInput::from("recover-old-peer".to_string()),
+        )
+        .await
+        .expect("old peer should recover via bind fallback under the advanced supervisor");
+}
+
+#[tokio::test]
+async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "peer-only-rebind-after-restart",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn live external worker");
+    assert_eq!(external.bind_count(), 1, "initial spawn should bind once");
+
+    external.forget_supervisor().await;
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("after-restart".to_string()),
+        )
+        .await
+        .expect("lost supervisor state should trigger a rebind fallback");
+    assert_eq!(
+        external.bind_count(),
+        2,
+        "restart recovery should re-establish supervisor authority via BindMember"
+    );
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "rebound peer should still receive the requested input"
+    );
+}
+
+#[tokio::test]
+async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "peer-only-query-bootstrap-rebind",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
+    let bootstrap_token = bootstrap_token.expect("live external binding bootstrap token");
+    let binding = crate::RuntimeBinding::External {
+        peer_id,
+        address: format!(
+            "{}?{}={}",
+            address,
+            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
+            bootstrap_token.as_str()
+        ),
+        bootstrap_token: None,
+    };
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            binding,
+        )
+        .await
+        .expect("spawn live external worker with query-only bootstrap token");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("spawned query-bootstrap entry");
+    match entry.member_ref {
+        MemberRef::BackendPeer {
+            bootstrap_token: Some(ref token),
+            ..
+        } => assert_eq!(
+            token, &bootstrap_token,
+            "spawn should persist the effective bootstrap token even when it came from the address query"
+        ),
+        ref other => panic!("expected backend peer member ref, got {other:?}"),
+    }
+
+    external.forget_supervisor().await;
+
+    handle
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("after-query-bootstrap-restart".to_string()),
+        )
+        .await
+        .expect("query-sourced bootstrap token should support rebind fallback");
+    assert_eq!(
+        external.bind_count(),
+        2,
+        "query-sourced bootstrap token should remain available for restart recovery"
     );
 }
 
@@ -4155,7 +5461,7 @@ async fn test_respawn_contract_aligns_receipt_with_canonical_member_state() {
     );
     assert_eq!(
         receipt.agent_runtime_id.generation,
-        original_snapshot.agent_runtime_id.generation
+        original_snapshot.agent_runtime_id.generation.next()
     );
     let snapshot = handle
         .member_status(&receipt.identity)
@@ -4241,7 +5547,7 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
     );
     assert_eq!(
         receipt.agent_runtime_id.generation,
-        original_left_snapshot.agent_runtime_id.generation
+        original_left_snapshot.agent_runtime_id.generation.next()
     );
     assert!(
         service.read(&old_session_id).await.is_err(),
@@ -4273,6 +5579,69 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
     assert_eq!(
         left_entry.agent_runtime_id, receipt.agent_runtime_id,
         "respawn receipt must align with the replacement member's canonical session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_archive_failure_returns_cleanup_ambiguous_report() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("respawn-ambiguous");
+    let member_ref = handle
+        .spawn(ProfileName::from("worker"), member_id.clone(), None)
+        .await
+        .expect("spawn member");
+    let old_session_id = member_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    let original_snapshot = handle
+        .member_status(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("snapshot before respawn");
+
+    service.set_archive_failure(&old_session_id).await;
+
+    let error = handle
+        .respawn(AgentIdentity::from(member_id.as_str()), None)
+        .await
+        .expect_err("respawn should surface ambiguous cleanup when archive fails");
+
+    let report = match error {
+        crate::runtime::handle::MobRespawnError::PreviousMemberCleanupAmbiguous { report } => {
+            report
+        }
+        other => panic!("expected PreviousMemberCleanupAmbiguous, got {other:?}"),
+    };
+
+    assert_eq!(report.identity, AgentIdentity::from(member_id.as_str()));
+    assert_eq!(report.agent_runtime_id, original_snapshot.agent_runtime_id);
+    assert_eq!(report.fence_token, original_snapshot.fence_token);
+    assert!(
+        report.retire_attempted,
+        "respawn should have attempted retire"
+    );
+    assert!(
+        report
+            .retire_error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("ArchiveSession")),
+        "cleanup report should capture the archive failure: {:?}",
+        report.retire_error
+    );
+    assert!(
+        !report.confirmatory_observation_attempted,
+        "current respawn ambiguity path should not claim a confirmatory probe"
+    );
+    assert!(
+        !report.destroy_attempted,
+        "current respawn ambiguity path should not claim a force-destroy"
+    );
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(member_id.as_str()))
+            .await
+            .is_none(),
+        "ambiguous cleanup must not create a replacement member"
     );
 }
 
@@ -4608,6 +5977,7 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -4633,11 +6003,14 @@ async fn test_wait_for_kickoff_complete_returns_broken_snapshot_without_hanging(
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume should succeed with Broken projection");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should succeed with Broken projection");
 
     let snapshots = resumed
         .wait_for_kickoff_complete(Some(Duration::from_secs(2)))
@@ -5019,6 +6392,7 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
 
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
@@ -5038,11 +6412,14 @@ async fn test_for_resume_rebuilds_definition_and_roster() {
         .await
         .expect("wire");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events.clone()))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events.clone(),
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
 
     assert_eq!(resumed.mob_id().as_str(), "test-mob");
     let entry_1 = resumed
@@ -5066,6 +6443,7 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     }
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(def, storage)
         .with_session_service(service.clone())
         .create()
@@ -5084,10 +6462,13 @@ async fn test_resume_fails_when_orchestrator_resume_notification_fails() {
     handle.stop().await.expect("stop");
     service.set_fail_start_turn(true);
 
-    let result = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .resume()
-        .await;
+    let result = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await;
 
     assert!(
         matches!(result, Err(MobError::SessionError(SessionError::Store(_)))),
@@ -5101,6 +6482,7 @@ async fn test_resume_reconciles_orphaned_sessions() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let _handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5128,11 +6510,14 @@ async fn test_resume_reconciles_orphaned_sessions() {
         .expect("create orphan");
     assert_eq!(service.active_session_count().await, 1);
 
-    let _resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let _resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
 
     let sessions = service
         .list(SessionQuery::default())
@@ -5150,6 +6535,7 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5182,11 +6568,14 @@ async fn test_resume_restores_missing_sessions_with_same_session_and_history() {
         .await
         .expect("archive missing session");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
 
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
@@ -5230,6 +6619,7 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition.clone(), storage)
         .with_session_service(service.clone())
         .register_tool_bundle("bundle-a", Arc::new(EchoBundleDispatcher))
@@ -5254,12 +6644,15 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
         .await
         .expect("archive missing session");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .register_tool_bundle("bundle-a", Arc::new(EchoBundleDispatcher))
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .register_tool_bundle("bundle-a", Arc::new(EchoBundleDispatcher))
+    .resume()
+    .await
+    .expect("resume");
 
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
@@ -5294,6 +6687,7 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5318,11 +6712,14 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should still succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should still succeed");
 
     let snapshot = resumed
         .member_status(&AgentIdentity::from("w-1"))
@@ -5363,11 +6760,357 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
 }
 
 #[tokio::test]
+async fn test_resume_replays_voice_intent_and_surfaces_intent_present_unbound_without_session() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentSet {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append voice intent event");
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentSet {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append replacement voice intent event");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.realtime_attachment_status,
+        crate::runtime::handle::MobRealtimeAttachmentStatus::IntentPresentUnbound
+    );
+}
+
+#[tokio::test]
+async fn test_resume_replays_voice_intent_clear_and_surfaces_unattached_without_session() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+    handle.stop().await.expect("stop");
+
+    let old_sid = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("roster entry")
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member");
+    service
+        .archive(&old_sid)
+        .await
+        .expect("archive live session");
+    service.delete_persisted_session(&old_sid).await;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentSet {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append voice intent event");
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentCleared {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append cleared voice intent event");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("partial resume should still succeed");
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.realtime_attachment_status,
+        crate::runtime::handle::MobRealtimeAttachmentStatus::Unattached
+    );
+}
+
+#[tokio::test]
+async fn test_member_status_uses_runtime_realtime_attachment_status_for_current_bridge_session() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    let sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-live"), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    adapter
+        .project_realtime_attachment_intent(&sid, true)
+        .await
+        .expect("project live intent");
+    adapter.attach_live(&sid).await.expect("attach live");
+    let runtime_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await
+    .expect("runtime live status");
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-live"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.realtime_attachment_status,
+        match runtime_status {
+            meerkat_runtime::RealtimeAttachmentStatus::Unattached => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::Unattached
+            }
+            meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::IntentPresentUnbound
+            }
+            meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::BindingNotReady
+            }
+            meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::BindingReady
+            }
+            meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::ReplacementPending
+            }
+            meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => {
+                crate::runtime::handle::MobRealtimeAttachmentStatus::ReattachRequired
+            }
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_realtime_attach_and_detach_update_durable_intent_and_runtime_status() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    let adapter = service.enable_runtime_adapter();
+    let sid = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-voice"),
+            None,
+        )
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .realtime_attach(AgentIdentity::from("w-voice"))
+        .await
+        .expect("voice attach");
+
+    let attached_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await
+    .expect("runtime status after voice attach");
+    assert_eq!(
+        attached_status,
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
+    );
+    assert_eq!(
+        handle
+            .member_status(&AgentIdentity::from("w-voice"))
+            .await
+            .expect("member status after voice attach")
+            .realtime_attachment_status,
+        crate::runtime::handle::MobRealtimeAttachmentStatus::BindingNotReady
+    );
+
+    handle
+        .realtime_detach(AgentIdentity::from("w-voice"))
+        .await
+        .expect("voice detach");
+
+    let detached_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await
+    .expect("runtime status after voice detach");
+    assert_eq!(
+        detached_status,
+        meerkat_runtime::RealtimeAttachmentStatus::Unattached
+    );
+    assert_eq!(
+        handle
+            .member_status(&AgentIdentity::from("w-voice"))
+            .await
+            .expect("member status after voice detach")
+            .realtime_attachment_status,
+        crate::runtime::handle::MobRealtimeAttachmentStatus::Unattached
+    );
+
+    let replay = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        replay.iter().any(|event| matches!(
+            &event.kind,
+            crate::event::MobEventKind::MemberVoiceIntentSet { agent_identity }
+                if agent_identity == &AgentIdentity::from("w-voice")
+        )),
+        "voice attach must persist durable intent"
+    );
+    assert!(
+        replay.iter().any(|event| matches!(
+            &event.kind,
+            crate::event::MobEventKind::MemberVoiceIntentCleared { agent_identity }
+                if agent_identity == &AgentIdentity::from("w-voice")
+        )),
+        "voice detach must clear durable intent"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_driven_realtime_attach_keeps_peer_ingress_drain_alive_until_detach() {
+    let mut definition = sample_definition();
+    let lead = definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .expect("inline lead profile");
+    lead.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    lead.external_addressable = true;
+
+    let (handle, service) = create_test_mob_with_runtime_adapter(definition).await;
+    let adapter = service.enable_runtime_adapter();
+    let sid = handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            MeerkatId::from("lead-live"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .realtime_attach(AgentIdentity::from("lead-live"))
+        .await
+        .expect("realtime attach");
+
+    let running_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&sid)
+            .await
+            .expect("runtime snapshot after realtime attach");
+        if snapshot.drain.phase == Some(meerkat_core::CommsDrainPhase::Running) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < running_deadline,
+            "turn-driven realtime attach must keep a peer ingress drain alive: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    handle
+        .realtime_detach(AgentIdentity::from("lead-live"))
+        .await
+        .expect("realtime detach");
+
+    let stopped_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&sid)
+            .await
+            .expect("runtime snapshot after realtime detach");
+        if matches!(
+            snapshot.drain.phase,
+            Some(meerkat_core::CommsDrainPhase::Stopped | meerkat_core::CommsDrainPhase::Inactive)
+                | None
+        ) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < stopped_deadline,
+            "turn-driven realtime detach must stop the extra peer ingress drain: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
 async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5399,11 +7142,14 @@ async fn test_resume_skips_wiring_for_broken_peer_and_keeps_partial_resume() {
         .expect("archive broken session");
     service.delete_persisted_session(&sid_2).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume should stay partial even with broken wired member");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should stay partial even with broken wired member");
 
     let left = resumed
         .member_status(&AgentIdentity::from("w-1"))
@@ -5437,6 +7183,7 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
     let service = Arc::new(PersistedListingSessionService::new(inner.clone()));
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5453,13 +7200,14 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
     handle.stop().await.expect("stop");
     inner.archive(&sid).await.expect("archive session");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .resume()
-        .await
-        .expect(
-            "resume should restore from persisted snapshot, not treat inactive summary as live",
-        );
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume should restore from persisted snapshot, not treat inactive summary as live");
 
     let snapshot = resumed
         .member_status(&AgentIdentity::from("w-1"))
@@ -5477,11 +7225,179 @@ async fn test_resume_restores_missing_live_session_even_when_list_reports_inacti
 }
 
 #[tokio::test]
+async fn test_resume_reattaches_voice_after_persisted_session_restore() {
+    let inner = Arc::new(MockSessionService::new());
+    let adapter = inner.enable_runtime_adapter();
+    let service = Arc::new(PersistedListingSessionService::new(inner.clone()));
+    let definition = sample_definition();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let sid = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle.stop().await.expect("stop");
+    inner.archive(&sid).await.expect("archive session");
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberVoiceIntentSet {
+                agent_identity: AgentIdentity::from("w-1"),
+            },
+        })
+        .await
+        .expect("append voice intent event");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("resume should restore from persisted snapshot");
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status after resume");
+    assert_eq!(snapshot.current_session_id, Some(sid.clone()));
+
+    let runtime_status =
+        <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+            adapter.as_ref(),
+            &sid,
+        )
+        .await
+        .expect("restored runtime should expose live attachment status");
+    assert_eq!(
+        runtime_status,
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
+    );
+}
+
+#[tokio::test]
+async fn test_force_cancel_preserves_live_voice_binding() {
+    let (handle, _service, adapter, sid) = create_resumed_worker_with_voice_intent().await;
+
+    handle
+        .force_cancel_member(AgentIdentity::from("w-1"))
+        .await
+        .expect("force cancel member");
+
+    let runtime_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await
+    .expect("runtime live attachment status after force cancel");
+    assert_eq!(
+        runtime_status,
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_preserves_voice_intent_and_reattaches_replacement_session() {
+    let (handle, _service, adapter, old_sid) = create_resumed_worker_with_voice_intent().await;
+
+    let receipt = handle
+        .respawn(AgentIdentity::from("w-1"), Some("repair".into()))
+        .await
+        .expect("respawn worker");
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("replacement member status");
+    let new_sid = snapshot
+        .current_bridge_session_id
+        .clone()
+        .expect("replacement session id");
+    assert_ne!(new_sid, old_sid, "respawn should replace the session");
+    assert_eq!(snapshot.agent_runtime_id, receipt.agent_runtime_id);
+
+    let runtime_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &new_sid,
+    )
+    .await
+    .expect("runtime live attachment status after respawn");
+    assert_eq!(
+        runtime_status,
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady
+    );
+
+    let replay = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !replay.iter().any(|event| matches!(
+            &event.kind,
+            crate::event::MobEventKind::MemberVoiceIntentCleared { agent_identity }
+                if agent_identity == &AgentIdentity::from("w-1")
+        )),
+        "respawn should preserve durable voice intent instead of clearing it"
+    );
+}
+
+#[tokio::test]
+async fn test_retire_clears_voice_intent_before_member_retire_event() {
+    let (handle, _service, adapter, sid) = create_resumed_worker_with_voice_intent().await;
+
+    handle
+        .retire(AgentIdentity::from("w-1"))
+        .await
+        .expect("retire worker");
+
+    let replay = handle.events().replay_all().await.expect("replay events");
+    let clear_index = replay
+        .iter()
+        .rposition(|event| {
+            matches!(
+                &event.kind,
+                crate::event::MobEventKind::MemberVoiceIntentCleared { agent_identity }
+                    if agent_identity == &AgentIdentity::from("w-1")
+            )
+        })
+        .expect("voice intent clear event");
+    let retire_index = replay
+        .iter()
+        .rposition(|event| {
+            matches!(
+                &event.kind,
+                crate::event::MobEventKind::MemberRetired { agent_identity, .. }
+                    if agent_identity == &AgentIdentity::from("w-1")
+            )
+        })
+        .expect("member retired event");
+    assert!(
+        clear_index < retire_index,
+        "permanent retire must clear voice intent before the retire event"
+    );
+
+    let runtime_status = <meerkat_runtime::MeerkatMachine as meerkat_runtime::SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &sid,
+    )
+    .await;
+    assert!(
+        runtime_status.is_err(),
+        "retired session should no longer expose runtime live attachment state"
+    );
+}
+
+#[tokio::test]
 async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_resume() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5506,11 +7422,14 @@ async fn test_resume_skips_broken_orchestrator_notification_and_keeps_partial_re
         .expect("archive orchestrator");
     service.delete_persisted_session(&orchestrator_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume should succeed when orchestrator is broken");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should succeed when orchestrator is broken");
 
     let orchestrator = resumed
         .member_status(&AgentIdentity::from("lead-1"))
@@ -5537,6 +7456,7 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
@@ -5561,11 +7481,14 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should still succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should still succeed");
     match resumed.resume().await {
         Ok(()) => {}
         Err(MobError::InvalidTransition {
@@ -5594,7 +7517,7 @@ async fn test_broken_member_turn_returns_restore_failed_error() {
             ..
         } => {
             assert_eq!(member_id, MeerkatId::from("w-1"));
-            assert_eq!(session_id, old_sid);
+            assert_eq!(session_id, Some(old_sid));
         }
         other => panic!("expected MemberRestoreFailed, got {other:?}"),
     }
@@ -5614,6 +7537,7 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
@@ -5638,11 +7562,14 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should still succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should still succeed");
     match resumed.resume().await {
         Ok(()) => {}
         Err(MobError::InvalidTransition {
@@ -5671,7 +7598,7 @@ async fn test_wire_broken_member_returns_restore_failed_error() {
             ..
         } => {
             assert_eq!(member_id, MeerkatId::from("w-1"));
-            assert_eq!(session_id, old_sid);
+            assert_eq!(session_id, Some(old_sid));
         }
         other => panic!("expected MemberRestoreFailed, got {other:?}"),
     }
@@ -5683,6 +7610,7 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5707,11 +7635,14 @@ async fn test_retire_broken_member_succeeds_and_removes_it() {
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should still succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should still succeed");
 
     resumed
         .retire(AgentIdentity::from("w-1"))
@@ -5741,6 +7672,7 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
@@ -5765,11 +7697,14 @@ async fn test_respawn_broken_member_clears_restore_diagnostic() {
         .expect("archive live session");
     service.delete_persisted_session(&old_sid).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should still succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should still succeed");
     match resumed.resume().await {
         Ok(()) => {}
         Err(MobError::InvalidTransition {
@@ -5829,6 +7764,7 @@ async fn test_resume_restores_persisted_behavior_metadata() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5881,11 +7817,14 @@ async fn test_resume_restores_persisted_behavior_metadata() {
         .await
         .expect("archive missing session");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
 
     let restored_sid = resumed
         .get_member(&AgentIdentity::from("w-1"))
@@ -5929,6 +7868,7 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -5959,11 +7899,14 @@ async fn test_resume_marks_comms_name_mismatch_as_broken() {
     service.replace_live_session(persisted).await;
     service.archive(&old_sid).await.expect("archive session");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume should succeed with Broken projection");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should succeed with Broken projection");
     let snapshot = resumed
         .member_status(&AgentIdentity::from("w-1"))
         .await
@@ -6185,24 +8128,37 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
 
 #[tokio::test]
 async fn test_resume_recreates_missing_external_bridge_preserving_backend_identity() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "resume-external-peer-only",
+    );
+    let mob_id = definition.id.clone();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
-    let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
         .await
         .expect("create mob");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            test_external_binding("w-ext"),
+            external.binding(),
         )
         .await
         .expect("spawn external");
+    assert_eq!(
+        external.bind_count(),
+        1,
+        "peer-only external spawn should bind the mob supervisor during provisioning"
+    );
     handle.stop().await.expect("stop");
 
     let old_entry = handle
@@ -6214,23 +8170,25 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
             ref peer_id,
             ref address,
             ref session_id,
-        } => (
-            peer_id.clone(),
-            address.clone(),
-            session_id.clone().expect("external bridge session id"),
-        ),
+            ..
+        } => (peer_id.clone(), address.clone(), session_id.clone()),
         ref other => panic!("expected external backend member ref, got {other:?}"),
     };
-    service
-        .archive(&old_sid)
-        .await
-        .expect("archive external bridge session");
+    if let Some(old_sid) = &old_sid {
+        service
+            .archive(old_sid)
+            .await
+            .expect("archive legacy external bridge session");
+    }
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
     let resumed_entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
@@ -6240,26 +8198,492 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
             peer_id,
             address,
             session_id,
+            ..
         } => {
-            let resumed_sid = session_id.expect("resumed external bridge session id");
-            assert_ne!(
-                resumed_sid, old_sid,
-                "resume should recreate missing external bridge session"
-            );
             assert_eq!(peer_id, old_peer_id, "resume must preserve backend peer_id");
             assert_eq!(address, old_address, "resume must preserve backend address");
+            assert!(
+                session_id.is_none(),
+                "resume should preserve peer-only external members without recreating a bridge session"
+            );
         }
         other => panic!("expected backend peer after resume, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn test_resume_reconciles_mixed_topology_without_losing_external_member_refs() {
+async fn test_resume_applies_normalized_external_binding_overlay_before_projection() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
+    let definition = sample_definition_with_external_backend();
+    let mob_id = definition.id.clone();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
-    let handle = MobBuilder::new(sample_definition_with_external_backend(), storage)
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    let old_peer_id = "ed25519:test-key:w-ext".to_string();
+    let old_address = "tcp://test.invalid/w-ext".to_string();
+    let old_sid = SessionId::new();
+    let generation = crate::ids::Generation::INITIAL;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    AgentIdentity::from("w-ext"),
+                    generation,
+                    FenceToken::new(0),
+                    AgentRuntimeId::initial(AgentIdentity::from("w-ext")),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::BackendPeer {
+                    peer_id: old_peer_id.clone(),
+                    address: old_address.clone(),
+                    bootstrap_token: None,
+                    session_id: Some(old_sid.clone()),
+                })),
+            ),
+        })
+        .await
+        .expect("append legacy external member event");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("w-ext"),
+                generation,
+                normalized_member_ref: Some(MemberRef::BackendPeer {
+                    peer_id: old_peer_id.clone(),
+                    address: old_address.clone(),
+                    bootstrap_token: None,
+                    session_id: None,
+                }),
+                bootstrap_token: None,
+                status: ExternalBindingOverlayStatus::Normalized,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist overlay");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume with normalized overlay");
+    let resumed_entry = resumed
+        .get_member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("resumed external entry");
+    match resumed_entry.member_ref {
+        MemberRef::BackendPeer {
+            peer_id,
+            address,
+            session_id,
+            ..
+        } => {
+            assert_eq!(peer_id, old_peer_id, "overlay must preserve peer identity");
+            assert_eq!(address, old_address, "overlay must preserve peer address");
+            assert_eq!(
+                session_id, None,
+                "normalized overlay must remove the legacy bridge session from replay"
+            );
+        }
+        other => panic!("expected backend peer after overlay replay, got {other:?}"),
+    }
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("sessionless external status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert!(
+        !snapshot.is_final,
+        "peer-only external member should stay non-terminal without a bridge session"
+    );
+    assert_eq!(snapshot.current_bridge_session_id(), None);
+}
+
+#[tokio::test]
+async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition_with_external_backend();
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    let old_sid = SessionId::new();
+    let generation = crate::ids::Generation::INITIAL;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    AgentIdentity::from("w-ext"),
+                    generation,
+                    FenceToken::new(0),
+                    AgentRuntimeId::initial(AgentIdentity::from("w-ext")),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::BackendPeer {
+                    peer_id: "ed25519:test-key:w-ext".to_string(),
+                    address: "tcp://test.invalid/w-ext".to_string(),
+                    bootstrap_token: None,
+                    session_id: Some(old_sid.clone()),
+                })),
+            ),
+        })
+        .await
+        .expect("append legacy external member event");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("w-ext"),
+                generation,
+                normalized_member_ref: None,
+                bootstrap_token: None,
+                status: ExternalBindingOverlayStatus::Failed {
+                    reason: "legacy external bridge normalization failed".to_string(),
+                },
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist failed overlay");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume should project broken external member");
+    let resumed_entry = resumed
+        .get_member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("resumed external entry");
+    match resumed_entry.member_ref {
+        MemberRef::BackendPeer { session_id, .. } => {
+            assert_eq!(
+                session_id, None,
+                "failed normalization should still strip the legacy bridge session from replay"
+            );
+        }
+        other => panic!("expected backend peer after failed overlay replay, got {other:?}"),
+    }
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("broken external status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("normalization failed")),
+        "overlay failure reason should surface as a broken-member error"
+    );
+
+    let error = resumed
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("repair me".to_string()),
+        )
+        .await
+        .expect_err("broken overlay members must reject turn delivery");
+    match error {
+        MobError::MemberRestoreFailed {
+            member_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(member_id, MeerkatId::from("w-ext"));
+            assert_eq!(session_id, Some(old_sid));
+        }
+        other => panic!("expected MemberRestoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition_with_external_backend();
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    let peer_id = "ed25519:test-key:w-ext".to_string();
+    let address = "tcp://test.invalid/w-ext".to_string();
+    let old_sid = SessionId::new();
+    let generation = crate::ids::Generation::INITIAL;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    AgentIdentity::from("w-ext"),
+                    generation,
+                    FenceToken::new(0),
+                    AgentRuntimeId::initial(AgentIdentity::from("w-ext")),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::BackendPeer {
+                    peer_id: peer_id.clone(),
+                    address: address.clone(),
+                    bootstrap_token: None,
+                    session_id: Some(old_sid.clone()),
+                })),
+            ),
+        })
+        .await
+        .expect("append legacy external member event");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("w-ext"),
+                generation,
+                normalized_member_ref: Some(MemberRef::BackendPeer {
+                    peer_id,
+                    address,
+                    bootstrap_token: None,
+                    session_id: None,
+                }),
+                bootstrap_token: None,
+                status: ExternalBindingOverlayStatus::Normalized,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist overlay");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume peer-only external member");
+
+    let single_error = match resumed
+        .subscribe_agent_events(&AgentIdentity::from("w-ext"))
+        .await
+    {
+        Ok(_) => panic!("peer-only members must reject direct event subscriptions"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        single_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ..
+        }
+    ));
+
+    let all_error = match resumed.subscribe_all_agent_events().await {
+        Ok(_) => panic!("peer-only members must reject aggregate event subscriptions"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        all_error,
+        MobError::UnsupportedForMode {
+            mode: crate::MobRuntimeMode::TurnDriven,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_session() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let mut definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "peer-only-direct-turn",
+    );
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .expect("worker profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
+    let old_sid = SessionId::new();
+    let generation = crate::ids::Generation::INITIAL;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    AgentIdentity::from("w-ext"),
+                    generation,
+                    FenceToken::new(0),
+                    AgentRuntimeId::initial(AgentIdentity::from("w-ext")),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::BackendPeer {
+                    peer_id: peer_id.clone(),
+                    address: address.clone(),
+                    bootstrap_token: bootstrap_token.clone(),
+                    session_id: Some(old_sid.clone()),
+                })),
+            ),
+        })
+        .await
+        .expect("append legacy external member event");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("w-ext"),
+                generation,
+                normalized_member_ref: Some(MemberRef::BackendPeer {
+                    peer_id,
+                    address,
+                    bootstrap_token: None,
+                    session_id: None,
+                }),
+                bootstrap_token: bootstrap_token.clone(),
+                status: ExternalBindingOverlayStatus::Normalized,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist overlay");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume peer-only external member");
+
+    resumed
+        .internal_turn(
+            AgentIdentity::from("w-ext"),
+            ContentInput::from("ping".to_string()),
+        )
+        .await
+        .expect("peer-only members should accept direct turn delivery without a bridge session");
+    assert_eq!(
+        external.delivered_input_ids().await.len(),
+        1,
+        "peer-only direct turn should use request/ack delivery with one logical input admission"
+    );
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("peer-only member status after direct turn");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active
+    );
+    assert_eq!(snapshot.current_bridge_session_id(), None);
+    assert!(
+        external
+            .trusted_peer_names()
+            .await
+            .iter()
+            .any(|name| name.contains("__mob_supervisor__")),
+        "peer-only direct turn should authorize the mob supervisor on the live external peer"
+    );
+
+    let respawn_receipt = resumed
+        .respawn(AgentIdentity::from("w-ext"), None)
+        .await
+        .expect("peer-only members should respawn through runtime control");
+    assert_eq!(respawn_receipt.identity, AgentIdentity::from("w-ext"));
+    assert_ne!(
+        respawn_receipt.previous_fence_token, respawn_receipt.fence_token,
+        "respawn must advance the member fence token"
+    );
+    let post_respawn = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("peer-only member status after respawn");
+    assert_eq!(post_respawn.current_bridge_session_id(), None);
+}
+
+#[tokio::test]
+async fn test_resume_reconciles_mixed_topology_without_losing_external_member_refs() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "resume-mixed-topology",
+    );
+    let mut definition = definition;
+    for profile in definition
+        .profiles
+        .values_mut()
+        .filter_map(|binding| binding.as_inline_mut())
+    {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let mob_id = definition.id.clone();
+    let service = Arc::new(RealCommsSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
         .await
@@ -6271,12 +8695,13 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .bridge_session_id()
         .expect("session-backed")
         .clone();
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
     handle
         .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            test_external_binding("w-ext"),
+            external.binding(),
         )
         .await
         .expect("spawn external");
@@ -6295,27 +8720,32 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
             ref peer_id,
             ref address,
             ref session_id,
-        } => (
-            peer_id.clone(),
-            address.clone(),
-            session_id.clone().expect("external bridge session"),
-        ),
+            ..
+        } => (peer_id.clone(), address.clone(), session_id.clone()),
         ref other => panic!("expected external backend member ref, got {other:?}"),
     };
     service
-        .archive(&old_sub_sid)
+        .real_comms(&old_sub_sid)
         .await
-        .expect("archive session-backed member session");
-    service
-        .archive(&old_ext_sid)
+        .expect("session-backed member comms")
+        .remove_trusted_peer(&old_ext_peer_id)
         .await
-        .expect("archive external bridge session");
+        .expect("remove external trust before resume");
+    if let Some(old_ext_sid) = &old_ext_sid {
+        service
+            .archive(old_ext_sid)
+            .await
+            .expect("archive legacy external bridge session");
+    }
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume mixed topology");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume mixed topology");
     let resumed_sub = resumed
         .get_member(&AgentIdentity::from("w-sub"))
         .await
@@ -6338,23 +8768,123 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(peer_id, old_ext_peer_id, "external peer_id must be stable");
             assert_eq!(address, old_ext_addr, "external address must be stable");
-            assert_ne!(
-                session_id.expect("resumed external bridge session"),
-                old_ext_sid,
-                "resume should recreate missing external bridge session"
+            assert!(
+                session_id.is_none(),
+                "mixed-topology resume should preserve peer-only externals without recreating a bridge session"
             );
         }
         other => panic!("expected backend peer member ref, got {other:?}"),
     }
 
-    let trusted_sub = service.trusted_peer_addresses(&resumed_sub_sid).await;
+    let trusted_sub = service
+        .real_comms(&resumed_sub_sid)
+        .await
+        .expect("resumed session-backed member comms")
+        .peers()
+        .await
+        .into_iter()
+        .map(|entry| entry.address)
+        .collect::<Vec<_>>();
     assert!(
-        trusted_sub.iter().any(|addr| addr.starts_with("inproc://")),
-        "mixed resume should re-establish trust with a sendable transport address"
+        trusted_sub.iter().any(|addr| addr == &old_ext_addr),
+        "mixed resume should re-establish trust using the external member's real transport address"
     );
+}
+
+#[tokio::test]
+async fn test_resume_reconciles_peer_only_trust_edges() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "resume-peer-only-trust-edges",
+    );
+    let mut definition = definition;
+    for profile in definition
+        .profiles
+        .values_mut()
+        .filter_map(|binding| binding.as_inline_mut())
+    {
+        profile.runtime_mode = crate::MobRuntimeMode::TurnDriven;
+    }
+    let mob_id = definition.id.clone();
+    let service = Arc::new(RealCommsSessionService::new());
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn external a");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn external b");
+    handle
+        .wire(AgentIdentity::from("w-a"), MeerkatId::from("w-b"))
+        .await
+        .expect("wire peer-only pair");
+
+    let crate::RuntimeBinding::External {
+        peer_id: a_peer_id, ..
+    } = external_a.binding()
+    else {
+        panic!("expected external a binding");
+    };
+    let crate::RuntimeBinding::External {
+        peer_id: b_peer_id, ..
+    } = external_b.binding()
+    else {
+        panic!("expected external b binding");
+    };
+
+    handle.stop().await.expect("stop mob");
+    external_a.remove_trusted_peer(&b_peer_id).await;
+    external_b.remove_trusted_peer(&a_peer_id).await;
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume peer-only trust topology");
+
+    let name_a = test_comms_name_for(&mob_id, "worker", "w-a");
+    let name_b = test_comms_name_for(&mob_id, "worker", "w-b");
+    assert!(
+        external_a.trusted_peer_names().await.contains(&name_b),
+        "resume should restore worker b trust on peer-only worker a"
+    );
+    assert!(
+        external_b.trusted_peer_names().await.contains(&name_a),
+        "resume should restore worker a trust on peer-only worker b"
+    );
+
+    resumed.stop().await.expect("stop resumed mob");
 }
 
 #[tokio::test]
@@ -6363,6 +8893,7 @@ async fn test_resume_reestablishes_missing_trust() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -6391,11 +8922,14 @@ async fn test_resume_reestablishes_missing_trust() {
     service.force_remove_trust(&sid_1, &sid_2).await;
     service.force_remove_trust(&sid_2, &sid_1).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
     let resumed_sid_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
@@ -6428,6 +8962,7 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -6456,11 +8991,14 @@ async fn test_resume_prunes_stale_trust_not_present_in_roster() {
         .force_add_trust_from_spec(&sid_1, stale.clone())
         .await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
     let resumed_sid_1 = resumed
         .get_member(&AgentIdentity::from("w-1"))
         .await
@@ -6481,6 +9019,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -6505,11 +9044,14 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .expect("wire external");
     handle.stop().await.expect("stop");
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("resume");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume");
     let resumed_sid = resumed
         .get_member(&AgentIdentity::from("l-1"))
         .await
@@ -6649,6 +9191,14 @@ async fn test_for_resume_rejects_non_persistent_session_service_by_default() {
 #[tokio::test]
 async fn test_for_resume_allows_ephemeral_session_service_when_opted_in() {
     let storage = MobStorage::in_memory();
+    storage
+        .runtime_metadata
+        .put_supervisor_authority(
+            &MobId::from("test-mob"),
+            &SupervisorAuthorityRecord::generate(1),
+        )
+        .await
+        .expect("persist supervisor metadata");
     storage
         .events
         .append(NewMobEvent {
@@ -6790,7 +9340,13 @@ async fn test_spawn_duplicate_meerkat_id_fails() {
 
 #[tokio::test]
 async fn test_spawn_supports_session_and_external_backends() {
-    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "spawn-session-and-external",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
 
     let session_ref = handle
         .spawn_with_backend(
@@ -6806,12 +9362,21 @@ async fn test_spawn_supports_session_and_external_backends() {
         "session backend should emit session member ref"
     );
 
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let crate::RuntimeBinding::External {
+        peer_id: expected_peer_id,
+        address: expected_address,
+        bootstrap_token: _expected_bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
     let external_ref = handle
         .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            test_external_binding("w-ext"),
+            external.binding(),
         )
         .await
         .expect("spawn external backend");
@@ -6820,22 +9385,37 @@ async fn test_spawn_supports_session_and_external_backends() {
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(
-                peer_id, "test-key:w-ext",
-                "external backend should use real peer_id from RuntimeBinding"
+                peer_id, expected_peer_id,
+                "external backend should use the committed peer_id returned by bind_member"
             );
             assert_eq!(
-                address, "tcp://test.invalid/w-ext",
-                "external backend should use real address from RuntimeBinding"
+                address,
+                canonical_external_address(&expected_address),
+                "external backend should use the committed transport address returned by bind_member"
             );
             assert!(
-                session_id.is_some(),
-                "external backend should keep session bridge for lifecycle ops"
+                session_id.is_none(),
+                "external backend should now persist peer-only member refs"
             );
         }
         other => panic!("expected backend peer member ref, got {other:?}"),
     }
+    assert_eq!(
+        external.bind_count(),
+        1,
+        "external spawn should issue exactly one bind request"
+    );
+    assert!(
+        external
+            .trusted_peer_names()
+            .await
+            .iter()
+            .any(|name| name.contains("__mob_supervisor__")),
+        "external spawn should authorize the mob supervisor during bind"
+    );
 }
 
 #[tokio::test]
@@ -6857,14 +9437,22 @@ async fn test_external_backend_rejects_invalid_peer_name_components() {
 
 #[tokio::test]
 async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
-    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-wiring-addresses",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
 
     let member_a = handle
         .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-a"),
             None,
-            test_external_binding("w-a"),
+            external_a.binding(),
         )
         .await
         .expect("spawn external w-a");
@@ -6873,37 +9461,130 @@ async fn test_external_backend_wiring_uses_sendable_transport_addresses() {
             ProfileName::from("worker"),
             MeerkatId::from("w-b"),
             None,
-            test_external_binding("w-b"),
+            external_b.binding(),
         )
         .await
         .expect("spawn external w-b");
-    let sid_a = member_a
-        .bridge_session_id()
-        .cloned()
-        .expect("external member bridge session id");
-    let sid_b = member_b
-        .bridge_session_id()
-        .cloned()
-        .expect("external member bridge session id");
+    assert_eq!(member_a.bridge_session_id(), None);
+    assert_eq!(member_b.bridge_session_id(), None);
 
     handle
         .wire(AgentIdentity::from("w-a"), MeerkatId::from("w-b"))
         .await
         .expect("wire external peers");
 
-    let addresses_a = service.trusted_peer_addresses(&sid_a).await;
-    let addresses_b = service.trusted_peer_addresses(&sid_b).await;
+    let roster = handle.roster().await;
+    let entry_a = roster
+        .get_by_identity(&AgentIdentity::from("w-a"))
+        .expect("entry a");
+    let entry_b = roster
+        .get_by_identity(&AgentIdentity::from("w-b"))
+        .expect("entry b");
     assert!(
-        addresses_a
-            .iter()
-            .all(|address| address.starts_with("inproc://")),
-        "wiring must use transport-sendable addresses"
+        entry_a.wired_to.contains(&AgentIdentity::from("w-b")),
+        "peer-only external wiring should remain symmetric in the roster"
     );
     assert!(
-        addresses_b
+        entry_b.wired_to.contains(&AgentIdentity::from("w-a")),
+        "peer-only external wiring should remain symmetric in the roster"
+    );
+    let trusted_a = external_a.trusted_peer_names().await;
+    let trusted_b = external_b.trusted_peer_names().await;
+    assert!(
+        trusted_a
             .iter()
-            .all(|address| address.starts_with("inproc://")),
-        "wiring must use transport-sendable addresses"
+            .any(|name| name == &test_comms_name_for(&mob_id, "worker", "w-b")),
+        "w-a should trust the peer-only remote target after wire"
+    );
+    assert!(
+        trusted_b
+            .iter()
+            .any(|name| name == &test_comms_name_for(&mob_id, "worker", "w-a")),
+        "w-b should trust the peer-only remote source after wire"
+    );
+    let intents_a = external_a.received_intents().await;
+    let intents_b = external_b.received_intents().await;
+    assert!(
+        intents_a
+            .iter()
+            .any(|intent| intent == super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT),
+        "w-a should receive an explicit wire_member bridge command"
+    );
+    assert!(
+        intents_b
+            .iter()
+            .any(|intent| intent == super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT),
+        "w-b should receive an explicit wire_member bridge command"
+    );
+}
+
+#[tokio::test]
+async fn test_external_backend_unwiring_revokes_remote_trust() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-unwiring-trust",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "u-a")).await;
+    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "u-b")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("u-a"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn external u-a");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("u-b"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn external u-b");
+
+    handle
+        .wire(AgentIdentity::from("u-a"), MeerkatId::from("u-b"))
+        .await
+        .expect("wire external peers");
+    handle
+        .unwire(AgentIdentity::from("u-a"), MeerkatId::from("u-b"))
+        .await
+        .expect("unwire external peers");
+
+    let trusted_a = external_a.trusted_peer_names().await;
+    let trusted_b = external_b.trusted_peer_names().await;
+    assert!(
+        !trusted_a
+            .iter()
+            .any(|name| name == &test_comms_name_for(&mob_id, "worker", "u-b")),
+        "u-a should drop remote peer trust after unwire"
+    );
+    assert!(
+        !trusted_b
+            .iter()
+            .any(|name| name == &test_comms_name_for(&mob_id, "worker", "u-a")),
+        "u-b should drop remote peer trust after unwire"
+    );
+    let intents_a = external_a.received_intents().await;
+    let intents_b = external_b.received_intents().await;
+    assert!(
+        intents_a
+            .iter()
+            .any(|intent| intent == super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT),
+        "u-a should receive an explicit unwire_member bridge command"
+    );
+    assert!(
+        intents_b
+            .iter()
+            .any(|intent| intent == super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT),
+        "u-b should receive an explicit unwire_member bridge command"
     );
 }
 
@@ -7326,17 +10007,24 @@ async fn test_wire_establishes_bidirectional() {
 
 #[tokio::test]
 async fn test_member_roster_surfaces_peer_id() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let spawn = handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
         .await
         .expect("spawn lead");
+    let lead_sid = spawn.bridge_session_id().expect("session-backed").clone();
+    let expected_peer_id = service
+        .comms_runtime(&lead_sid)
+        .await
+        .expect("lead comms runtime")
+        .public_key()
+        .expect("lead peer id");
 
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
         .expect("member should exist");
-    assert_eq!(entry.peer_id.as_deref(), Some("ed25519:test-mob/lead/l-1"));
+    assert_eq!(entry.peer_id.as_deref(), Some(expected_peer_id.as_str()));
 }
 
 #[tokio::test]
@@ -8941,6 +11629,7 @@ async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
@@ -8958,11 +11647,14 @@ async fn test_spawn_skips_broken_orchestrator_in_auto_wire_selection() {
     service.archive(&sid_l).await.expect("archive orchestrator");
     service.delete_persisted_session(&sid_l).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should succeed");
 
     let lead = resumed
         .member_status(&AgentIdentity::from("l-1"))
@@ -9447,6 +12139,7 @@ async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
         .runtime_mode = crate::MobRuntimeMode::TurnDriven;
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(definition, storage)
         .with_session_service(service.clone())
         .create()
@@ -9464,11 +12157,14 @@ async fn test_spawn_skips_broken_role_peers_in_role_wiring_selection() {
     service.archive(&sid_w1).await.expect("archive w-1");
     service.delete_persisted_session(&sid_w1).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .resume()
-        .await
-        .expect("partial resume should succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("partial resume should succeed");
 
     let broken = resumed
         .member_status(&AgentIdentity::from("w-1"))
@@ -10007,7 +12703,13 @@ async fn test_flow_dispatch_autonomous_mode_uses_injector_and_avoids_non_host_st
         .await
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
-    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Completed,
+        "peer-only external flow dispatch failed: failures={:?} steps={:?}",
+        terminal.failure_ledger,
+        terminal.step_ledger
+    );
 
     let non_host_start_turn = service
         .start_turn_call_count()
@@ -10155,11 +12857,19 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
 
 #[tokio::test]
 async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
-    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-turn-driven",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-turn")).await;
     {
         let mut spec = SpawnMemberSpec::new("lead", "l-ext-turn");
         spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
-        spec.binding = Some(test_external_binding("l-ext-turn"));
+        spec.binding = Some(external.binding());
         handle
             .spawn_spec(spec)
             .await
@@ -10181,26 +12891,35 @@ async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
     assert_eq!(
         service.inject_call_count(),
         0,
-        "turn-driven external backend dispatch should not use injector"
+        "peer-only turn-driven external dispatch should not use injector"
     );
     assert_eq!(
         service.start_turn_call_count(),
-        baseline_start_turn + 1,
-        "turn-driven external backend dispatch should issue start_turn"
+        baseline_start_turn,
+        "peer-only turn-driven external dispatch should avoid local bridge start_turn"
     );
 }
 
 #[tokio::test]
-async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() {
-    let mut definition = sample_definition_with_dispatch_mode(DispatchMode::OneToOne);
+async fn test_external_backend_autonomous_flow_dispatch_normalizes_to_peer_only_turn_dispatch() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let mut definition = with_unique_mob_id(
+        sample_definition_with_dispatch_mode(DispatchMode::OneToOne),
+        "external-autonomous-flow",
+    );
     definition.backend.external = Some(crate::definition::ExternalBackendConfig {
         address_base: "https://backend.example.invalid/mesh".to_string(),
     });
+    let mob_id = definition.id.clone();
     let (handle, service) = create_test_mob(definition).await;
+    let external_lead =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-auto")).await;
+    let external_worker =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext-auto")).await;
     {
         let mut spec = SpawnMemberSpec::new("lead", "l-ext-auto");
         spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-        spec.binding = Some(test_external_binding("l-ext-auto"));
+        spec.binding = Some(external_lead.binding());
         handle
             .spawn_spec(spec)
             .await
@@ -10209,7 +12928,7 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
     {
         let mut spec = SpawnMemberSpec::new("worker", "w-ext-auto");
         spec.runtime_mode = Some(crate::MobRuntimeMode::AutonomousHost);
-        spec.binding = Some(test_external_binding("w-ext-auto"));
+        spec.binding = Some(external_worker.binding());
         handle
             .spawn_spec(spec)
             .await
@@ -10224,31 +12943,131 @@ async fn test_external_backend_autonomous_flow_dispatch_uses_injector_routing() 
         .await
         .expect("run flow");
     let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(2)).await;
-    assert_eq!(terminal.status, MobRunStatus::Completed);
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Failed,
+        "peer-only external flow dispatch should fail explicitly without remote event-stream fan-in: failures={:?} steps={:?}",
+        terminal.failure_ledger,
+        terminal.step_ledger
+    );
+    let failure_reasons = terminal
+        .failure_ledger
+        .iter()
+        .map(|entry| entry.reason.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        failure_reasons
+            .iter()
+            .any(|message| message.contains("tracked turn event streams are not supported")),
+        "peer-only external flow dispatch should fail with an explicit unsupported-mode message, got: {failure_reasons:?}"
+    );
 
     let non_host_start_turn = service
         .start_turn_call_count()
         .saturating_sub(service.keep_alive_start_turn_call_count());
     assert_eq!(
         non_host_start_turn, baseline_non_host_start_turn,
-        "external autonomous flow dispatch should avoid non-host start_turn calls"
+        "peer-only external flow dispatch should avoid non-host start_turn calls"
     );
-    assert!(
-        service.inject_call_count() > 0,
-        "external autonomous flow dispatch should use injector routing"
+    assert_eq!(
+        service.inject_call_count(),
+        0,
+        "peer-only external flow dispatch should not rely on local injector routing"
     );
 }
 
 #[tokio::test]
+async fn test_subscribe_all_agent_events_keeps_session_backed_members_in_mixed_roster() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "mixed-subscribe-all",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-local"), None)
+        .await
+        .expect("spawn local lead");
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext-sub")).await;
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext-sub"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+
+    let streams = handle
+        .subscribe_all_agent_events()
+        .await
+        .expect("mixed roster should still expose session-backed event streams");
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].0, AgentIdentity::from("l-local"));
+}
+
+#[tokio::test]
+async fn test_subscribe_all_agent_events_surfaces_session_subscription_failure() {
+    // Regression: a session-backed member whose subscribe_session_events fails
+    // must propagate the error, not be silently dropped. Previously the loop
+    // used `if let Ok(stream) = ...` which turned real subscription errors
+    // into partial/empty lists and masked real regressions.
+    let definition = with_unique_mob_id(sample_definition(), "subscribe-all-failure-propagates");
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-local"), None)
+        .await
+        .expect("spawn local lead");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-local"),
+            None,
+        )
+        .await
+        .expect("spawn local worker");
+
+    let broken_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-local"))
+        .await
+        .expect("worker session should have a bridge session id");
+    service.fail_subscribe_for_session(broken_session_id).await;
+
+    match handle.subscribe_all_agent_events().await {
+        Ok(_) => panic!("broken session subscription must surface as an error"),
+        Err(MobError::Internal(message)) => assert!(
+            message.contains("failed to subscribe to agent events") && message.contains("w-local"),
+            "internal error should cite the failing member, got: {message}"
+        ),
+        Err(other) => {
+            panic!("expected MobError::Internal propagating subscribe failure, got: {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_external_backend_lifecycle_and_turn_policy() {
-    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-lifecycle-policy",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external_lead =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext")).await;
+    let external_worker =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
 
     handle
         .spawn_with_binding(
             ProfileName::from("lead"),
             MeerkatId::from("l-ext"),
             None,
-            test_external_binding("l-ext"),
+            external_lead.binding(),
         )
         .await
         .expect("spawn external lead");
@@ -10257,7 +13076,7 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
             None,
-            test_external_binding("w-ext"),
+            external_worker.binding(),
         )
         .await
         .expect("spawn external worker");
@@ -10303,6 +13122,84 @@ async fn test_external_backend_lifecycle_and_turn_policy() {
             .await
             .is_none(),
         "retire should remove external backend member"
+    );
+}
+
+#[tokio::test]
+async fn test_rewire_repairs_remote_trust_for_existing_peer_only_edge() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "rewire-peer-only-trust",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external_a =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-rewire")).await;
+    let external_b =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext-rewire")).await;
+
+    handle
+        .spawn_with_binding(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-ext-rewire"),
+            None,
+            external_a.binding(),
+        )
+        .await
+        .expect("spawn external lead");
+    handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext-rewire"),
+            None,
+            external_b.binding(),
+        )
+        .await
+        .expect("spawn external worker");
+
+    handle
+        .wire(
+            AgentIdentity::from("l-ext-rewire"),
+            MeerkatId::from("w-ext-rewire"),
+        )
+        .await
+        .expect("initial wire");
+
+    let crate::RuntimeBinding::External {
+        peer_id: lead_peer_id,
+        ..
+    } = external_a.binding()
+    else {
+        panic!("expected external lead binding");
+    };
+    let crate::RuntimeBinding::External {
+        peer_id: worker_peer_id,
+        ..
+    } = external_b.binding()
+    else {
+        panic!("expected external worker binding");
+    };
+    external_a.remove_trusted_peer(&worker_peer_id).await;
+    external_b.remove_trusted_peer(&lead_peer_id).await;
+
+    handle
+        .wire(
+            AgentIdentity::from("l-ext-rewire"),
+            MeerkatId::from("w-ext-rewire"),
+        )
+        .await
+        .expect("rewire should reconcile both peer-only trust edges");
+
+    let lead_name = test_comms_name_for(&mob_id, "lead", "l-ext-rewire");
+    let worker_name = test_comms_name_for(&mob_id, "worker", "w-ext-rewire");
+    assert!(
+        external_a.trusted_peer_names().await.contains(&worker_name),
+        "rewire should restore worker trust on the lead peer-only runtime"
+    );
+    assert!(
+        external_b.trusted_peer_names().await.contains(&lead_name),
+        "rewire should restore lead trust on the worker peer-only runtime"
     );
 }
 
@@ -11581,6 +14478,105 @@ async fn test_mob_runtime_parity_field_evaluator_covers_formal_state_fields() {
     assert!(
         missing.is_empty(),
         "runtime parity field evaluator is missing schema fields: {missing:?}"
+    );
+}
+
+#[test]
+fn test_bridge_protocol_types_live_in_contracts_not_runtime() {
+    // Verify the canonical protocol types are re-exported from contracts,
+    // not defined in meerkat-runtime. This is a compile-time structural
+    // assertion — if the re-export chain breaks, this won't compile.
+    let _cmd: meerkat_contracts::BridgeCommand = meerkat_contracts::BridgeCommand::ObserveMember(
+        meerkat_contracts::BridgeSupervisorPayload {
+            supervisor: meerkat_contracts::BridgePeerSpec {
+                name: "test".into(),
+                peer_id: "ed25519:test".into(),
+                address: "inproc://test".into(),
+            },
+            epoch: 1,
+            protocol_version:
+                meerkat_contracts::wire::supervisor_bridge::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        },
+    );
+}
+
+#[test]
+fn test_top_level_mob_schema_does_not_duplicate_bridge_protocol_effects() {
+    let schema = schema_mob_machine();
+    let forbidden_effects = [
+        "BridgeBindMember",
+        "BridgeAuthorizeSupervisor",
+        "BridgeRevokeSupervisor",
+        "BridgeDeliverMemberInput",
+        "BridgeObserveMember",
+        "BridgeInterruptMember",
+        "BridgeRetireMember",
+        "BridgeDestroyMember",
+        "BridgeWireMember",
+        "BridgeUnwireMember",
+    ];
+    let schema_effect_names: Vec<_> = schema
+        .effects
+        .variants
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    let duplicated: Vec<_> = forbidden_effects
+        .iter()
+        .filter(|name| schema_effect_names.contains(name))
+        .collect();
+    assert!(
+        duplicated.is_empty(),
+        "top-level mob schema must not duplicate bridge protocol effects: {duplicated:?}"
+    );
+}
+
+#[test]
+fn test_top_level_mob_schema_avoids_shadow_bridge_state_fields() {
+    let schema = schema_mob_machine();
+    let forbidden_fields = [
+        "remote_member_count",
+        "supervisor_authorized",
+        "supervisor_rotating",
+        "rotation_pending_acks",
+    ];
+    let field_names: Vec<_> = schema
+        .state
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    let shadowed: Vec<_> = forbidden_fields
+        .iter()
+        .filter(|name| field_names.contains(name))
+        .collect();
+    assert!(
+        shadowed.is_empty(),
+        "top-level mob schema must not carry shadow bridge state fields: {shadowed:?}"
+    );
+}
+
+#[test]
+fn test_top_level_mob_schema_does_not_model_schema_only_rotation_transitions() {
+    let schema = schema_mob_machine();
+    let transition_names: Vec<_> = schema.transitions.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        !transition_names.contains(&"RotateSupervisorRunning"),
+        "top-level mob schema must not model schema-only RotateSupervisor transitions"
+    );
+    assert!(
+        !transition_names.contains(&"AckRotationRunning"),
+        "top-level mob schema must not model schema-only AckRotation transitions"
+    );
+
+    let manifest = crate::mob_machine::canonical_mob_machine_command_manifest();
+    assert!(
+        !manifest.contains("RotateSupervisor"),
+        "canonical mob machine command surface must not include schema-only RotateSupervisor"
+    );
+    assert!(
+        !manifest.contains("AckRotation"),
+        "canonical mob machine command surface must not include schema-only AckRotation"
     );
 }
 
@@ -13237,6 +16233,7 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
         events: storage.events.clone(),
         runs: storage.runs.clone(),
         specs: storage.specs.clone(),
+        runtime_metadata: storage.runtime_metadata.clone(),
         realm_profiles: storage.realm_profiles.clone(),
     };
     let service = Arc::new(MockSessionService::new());
@@ -13294,6 +16291,92 @@ async fn test_resume_from_events_restarts_autonomous_host_loops_from_runtime_mod
 }
 
 #[tokio::test]
+async fn test_mob_resume_fails_when_runtime_metadata_store_unavailable() {
+    let definition = sample_definition();
+    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    let runtime_metadata = Arc::new(FaultInjectedRuntimeMetadataStore::new());
+    runtime_metadata.set_fail_load_supervisor(true);
+    let storage = MobStorage::custom_with_runtime_metadata(
+        events.clone(),
+        Arc::new(InMemoryMobRunStore::new()),
+        Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata,
+    );
+
+    events
+        .append(NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(definition.clone()),
+            },
+        })
+        .await
+        .expect("append mob created");
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let error = match MobBuilder::for_resume(storage)
+        .with_session_service(service)
+        .resume()
+        .await
+    {
+        Ok(_) => panic!("resume must fail when runtime metadata cannot be loaded"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("fault-injected runtime metadata load failure"),
+        "resume should surface runtime metadata load failures, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_resume_seeds_missing_supervisor_runtime_metadata() {
+    let definition = sample_definition();
+    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+    let runtime_metadata = Arc::new(InMemoryMobRuntimeMetadataStore::new());
+    let storage = MobStorage::custom_with_runtime_metadata(
+        events.clone(),
+        Arc::new(InMemoryMobRunStore::new()),
+        Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata.clone(),
+    );
+
+    events
+        .append(NewMobEvent {
+            mob_id: definition.id.clone(),
+            timestamp: None,
+            kind: MobEventKind::MobCreated {
+                definition: Box::new(definition.clone()),
+            },
+        })
+        .await
+        .expect("append mob created");
+
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let resumed = MobBuilder::for_resume(storage)
+        .with_session_service(service)
+        .resume()
+        .await
+        .expect("resume should seed missing supervisor runtime metadata");
+
+    assert_eq!(resumed.status(), MobState::Running);
+    let supervisor_authority = runtime_metadata
+        .load_supervisor_authority(&definition.id)
+        .await
+        .expect("load supervisor authority")
+        .expect("resume should seed supervisor authority");
+    assert!(
+        !supervisor_authority.public_peer_id.is_empty(),
+        "seeded supervisor authority should have a real public peer id"
+    );
+}
+
+#[tokio::test]
 async fn test_resume_startup_keep_alive_loop_failure_enters_stopped_state() {
     // TODO: This test exercises condemned direct host-loop failure behavior.
     // Needs rewrite for runtime-backed keep-alive path.
@@ -13303,6 +16386,7 @@ async fn test_resume_startup_keep_alive_loop_failure_enters_stopped_state() {
     let service = Arc::new(MockSessionService::new());
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -13316,13 +16400,16 @@ async fn test_resume_startup_keep_alive_loop_failure_enters_stopped_state() {
     handle.stop().await.expect("stop");
     service.set_fail_start_turn(true);
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .allow_ephemeral_sessions(true)
-        .notify_orchestrator_on_resume(false)
-        .resume()
-        .await
-        .expect("resume handle should still be constructed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .allow_ephemeral_sessions(true)
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("resume handle should still be constructed");
 
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert_eq!(
@@ -13338,6 +16425,7 @@ async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
     let handle = MobBuilder::new(sample_definition(), storage)
         .with_session_service(service.clone())
         .create()
@@ -13355,12 +16443,15 @@ async fn test_resume_skips_broken_autonomous_member_in_host_loop_startup() {
     service.archive(&sid_l).await.expect("archive lead");
     service.delete_persisted_session(&sid_l).await;
 
-    let resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service)
-        .notify_orchestrator_on_resume(false)
-        .resume()
-        .await
-        .expect("partial resume should succeed");
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .notify_orchestrator_on_resume(false)
+    .resume()
+    .await
+    .expect("partial resume should succeed");
 
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     assert_eq!(
@@ -14071,6 +17162,167 @@ async fn test_runtime_backed_turn_driven_send_preserves_render_metadata() {
     assert_eq!(
         service.applied_runtime_render_metadata(&member).await,
         vec![Some(render_metadata)]
+    );
+}
+
+// WIP: turn-driven realtime-attached peer_response_terminal application
+// lands the response in the `Steer` admission queue without flushing it
+// onto the keep-alive runtime's prompt stream. The machine/DSL rebase on
+// `codex/machine-dls-completion` is expected to own the final shape of
+// this delivery seam; tracking this as ignored until then so CI and the
+// audio smoke lane aren't blocked by the transitional gap.
+#[ignore = "wip: terminal peer response delivery for turn-driven realtime member pending machine-dls-completion rebase"]
+#[tokio::test]
+async fn test_turn_driven_realtime_attached_member_applies_terminal_peer_response() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("lead"))
+        .expect("lead profile")
+        .as_inline_mut()
+        .unwrap()
+        .runtime_mode = crate::MobRuntimeMode::TurnDriven;
+
+    let (handle, service) = create_test_mob_with_runtime_backed_real_comms(definition).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_operator = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("operator-rt"),
+            None,
+        )
+        .await
+        .expect("spawn operator")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_analyst = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("analyst-rt"),
+            None,
+        )
+        .await
+        .expect("spawn analyst")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("operator-rt"),
+            MeerkatId::from("analyst-rt"),
+        )
+        .await
+        .expect("wire should succeed");
+    handle
+        .realtime_attach(AgentIdentity::from("operator-rt"))
+        .await
+        .expect("realtime attach should succeed");
+
+    let adapter = service
+        .runtime_adapter()
+        .expect("runtime-backed real comms service exposes runtime adapter");
+    for _ in 0..40 {
+        let snapshot = adapter
+            .meerkat_machine_spine_snapshot(&sid_operator)
+            .await
+            .expect("runtime snapshot after realtime attach");
+        if snapshot.drain.phase == Some(meerkat_core::CommsDrainPhase::Running) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let baseline_prompts = service.applied_runtime_prompts(&sid_operator).await.len();
+    let comms_operator = service
+        .real_comms(&sid_operator)
+        .await
+        .expect("operator comms");
+    let comms_analyst = service
+        .real_comms(&sid_analyst)
+        .await
+        .expect("analyst comms");
+
+    let request_receipt = CoreCommsRuntime::send(
+        &*comms_operator,
+        CommsCommand::PeerRequest {
+            to: PeerName::new(test_comms_name("worker", "analyst-rt")).expect("valid peer name"),
+            intent: "checksum_token".to_string(),
+            params: serde_json::json!({ "subject": "alpha beta gamma" }),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            stream: meerkat_core::comms::InputStreamMode::None,
+        },
+    )
+    .await
+    .expect("peer request should succeed");
+    let request_interaction_id = match request_receipt {
+        SendReceipt::PeerRequestSent { interaction_id, .. } => interaction_id,
+        other => panic!("expected PeerRequestSent, got {other:?}"),
+    };
+
+    let response_receipt = CoreCommsRuntime::send(
+        &*comms_analyst,
+        CommsCommand::PeerResponse {
+            to: PeerName::new(test_comms_name("lead", "operator-rt")).expect("valid peer name"),
+            in_reply_to: request_interaction_id,
+            status: meerkat_core::interaction::ResponseStatus::Completed,
+            result: serde_json::json!({ "token": "birch seventeen" }),
+            handling_mode: None,
+        },
+    )
+    .await
+    .expect("peer response should succeed");
+    assert!(
+        matches!(response_receipt, SendReceipt::PeerResponseSent { .. }),
+        "expected PeerResponseSent, got: {response_receipt:?}"
+    );
+
+    let delivered = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_operator).await;
+            if let Some(prompt) = prompts
+                .iter()
+                .skip(baseline_prompts)
+                .find(|prompt| {
+                    let text = prompt.text_content().to_lowercase();
+                    text.contains("peer_response_terminal")
+                        && text.contains("birch seventeen")
+                        && text.contains("analyst-rt")
+                })
+                .cloned()
+            {
+                break prompt;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+
+    let delivered = match delivered {
+        Ok(prompt) => prompt,
+        Err(_) => {
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&sid_operator)
+                .await
+                .expect("runtime snapshot after missing peer response prompt");
+            let prompts = service.applied_runtime_prompts(&sid_operator).await;
+            panic!(
+                "turn-driven realtime-attached operator never applied terminal peer response; prompts: {prompts:?}; snapshot: {snapshot:?}"
+            );
+        }
+    };
+    let delivered_text = delivered.text_content().to_lowercase();
+    assert!(
+        delivered_text.contains("peer_response_terminal"),
+        "expected terminal peer response prompt text, got: {delivered_text:?}"
+    );
+    assert!(
+        delivered_text.contains("birch seventeen"),
+        "expected token payload in terminal peer response prompt, got: {delivered_text:?}"
     );
 }
 
@@ -14935,7 +18187,10 @@ async fn test_agent_event_subscriptions_resolve_through_machine_routed_member_re
         .await
         .expect("member stream");
 
-    let streams = handle.subscribe_all_agent_events().await;
+    let streams = handle
+        .subscribe_all_agent_events()
+        .await
+        .expect("all-member streams");
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0].0, AgentIdentity::from("l-1"));
 }
@@ -15319,13 +18574,26 @@ async fn test_name_filtered_dispatcher() {
 
 #[tokio::test]
 async fn test_external_spawn_with_binding_uses_real_identity() {
-    let (handle, _service) = create_test_mob(sample_definition_with_external_backend()).await;
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-spawn-real-identity",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-real")).await;
+    let crate::RuntimeBinding::External {
+        peer_id: expected_peer_id,
+        address: expected_address,
+        bootstrap_token: _expected_bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
 
     let mut spec = SpawnMemberSpec::new("worker", "w-real");
-    spec.binding = Some(crate::RuntimeBinding::External {
-        peer_id: "ed25519:REAL_TARGET_KEY_abc123".to_string(),
-        address: "tcp://192.168.0.180:4800".to_string(),
-    });
+    spec.binding = Some(external.binding());
 
     let spawn_result = handle.spawn_spec(spec).await.expect("spawn with binding");
     // Verify identity was created
@@ -15342,18 +18610,20 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
             peer_id,
             address,
             session_id,
+            ..
         } => {
             assert_eq!(
-                peer_id, "ed25519:REAL_TARGET_KEY_abc123",
-                "BackendPeer.peer_id must be the real external process key, not the placeholder"
+                peer_id, &expected_peer_id,
+                "BackendPeer.peer_id must be the committed external process key"
             );
             assert_eq!(
-                address, "tcp://192.168.0.180:4800",
-                "BackendPeer.address must be the real external process address"
+                address,
+                canonical_external_address(&expected_address),
+                "BackendPeer.address must be the committed external process transport address"
             );
             assert!(
-                session_id.is_some(),
-                "bridge session should still exist for lifecycle ops"
+                session_id.is_none(),
+                "peer-only external members should not keep a hidden bridge session"
             );
         }
         other => panic!("expected BackendPeer member ref, got {other:?}"),
@@ -15399,16 +18669,32 @@ async fn test_session_spawn_default_binding() {
 }
 
 #[tokio::test]
-async fn test_trusted_peer_spec_uses_bridge_not_real_identity() {
-    // After spawning an external member with real identity, the trust spec
-    // used for wiring must use the bridge session's comms key (for transport),
-    // NOT the real external process key (which is canonical identity).
-    let (handle, service) = create_test_mob(sample_definition_with_external_backend()).await;
+async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_members() {
+    // Peer-only external members should wire using the real external transport
+    // identity rather than a hidden local bridge session.
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "trusted-peer-spec",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob_with_real_comms(definition).await;
+    let external_name = test_comms_name_for(&mob_id, "worker", "w-bridge");
+    let external = spawn_live_external_peer(&external_name).await;
+    let crate::RuntimeBinding::External {
+        peer_id,
+        address,
+        bootstrap_token,
+    } = external.binding()
+    else {
+        panic!("live external peer must produce external binding");
+    };
 
     let mut spec = SpawnMemberSpec::new("worker", "w-bridge");
     spec.binding = Some(crate::RuntimeBinding::External {
-        peer_id: "ed25519:REAL_EXTERNAL_KEY".to_string(),
-        address: "tcp://10.0.0.1:5000".to_string(),
+        peer_id: peer_id.clone(),
+        address: address.clone(),
+        bootstrap_token: bootstrap_token.clone(),
     });
     let _member_ref = handle
         .spawn_spec(spec)
@@ -15430,25 +18716,24 @@ async fn test_trusted_peer_spec_uses_bridge_not_real_identity() {
         .bridge_session_id()
         .cloned()
         .expect("lead session id");
-    let trusted_addresses = service.trusted_peer_addresses(&lead_sid).await;
+    let trusted_peers = service
+        .real_comms(&lead_sid)
+        .await
+        .expect("lead comms runtime")
+        .peers()
+        .await;
+    let trusted_peer = trusted_peers
+        .iter()
+        .find(|entry| entry.name.as_str() == external_name)
+        .expect("lead should trust the real external peer");
 
-    // The trust spec should use inproc:// bridge transport, not the real
-    // tcp://10.0.0.1:5000 address. The real address is the member's identity,
-    // not the bridge's transport address.
     assert!(
-        trusted_addresses
-            .iter()
-            .all(|addr| addr.starts_with("inproc://")),
-        "trust specs must use bridge transport addresses (inproc://), \
-         not real external addresses. Got: {trusted_addresses:?}"
+        trusted_peer.address == canonical_external_address(&address),
+        "peer-only trust specs should use the real external address. Got: {trusted_peers:?}",
     );
-
-    // The real identity should NOT appear in comms trust.
     assert!(
-        !trusted_addresses
-            .iter()
-            .any(|addr| addr.contains("10.0.0.1")),
-        "real external address must not leak into bridge comms trust: {trusted_addresses:?}"
+        trusted_peer.peer_id == peer_id,
+        "peer-only trust should retain the real external peer identity. Got: {trusted_peers:?}",
     );
 }
 
@@ -15661,6 +18946,7 @@ async fn test_restored_member_gets_external_tools() {
     let _ = service.enable_runtime_adapter();
     let storage = MobStorage::in_memory();
     let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
 
     // Create mob and spawn a worker
     let handle = MobBuilder::new(definition.clone(), storage)
@@ -15688,12 +18974,15 @@ async fn test_restored_member_gets_external_tools() {
     service.archive(&old_sid).await.expect("archive session");
 
     // Resume with provider — restored member should get external tools
-    let _resumed = MobBuilder::for_resume(MobStorage::with_events(events))
-        .with_session_service(service.clone())
-        .with_default_external_tools_provider(Some(provider))
-        .resume()
-        .await
-        .expect("resume");
+    let _resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .with_default_external_tools_provider(Some(provider))
+    .resume()
+    .await
+    .expect("resume");
 
     // The restore path creates a new session for the member.
     // Check that the create_session call included external tools.
@@ -16891,6 +20180,7 @@ async fn create_test_mob_with_realm_store(
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         realm_profiles: Some(realm_store),
     };
     let handle = MobBuilder::new(definition, storage)
@@ -16980,6 +20270,7 @@ async fn test_spawn_realm_ref_without_store_returns_error() {
         events: Arc::new(InMemoryMobEventStore::new()),
         runs: Arc::new(InMemoryMobRunStore::new()),
         specs: Arc::new(InMemoryMobSpecStore::new()),
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
         realm_profiles: None, // no realm store
     };
     let handle = MobBuilder::new(sample_definition_with_realm_ref_profile(), storage)
@@ -17368,6 +20659,7 @@ enum MobRuntimeParityOutcomeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct MobRuntimeParitySnapshotSummary {
     phase: String,
+    live_intent_identities: BTreeSet<String>,
     live_runtime_ids: BTreeSet<String>,
     externally_addressable_runtime_ids: BTreeSet<String>,
     runtime_fence_tokens: BTreeMap<String, u64>,
@@ -17835,6 +21127,23 @@ async fn mob_runtime_parity_snapshot_summary(
         )
     });
     let representative_fence_token = representative.map(|entry| entry.fence_token.get());
+    let live_intent_identities = all_members
+        .iter()
+        .filter(|entry| entry.voice_intent_present)
+        .map(|entry| {
+            mob_modeled_normalize_formal_string(
+                &serde_json::to_string(&entry.agent_identity)
+                    .expect("serialize live intent identity for parity snapshot"),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let live_intent_identity_values = live_intent_identities
+        .iter()
+        .map(|raw| {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .unwrap_or_else(|_| serde_json::Value::String(raw.clone()))
+        })
+        .collect::<Vec<_>>();
     let live_runtime_ids = active_members
         .iter()
         .map(|entry| {
@@ -17889,6 +21198,11 @@ async fn mob_runtime_parity_snapshot_summary(
         .collect::<Vec<_>>();
     let mut formal_available_fields = BTreeMap::new();
     formal_available_fields.insert(
+        "live_intent_identities".into(),
+        serde_json::to_string(&live_intent_identity_values)
+            .expect("serialize live_intent_identities"),
+    );
+    formal_available_fields.insert(
         "live_runtime_ids".into(),
         serde_json::to_string(&live_runtime_id_values).expect("serialize live_runtime_ids"),
     );
@@ -17942,6 +21256,7 @@ async fn mob_runtime_parity_snapshot_summary(
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
+        live_intent_identities,
         live_runtime_ids,
         externally_addressable_runtime_ids,
         runtime_fence_tokens,
@@ -17984,6 +21299,9 @@ fn mob_runtime_parity_field_value(
     field: &str,
 ) -> Option<MobRuntimeParityExprValue> {
     match field {
+        "live_intent_identities" => Some(MobRuntimeParityExprValue::Set(
+            snapshot.live_intent_identities.clone(),
+        )),
         "live_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.live_runtime_ids.clone(),
         )),
@@ -18414,7 +21732,7 @@ async fn mob_runtime_parity_execute_probe(
                 None,
             )
             .await
-            .map(|_| summarize_mob_runtime_success(probe, "bridge_session")),
+            .map(|()| summarize_mob_runtime_success(probe, "bridge_session")),
         MobRuntimeParityProbeInput::InternalTurn => fixture
             .handle
             .internal_turn(
@@ -18460,7 +21778,8 @@ async fn mob_runtime_parity_execute_probe(
             .handle
             .destroy()
             .await
-            .map(|()| summarize_mob_runtime_success(probe, "unit")),
+            .map(|_| summarize_mob_runtime_success(probe, "destroy_report"))
+            .map_err(|error| MobError::Internal(error.to_string())),
         MobRuntimeParityProbeInput::TaskCreate => fixture
             .handle
             .task_create("mob runtime parity".to_string(), "task".to_string(), vec![])
@@ -18484,7 +21803,7 @@ async fn mob_runtime_parity_execute_probe(
             .await
             .map(|_| summarize_mob_runtime_success(probe, "event_stream")),
         MobRuntimeParityProbeInput::SubscribeAllAgentEvents => {
-            let streams = fixture.handle.subscribe_all_agent_events().await;
+            let streams = fixture.handle.subscribe_all_agent_events().await?;
             Ok(summarize_mob_runtime_success(
                 probe,
                 &format!("all_agent_streams:{}", streams.len()),

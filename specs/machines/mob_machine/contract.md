@@ -7,6 +7,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
+- `live_intent_identities`: `Set<AgentIdentity>`
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
@@ -44,6 +45,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ListMembersIncludingRetiring`
 - `ListAllMembers`
 - `MemberStatus`
+- `RealtimeAttach`(agent_identity: AgentIdentity)
+- `RealtimeDetach`(agent_identity: AgentIdentity)
 - `SubscribeAgentEvents`
 - `SubscribeAllAgentEvents`
 - `SubscribeMobEvents`
@@ -244,6 +247,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Destroyed`
 - On: `SetSpawnPolicy`()
 - To: `Destroyed`
+
+### `RealtimeAttachRunning`
+- From: `Running`
+- On: `RealtimeAttach`(agent_identity)
+- To: `Running`
+
+### `RealtimeDetachRunning`
+- From: `Running`
+- On: `RealtimeDetach`(agent_identity)
+- To: `Running`
+
+### `RealtimeAttachStopped`
+- From: `Stopped`
+- On: `RealtimeAttach`(agent_identity)
+- To: `Stopped`
+
+### `RealtimeDetachStopped`
+- From: `Stopped`
+- On: `RealtimeDetach`(agent_identity)
+- To: `Stopped`
+
+### `RealtimeAttachCompleted`
+- From: `Completed`
+- On: `RealtimeAttach`(agent_identity)
+- To: `Completed`
+
+### `RealtimeDetachCompleted`
+- From: `Completed`
+- On: `RealtimeDetach`(agent_identity)
+- To: `Completed`
 
 ### `StopRunning`
 - From: `Running`

@@ -485,6 +485,41 @@ RetireRequestedFromIdle ==
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
 
 
+RecoverFromInitializing ==
+    /\ phase = "Initializing"
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+RecoverFromIdle ==
+    /\ phase = "Idle"
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+RecoverFromAttached ==
+    /\ phase = "Attached"
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+RecoverFromRetired ==
+    /\ phase = "Retired"
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+RecoverFromStopped ==
+    /\ phase = "Stopped"
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
 Reset ==
     /\ phase = "Initializing" \/ phase = "Idle" \/ phase = "Attached" \/ phase = "Retired"
     /\ phase' = "Idle"
@@ -520,6 +555,22 @@ StopRuntimeExecutorRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = {}
     /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase >>
+
+
+IngestRealtimeAttachmentSignalAttached ==
+    /\ phase = "Attached"
+    /\ (active_runtime_id # None)
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
+
+
+IngestRealtimeAttachmentSignalRunning ==
+    /\ phase = "Running"
+    /\ (active_runtime_id # None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides >>
 
 
 Destroy ==
@@ -1317,10 +1368,17 @@ Next ==
     \/ \E active_filter \in ToolFilterValues : \E staged_filter \in ToolFilterValues : \E active_requested_deferred_names \in SetOfStringValues : \E staged_requested_deferred_names \in SetOfStringValues : \E active_visibility_revision \in 0..2 : \E staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
     \/ \E active_filter \in ToolFilterValues : \E staged_filter \in ToolFilterValues : \E active_requested_deferred_names \in SetOfStringValues : \E staged_requested_deferred_names \in SetOfStringValues : \E active_visibility_revision \in 0..2 : \E staged_visibility_revision \in 0..2 : PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision)
     \/ RetireRequestedFromIdle
+    \/ RecoverFromInitializing
+    \/ RecoverFromIdle
+    \/ RecoverFromAttached
+    \/ RecoverFromRetired
+    \/ RecoverFromStopped
     \/ Reset
     \/ StopRuntimeExecutorUnbound
     \/ StopRuntimeExecutorAttached
     \/ StopRuntimeExecutorRunning
+    \/ IngestRealtimeAttachmentSignalAttached
+    \/ IngestRealtimeAttachmentSignalRunning
     \/ Destroy
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorIdle(arg_session_id)
     \/ \E arg_session_id \in SessionIdValues : EnsureSessionWithExecutorAttached(arg_session_id)

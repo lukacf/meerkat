@@ -11,6 +11,7 @@ use crate::ids::{
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
@@ -76,7 +77,8 @@ pub struct NewMobEvent {
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MemberRef {
+#[doc(hidden)]
+pub enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.
@@ -88,6 +90,11 @@ pub(crate) enum MemberRef {
         peer_id: String,
         /// Backend-provided address string.
         address: String,
+        /// Optional bootstrap proof for re-establishing supervisor control.
+        /// Not serialized on the wire (intentionally elided from `Serialize`
+        /// below); kept in memory as a redacting newtype so it does not leak
+        /// through `Debug` or `tracing` fields.
+        bootstrap_token: Option<BridgeBootstrapToken>,
         /// Optional bridge session binding when this member is bridged to a
         /// local session. Serialized additively as both `session_id` and
         /// `bridge_session_id` for compatibility.
@@ -125,6 +132,7 @@ impl Serialize for MemberRef {
                 peer_id,
                 address,
                 session_id,
+                ..
             } => {
                 let mut map =
                     serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
@@ -160,6 +168,8 @@ enum MemberRefCanonical {
         peer_id: String,
         address: String,
         #[serde(default)]
+        bootstrap_token: Option<BridgeBootstrapToken>,
+        #[serde(default)]
         session_id: Option<SessionId>,
         #[serde(default)]
         bridge_session_id: Option<SessionId>,
@@ -186,11 +196,13 @@ impl<'de> Deserialize<'de> for MemberRef {
             MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id,
                 bridge_session_id,
             }) => Self::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: bridge_session_id.or(session_id),
             },
         })
@@ -261,6 +273,16 @@ pub enum MobEventKind {
         member: AgentIdentity,
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
+    },
+    /// Durable intent that this member should have voice attached.
+    MemberVoiceIntentSet {
+        /// Member whose durable voice intent is now present.
+        agent_identity: AgentIdentity,
+    },
+    /// Durable voice intent was cleared for this member.
+    MemberVoiceIntentCleared {
+        /// Member whose durable voice intent is now absent.
+        agent_identity: AgentIdentity,
     },
     /// Bidirectional trust was established between two members.
     MembersWired {
@@ -629,6 +651,16 @@ mod tests {
     }
 
     #[test]
+    fn test_member_voice_intent_variants_roundtrip() {
+        roundtrip(&MobEventKind::MemberVoiceIntentSet {
+            agent_identity: AgentIdentity::from("agent-1"),
+        });
+        roundtrip(&MobEventKind::MemberVoiceIntentCleared {
+            agent_identity: AgentIdentity::from("agent-1"),
+        });
+    }
+
+    #[test]
     fn test_flow_variants_roundtrip() {
         let run_id = RunId::new();
         let flow_id = FlowId::from("flow-a");
@@ -765,6 +797,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: None,
             session_id: Some(SessionId::from_uuid(Uuid::nil())),
         };
 
@@ -776,6 +809,25 @@ mod tests {
         );
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
+    }
+
+    #[test]
+    fn test_member_ref_backend_peer_omits_bootstrap_token_in_serialized_output() {
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: "peer-123".to_string(),
+            address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: Some("secret-bootstrap-proof".into()),
+            session_id: None,
+        };
+
+        let value = serde_json::to_value(&member_ref).unwrap();
+        assert_eq!(value["kind"], "backend_peer");
+        assert_eq!(value["peer_id"], "peer-123");
+        assert_eq!(value["address"], "https://backend.example/peers/peer-123");
+        assert!(
+            value.get("bootstrap_token").is_none(),
+            "bootstrap proof must not be exposed through serialized member refs"
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ use meerkat_core::hydrate_content_blocks;
 use meerkat_core::time_compat::Instant;
 use meerkat_core::{BlobStore, MissingBlobBehavior};
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::path::Path;
@@ -266,6 +267,21 @@ impl CoreCommsRuntime for CommsRuntime {
     }
     fn public_key(&self) -> Option<String> {
         Some(self.public_key.to_peer_id())
+    }
+
+    fn advertised_address(&self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(crate::runtime::comms_runtime::CommsRuntime::advertised_address(self))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
+    fn bridge_bootstrap_token(&self) -> Option<String> {
+        Some(self.bridge_bootstrap_token.clone())
     }
 
     async fn add_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
@@ -925,6 +941,7 @@ pub struct CommsRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     _session_identity_claim: Option<SessionIdentityClaim>,
     keypair: Arc<Keypair>,
+    bridge_bootstrap_token: String,
     require_peer_auth: bool,
     dismiss_flag: AtomicBool,
     subscriber_registry: crate::event_injector::SubscriberRegistry,
@@ -939,6 +956,16 @@ pub struct CommsRuntime {
 }
 
 impl CommsRuntime {
+    fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
+        digest.update(keypair.secret_bytes());
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            digest.finalize(),
+        )
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new(config: ResolvedCommsConfig) -> Result<Self, CommsRuntimeError> {
         Self::new_with_silent_intents(config, Arc::new(HashSet::new())).await
@@ -991,6 +1018,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             _session_identity_claim: None,
+            bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: config.require_peer_auth,
             dismiss_flag: AtomicBool::new(false),
@@ -1030,6 +1058,15 @@ impl CommsRuntime {
         silent_intents: Arc<HashSet<String>>,
     ) -> Result<Self, CommsRuntimeError> {
         let keypair = Keypair::generate();
+        Self::inproc_only_with_keypair_and_silent_intents(name, namespace, keypair, silent_intents)
+    }
+
+    pub fn inproc_only_with_keypair_and_silent_intents(
+        name: &str,
+        namespace: Option<String>,
+        keypair: Keypair,
+        silent_intents: Arc<HashSet<String>>,
+    ) -> Result<Self, CommsRuntimeError> {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
@@ -1086,6 +1123,7 @@ impl CommsRuntime {
             listeners_started: false,
             #[cfg(not(target_arch = "wasm32"))]
             _session_identity_claim: None,
+            bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: true,
             dismiss_flag: AtomicBool::new(false),
@@ -1167,6 +1205,7 @@ impl CommsRuntime {
             listener_handles: Vec::new(),
             listeners_started: false,
             _session_identity_claim: Some(claim),
+            bridge_bootstrap_token: Self::derive_bridge_bootstrap_token(&keypair),
             keypair: Arc::new(keypair),
             require_peer_auth: true,
             dismiss_flag: AtomicBool::new(false),
@@ -1345,6 +1384,11 @@ impl CommsRuntime {
     pub fn public_key(&self) -> PubKey {
         self.public_key
     }
+
+    pub fn bridge_bootstrap_token(&self) -> &str {
+        &self.bridge_bootstrap_token
+    }
+
     pub fn router(&self) -> &Router {
         &self.router
     }
@@ -2018,6 +2062,27 @@ mod tests {
         };
         envelope.sign(from);
         envelope
+    }
+
+    #[test]
+    fn bridge_bootstrap_token_is_stable_for_the_same_keypair() {
+        let keypair = Keypair::generate();
+        let first = CommsRuntime::derive_bridge_bootstrap_token(&keypair);
+        let second = CommsRuntime::derive_bridge_bootstrap_token(&keypair);
+        assert_eq!(
+            first, second,
+            "same keypair should derive same bootstrap token"
+        );
+    }
+
+    #[test]
+    fn bridge_bootstrap_token_changes_with_a_different_keypair() {
+        let first = CommsRuntime::derive_bridge_bootstrap_token(&Keypair::generate());
+        let second = CommsRuntime::derive_bridge_bootstrap_token(&Keypair::generate());
+        assert_ne!(
+            first, second,
+            "different keypairs should not derive the same bootstrap token"
+        );
     }
 
     /// Regression: auth=Open must always load keypair and trusted peers from disk

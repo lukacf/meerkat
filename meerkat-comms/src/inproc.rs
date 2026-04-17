@@ -369,12 +369,32 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
     ) -> Result<uuid::Uuid, InprocSendError> {
+        self.send_cross_namespace_with_id(
+            from_keypair,
+            to_name,
+            expected_pubkey,
+            Uuid::new_v4(),
+            kind,
+            sign_envelope,
+        )
+    }
+
+    /// Send a message to an inproc peer across namespaces using a caller-chosen envelope id.
+    pub fn send_cross_namespace_with_id(
+        &self,
+        from_keypair: &Keypair,
+        to_name: &str,
+        expected_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
         let (to_pubkey, sender) = self
             .get_by_name_and_pubkey_any_namespace(to_name, expected_pubkey)
             .ok_or_else(|| InprocSendError::PeerNotFound(to_name.to_string()))?;
 
         let mut envelope = Envelope {
-            id: Uuid::new_v4(),
+            id: envelope_id,
             from: from_keypair.public_key(),
             to: to_pubkey,
             kind,
@@ -404,6 +424,26 @@ impl InprocRegistry {
         kind: MessageKind,
         sign_envelope: bool,
     ) -> Result<uuid::Uuid, InprocSendError> {
+        self.send_with_signature_in_namespace_with_id(
+            namespace,
+            from_keypair,
+            to_name,
+            Uuid::new_v4(),
+            kind,
+            sign_envelope,
+        )
+    }
+
+    /// Send a message directly to an inproc peer within a namespace using a caller-chosen envelope id.
+    pub fn send_with_signature_in_namespace_with_id(
+        &self,
+        namespace: &str,
+        from_keypair: &Keypair,
+        to_name: &str,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
         // Look up the peer
         let (to_pubkey, sender) = self
             .get_by_name_in_namespace(namespace, to_name)
@@ -411,7 +451,7 @@ impl InprocRegistry {
 
         // Create and sign the envelope
         let mut envelope = Envelope {
-            id: Uuid::new_v4(),
+            id: envelope_id,
             from: from_keypair.public_key(),
             to: to_pubkey,
             kind,

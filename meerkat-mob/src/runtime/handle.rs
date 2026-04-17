@@ -18,6 +18,8 @@ use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::time_compat::Instant;
 use meerkat_core::types::{HandlingMode, RenderMetadata, SessionId};
+#[cfg(feature = "runtime-adapter")]
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -38,6 +40,18 @@ enum SessionObservationProjection {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MobRealtimeAttachmentStatus {
+    Unattached,
+    IntentPresentUnbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+    ReattachRequired,
+}
+
 /// Point-in-time snapshot of a mob member's execution state.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -48,7 +62,7 @@ pub struct MobMemberSnapshot {
     pub agent_runtime_id: AgentRuntimeId,
     /// Fence token for the current incarnation.
     pub fence_token: FenceToken,
-    /// Preview of the last assistant output (if any).
+    /// Preview of the current bridge session's last committed assistant text.
     pub output_preview: Option<String>,
     /// Error description (if the member errored).
     pub error: Option<String>,
@@ -56,6 +70,8 @@ pub struct MobMemberSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
+    /// Canonical live attachment status for the member.
+    pub realtime_attachment_status: MobRealtimeAttachmentStatus,
     /// Bridge-internal session binding — compatibility alias for the current bridge session.
     #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
@@ -196,6 +212,101 @@ impl MemberRespawnReceipt {
     }
 }
 
+/// Report returned after rotating a mob-owned supervisor authority.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct SupervisorRotationReport {
+    /// Supervisor epoch before rotation.
+    pub previous_epoch: u64,
+    /// Supervisor epoch after rotation.
+    pub current_epoch: u64,
+    /// Public peer id for the new supervisor keypair.
+    pub public_peer_id: String,
+}
+
+/// Structured report returned from mob destroy.
+#[derive(Debug, Clone, Default, Serialize)]
+#[non_exhaustive]
+pub struct MobDestroyReport {
+    /// Members that required force-destroy semantics during cleanup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub force_destroyed_members: Vec<AgentIdentity>,
+    /// Remote members whose cleanup could not be completed before destroy ended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphaned_remote_members: Vec<AgentIdentity>,
+    /// Whether aggregate remote cleanup exceeded its deadline.
+    #[serde(default)]
+    pub remote_cleanup_deadline_exceeded: bool,
+    /// Whether runtime metadata was scrubbed.
+    #[serde(default)]
+    pub metadata_scrubbed: bool,
+    /// Whether persisted mob events were cleared.
+    #[serde(default)]
+    pub events_cleared: bool,
+    /// Whether namespace cleanup completed.
+    #[serde(default)]
+    pub namespace_cleaned: bool,
+    /// Human-readable cleanup errors captured while destroying.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl MobDestroyReport {
+    pub(crate) fn push_error(&mut self, error: impl Into<String>) {
+        self.errors.push(error.into());
+    }
+
+    fn error_summary(&self) -> String {
+        if self.errors.is_empty() {
+            "destroy cleanup did not complete".to_string()
+        } else {
+            self.errors.join("; ")
+        }
+    }
+}
+
+/// Structured error returned by mob destroy.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MobDestroyError {
+    /// Destroy performed partial cleanup but could not finish the full contract.
+    #[error("destroy incomplete: {}", report.error_summary())]
+    Incomplete { report: MobDestroyReport },
+
+    /// A preflight or actor-level mob error occurred before partial reporting.
+    #[error(transparent)]
+    Mob(#[from] MobError),
+}
+
+/// Structured evidence captured when respawn cannot prove the old member is gone.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct PreviousMemberCleanupReport {
+    /// Stable member identity.
+    pub identity: AgentIdentity,
+    /// Runtime id of the incarnation being replaced.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// Fence token of the incarnation being replaced.
+    pub fence_token: FenceToken,
+    /// Whether graceful retire was attempted.
+    pub retire_attempted: bool,
+    /// Error returned from the graceful retire attempt, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retire_error: Option<String>,
+    /// Whether a confirmatory observation probe was attempted.
+    #[serde(default)]
+    pub confirmatory_observation_attempted: bool,
+    /// Observation probe detail, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmatory_observation: Option<String>,
+    /// Whether force-destroy was attempted.
+    #[serde(default)]
+    pub destroy_attempted: bool,
+    /// Error returned from the force-destroy attempt, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destroy_error: Option<String>,
+}
+
 /// Receipt returned by a successful member spawn.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -245,9 +356,9 @@ pub(crate) struct CanonicalOpsOwnerContext {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MobRespawnError {
-    /// Member has no current session bridge to retire.
-    #[error("no current session bridge for member {identity}")]
-    NoSessionBridge { identity: AgentIdentity },
+    /// Member has no runtime control channel for replacement.
+    #[error("no runtime control channel for member {identity}")]
+    NoRuntimeControl { identity: AgentIdentity },
 
     /// Spawn failed after the old member was retired.
     #[error("spawn failed after retire for member {identity}: {reason}")]
@@ -263,6 +374,11 @@ pub enum MobRespawnError {
         receipt: MemberRespawnReceipt,
         failed_peer_ids: Vec<AgentIdentity>,
     },
+
+    /// Retire cleanup progressed far enough that the old member may still exist,
+    /// but respawn could not prove it was fully cleaned up.
+    #[error("previous member cleanup ambiguous for member {}", report.identity)]
+    PreviousMemberCleanupAmbiguous { report: PreviousMemberCleanupReport },
 
     /// An underlying mob error occurred before mutation.
     #[error(transparent)]
@@ -400,12 +516,14 @@ pub struct MobHandle {
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RestoreFailureDiagnostic {
-    pub(crate) bridge_session_id: SessionId,
+    pub(crate) bridge_session_id: Option<SessionId>,
     pub(crate) reason: String,
 }
 
@@ -611,6 +729,63 @@ impl MobEventsView {
 }
 
 impl MobHandle {
+    async fn current_session_realtime_attachment_status(
+        &self,
+        bridge_session_id: &SessionId,
+        roster_entry: Option<&crate::roster::RosterEntry>,
+    ) -> MobRealtimeAttachmentStatus {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(adapter) = self.runtime_adapter.clone() else {
+                return Self::missing_session_realtime_attachment_status(roster_entry);
+            };
+
+            match adapter.realtime_attachment_status(bridge_session_id).await {
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached) => {
+                    MobRealtimeAttachmentStatus::Unattached
+                }
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound) => {
+                    MobRealtimeAttachmentStatus::IntentPresentUnbound
+                }
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady) => {
+                    MobRealtimeAttachmentStatus::BindingNotReady
+                }
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::BindingReady) => {
+                    MobRealtimeAttachmentStatus::BindingReady
+                }
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending) => {
+                    MobRealtimeAttachmentStatus::ReplacementPending
+                }
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired) => {
+                    MobRealtimeAttachmentStatus::ReattachRequired
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %bridge_session_id,
+                        error = %error,
+                        "failed to query runtime live attachment status for member snapshot"
+                    );
+                    Self::missing_session_realtime_attachment_status(roster_entry)
+                }
+            }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = bridge_session_id;
+            Self::missing_session_realtime_attachment_status(roster_entry)
+        }
+    }
+
+    fn missing_session_realtime_attachment_status(
+        roster_entry: Option<&crate::roster::RosterEntry>,
+    ) -> MobRealtimeAttachmentStatus {
+        if roster_entry.is_some_and(|entry| entry.voice_intent_present) {
+            MobRealtimeAttachmentStatus::IntentPresentUnbound
+        } else {
+            MobRealtimeAttachmentStatus::Unattached
+        }
+    }
+
     async fn restore_failure_for(
         &self,
         meerkat_id: &MeerkatId,
@@ -743,29 +918,27 @@ impl MobHandle {
                 handling_mode,
                 render_metadata,
             } => {
-                let bridge_session_id = self
-                    .send_actor_command(|reply_tx| MobCommand::ExternalTurn {
-                        meerkat_id,
-                        content,
-                        handling_mode,
-                        render_metadata,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::BridgeSessionId(bridge_session_id))
+                self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
+                    meerkat_id,
+                    content,
+                    handling_mode,
+                    render_metadata,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::InternalTurn {
                 meerkat_id,
                 content,
             } => {
-                let bridge_session_id = self
-                    .send_actor_command(|reply_tx| MobCommand::InternalTurn {
-                        meerkat_id,
-                        content,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::BridgeSessionId(bridge_session_id))
+                self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
+                    meerkat_id,
+                    content,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::SubmitWork {
                 runtime_id,
@@ -788,7 +961,7 @@ impl MobHandle {
                     });
                 }
                 let content = meerkat_core::types::ContentInput::from(spec.content);
-                let bridge_session_id = match spec.origin {
+                match spec.origin {
                     WorkOrigin::External => {
                         self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
                             meerkat_id,
@@ -797,7 +970,7 @@ impl MobHandle {
                             render_metadata: None,
                             reply_tx,
                         })
-                        .await??
+                        .await??;
                     }
                     WorkOrigin::Internal => {
                         self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
@@ -805,10 +978,9 @@ impl MobHandle {
                             content,
                             reply_tx,
                         })
-                        .await??
+                        .await??;
                     }
-                };
-                let _ = bridge_session_id;
+                }
                 Ok(MobMachineCommandResult::WorkReceipt { work_ref })
             }
             MobMachineCommand::CancelWork { work_ref } => {
@@ -862,9 +1034,16 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::Destroy => {
-                self.send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
-                    .await??;
-                Ok(MobMachineCommandResult::Unit)
+                let reply = self
+                    .send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
+                    .await?;
+                match reply {
+                    Ok(report) => Ok(MobMachineCommandResult::DestroyReport(report)),
+                    Err(MobDestroyError::Mob(error)) => Err(error),
+                    Err(MobDestroyError::Incomplete { report }) => Err(MobError::Internal(
+                        format!("destroy incomplete: {}", report.error_summary()),
+                    )),
+                }
             }
             MobMachineCommand::TaskCreate {
                 subject,
@@ -945,6 +1124,24 @@ impl MobHandle {
                     snapshot.to_snapshot(),
                 ))
             }
+            MobMachineCommand::RealtimeAttach { meerkat_id } => {
+                let attached = self
+                    .send_actor_command(|reply_tx| MobCommand::RealtimeAttach {
+                        meerkat_id,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::Bool(attached))
+            }
+            MobMachineCommand::RealtimeDetach { meerkat_id } => {
+                let detached = self
+                    .send_actor_command(|reply_tx| MobCommand::RealtimeDetach {
+                        meerkat_id,
+                        reply_tx,
+                    })
+                    .await??;
+                Ok(MobMachineCommandResult::Bool(detached))
+            }
             MobMachineCommand::SubscribeAgentEvents { meerkat_id } => {
                 let stream = self
                     .send_actor_command(|reply_tx| MobCommand::SubscribeAgentEvents {
@@ -957,7 +1154,7 @@ impl MobHandle {
             MobMachineCommand::SubscribeAllAgentEvents => {
                 let streams = self
                     .send_actor_command(|reply_tx| MobCommand::SubscribeAllAgentEvents { reply_tx })
-                    .await?;
+                    .await??;
                 Ok(MobMachineCommandResult::AllAgentEventStreams(streams))
             }
             MobMachineCommand::SubscribeMobEvents { config } => {
@@ -1048,6 +1245,27 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
+        }
+    }
+
+    async fn execute_destroy_machine_command(
+        &self,
+        command: MobMachineCommand,
+    ) -> Result<MobMachineCommandResult, MobDestroyError> {
+        match command {
+            MobMachineCommand::Destroy => {
+                let reply = self
+                    .send_actor_command(|reply_tx| MobCommand::Destroy { reply_tx })
+                    .await
+                    .map_err(MobDestroyError::from)?;
+                match reply {
+                    Ok(report) => Ok(MobMachineCommandResult::DestroyReport(report)),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Err(MobDestroyError::from(MobError::Internal(
+                "unsupported destroy machine command".into(),
+            ))),
         }
     }
 
@@ -1365,11 +1583,14 @@ impl MobHandle {
                     .as_ref()
                     .map(|e| e.fence_token)
                     .unwrap_or(FenceToken::new(0)),
-                current_bridge_session_id: Some(diag.bridge_session_id),
+                current_bridge_session_id: diag.bridge_session_id,
                 peer_connectivity: None,
                 kickoff: roster_entry
                     .as_ref()
                     .and_then(|entry| entry.kickoff.clone()),
+                realtime_attachment_status: Self::missing_session_realtime_attachment_status(
+                    roster_entry.as_ref(),
+                ),
             });
         }
 
@@ -1386,12 +1607,20 @@ impl MobHandle {
                 current_bridge_session_id: None,
                 peer_connectivity: None,
                 kickoff: None,
+                realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
             }),
             (Some(roster_state), None) => {
+                let session_observation = match roster_entry.as_ref().map(|entry| &entry.member_ref)
+                {
+                    Some(MemberRef::BackendPeer {
+                        session_id: None, ..
+                    }) => CanonicalSessionObservation::Unknown,
+                    _ => CanonicalSessionObservation::Missing,
+                };
                 MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
                     member_present: true,
                     roster_state: Some(roster_state),
-                    session_observation: CanonicalSessionObservation::Missing,
+                    session_observation,
                     restore_failure: None,
                     output_preview: None,
                     tokens_used: 0,
@@ -1410,9 +1639,18 @@ impl MobHandle {
                     kickoff: roster_entry
                         .as_ref()
                         .and_then(|entry| entry.kickoff.clone()),
+                    realtime_attachment_status: Self::missing_session_realtime_attachment_status(
+                        roster_entry.as_ref(),
+                    ),
                 })
             }
             (Some(roster_state), Some(bridge_session_id)) => {
+                let realtime_attachment_status = self
+                    .current_session_realtime_attachment_status(
+                        &bridge_session_id,
+                        roster_entry.as_ref(),
+                    )
+                    .await;
                 let (output_preview, tokens_used, observation) = match observation {
                     SessionObservationProjection::Omit => {
                         (None, 0, CanonicalSessionObservation::Unknown)
@@ -1470,6 +1708,7 @@ impl MobHandle {
                     current_bridge_session_id: Some(bridge_session_id),
                     peer_connectivity,
                     kickoff: roster_entry.and_then(|entry| entry.kickoff),
+                    realtime_attachment_status,
                 })
             }
         }
@@ -1590,20 +1829,24 @@ impl MobHandle {
     /// Returns one stream per active member that has a live bridge binding. Members
     /// spawned after this call are not included — use [`subscribe_mob_events`]
     /// for a continuously updated view.
-    pub async fn subscribe_all_agent_events(&self) -> Vec<(AgentIdentity, EventStream)> {
+    pub async fn subscribe_all_agent_events(
+        &self,
+    ) -> Result<Vec<(AgentIdentity, EventStream)>, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAllAgentEvents)
             .await
         {
-            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => streams
+            Ok(MobMachineCommandResult::AllAgentEventStreams(streams)) => Ok(streams
                 .into_iter()
                 .map(|(mid, stream)| (AgentIdentity::from(mid.as_str()), stream))
-                .collect(),
+                .collect()),
             Ok(_) => {
                 tracing::error!("unexpected command result variant");
-                Default::default()
+                Err(MobError::Internal(
+                    "unexpected command result variant".into(),
+                ))
             }
-            Err(_) => Vec::new(),
+            Err(error) => Err(error),
         }
     }
 
@@ -1939,6 +2182,12 @@ impl MobHandle {
         }
     }
 
+    /// Rotate the persisted mob supervisor authority.
+    pub async fn rotate_supervisor(&self) -> Result<SupervisorRotationReport, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::RotateSupervisor { reply_tx })
+            .await?
+    }
+
     /// Wire a local member to either another local member or an external peer.
     pub async fn wire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -2004,40 +2253,28 @@ impl MobHandle {
         message: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::ExternalTurn {
-                meerkat_id,
-                content: message,
-                handling_mode,
-                render_metadata,
-            })
-            .await?
-        {
-            MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
+    ) -> Result<(), MobError> {
+        self.execute_machine_command(MobMachineCommand::ExternalTurn {
+            meerkat_id,
+            content: message,
+            handling_mode,
+            render_metadata,
+        })
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn internal_turn_for_member(
         &self,
         meerkat_id: MeerkatId,
         message: meerkat_core::types::ContentInput,
-    ) -> Result<SessionId, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::InternalTurn {
-                meerkat_id,
-                content: message,
-            })
-            .await?
-        {
-            MobMachineCommandResult::BridgeSessionId(bridge_session_id) => Ok(bridge_session_id),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
+    ) -> Result<(), MobError> {
+        self.execute_machine_command(MobMachineCommand::InternalTurn {
+            meerkat_id,
+            content: message,
+        })
+        .await?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -2171,15 +2408,15 @@ impl MobHandle {
     }
 
     /// Retire active members, clear persisted mob storage, and terminate the actor.
-    pub async fn destroy(&self) -> Result<(), MobError> {
+    pub async fn destroy(&self) -> Result<MobDestroyReport, MobDestroyError> {
         match self
-            .execute_machine_command(MobMachineCommand::Destroy)
+            .execute_destroy_machine_command(MobMachineCommand::Destroy)
             .await?
         {
-            MobMachineCommandResult::Unit => Ok(()),
-            _ => Err(MobError::Internal(
+            MobMachineCommandResult::DestroyReport(report) => Ok(report),
+            _ => Err(MobDestroyError::from(MobError::Internal(
                 "unexpected command result variant".into(),
-            )),
+            ))),
         }
     }
 
@@ -2435,6 +2672,38 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::MemberStatus(snapshot) => Ok(snapshot),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
+    /// Persist durable voice intent and attach it to the current session when
+    /// a bridge session exists.
+    pub async fn realtime_attach(&self, identity: AgentIdentity) -> Result<bool, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::RealtimeAttach {
+                meerkat_id: MeerkatId::from(identity.as_str()),
+            })
+            .await?
+        {
+            MobMachineCommandResult::Bool(attached) => Ok(attached),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
+    /// Clear durable voice intent and detach it from the current session when
+    /// a bridge session exists.
+    pub async fn realtime_detach(&self, identity: AgentIdentity) -> Result<bool, MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::RealtimeDetach {
+                meerkat_id: MeerkatId::from(identity.as_str()),
+            })
+            .await?
+        {
+            MobMachineCommandResult::Bool(detached) => Ok(detached),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),
@@ -2715,6 +2984,7 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -2745,6 +3015,7 @@ mod tests {
             current_bridge_session_id: Some(sid.clone()),
             peer_connectivity: None,
             kickoff: None,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
         }
         .to_snapshot();
 

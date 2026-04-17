@@ -3,6 +3,7 @@ use meerkat_core::AgentExecutionSnapshot;
 use meerkat_core::CommsCapabilityError;
 use meerkat_core::ExternalToolSurfaceSnapshot;
 use meerkat_core::PeerIngressRuntimeSnapshot;
+use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::Session;
 use meerkat_core::ToolScopeSnapshot;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
@@ -14,7 +15,9 @@ use meerkat_core::service::{
 };
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
+#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
 use std::sync::{Mutex, OnceLock, Weak};
 
 fn build_runtime_receipt(
@@ -75,6 +78,7 @@ fn session_has_persisted_mob_binding(session: &Session, mob_id: &MobId) -> bool 
         && peer_meta.labels.get("meerkat_id").map(String::as_str) == Some(meerkat_id)
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
@@ -82,7 +86,7 @@ fn ephemeral_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-adapter"))]
 fn persistent_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>> =
@@ -90,6 +94,7 @@ fn persistent_runtime_adapter_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(feature = "runtime-adapter")]
 fn cached_runtime_adapter(
     cache: &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>>,
     key: usize,
@@ -134,6 +139,7 @@ pub trait MobSessionService:
         false
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         None
     }
@@ -194,6 +200,21 @@ pub trait MobSessionService:
         ))
     }
 
+    async fn apply_runtime_context_appends(
+        &self,
+        _session_id: &SessionId,
+        _run_id: RunId,
+        _appends: Vec<PendingSystemContextAppend>,
+        _contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(
+                "runtime-backed context append apply is unavailable for this session service"
+                    .into(),
+            ),
+        ))
+    }
+
     async fn discard_live_session(&self, _session_id: &SessionId) -> Result<(), SessionError> {
         Ok(())
     }
@@ -221,6 +242,7 @@ where
         false
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         let key = std::ptr::from_ref(self) as usize;
         Some(cached_runtime_adapter(
@@ -313,6 +335,23 @@ where
             Some(session_snapshot),
         ))
     }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -325,6 +364,7 @@ where
         true
     }
 
+    #[cfg(feature = "runtime-adapter")]
     fn runtime_adapter(&self) -> Option<Arc<meerkat_runtime::MeerkatMachine>> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -423,6 +463,23 @@ where
             run_id,
             req,
             boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::apply_runtime_context_appends(
+            self,
+            session_id,
+            run_id,
+            appends,
             contributing_input_ids,
         )
         .await

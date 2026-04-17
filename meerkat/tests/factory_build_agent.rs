@@ -2076,3 +2076,47 @@ async fn web_search_explicit_params_merged_with_defaults() {
         "explicit thinking_budget should be present: {params}"
     );
 }
+
+#[tokio::test]
+async fn explicit_meerkat_tool_policy_suppresses_ambient_provider_search_defaults() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        override_builtins: ToolCategoryOverride::Disable,
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client.captured_params();
+    let has_web_search = params.as_ref().and_then(|p| p.get("web_search")).is_some();
+    assert!(
+        !has_web_search,
+        "explicit Meerkat tool policy should suppress ambient provider web_search defaults: {params:?}"
+    );
+}
+
+#[tokio::test]
+async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        override_builtins: ToolCategoryOverride::Disable,
+        provider_params: Some(json!({"web_search": {"type": "web_search"}})),
+        ..AgentBuildConfig::new("gpt-5.4")
+    };
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let params = client
+        .captured_params()
+        .expect("should have provider_params");
+    assert!(
+        params.get("web_search").is_some(),
+        "explicit provider search override should still be honored under explicit tool policy: {params}"
+    );
+}

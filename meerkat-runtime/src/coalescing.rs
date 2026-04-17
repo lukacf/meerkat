@@ -194,6 +194,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "progress".into(),
+            payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
             handling_mode: None,
         });
@@ -217,6 +218,7 @@ mod tests {
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
             body: "hello".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });

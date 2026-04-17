@@ -88,9 +88,10 @@ pub use meerkat_machine::{
     CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatMachine, RuntimeBindingsError,
 };
 pub use meerkat_machine_types::{
-    HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
-    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,
-    SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    HydratedSessionLlmState, RealtimeAttachmentSignalAuthority, RealtimeAttachmentStatus,
+    ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{

@@ -11,7 +11,9 @@ use meerkat_core::Session;
 use meerkat_core::comms::{CommsCommand, PeerDirectoryEntry, SendError, SendReceipt};
 use meerkat_core::event::AgentEvent;
 use meerkat_core::service::{CreateSessionRequest, SessionError, TurnToolOverlay};
-use meerkat_core::types::{HandlingMode, Message, RenderMetadata, RunResult, SessionId};
+use meerkat_core::types::{
+    AssistantBlock, HandlingMode, Message, RenderMetadata, RunResult, SessionId, StopReason, Usage,
+};
 use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use std::sync::Arc;
@@ -236,6 +238,13 @@ impl SessionAgent for FactoryAgent {
         }
     }
 
+    async fn dispatch_external_tool_call(
+        &mut self,
+        call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError> {
+        self.agent.dispatch_external_tool_call(call).await
+    }
+
     fn sync_system_context_state(&mut self) {
         self.agent.sync_system_context_state_to_session();
     }
@@ -272,6 +281,15 @@ impl SessionAgent for FactoryAgent {
         self.agent.tool_scope_snapshot()
     }
 
+    fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
+        self.agent
+            .tool_scope()
+            .visible_tools()
+            .iter()
+            .map(|tool| tool.as_ref().clone())
+            .collect()
+    }
+
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
         self.agent.external_tool_surface_snapshot()
     }
@@ -291,6 +309,31 @@ impl SessionAgent for FactoryAgent {
         self.agent
             .session_mut()
             .append_system_context_blocks(appends);
+    }
+
+    fn append_external_user_content(
+        &mut self,
+        content: meerkat_core::types::ContentInput,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .append_external_user_content(content);
+        Ok(())
+    }
+
+    fn append_external_assistant_output(
+        &mut self,
+        blocks: Vec<AssistantBlock>,
+        stop_reason: StopReason,
+        usage: Usage,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.session_mut().append_external_assistant_blocks(
+            blocks,
+            stop_reason,
+            usage.clone(),
+        );
+        self.agent.budget().record_usage(&usage);
+        Ok(())
     }
 
     fn system_context_state(

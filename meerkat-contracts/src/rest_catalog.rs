@@ -204,8 +204,36 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/realtime/open_info",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Get bootstrap metadata for opening a realtime channel",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/realtime/status",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Get product-layer realtime channel status for a target",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/realtime/capabilities",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Get product-layer realtime capabilities for a target",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/runtime/{id}/state",
             vec![RestOperationDescriptor::new("get", "Get runtime state")],
+        ),
+        RestPathDescriptor::new(
+            "/runtime/{id}/realtime_attachment_status",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get runtime-owned realtime attachment status for a session",
+            )],
         ),
         RestPathDescriptor::new(
             "/runtime/{id}/accept",
@@ -258,7 +286,21 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/mob/{id}/members/{agent_identity}/status",
             vec![RestOperationDescriptor::new(
                 "get",
-                "Get live status for a mob member",
+                "Get realtime attachment status for a mob member",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/realtime/attach",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Attach realtime attachment intent to a mob member",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/mob/{id}/members/{agent_identity}/realtime/detach",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Detach realtime attachment intent from a mob member",
             )],
         ),
         RestPathDescriptor::new(
@@ -300,7 +342,10 @@ mod tests {
             "/config",
             "/schedules",
             "/schedules/{id}/occurrences",
+            "/runtime/{id}/realtime_attachment_status",
             "/mob/{id}/members/{agent_identity}/status",
+            "/mob/{id}/members/{agent_identity}/realtime/attach",
+            "/mob/{id}/members/{agent_identity}/realtime/detach",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",
         ] {

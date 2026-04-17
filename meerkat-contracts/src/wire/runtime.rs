@@ -9,6 +9,13 @@ pub struct RuntimeStateParams {
     pub session_id: String,
 }
 
+/// Request payload for `runtime/realtime_attachment_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeRealtimeAttachmentStatusParams {
+    pub session_id: String,
+}
+
 /// Request payload for `runtime/accept`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -60,11 +67,31 @@ pub enum WireRuntimeState {
     Destroyed,
 }
 
+/// Public live attachment status projection used by runtime and mob surfaces.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireRealtimeAttachmentStatus {
+    Unattached,
+    IntentPresentUnbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+    ReattachRequired,
+}
+
 /// Response payload for `runtime/state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeStateResult {
     pub state: WireRuntimeState,
+}
+
+/// Response payload for `runtime/realtime_attachment_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RuntimeRealtimeAttachmentStatusResult {
+    pub status: WireRealtimeAttachmentStatus,
 }
 
 /// Discriminator for `runtime/accept` responses.

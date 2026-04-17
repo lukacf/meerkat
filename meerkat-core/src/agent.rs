@@ -537,6 +537,21 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Runtime-local advertised comms address, if available.
+    ///
+    /// This is the canonical address the runtime expects peers to use when
+    /// constructing a [`TrustedPeerSpec`]. Implementations that do not expose a
+    /// stable advertised address can return `None`.
+    fn advertised_address(&self) -> Option<String> {
+        None
+    }
+
+    /// Runtime-local bootstrap proof for the initial supervisor bind, if
+    /// available.
+    fn bridge_bootstrap_token(&self) -> Option<String> {
+        None
+    }
+
     /// Register a trusted peer for future peer sends.
     ///
     /// Runtimes that manage trust dynamically should accept this as a mutable

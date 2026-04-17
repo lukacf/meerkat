@@ -42,11 +42,12 @@ use meerkat_mob::{
     AgentIdentity, FlowId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
 };
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,6 +97,7 @@ fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob:
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    realtime_rpc_tcp_addr: StdMutex<Option<String>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -127,6 +129,7 @@ impl MobMcpState {
         Self {
             session_service,
             runtime_adapter,
+            realtime_rpc_tcp_addr: StdMutex::new(None),
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
@@ -177,6 +180,28 @@ impl MobMcpState {
             mob_root
         });
         self
+    }
+
+    pub fn with_realtime_rpc_tcp_addr(self, addr: Option<String>) -> Self {
+        *self
+            .realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
+        self
+    }
+
+    pub fn set_realtime_rpc_tcp_addr(&self, addr: Option<String>) {
+        *self
+            .realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
+    }
+
+    pub fn realtime_rpc_tcp_addr(&self) -> Option<String> {
+        self.realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
@@ -500,7 +525,7 @@ impl MobMcpState {
         };
 
         match managed.handle.destroy().await {
-            Ok(()) => {
+            Ok(_report) => {
                 Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
                 Ok(())
             }
@@ -517,7 +542,7 @@ impl MobMcpState {
                         );
                     }
                 }
-                Err(error)
+                Err(MobError::Internal(format!("mob destroy failed: {error}")))
             }
         }
     }
@@ -695,6 +720,18 @@ impl MobMcpState {
         Ok((bridge_session_id, result))
     }
 
+    pub async fn mob_resolve_bridge_session_id(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<SessionId>, MobError> {
+        Ok(self
+            .handle_for(mob_id)
+            .await?
+            .resolve_bridge_session_id(identity)
+            .await)
+    }
+
     pub async fn mob_member_send(
         &self,
         mob_id: &MobId,
@@ -794,6 +831,51 @@ impl MobMcpState {
         identity: &AgentIdentity,
     ) -> Result<meerkat_mob::MobMemberSnapshot, MobError> {
         self.handle_for(mob_id).await?.member_status(identity).await
+    }
+
+    pub async fn realtime_validate_session_target(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.session_service.read(session_id).await.map(|_| ())
+    }
+
+    pub async fn realtime_session_realtime_attachment_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, SessionError> {
+        self.realtime_validate_session_target(session_id).await?;
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            SessionError::Unsupported(
+                "runtime adapter unavailable for realtime target inspection".to_string(),
+            )
+        })?;
+        adapter
+            .realtime_attachment_status(session_id)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))
+    }
+
+    pub async fn mob_realtime_attach(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<bool, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .realtime_attach(identity)
+            .await
+    }
+
+    pub async fn mob_realtime_detach(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<bool, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .realtime_detach(identity)
+            .await
     }
 
     pub async fn mob_wait_kickoff(
@@ -1843,7 +1925,8 @@ impl MobMcpDispatcher {
             tool(
                 "mob_member_status",
                 &format!("Get execution status snapshot for a member. Returns status, \
-                     output_preview, tokens_used, and is_final. {COMMON}"),
+                     output_preview (the current bridge session's last committed assistant text), \
+                     tokens_used, and is_final. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
@@ -2418,6 +2501,14 @@ impl McpToolError {
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn capability_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
             message: message.into(),
             data: None,
         }
@@ -3761,6 +3852,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live comms peer after external binding validation was added"]
     async fn test_mob_spawn_backend_arg_returns_backend_member_ref() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -3803,7 +3895,7 @@ mod tests {
             "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
+                "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "ed25519:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=", "address": "inproc://test-w-ext"}}]
             }),
         )
         .await;

@@ -173,23 +173,31 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // PeerInput(ResponseTerminal) — StageRunStart, WakeIfIdle/None
+            // PeerInput(ResponseTerminal) — InjectNow, WakeIfIdle
+            //
+            // Even while a run is currently active, terminal peer responses
+            // must request a loop wake so they cannot strand in the queue after
+            // the active turn finishes. The runtime now projects these inputs
+            // onto the durable system-context append path instead of staging
+            // them as ordinary user appends, because terminal peer responses
+            // are authoritative semantic facts for later turns rather than
+            // transient next-turn prompts.
             ("peer_response_terminal", true) => pd(
-                ApplyMode::StageRunStart,
+                ApplyMode::InjectNow,
                 WakeMode::WakeIfIdle,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                DrainPolicy::QueueNextTurn,
-                RoutingDisposition::Queue,
+                QueueMode::None,
+                ConsumePoint::OnApply,
+                DrainPolicy::Immediate,
+                RoutingDisposition::Immediate,
                 true,
             ),
             ("peer_response_terminal", false) => pd(
-                ApplyMode::StageRunStart,
-                WakeMode::None,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                DrainPolicy::QueueNextTurn,
-                RoutingDisposition::Queue,
+                ApplyMode::InjectNow,
+                WakeMode::WakeIfIdle,
+                QueueMode::None,
+                ConsumePoint::OnApply,
+                DrainPolicy::Immediate,
+                RoutingDisposition::Immediate,
                 true,
             ),
 
@@ -417,10 +425,10 @@ mod tests {
         assert_cell(
             "peer_response_terminal",
             true,
-            ApplyMode::StageRunStart,
+            ApplyMode::InjectNow,
             WakeMode::WakeIfIdle,
-            QueueMode::Fifo,
-            ConsumePoint::OnRunComplete,
+            QueueMode::None,
+            ConsumePoint::OnApply,
             true,
         );
     }
@@ -429,10 +437,10 @@ mod tests {
         assert_cell(
             "peer_response_terminal",
             false,
-            ApplyMode::StageRunStart,
-            WakeMode::None,
-            QueueMode::Fifo,
-            ConsumePoint::OnRunComplete,
+            ApplyMode::InjectNow,
+            WakeMode::WakeIfIdle,
+            QueueMode::None,
+            ConsumePoint::OnApply,
             true,
         );
     }
@@ -664,6 +672,7 @@ mod tests {
             },
             convention,
             body: "test".into(),
+            payload: None,
             blocks: None,
             handling_mode,
         })
@@ -778,9 +787,11 @@ mod tests {
             None,
         );
         let decision = DefaultPolicyTable::resolve(&input, true);
-        // Kind default for peer_response_terminal idle: Queue, StageRunStart, WakeIfIdle
-        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
-        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+        // Kind default for peer_response_terminal idle: Immediate durable
+        // context projection with WakeIfIdle so later turns can observe the
+        // authoritative result without helper-local shadow state.
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Immediate);
+        assert_eq!(decision.apply_mode, ApplyMode::InjectNow);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
     }
 }

@@ -65,7 +65,11 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `session/inject_context` | Session | Append runtime-backed system context to the next turn |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
+| `realtime/open_info` | Realtime | Get bootstrap metadata for opening a realtime channel |
+| `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
+| `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
 | `runtime/state` | Runtime | Read runtime-backed ingress state |
+| `runtime/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status |
 | `runtime/accept` | Runtime | Admit external work directly into runtime ingress |
 | `runtime/retire` | Runtime | Retire runtime-backed ingress |
 | `runtime/reset` | Runtime | Reset runtime-backed ingress |
@@ -96,6 +100,8 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/spawn_helper` | Mob | Spawn a helper member and wait for its result (mob feature) |
 | `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
+| `mob/realtime_attach` | Mob | Attach realtime attachment intent to a member (mob feature) |
+| `mob/realtime_detach` | Mob | Detach realtime attachment intent from a member (mob feature) |
 | `mob/turn_start` | Mob | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
 | `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
@@ -129,6 +135,11 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 
 <Note>
 `runtime/*` and `input/*` methods are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.
+</Note>
+
+<Note>
+Public documentation uses `runtime/realtime_attachment_status`,
+`mob/realtime_attach`, and `mob/realtime_detach` for the realtime attachment capability.
 </Note>
 
 <Note>
@@ -198,7 +209,8 @@ Handshake. Returns server capabilities.
       "config/get", "config/set", "config/patch",
       "capabilities/get", "models/catalog",
       "skills/list", "skills/inspect",
-      "runtime/state", "runtime/accept", "runtime/retire", "runtime/reset",
+      "realtime/open_info", "realtime/status", "realtime/capabilities",
+      "runtime/state", "runtime/realtime_attachment_status", "runtime/accept", "runtime/retire", "runtime/reset",
       "input/state", "input/list",
       "session/stream_open", "session/stream_close",
       "mob/create", "mob/list", "mob/status",
@@ -208,7 +220,7 @@ Handshake. Returns server capabilities.
       "mob/events", "mob/stream_open", "mob/stream_close",
       "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
       "mob/flow_status", "mob/flow_cancel",
-      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
+      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/realtime_attach", "mob/realtime_detach", "mob/member_status",
       "mob/wait_kickoff", "mob/turn_start",
       "mob/profile/create", "mob/profile/get", "mob/profile/list",
       "mob/profile/update", "mob/profile/delete",

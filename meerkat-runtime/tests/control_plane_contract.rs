@@ -47,6 +47,7 @@ fn make_progress_input(label: &str) -> Input {
             phase: ResponseProgressPhase::InProgress,
         }),
         body: format!("progress-{label}"),
+        payload: Some(serde_json::json!({ "label": label })),
         blocks: None,
         handling_mode: None,
     })

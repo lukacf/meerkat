@@ -72,6 +72,26 @@ function includeScenario(id) {
   return true;
 }
 
+async function withoutOpenAiRealtimeEnv(run) {
+  const keys = ["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"];
+  const saved = new Map();
+  for (const key of keys) {
+    saved.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of saved.entries()) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 function logScenarioStep(scenario, step) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${scenario}: ${step}`);
@@ -117,10 +137,11 @@ async function waitFor(fetch, predicate, { timeoutMs = 60000, intervalMs = 200 }
 
 describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
   let MeerkatClient;
+  let RealtimeChannel;
   const clients = [];
 
   before(async () => {
-    ({ MeerkatClient } = await import("../dist/index.js"));
+    ({ MeerkatClient, RealtimeChannel } = await import("../dist/index.js"));
   });
 
   afterEach(async () => {
@@ -469,6 +490,114 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         assert.match(String(error), /definitely-invalid-live-smoke-model/);
       }
       },
+    );
+  }
+
+  if (includeScenario(59)) {
+    it(
+      "Scenario 59: realtime channel session exchange through the packaged SDK",
+      { skip: !hasAnthropicKey() },
+      async () => withoutOpenAiRealtimeEnv(async () => {
+      const scenario = "Scenario 59";
+      const client = await withStepTimeout(
+        scenario,
+        "connect isolated client",
+        connectClient({ isolated: true }),
+      );
+
+      const session = await withStepTimeout(
+        scenario,
+        "create session",
+        client.createSession(
+        "When asked through realtime, reply with TS-REALTIME-59 and mention cedar.",
+        {
+          model: anthropicModel(),
+          provider: "anthropic",
+        },
+        ),
+      );
+      assert.ok(session.id);
+
+      const channel = RealtimeChannel.session(client, session.id);
+      const openInfo = await withStepTimeout(
+        scenario,
+        "request realtime open info",
+        channel.openInfo(),
+      );
+      assert.match(openInfo.ws_url, /^ws:\/\//);
+      assert.ok(openInfo.default_protocol_version);
+
+      const connection = await withStepTimeout(
+        scenario,
+        "connect realtime websocket",
+        channel.connect(),
+      );
+      await withStepTimeout(
+        scenario,
+        "send realtime text chunk",
+        connection.sendInput({
+          kind: "text_chunk",
+          text: "Reply with TS-REALTIME-59 and the word cedar.",
+        }),
+      );
+
+      const frames = [];
+      await withStepTimeout(scenario, "receive realtime turn commit", (async () => {
+        while (true) {
+          const frame = await connection.nextFrame();
+          assert.notEqual(frame, null, "realtime websocket closed before turn commit");
+          if (frame.type === "channel.error") {
+            throw new Error(`realtime channel error: ${JSON.stringify(frame)}`);
+          }
+          frames.push(frame);
+          if (frame.type === "channel.event" && frame.event?.type === "turn_committed") {
+            break;
+          }
+        }
+      })());
+
+      const eventTypes = frames
+        .filter((frame) => frame.type === "channel.event" && frame.event?.type)
+        .map((frame) => frame.event.type);
+      assert.deepEqual(eventTypes.slice(0, 4), [
+        "turn_started",
+        "input_transcript_partial",
+        "input_transcript_final",
+        "turn_committed",
+      ]);
+
+      const sessionState = await waitFor(
+        async () => withStepTimeout(scenario, "poll session after realtime turn", client.readSession(session.id)),
+        (state) => (state.lastAssistantText || "").toLowerCase().includes("ts-realtime-59"),
+        { timeoutMs: 120000, intervalMs: 500 },
+      );
+      const lastText = (sessionState.lastAssistantText || "").toLowerCase();
+      assert.ok(lastText.includes("ts-realtime-59"));
+      assert.ok(lastText.includes("cedar"));
+
+      const history = await withStepTimeout(
+        scenario,
+        "read session history",
+        client.readSessionHistory(session.id),
+      );
+      assert.ok(history.messages.some(
+        (message) =>
+          message.role === "user"
+          && typeof message.content === "string"
+          && message.content.includes("Reply with TS-REALTIME-59 and the word cedar."),
+      ));
+
+      await withStepTimeout(scenario, "close realtime channel", connection.close());
+      const closed = await withStepTimeout(scenario, "wait for realtime close", (async () => {
+        while (true) {
+          const frame = await connection.nextFrame();
+          if (frame?.type === "channel.closed") {
+            return frame;
+          }
+        }
+      })());
+      assert.equal(closed.type, "channel.closed");
+      }),
     );
   }
 });

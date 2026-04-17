@@ -7,8 +7,6 @@
 use crate::error::MobError;
 use crate::ids::MeerkatId;
 use crate::roster::RosterEntry;
-use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // DisposalStep
@@ -38,15 +36,17 @@ pub(super) enum DisposalStep {
     StopHostLoop,
     NotifyPeers,
     RemoveTrustEdges,
+    RealtimeDetach,
     ArchiveSession,
 }
 
 impl DisposalStep {
     /// The ordered sequence of policy-driven steps.
-    pub(super) const ORDERED: [DisposalStep; 4] = [
+    pub(super) const ORDERED: [DisposalStep; 5] = [
         DisposalStep::StopHostLoop,
         DisposalStep::NotifyPeers,
         DisposalStep::RemoveTrustEdges,
+        DisposalStep::RealtimeDetach,
         DisposalStep::ArchiveSession,
     ];
 
@@ -63,6 +63,7 @@ impl std::fmt::Display for DisposalStep {
             Self::StopHostLoop => f.write_str("StopHostLoop"),
             Self::NotifyPeers => f.write_str("NotifyPeers"),
             Self::RemoveTrustEdges => f.write_str("RemoveTrustEdges"),
+            Self::RealtimeDetach => f.write_str("RealtimeDetach"),
             Self::ArchiveSession => f.write_str("ArchiveSession"),
         }
     }
@@ -78,8 +79,8 @@ impl std::fmt::Display for DisposalStep {
 pub(super) struct DisposalContext {
     pub(crate) meerkat_id: MeerkatId,
     pub entry: RosterEntry,
-    pub retiring_comms: Option<Arc<dyn CoreCommsRuntime>>,
     pub retiring_key: Option<String>,
+    pub clear_voice_intent: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,15 +229,32 @@ mod tests {
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,
                 state: MemberState::Retiring,
+                voice_intent_present: false,
                 wired_to: BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
                 kickoff: None,
                 effective_profile_override: None,
             },
-            retiring_comms: None,
             retiring_key: None,
+            clear_voice_intent: false,
         }
+    }
+
+    #[test]
+    fn realtime_detach_step_runs_before_archive_session() {
+        let realtime_detach_index = DisposalStep::ORDERED
+            .iter()
+            .position(|step| *step == DisposalStep::RealtimeDetach)
+            .expect("live detach step");
+        let archive_index = DisposalStep::ORDERED
+            .iter()
+            .position(|step| *step == DisposalStep::ArchiveSession)
+            .expect("archive step");
+        assert!(
+            realtime_detach_index < archive_index,
+            "live detach must run before archive session"
+        );
     }
 
     fn test_error() -> MobError {

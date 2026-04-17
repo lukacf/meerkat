@@ -25,7 +25,7 @@ use meerkat::{
     PersistentSessionService, ScheduleService, ScheduleToolDispatcher,
     encode_llm_client_override_for_service,
 };
-use meerkat_client::LlmClient;
+use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
 use meerkat_core::EventEnvelope;
 use meerkat_core::RunId;
 #[cfg(all(test, feature = "mcp"))]
@@ -37,17 +37,17 @@ use meerkat_core::lifecycle::run_primitive::{
 };
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    DeferredPromptPolicy, SessionBuildOptions, SessionControlError, SessionError,
-    SessionHistoryQuery, SessionQuery, SessionService, SessionServiceControlExt,
-    SessionServiceHistoryExt, StartTurnRequest,
+    DeferredPromptPolicy, SessionControlError, SessionError, SessionHistoryQuery, SessionQuery,
+    SessionService, SessionServiceControlExt, SessionServiceHistoryExt, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
-use meerkat_core::types::{RunResult, SessionId};
+use meerkat_core::types::{Message, RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{
-    Config, ConfigStore, ContentInput, HookRunOverrides, PendingSystemContextAppend, Session,
-    SessionLlmIdentity, SessionSystemContextState,
+    Config, ConfigStore, ContentInput, PendingSystemContextAppend, Session, SessionLlmIdentity,
+    SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
+    SurfaceSessionRecoveryOverrides, SystemMessage, build_recovered_session,
 };
 use meerkat_runtime::RuntimeDriverError;
 use meerkat_runtime::{
@@ -95,6 +95,79 @@ fn pending_system_context_appends(
             accepted_at,
         })
         .collect()
+}
+
+fn render_runtime_system_context_message(append: &PendingSystemContextAppend) -> Message {
+    let mut content = String::from("[Runtime System Context]");
+    if let Some(source) = &append.source {
+        content.push_str("\nsource: ");
+        content.push_str(source);
+    }
+    content.push_str("\n\n");
+    content.push_str(&append.text);
+    Message::System(SystemMessage { content })
+}
+
+fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
+    let build_state = session.build_state().unwrap_or_default();
+    let mut content = build_state
+        .system_prompt
+        .or_else(|| {
+            session
+                .messages()
+                .first()
+                .and_then(|message| match message {
+                    Message::System(system) => Some(system.content.clone()),
+                    Message::SystemNotice(notice) => Some(notice.rendered_text()),
+                    _ => None,
+                })
+        })
+        .unwrap_or_default();
+
+    if let Some(additional_instructions) = build_state.additional_instructions
+        && !additional_instructions.is_empty()
+    {
+        if !content.trim().is_empty() {
+            content.push_str("\n\n");
+        }
+        content.push_str("[Session Build Instructions]");
+        for instruction in additional_instructions {
+            let instruction = instruction.trim();
+            if instruction.is_empty() {
+                continue;
+            }
+            content.push_str("\n- ");
+            content.push_str(instruction);
+        }
+    }
+
+    if content.trim().is_empty() {
+        None
+    } else {
+        Some(Message::System(SystemMessage { content }))
+    }
+}
+
+fn realtime_projection_messages(session: &Session) -> Vec<Message> {
+    let mut projected = session.messages().to_vec();
+    if let Some(root_system) = realtime_projection_root_system_message(session) {
+        match projected.first() {
+            Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
+            _ => projected.insert(0, root_system),
+        }
+    }
+    let pending = session.system_context_state().unwrap_or_default().pending;
+    if !pending.is_empty() {
+        // Projection-only and rebuildable:
+        // runtime-owned system-context appends are canonical in live session
+        // metadata, not in transcript messages. For provider reconstruction we
+        // preserve those appends as explicit synthetic system history items
+        // instead of burying them inside the root instruction string. That
+        // keeps async runtime facts closer to the way the local runtime applies
+        // them: authoritative, replayable, and distinct from the base prompt.
+        projected.extend(pending.iter().map(render_runtime_system_context_message));
+    }
+    projected
 }
 
 #[cfg(test)]
@@ -787,6 +860,123 @@ impl SessionRuntime {
         self.runtime_adapter.clone()
     }
 
+    /// Project the owning live session into the provider-backed realtime open seam.
+    pub async fn realtime_session_open_config(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+        let session = self.service.export_live_session(session_id).await?;
+        let llm_identity = self.service.live_session_llm_identity(session_id).await?;
+        let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
+        Ok(RealtimeSessionOpenConfig::new(
+            turning_mode,
+            llm_identity,
+            visible_tools,
+            realtime_projection_messages(&session),
+        ))
+    }
+
+    fn recovery_overrides_from_turn(
+        &self,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        keep_alive: bool,
+    ) -> Result<SurfaceSessionRecoveryOverrides, RpcError> {
+        let output_schema = match overrides.and_then(|ov| ov.output_schema.clone()) {
+            Some(value) => Some(meerkat_core::OutputSchema::from_json_value(value).map_err(
+                |e| RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: format!("Invalid output_schema override: {e}"),
+                    data: None,
+                },
+            )?),
+            None => None,
+        };
+
+        Ok(SurfaceSessionRecoveryOverrides {
+            model: overrides.and_then(|ov| ov.model.clone()),
+            provider: overrides.and_then(|ov| {
+                ov.provider
+                    .as_ref()
+                    .map(|provider| meerkat_core::Provider::from_name(provider))
+            }),
+            provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
+            max_tokens: overrides.and_then(|ov| ov.max_tokens),
+            system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
+            output_schema,
+            structured_output_retries: overrides.and_then(|ov| ov.structured_output_retries),
+            keep_alive: Some(keep_alive),
+            ..Default::default()
+        })
+    }
+
+    fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        let tx = self.callback_request_tx()?;
+        Some(
+            Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
+                self.registered_tools(),
+                tx,
+                self.callback_id_counter(),
+                vec![],
+            )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
+        )
+    }
+
+    fn recovery_error_to_rpc(error: SurfaceSessionRecoveryError) -> RpcError {
+        match error {
+            SurfaceSessionRecoveryError::InvalidOverride(message) => RpcError {
+                code: error::INVALID_PARAMS,
+                message,
+                data: None,
+            },
+            other => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: other.to_string(),
+                data: None,
+            },
+        }
+    }
+
+    async fn recovered_create_request(
+        &self,
+        session_id: &SessionId,
+        session: Session,
+        overrides: SurfaceSessionRecoveryOverrides,
+    ) -> Result<CreateSessionRequest, RpcError> {
+        let current_generation = match self.config_runtime() {
+            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
+            None => None,
+        };
+        let bindings = self
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!(
+                    "failed to prepare runtime bindings for session {session_id}: {e}"
+                ),
+                data: None,
+            })?;
+        let recovered = build_recovered_session(
+            session,
+            &overrides,
+            SurfaceSessionRecoveryContext {
+                llm_client_override: self
+                    .default_llm_client()
+                    .map(encode_llm_client_override_for_service),
+                external_tools: self.recovery_external_tools(),
+                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                realm_id: self.realm_id.clone(),
+                instance_id: self.instance_id.clone(),
+                backend: self.backend.clone(),
+                config_generation: current_generation,
+            },
+        )
+        .map_err(Self::recovery_error_to_rpc)?;
+        Ok(recovered.into_deferred_create_request())
+    }
+
     pub fn schedule_service(&self) -> ScheduleService {
         self.schedule_service.clone()
     }
@@ -1225,6 +1415,38 @@ impl SessionRuntime {
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.service.discard_live_session(session_id).await
+    }
+
+    pub async fn dispatch_external_tool_call(
+        &self,
+        session_id: &SessionId,
+        call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        self.service
+            .dispatch_external_tool_call(session_id, call)
+            .await
+    }
+
+    pub async fn append_external_user_content(
+        &self,
+        session_id: &SessionId,
+        content: meerkat_core::types::ContentInput,
+    ) -> Result<(), SessionError> {
+        self.service
+            .append_external_user_content(session_id, content)
+            .await
+    }
+
+    pub async fn append_external_assistant_output(
+        &self,
+        session_id: &SessionId,
+        blocks: Vec<meerkat_core::types::AssistantBlock>,
+        stop_reason: meerkat_core::types::StopReason,
+        usage: meerkat_core::types::Usage,
+    ) -> Result<(), SessionError> {
+        self.service
+            .append_external_assistant_output(session_id, blocks, stop_reason, usage)
+            .await
     }
 
     #[cfg(feature = "mob")]
@@ -1980,124 +2202,13 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
-        let stored_metadata = stored_session.session_metadata();
-        let tooling = stored_metadata
-            .as_ref()
-            .map(|meta| meta.tooling.clone())
-            .unwrap_or_default();
-        let current_generation = match self.config_runtime() {
-            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
-            None => None,
-        };
-        let bindings = self
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!(
-                    "failed to prepare runtime bindings for session {session_id}: {e}"
-                ),
-                data: None,
-            })?;
-        let mut build = SessionBuildOptions {
-            provider: stored_metadata.as_ref().map(|meta| meta.provider),
-            self_hosted_server_id: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.self_hosted_server_id.clone()),
-            output_schema: None,
-            structured_output_retries: 2,
-            hooks_override: HookRunOverrides::default(),
-            comms_name: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.comms_name.clone()),
-            peer_meta: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.peer_meta.clone()),
-            resume_session: Some(stored_session),
-            budget_limits: None,
-            provider_params: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.provider_params.clone()),
-            call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
-            external_tools: None,
-            recoverable_tool_defs: None,
-            llm_client_override: self
-                .default_llm_client()
-                .map(encode_llm_client_override_for_service),
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-            override_builtins: tooling.builtins,
-            override_shell: tooling.shell,
-            override_memory: tooling.memory,
-            override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
-            override_mob: meerkat_core::ToolCategoryOverride::Inherit,
-            schedule_tools: None,
-            mob_tool_authority_context: None,
-            preload_skills: tooling.active_skills.clone(),
-            realm_id: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.realm_id.clone())
-                .or_else(|| self.realm_id.clone()),
-            instance_id: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.instance_id.clone())
-                .or_else(|| self.instance_id.clone()),
-            backend: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.backend.clone())
-                .or_else(|| self.backend.clone()),
-            config_generation: stored_metadata
-                .as_ref()
-                .and_then(|meta| meta.config_generation)
-                .or(current_generation),
-            keep_alive: stored_metadata
-                .as_ref()
-                .map(|meta| meta.keep_alive)
-                .unwrap_or(false),
-            checkpointer: None,
-            silent_comms_intents: Vec::new(),
-            max_inline_peer_notifications: None,
-            app_context: None,
-            additional_instructions: None,
-            shell_env: None,
-            resume_override_mask: Default::default(),
-            blob_store_override: None,
-            mob_tools: None,
-        };
-        build.apply_persisted_mob_operator_access(
-            tooling.mob,
-            build
-                .resume_session
-                .as_ref()
-                .and_then(Session::mob_tool_authority_context),
-        );
+        let recovery_overrides =
+            self.recovery_overrides_from_turn(overrides.as_ref(), keep_alive)?;
+        let create_request = self
+            .recovered_create_request(session_id, stored_session, recovery_overrides)
+            .await?;
         self.service
-            .create_session(CreateSessionRequest {
-                model: stored_metadata
-                    .as_ref()
-                    .map(|meta| meta.model.clone())
-                    .ok_or_else(|| RpcError {
-                        code: error::INTERNAL_ERROR,
-                        message: format!(
-                            "persisted session {session_id} is missing session metadata"
-                        ),
-                        data: None,
-                    })?,
-                prompt: prompt.clone(),
-                render_metadata: None,
-                system_prompt: overrides.as_ref().and_then(|ov| ov.system_prompt.clone()),
-                max_tokens: overrides
-                    .as_ref()
-                    .and_then(|ov| ov.max_tokens)
-                    .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens)),
-                event_tx: None,
-
-                skill_references: skill_references.clone(),
-                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(build),
-                labels: None,
-            })
+            .create_session(create_request)
             .await
             .map_err(session_error_to_rpc)?;
         #[cfg(feature = "comms")]
@@ -2640,11 +2751,7 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
     ) -> Result<RunResult, RpcError> {
-        let loaded_session = self
-            .service
-            .load_persisted(session_id)
-            .await
-            .map_err(session_error_to_rpc)?;
+        let loaded_session = self.load_persisted_session(session_id).await?;
 
         let Some(session) = loaded_session else {
             return Err(RpcError {
@@ -2661,63 +2768,22 @@ impl SessionRuntime {
             });
         }
 
-        let stored_metadata = session.session_metadata();
-
-        // Build config from stored metadata.
-        let model = stored_metadata
-            .as_ref()
-            .map(|m| m.model.clone())
-            .unwrap_or_else(|| {
-                meerkat_models::default_model("anthropic")
-                    .unwrap_or("claude-sonnet-4-5")
-                    .to_string()
-            });
+        let recovery_overrides = self.recovery_overrides_from_turn(None, keep_alive)?;
+        let create_request = self
+            .recovered_create_request(session_id, session, recovery_overrides)
+            .await?;
+        let build = create_request.build.clone().ok_or_else(|| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!(
+                "recovered create request for session {session_id} is missing build options"
+            ),
+            data: None,
+        })?;
+        let model = create_request.model.clone();
         let mut build_config = AgentBuildConfig::new(model);
-        build_config.resume_session = Some(session);
-
-        if let Some(ref meta) = stored_metadata {
-            build_config.provider = Some(meta.provider);
-            build_config.self_hosted_server_id = meta.self_hosted_server_id.clone();
-            build_config.provider_params = meta.provider_params.clone();
-            build_config.max_tokens = Some(meta.max_tokens);
-            build_config.keep_alive = meta.keep_alive;
-            build_config.comms_name = meta.comms_name.clone();
-            build_config.peer_meta = meta.peer_meta.clone();
-            build_config.override_builtins = meta.tooling.builtins;
-            build_config.override_shell = meta.tooling.shell;
-            build_config.override_memory = meta.tooling.memory;
-            build_config.preload_skills = meta.tooling.active_skills.clone();
-            build_config.apply_persisted_mob_operator_access(
-                meta.tooling.mob,
-                build_config
-                    .resume_session
-                    .as_ref()
-                    .and_then(Session::mob_tool_authority_context),
-            );
-        }
-
-        // Apply caller-requested keep_alive override unconditionally.
-        // This allows an explicit keep_alive=false to clear a persisted true.
-        build_config.keep_alive = keep_alive;
-
-        // Inject default LLM client if available.
-        if let Some(client) = self.default_llm_client() {
-            build_config.llm_client_override = Some(client);
-        }
-
-        // Restore callback tools backed by the live registered_tools list.
-        // The dynamic dispatcher picks up tools registered later via
-        // tools/register at each turn boundary (poll_external_updates).
-        if let Some(tx) = self.callback_request_tx() {
-            let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> =
-                Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
-                    self.registered_tools(),
-                    tx,
-                    self.callback_id_counter(),
-                    vec![],
-                ));
-            build_config.external_tools = Some(dispatcher);
-        }
+        build_config.apply_session_build_options(&build);
+        build_config.system_prompt = create_request.system_prompt.clone();
+        build_config.max_tokens = create_request.max_tokens;
 
         // Stage as pending and re-enter the materialization path.
         // Labels are managed by the session service — pass None so
@@ -2941,7 +3007,7 @@ impl SessionRuntime {
         session_id: &SessionId,
     ) -> Result<Option<Session>, RpcError> {
         self.service
-            .load_persisted(session_id)
+            .load_authoritative_session(session_id)
             .await
             .map_err(session_error_to_rpc)
     }
@@ -3175,6 +3241,17 @@ impl SessionRuntime {
         session_id: &meerkat_core::SessionId,
     ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
         self.service.subscribe_session_events(session_id).await
+    }
+
+    /// Wait until a live session's authoritative summary timestamp advances.
+    pub async fn wait_for_session_mutation_after(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        after: std::time::SystemTime,
+    ) -> Result<std::time::SystemTime, meerkat_core::StreamError> {
+        self.service
+            .wait_for_session_mutation_after(session_id, after)
+            .await
     }
 
     /// Get the comms runtime for a session, if available.
@@ -3738,6 +3815,832 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn realtime_open_config_projects_pending_system_context_into_seed_messages() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst:req-123".to_string()),
+                },
+            )
+            .await
+            .expect("append_system_context");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+
+        let system_messages = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            system_messages.iter().any(|text| {
+                text.contains("[Runtime System Context]")
+                    && text.contains("Authoritative peer token is birch seventeen.")
+            }),
+            "projected realtime seed messages should include pending runtime system context: {system_messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_projects_build_state_additional_instructions_into_root_system_message()
+     {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-build-state".to_string());
+        build.system_prompt = Some("You are the realtime operator.".to_string());
+        build.additional_instructions = Some(vec![
+            "Remember user-provided codewords verbatim.".to_string(),
+            "Use the most recent authoritative terminal peer response.".to_string(),
+        ]);
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+
+        let root_system = open_config
+            .seed_messages
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .expect("expected root system projection");
+
+        assert!(
+            root_system.contains("You are the realtime operator."),
+            "expected root system prompt to preserve canonical build-state system prompt: {root_system}"
+        );
+        assert!(
+            root_system.contains("[Session Build Instructions]"),
+            "expected root system prompt to render durable build-state instructions: {root_system}"
+        );
+        assert!(
+            root_system.contains("Remember user-provided codewords verbatim.")
+                && root_system
+                    .contains("Use the most recent authoritative terminal peer response."),
+            "expected root system prompt to include all durable additional instructions: {root_system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_restores_build_state_additional_instructions_into_realtime_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.system_prompt = Some("You are the recovered realtime operator.".to_string());
+        build.additional_instructions = Some(vec![
+            "Remember user-provided codewords verbatim.".to_string(),
+            "Prefer the latest authoritative peer response over stale memory.".to_string(),
+        ]);
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard_live_session");
+        runtime
+            .runtime_adapter()
+            .unregister_session(&session_id)
+            .await;
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .try_recover_persisted_session(
+                &session_id,
+                "Recover".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("try_recover_persisted_session");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+
+        let root_system = open_config
+            .seed_messages
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .expect("expected root system projection after recovery");
+
+        assert!(
+            root_system.contains("You are the recovered realtime operator."),
+            "expected recovered realtime projection to preserve canonical system prompt: {root_system}"
+        );
+        assert!(
+            root_system.contains("[Session Build Instructions]"),
+            "expected recovered realtime projection to render durable build-state instructions: {root_system}"
+        );
+        assert!(
+            root_system.contains("Remember user-provided codewords verbatim.")
+                && root_system
+                    .contains("Prefer the latest authoritative peer response over stale memory."),
+            "expected recovered realtime projection to include all durable additional instructions: {root_system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_includes_runtime_owned_terminal_peer_response_projection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut base_runtime = make_runtime(temp_factory(&temp), 10);
+        base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(base_runtime);
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-peer-response".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        runtime
+            .runtime_adapter()
+            .accept_input(
+                &session_id,
+                meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    header: meerkat_runtime::InputHeader {
+                        id: meerkat_core::lifecycle::InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: meerkat_runtime::InputOrigin::Peer {
+                            peer_id: "analyst-rt".to_string(),
+                            runtime_id: None,
+                        },
+                        durability: meerkat_runtime::InputDurability::Durable,
+                        visibility: meerkat_runtime::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
+                        request_id: "req-123".to_string(),
+                        status: meerkat_runtime::ResponseTerminalStatus::Completed,
+                    }),
+                    body: "done".to_string(),
+                    payload: Some(serde_json::json!({
+                        "request_intent": "checksum_token",
+                        "token": "birch seventeen",
+                    })),
+                    blocks: None,
+                    handling_mode: None,
+                }),
+            )
+            .await
+            .expect("accept terminal peer response");
+
+        let open_config = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let open_config = runtime
+                    .realtime_session_open_config(
+                        &session_id,
+                        meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                    )
+                    .await
+                    .expect("realtime_session_open_config");
+                let projected = open_config
+                    .seed_messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::System(system) => Some(system.content.to_lowercase()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if projected.iter().any(|text| {
+                    text.contains("peer_response_terminal:analyst-rt:req-123")
+                        && text.contains("birch seventeen")
+                }) {
+                    break open_config;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("terminal peer response should reach realtime projection");
+
+        let projected = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.to_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected realtime projection to include runtime-owned terminal peer response: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_restores_runtime_owned_terminal_peer_response_from_authoritative_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut base_runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        base_runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(base_runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        runtime
+            .runtime_adapter()
+            .accept_input(
+                &session_id,
+                meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    header: meerkat_runtime::InputHeader {
+                        id: meerkat_core::lifecycle::InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: meerkat_runtime::InputOrigin::Peer {
+                            peer_id: "analyst-rt".to_string(),
+                            runtime_id: None,
+                        },
+                        durability: meerkat_runtime::InputDurability::Durable,
+                        visibility: meerkat_runtime::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
+                        request_id: "req-123".to_string(),
+                        status: meerkat_runtime::ResponseTerminalStatus::Completed,
+                    }),
+                    body: "done".to_string(),
+                    payload: Some(serde_json::json!({
+                        "request_intent": "checksum_token",
+                        "token": "birch seventeen",
+                    })),
+                    blocks: None,
+                    handling_mode: None,
+                }),
+            )
+            .await
+            .expect("accept terminal peer response");
+
+        let authoritative = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let Some(session) = runtime
+                    .load_persisted_session(&session_id)
+                    .await
+                    .expect("load authoritative session")
+                else {
+                    panic!("authoritative session missing");
+                };
+                let projected = session
+                    .messages()
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::System(system) => Some(system.content.to_lowercase()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if projected.iter().any(|text| {
+                    text.contains("peer_response_terminal:analyst-rt:req-123")
+                        && text.contains("birch seventeen")
+                }) {
+                    break session;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("authoritative snapshot should include terminal peer response");
+
+        let authoritative_projected = authoritative
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.to_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            authoritative_projected.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected authoritative snapshot to include runtime-owned terminal peer response: {authoritative_projected:?}"
+        );
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard_live_session");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .try_recover_persisted_session(
+                &session_id,
+                "Recover".into(),
+                event_tx,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("try_recover_persisted_session");
+
+        let open_config = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let open_config = runtime
+                    .realtime_session_open_config(
+                        &session_id,
+                        meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                    )
+                    .await
+                    .expect("realtime_session_open_config");
+                let projected = open_config
+                    .seed_messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::System(system) => Some(system.content.to_lowercase()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if projected.iter().any(|text| {
+                    text.contains("peer_response_terminal:analyst-rt:req-123")
+                        && text.contains("birch seventeen")
+                }) {
+                    break open_config;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("recovered realtime projection should include terminal peer response");
+
+        let projected = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.to_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected recovered realtime projection to include authoritative terminal peer response: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_input_with_completion_persists_runtime_owned_terminal_peer_response() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        let (_outcome, handle) = runtime
+            .runtime_adapter()
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    header: meerkat_runtime::InputHeader {
+                        id: meerkat_core::lifecycle::InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: meerkat_runtime::InputOrigin::Peer {
+                            peer_id: "analyst-rt".to_string(),
+                            runtime_id: None,
+                        },
+                        durability: meerkat_runtime::InputDurability::Durable,
+                        visibility: meerkat_runtime::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
+                        request_id: "req-123".to_string(),
+                        status: meerkat_runtime::ResponseTerminalStatus::Completed,
+                    }),
+                    body: "done".to_string(),
+                    payload: Some(serde_json::json!({
+                        "request_intent": "checksum_token",
+                        "token": "birch seventeen",
+                    })),
+                    blocks: None,
+                    handling_mode: None,
+                }),
+            )
+            .await
+            .expect("accept terminal peer response with completion");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
+
+        let authoritative = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let Some(session) = runtime
+                    .load_persisted_session(&session_id)
+                    .await
+                    .expect("load authoritative session")
+                else {
+                    panic!("authoritative session missing");
+                };
+                let projected = session
+                    .messages()
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::System(system) => Some(system.content.to_lowercase()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if projected.iter().any(|text| {
+                    text.contains("peer_response_terminal:analyst-rt:req-123")
+                        && text.contains("birch seventeen")
+                }) {
+                    break session;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("authoritative snapshot should include terminal peer response");
+
+        let projected = authoritative
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.to_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected accept_input_with_completion to persist runtime-owned terminal peer response: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_includes_runtime_context_applied_via_session_service() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-runtime-append".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        runtime
+            .service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![],
+            )
+            .await
+            .expect("apply_runtime_context_appends");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+
+        let projected = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.to_lowercase()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            projected.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected realtime projection to include runtime context applied via session service: {projected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_config_preserves_committed_external_dialogue_for_reconstruction() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("realtime-open-config-dialogue-recap".to_string());
+        build.additional_instructions = Some(vec![
+            "Remember user-provided codewords verbatim.".to_string(),
+            "Use authoritative terminal peer responses for token recall.".to_string(),
+        ]);
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+
+        runtime
+            .append_external_user_content(
+                &session_id,
+                meerkat_core::types::ContentInput::Text(
+                    "Remember the codeword amber lantern.".to_string(),
+                ),
+            )
+            .await
+            .expect("append remember user turn");
+        runtime
+            .append_external_assistant_output(
+                &session_id,
+                vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Remembering amber lantern.".to_string(),
+                    meta: None,
+                }],
+                meerkat_core::types::StopReason::EndTurn,
+                meerkat_core::types::Usage::default(),
+            )
+            .await
+            .expect("append remember assistant turn");
+        runtime
+            .append_external_user_content(
+                &session_id,
+                meerkat_core::types::ContentInput::Text("Ask analyst for the token.".to_string()),
+            )
+            .await
+            .expect("append checksum request user turn");
+        runtime
+            .append_external_assistant_output(
+                &session_id,
+                vec![meerkat_core::types::AssistantBlock::Text {
+                    text: "Waiting for analyst token.".to_string(),
+                    meta: None,
+                }],
+                meerkat_core::types::StopReason::EndTurn,
+                meerkat_core::types::Usage::default(),
+            )
+            .await
+            .expect("append checksum request assistant turn");
+        runtime
+            .service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![],
+            )
+            .await
+            .expect("apply runtime context");
+
+        let open_config = runtime
+            .realtime_session_open_config(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("realtime_session_open_config");
+
+        let user_messages = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let assistant_messages = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::Assistant(assistant) => Some(assistant.content.clone()),
+                Message::BlockAssistant(assistant) => {
+                    Some(assistant.text_blocks().collect::<Vec<_>>().join("\n"))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let system_messages = open_config
+            .seed_messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            user_messages
+                .iter()
+                .any(|text| text.contains("Remember the codeword amber lantern.")),
+            "expected realtime projection to preserve remembered user turn: {user_messages:?}"
+        );
+        assert!(
+            assistant_messages
+                .iter()
+                .any(|text| text.contains("Remembering amber lantern.")),
+            "expected realtime projection to preserve remembered assistant turn: {assistant_messages:?}"
+        );
+        assert!(
+            system_messages.iter().any(|text| {
+                text.contains("peer_response_terminal:analyst-rt:req-123")
+                    && text.contains("birch seventeen")
+            }),
+            "expected realtime projection to preserve authoritative token system context: {system_messages:?}"
+        );
+    }
+
     fn make_runtime(factory: AgentFactory, max_sessions: usize) -> SessionRuntime {
         let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -3747,6 +4650,24 @@ mod tests {
             Config::default(),
             max_sessions,
             meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        )
+    }
+
+    fn make_runtime_with_runtime_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+    ) -> SessionRuntime {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
             crate::router::NotificationSink::noop(),
         )
     }
@@ -3960,7 +4881,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_returns_id_and_idle_state() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -3975,7 +4896,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_returns_run_result() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -4196,7 +5117,7 @@ mod tests {
     #[tokio::test]
     async fn start_turn_emits_events() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)

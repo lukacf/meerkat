@@ -288,6 +288,7 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    realtime_ws_host: Option<Arc<crate::realtime_ws::RealtimeWsHost>>,
     #[cfg(not(feature = "mini-surface"))]
     active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     /// Recently-closed stream IDs for idempotent close detection.
@@ -382,6 +383,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            realtime_ws_host: None,
             #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(not(feature = "mini-surface"))]
@@ -440,6 +442,66 @@ impl MethodRouter {
         };
         SessionId::parse(session_id)
             .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[cfg(not(feature = "mini-surface"))]
+    fn session_id_from_realtime_target_params(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<Option<SessionId>, RpcResponse> {
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let value: serde_json::Value = match serde_json::from_str(params.get()) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {err}"),
+                ));
+            }
+        };
+        let Some(target) = value.get("target") else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing target",
+            ));
+        };
+        let Some(target_type) = target.get("type").and_then(|value| value.as_str()) else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing target.type",
+            ));
+        };
+        if target_type == "session_target" {
+            let Some(session_id) = target.get("session_id").and_then(|value| value.as_str()) else {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    "missing target.session_id",
+                ));
+            };
+            SessionId::parse(session_id)
+                .map(Some)
+                .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+        } else if target_type == "mob_member_target" {
+            Ok(None)
+        } else {
+            Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("unsupported target.type '{target_type}'"),
+            ))
+        }
     }
 
     #[cfg(not(feature = "mini-surface"))]
@@ -546,6 +608,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            realtime_ws_host: None,
             #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(not(feature = "mini-surface"))]
@@ -570,6 +633,12 @@ impl MethodRouter {
         runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     ) -> Self {
         self.skill_runtime = runtime;
+        self
+    }
+
+    /// Attach the shared realtime websocket bootstrap host.
+    pub fn with_realtime_ws_host(mut self, host: Arc<crate::realtime_ws::RealtimeWsHost>) -> Self {
+        self.realtime_ws_host = Some(host);
         self
     }
 
@@ -834,6 +903,14 @@ impl MethodRouter {
                 handlers::mob::handle_force_cancel(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/realtime_attach" => {
+                handlers::mob::handle_realtime_attach(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/realtime_detach" => {
+                handlers::mob::handle_realtime_detach(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/member_status" => {
                 handlers::mob::handle_member_status(id, params, &self.mob_state).await
             }
@@ -906,6 +983,128 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
+            "realtime/open_info" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: realtime/open_info",
+                    )
+                } else {
+                    let maybe_session_id =
+                        match self.session_id_from_realtime_target_params(id.clone(), params) {
+                            Ok(session_id) => session_id,
+                            Err(response) => return Some(response),
+                        };
+                    if let Some(session_id) = maybe_session_id
+                        && let Err(response) =
+                            self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
+                        #[cfg(feature = "mob")]
+                        {
+                            Some(self.mob_state.as_ref())
+                        }
+                        #[cfg(not(feature = "mob"))]
+                        {
+                            None
+                        }
+                    };
+                    handlers::realtime::handle_realtime_open_info(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                        mob_inspector,
+                        self.realtime_ws_host.as_deref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "realtime/status" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: realtime/status",
+                    )
+                } else {
+                    let maybe_session_id =
+                        match self.session_id_from_realtime_target_params(id.clone(), params) {
+                            Ok(session_id) => session_id,
+                            Err(response) => return Some(response),
+                        };
+                    if let Some(session_id) = maybe_session_id
+                        && let Err(response) =
+                            self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
+                        #[cfg(feature = "mob")]
+                        {
+                            Some(self.mob_state.as_ref())
+                        }
+                        #[cfg(not(feature = "mob"))]
+                        {
+                            None
+                        }
+                    };
+                    handlers::realtime::handle_realtime_status(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                        mob_inspector,
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "realtime/capabilities" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: realtime/capabilities",
+                    )
+                } else {
+                    let maybe_session_id =
+                        match self.session_id_from_realtime_target_params(id.clone(), params) {
+                            Ok(session_id) => session_id,
+                            Err(response) => return Some(response),
+                        };
+                    if let Some(session_id) = maybe_session_id
+                        && let Err(response) =
+                            self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
+                        #[cfg(feature = "mob")]
+                        {
+                            Some(self.mob_state.as_ref())
+                        }
+                        #[cfg(not(feature = "mob"))]
+                        {
+                            None
+                        }
+                    };
+                    handlers::realtime::handle_realtime_capabilities(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                        mob_inspector,
+                        self.realtime_ws_host.as_deref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
@@ -930,6 +1129,32 @@ impl MethodRouter {
                         return Some(response.with_id(id));
                     }
                     handlers::runtime::handle_runtime_state(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "runtime/realtime_attachment_status" => {
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/realtime_attachment_status",
+                    )
+                } else {
+                    let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
+                    if let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                    {
+                        return Some(response.with_id(id));
+                    }
+                    handlers::runtime::handle_runtime_realtime_attachment_status(
                         id,
                         params,
                         self.runtime_adapter.as_ref(),
@@ -2231,6 +2456,15 @@ mod tests {
             memory_blob_store(),
         ));
         (router.with_runtime_adapter(runtime_adapter), notif_rx)
+    }
+
+    async fn test_router_with_v9_runtime_and_realtime_ws_host()
+    -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let (router, notif_rx) = test_router_with_v9_runtime().await;
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(
+            "ws://127.0.0.1:4900/realtime/ws",
+        ));
+        (router.with_realtime_ws_host(host), notif_rx)
     }
 
     async fn test_router_with_llm(
@@ -4418,6 +4652,174 @@ mod tests {
             Some("accepted"),
             "deferred sessions should also be routable through runtime/accept before their first turn"
         );
+    }
+
+    #[tokio::test]
+    async fn realtime_status_projects_runtime_realtime_attachment_truth_for_session_targets() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime status",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        router
+            .runtime_adapter()
+            .project_realtime_attachment_intent(&parsed_session_id, true)
+            .await
+            .expect("intent projection should succeed");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/status",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        assert_eq!(result["status"]["state"], "opening");
+    }
+
+    #[tokio::test]
+    async fn realtime_capabilities_returns_conservative_phase_one_metadata() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime caps",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/capabilities",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        let capabilities = &result["capabilities"];
+        assert_eq!(
+            capabilities["turning_modes"],
+            serde_json::json!(["provider_managed"])
+        );
+        assert_eq!(capabilities["video_supported"], false);
+        assert_eq!(capabilities["interrupt_supported"], true);
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_reports_transport_unavailable_until_ws_host_lands() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_returns_bootstrap_when_ws_host_is_configured() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info wired",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        assert_eq!(
+            result["ws_url"],
+            serde_json::json!("ws://127.0.0.1:4900/realtime/ws")
+        );
+        assert!(result["open_token"].as_str().is_some());
+        assert_eq!(
+            result["supported_protocol_versions"],
+            serde_json::json!(["1"])
+        );
+        assert_eq!(result["default_protocol_version"], serde_json::json!("1"));
     }
 
     /// 5. `session/list` returns the list of sessions after creating one.

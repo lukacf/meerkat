@@ -240,18 +240,31 @@ fn ensure_materialized_session_id_matches(
 mod tests {
     use super::*;
 
+    use std::collections::VecDeque;
     use std::path::PathBuf;
 
+    #[cfg(feature = "openai")]
+    use async_trait::async_trait;
     use meerkat_client::TestClient;
+    #[cfg(feature = "openai")]
+    use meerkat_client::{
+        LlmError, OpenAiLiveCallTarget, OpenAiLiveClientEvent, OpenAiLiveServerEvent,
+        OpenAiLiveSession, OpenAiLiveSessionFactory, OpenAiRealtimeAttachmentOrchestrator,
+        RealtimeAttachmentToolDispatchHost,
+    };
     use meerkat_core::SessionBuildOptions;
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, PromptInput, RuntimeState};
     use tempfile::TempDir;
+    #[cfg(feature = "openai")]
+    use tokio::sync::{Mutex, Notify};
     use tokio::time::Duration;
 
     #[cfg(feature = "comms")]
     use crate::CommsRuntime;
     use crate::{PersistenceBundle, SessionStore, SessionStoreError};
+    #[cfg(feature = "openai")]
+    use meerkat_runtime::{RealtimeAttachmentStatus, SessionServiceRuntimeExt};
 
     fn make_request(build: SessionBuildOptions) -> CreateSessionRequest {
         CreateSessionRequest {
@@ -305,11 +318,15 @@ mod tests {
             .await
             .expect("build default persistence");
 
-        let mut factory = crate::AgentFactory::new(temp.path().join("sessions"));
         #[cfg(feature = "comms")]
-        if let Some(shared_runtime) = shared_runtime {
-            factory = factory.with_comms_runtime(shared_runtime);
-        }
+        let factory = if let Some(shared_runtime) = shared_runtime {
+            crate::AgentFactory::new(temp.path().join("sessions"))
+                .with_comms_runtime(shared_runtime)
+        } else {
+            crate::AgentFactory::new(temp.path().join("sessions"))
+        };
+        #[cfg(not(feature = "comms"))]
+        let factory = crate::AgentFactory::new(temp.path().join("sessions"));
 
         let mut builder = FactoryAgentBuilder::new(factory, crate::Config::default());
         builder.default_llm_client = Some(Arc::new(TestClient::default()));
@@ -670,5 +687,185 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[cfg(feature = "openai")]
+    struct FakeOpenAiLiveSession {
+        events: VecDeque<OpenAiLiveServerEvent>,
+        close_gate: Option<Arc<Notify>>,
+        sent_events: Arc<Mutex<Vec<OpenAiLiveClientEvent>>>,
+    }
+
+    #[cfg(feature = "openai")]
+    #[async_trait]
+    impl OpenAiLiveSession for FakeOpenAiLiveSession {
+        async fn send_raw(&mut self, event: OpenAiLiveClientEvent) -> Result<(), LlmError> {
+            self.sent_events.lock().await.push(event);
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Result<Option<OpenAiLiveServerEvent>, LlmError> {
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            if let Some(gate) = self.close_gate.take() {
+                gate.notified().await;
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(feature = "openai")]
+    struct FakeOpenAiLiveFactory {
+        sessions: Mutex<VecDeque<Result<Box<dyn OpenAiLiveSession>, LlmError>>>,
+    }
+
+    #[cfg(feature = "openai")]
+    #[async_trait]
+    impl OpenAiLiveSessionFactory for FakeOpenAiLiveFactory {
+        async fn open_session(
+            &self,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
+            self.sessions
+                .lock()
+                .await
+                .pop_front()
+                .expect("fake openai live factory should have a queued session")
+        }
+
+        async fn attach_to_call(
+            &self,
+            _target: &OpenAiLiveCallTarget,
+        ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
+            self.sessions
+                .lock()
+                .await
+                .pop_front()
+                .expect("fake openai live factory should have a queued session")
+        }
+    }
+
+    #[cfg(feature = "openai")]
+    struct RuntimeBackedRealtimeAttachmentToolDispatchHost {
+        service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    }
+
+    #[cfg(feature = "openai")]
+    #[async_trait]
+    impl RealtimeAttachmentToolDispatchHost for RuntimeBackedRealtimeAttachmentToolDispatchHost {
+        async fn dispatch_external_tool_call(
+            &self,
+            session_id: &SessionId,
+            call: meerkat_core::ToolCall,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, RuntimeDriverError> {
+            self.service
+                .dispatch_external_tool_call(session_id, call)
+                .await
+                .map_err(|err| match err {
+                    SessionError::NotFound { .. } => RuntimeDriverError::NotReady {
+                        state: RuntimeState::Destroyed,
+                    },
+                    other => RuntimeDriverError::Internal(other.to_string()),
+                })
+        }
+    }
+
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn runtime_backed_openai_live_orchestrator_routes_tool_calls_through_service_host() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        )
+        .await
+        .expect("materialize session");
+        let session_id = result.session_id.clone();
+
+        adapter
+            .project_realtime_attachment_intent(&session_id, true)
+            .await
+            .expect("project live attachment intent");
+
+        let hold_open = Arc::new(Notify::new());
+        let sent_events = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(FakeOpenAiLiveFactory {
+            sessions: Mutex::new(VecDeque::from([Ok(Box::new(FakeOpenAiLiveSession {
+                events: VecDeque::from([
+                    OpenAiLiveServerEvent::ResponseFunctionCallArgumentsDone {
+                        event_id: "evt_1".to_string(),
+                        response_id: "resp_1".to_string(),
+                        item_id: "item_1".to_string(),
+                        output_index: 0,
+                        call_id: "call_1".to_string(),
+                        name: "missing_tool".to_string(),
+                        arguments: r#"{"x":1}"#.to_string(),
+                    },
+                ]),
+                close_gate: Some(hold_open.clone()),
+                sent_events: sent_events.clone(),
+            })
+                as Box<dyn OpenAiLiveSession>)])),
+        });
+        let orchestrator = OpenAiRealtimeAttachmentOrchestrator::new(
+            Arc::clone(&adapter),
+            factory,
+            Arc::new(RuntimeBackedRealtimeAttachmentToolDispatchHost {
+                service: Arc::clone(&service),
+            }),
+        );
+        let target =
+            OpenAiLiveCallTarget::new("call_runtime_backed").expect("call target should succeed");
+
+        orchestrator
+            .attach(&session_id, &target)
+            .await
+            .expect("attach should succeed");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !sent_events.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("function-call error should be routed back through the provider session");
+
+        let sent = sent_events.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        let payload =
+            serde_json::to_value(&sent[0]).expect("provider event should serialize for checks");
+        assert_eq!(payload["item"]["call_id"], "call_1");
+        assert!(
+            payload["item"]["output"]
+                .as_str()
+                .expect("function-call output should serialize as text")
+                .contains("missing_tool"),
+            "missing tool errors should flow through the runtime-backed service host"
+        );
+
+        let status = adapter
+            .realtime_attachment_status(&session_id)
+            .await
+            .expect("runtime-backed session should expose live attachment status");
+        assert_eq!(status, RealtimeAttachmentStatus::BindingReady);
+
+        hold_open.notify_waiters();
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&session_id).await;
     }
 }

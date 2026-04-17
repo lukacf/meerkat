@@ -110,6 +110,12 @@ pub(crate) enum MobMachineCommand {
     MemberStatus {
         meerkat_id: MeerkatId,
     },
+    RealtimeAttach {
+        meerkat_id: MeerkatId,
+    },
+    RealtimeDetach {
+        meerkat_id: MeerkatId,
+    },
     SubscribeAgentEvents {
         meerkat_id: MeerkatId,
     },
@@ -153,7 +159,7 @@ pub(crate) enum MobMachineCommandResult {
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),
     Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),
-    BridgeSessionId(meerkat_core::types::SessionId),
+    DestroyReport(crate::runtime::MobDestroyReport),
     TaskId(crate::ids::TaskId),
     TaskList(Vec<MobTask>),
     TaskGet(Option<MobTask>),
@@ -163,6 +169,7 @@ pub(crate) enum MobMachineCommandResult {
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
     ListAllMembers(Vec<RosterEntry>),
     MemberStatus(crate::runtime::MobMemberSnapshot),
+    Bool(bool),
     EventStream(meerkat_core::EventStream),
     AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
     MobEventRouter(crate::runtime::MobEventRouterHandle),

@@ -73,6 +73,7 @@ mod tests {
                 intent: intent_str.into(),
             }),
             body: "test body".into(),
+            payload: Some(serde_json::json!({"intent": intent_str})),
             blocks: None,
             handling_mode: None,
         })
@@ -92,6 +93,7 @@ mod tests {
             },
             convention: Some(PeerConvention::Message),
             body: "test body".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         })

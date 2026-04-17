@@ -1268,7 +1268,11 @@ impl AgentFactory {
         provider: Provider,
         model: &str,
         config: &Config,
+        suppress_ambient_provider_search: bool,
     ) -> Option<serde_json::Value> {
+        if suppress_ambient_provider_search {
+            return None;
+        }
         let profile = registry.profile_for(model)?;
         if !profile.supports_web_search {
             return None;
@@ -1575,6 +1579,18 @@ impl AgentFactory {
 
         let registry = self.model_registry(config)?;
 
+        let explicit_meerkat_tool_policy =
+            !matches!(
+                build_config.override_builtins,
+                ToolCategoryOverride::Inherit
+            ) || !matches!(build_config.override_shell, ToolCategoryOverride::Inherit)
+                || !matches!(build_config.override_memory, ToolCategoryOverride::Inherit)
+                || !matches!(
+                    build_config.override_schedule,
+                    ToolCategoryOverride::Inherit
+                )
+                || !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
+
         // 2. Resolve provider and any self-hosted server binding.
         let resumed_self_hosted_server_id = resumed_session_metadata
             .as_ref()
@@ -1592,8 +1608,13 @@ impl AgentFactory {
         };
 
         // 2b. Resolve provider-native tool defaults (web search, etc.)
-        let provider_tool_defaults =
-            Self::resolve_provider_tool_defaults(&registry, provider, &build_config.model, config);
+        let provider_tool_defaults = Self::resolve_provider_tool_defaults(
+            &registry,
+            provider,
+            &build_config.model,
+            config,
+            explicit_meerkat_tool_policy,
+        );
 
         // 3. Create LLM client
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
@@ -1863,7 +1884,7 @@ impl AgentFactory {
                         effective_builtins,
                         effective_shell,
                         skill_engine.clone(),
-                        build_config.shell_env.take(),
+                        build_config.shell_env.clone(),
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
                         _image_tool_results,
@@ -2185,10 +2206,13 @@ impl AgentFactory {
         for section in &preloaded_skill_sections {
             extra_sections.push(section.as_str());
         }
-        // Append additional instructions after skills, before tool instructions.
+        // Append additional instructions after skills, before tool
+        // instructions. These are canonical build-state and must survive into
+        // persisted recovery / realtime reconstruction, so prompt assembly may
+        // read them but must not consume them.
         let additional_instruction_storage: Vec<String> = build_config
             .additional_instructions
-            .take()
+            .clone()
             .unwrap_or_default();
         for instruction in &additional_instruction_storage {
             if !instruction.is_empty() {

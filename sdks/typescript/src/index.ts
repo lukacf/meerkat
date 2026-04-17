@@ -32,6 +32,13 @@ export type {
 } from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
+export { RealtimeChannel, RealtimeConnection } from "./realtime.js";
+export type {
+  RealtimeChannelOptions,
+  RealtimeChannelTarget,
+  RealtimeMobMemberTarget,
+  RealtimeSessionTarget,
+} from "./realtime.js";
 
 export type {
   AgentEventEnvelope,
@@ -116,8 +123,33 @@ export type {
   McpReloadParams,
   McpLiveOpResponse,
   ProviderCatalog,
+  RealtimeAudioChunk,
+  RealtimeCapabilities,
+  RealtimeCapabilitiesParams,
+  RealtimeCapabilitiesResult,
+  RealtimeChannelClosedFrame,
+  RealtimeChannelErrorFrame,
+  RealtimeChannelEventFrame,
+  RealtimeChannelInputFrame,
+  RealtimeChannelOpenFrame,
+  RealtimeChannelOpenedFrame,
+  RealtimeChannelRole,
+  RealtimeChannelState,
+  RealtimeChannelStatus,
+  RealtimeChannelStatusFrame,
+  RealtimeOpenInfo,
+  RealtimeOpenRequest,
+  RealtimeOutputChunk,
+  RealtimeReconnectPolicy,
+  RealtimeStatusParams,
+  RealtimeStatusResult,
+  RealtimeTextChunk,
+  RealtimeTextDelta,
+  RealtimeTurningMode,
+  RealtimeVideoChunk,
   RuntimeAcceptParams,
   RuntimeAcceptResult,
+  RuntimeRealtimeAttachmentStatusResult,
   RuntimeResetParams,
   RuntimeResetResult,
   RuntimeRetireParams,

@@ -153,6 +153,15 @@ impl Router {
     }
 
     pub async fn send(&self, peer_name: &str, kind: MessageKind) -> Result<Uuid, SendError> {
+        self.send_with_id(peer_name, Uuid::new_v4(), kind).await
+    }
+
+    pub async fn send_with_id(
+        &self,
+        peer_name: &str,
+        envelope_id: Uuid,
+        kind: MessageKind,
+    ) -> Result<Uuid, SendError> {
         let inproc_namespace = self.inproc_namespace.as_deref().unwrap_or("");
         let peer = {
             let peers = self.trusted_peers.read();
@@ -175,7 +184,7 @@ impl Router {
         .ok_or_else(|| SendError::PeerNotFound(peer_name.to_string()))?;
         let addr = PeerAddr::parse(&peer.addr)?;
         let mut envelope = Envelope {
-            id: Uuid::new_v4(),
+            id: envelope_id,
             from: self.keypair.public_key(),
             to: peer.pubkey,
             kind,
@@ -208,10 +217,11 @@ impl Router {
                 }
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
-                    match registry.send_with_signature_in_namespace(
+                    match registry.send_with_signature_in_namespace_with_id(
                         inproc_namespace,
                         &self.keypair,
                         peer_name,
+                        envelope.id,
                         envelope.kind.clone(),
                         self.require_peer_auth,
                     ) {
@@ -223,10 +233,11 @@ impl Router {
                                 "same-namespace lookup failed, falling back to cross-namespace send"
                             );
                             registry
-                                .send_cross_namespace(
+                                .send_cross_namespace_with_id(
                                     &self.keypair,
                                     peer_name,
                                     &peer.pubkey,
+                                    envelope.id,
                                     envelope.kind,
                                     self.require_peer_auth,
                                 )
@@ -356,6 +367,12 @@ impl Router {
         status: Status,
         result: serde_json::Value,
     ) -> Result<Uuid, SendError> {
+        // Transitional: this low-level router API still sends responses with no
+        // explicit handling_mode override. The intended higher-level contract is
+        // that send_response may default to the original request's handling
+        // mode, but that semantic default is not machine-backed on this branch
+        // and will be revisited when the machine/DSL seam owns correlated peer
+        // request-response policy end to end.
         self.send(
             peer_name,
             MessageKind::Response {

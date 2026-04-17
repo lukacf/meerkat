@@ -876,6 +876,50 @@ pub async fn handle_force_cancel(
     }
 }
 
+pub async fn handle_realtime_attach(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_realtime_attach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
+        .await
+    {
+        Ok(attached) => RpcResponse::success(id, serde_json::json!({"attached": attached})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_realtime_detach(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_realtime_detach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
+        .await
+    {
+        Ok(detached) => RpcResponse::success(id, serde_json::json!({"detached": detached})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // mob/member_status
 // ---------------------------------------------------------------------------
@@ -1137,7 +1181,36 @@ pub async fn handle_mob_turn_start(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_mob::{AgentIdentity, AgentRuntimeId, FenceToken};
+    use meerkat_mob::{
+        AgentIdentity, AgentRuntimeId, FenceToken, MobDefinition, MobId, MobRuntimeMode,
+        ProfileName,
+    };
+    use std::collections::BTreeMap;
+
+    fn voice_test_definition(mob_id: &str) -> MobDefinition {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::profile::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::profile::ToolConfig::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mut definition = MobDefinition::explicit(MobId::from(mob_id));
+        definition.profiles = profiles;
+        definition
+    }
 
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()
@@ -1292,5 +1365,83 @@ mod tests {
         assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
         assert_eq!(params.timeout_ms, Some(2500));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn realtime_attach_and_detach_handlers_drive_member_status() {
+        let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(voice_test_definition("mob-voice-rpc"))
+            .await
+            .expect("create voice mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+
+        let attach_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("attach params");
+        let attach_response =
+            handle_realtime_attach(Some(RpcId::Num(1)), Some(attach_params.as_ref()), &state).await;
+        assert!(
+            attach_response.error.is_none(),
+            "voice attach should succeed"
+        );
+
+        let status_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("status params");
+        let attached_status =
+            handle_member_status(Some(RpcId::Num(2)), Some(status_params.as_ref()), &state).await;
+        let attached_value: serde_json::Value = serde_json::from_str(
+            attached_status
+                .result
+                .as_ref()
+                .expect("member status result")
+                .get(),
+        )
+        .expect("member status json");
+        assert_eq!(
+            attached_value["realtime_attachment_status"],
+            serde_json::Value::String("binding_not_ready".to_string())
+        );
+
+        let detach_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("detach params");
+        let detach_response =
+            handle_realtime_detach(Some(RpcId::Num(3)), Some(detach_params.as_ref()), &state).await;
+        assert!(
+            detach_response.error.is_none(),
+            "voice detach should succeed"
+        );
+
+        let detached_status =
+            handle_member_status(Some(RpcId::Num(4)), Some(status_params.as_ref()), &state).await;
+        let detached_value: serde_json::Value = serde_json::from_str(
+            detached_status
+                .result
+                .as_ref()
+                .expect("member status result")
+                .get(),
+        )
+        .expect("member status json");
+        assert_eq!(
+            detached_value["realtime_attachment_status"],
+            serde_json::Value::String("unattached".to_string())
+        );
     }
 }

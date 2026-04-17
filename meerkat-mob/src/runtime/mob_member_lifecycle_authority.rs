@@ -2,6 +2,7 @@ use crate::ids::{AgentRuntimeId, FenceToken};
 use crate::roster::{MemberState, MobMemberKickoffSnapshot};
 use crate::runtime::handle::{
     HelperResult, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
+    MobRealtimeAttachmentStatus,
 };
 use meerkat_core::types::SessionId;
 
@@ -43,6 +44,7 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
+    pub(super) realtime_attachment_status: MobRealtimeAttachmentStatus,
 }
 
 impl CanonicalMemberSnapshotMaterial {
@@ -63,6 +65,7 @@ impl CanonicalMemberSnapshotMaterial {
             error: self.error.clone(),
             tokens_used: self.tokens_used,
             is_final,
+            realtime_attachment_status: self.realtime_attachment_status,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: self.peer_connectivity.clone(),
@@ -95,6 +98,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) current_bridge_session_id: Option<SessionId>,
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
+    pub(super) realtime_attachment_status: MobRealtimeAttachmentStatus,
 }
 
 pub(super) struct MobMemberLifecycleAuthority;
@@ -118,6 +122,7 @@ impl MobMemberLifecycleAuthority {
                 current_bridge_session_id: input.current_bridge_session_id,
                 peer_connectivity: None,
                 kickoff: input.kickoff,
+                realtime_attachment_status: input.realtime_attachment_status,
             };
         }
 
@@ -147,6 +152,7 @@ impl MobMemberLifecycleAuthority {
             current_bridge_session_id: input.current_bridge_session_id,
             peer_connectivity: input.peer_connectivity,
             kickoff: input.kickoff,
+            realtime_attachment_status: input.realtime_attachment_status,
         }
     }
 
@@ -197,6 +203,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
         assert_eq!(material.error.as_deref(), Some("restore mismatch"));
@@ -216,9 +223,30 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
         assert!(MobMemberLifecycleAuthority::is_terminal(&material));
+    }
+
+    #[test]
+    fn unknown_active_sessionless_member_stays_non_terminal() {
+        let material = MobMemberLifecycleAuthority::materialize(MobMemberLifecycleInput {
+            member_present: true,
+            roster_state: Some(MemberState::Active),
+            session_observation: CanonicalSessionObservation::Unknown,
+            restore_failure: None,
+            output_preview: None,
+            tokens_used: 0,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            fence_token: FenceToken::new(0),
+            current_bridge_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+        });
+        assert_eq!(material.status, CanonicalMemberStatus::Active);
+        assert!(!MobMemberLifecycleAuthority::is_terminal(&material));
     }
 
     #[test]
@@ -235,6 +263,7 @@ mod tests {
             current_bridge_session_id: None,
             peer_connectivity: None,
             kickoff: None,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
         assert!(!MobMemberLifecycleAuthority::is_terminal(&material));

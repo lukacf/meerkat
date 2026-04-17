@@ -4,6 +4,7 @@ use crate::budget::Budget;
 use crate::error::AgentError;
 use crate::event::AgentEvent;
 use crate::hooks::{HookDecision, HookInvocation, HookPatch, HookPoint};
+use crate::ops::ToolDispatchOutcome;
 use crate::retry::RetryPolicy;
 use crate::service::TurnToolOverlay;
 use crate::session::{PendingSystemContextAppend, Session};
@@ -20,8 +21,9 @@ use crate::tool_scope::{
 use crate::turn_execution_authority::{
     ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
 };
-use crate::types::{ContentInput, Message, RunResult};
+use crate::types::{ContentInput, Message, RunResult, ToolCallView};
 use async_trait::async_trait;
+use serde_json::value::to_raw_value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -420,6 +422,56 @@ where
                     "failed to persist canonical tool visibility state: {err}"
                 ))
             })
+    }
+
+    /// Dispatch one external tool call through the canonical tool dispatcher.
+    ///
+    /// This reuses the same visibility owner and session-effect application path
+    /// as ordinary LLM-driven tool batches, but without synthesizing a full turn.
+    pub async fn dispatch_external_tool_call(
+        &mut self,
+        call: crate::types::ToolCall,
+    ) -> Result<ToolDispatchOutcome, AgentError> {
+        let visible_tool_names = self
+            .tool_scope
+            .visible_tools_result()
+            .map_err(|err| AgentError::InternalError(err.to_string()))?
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<HashSet<_>>();
+        let args = to_raw_value(&call.args).map_err(|err| {
+            AgentError::InternalError(format!(
+                "failed to serialize external tool-call arguments: {err}"
+            ))
+        })?;
+        let view = ToolCallView {
+            id: &call.id,
+            name: &call.name,
+            args: args.as_ref(),
+        };
+        let dispatch_result = if visible_tool_names.contains(call.name.as_str()) {
+            self.tools.dispatch(view).await
+        } else {
+            Err(crate::error::ToolError::NotFound {
+                name: call.name.clone(),
+            })
+        };
+
+        match dispatch_result {
+            Ok(mut outcome) => {
+                if outcome.result.tool_use_id.is_empty() {
+                    outcome.result.tool_use_id = call.id;
+                }
+                if !outcome.session_effects.is_empty() {
+                    self.apply_session_effects(&outcome.session_effects)?;
+                }
+                Ok(outcome)
+            }
+            Err(crate::error::ToolError::CallbackPending { tool_name, args }) => {
+                Err(AgentError::CallbackPending { tool_name, args })
+            }
+            Err(error) => Err(AgentError::ToolError(error.to_string())),
+        }
     }
 
     #[cfg(test)]

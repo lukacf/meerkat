@@ -21,6 +21,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PrepareBindings`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: String)
+- `IngestRealtimeAttachmentSignal`(status: String)
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
 - `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
@@ -39,6 +40,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `OpsLifecycleRegistry`(session_id: SessionId)
 - `InputState`(session_id: SessionId, input_id: InputId)
 - `ListActiveInputs`(session_id: SessionId)
+- `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
 - `Abort`(session_id: SessionId)
 - `AbortAll`
 - `Wait`(session_id: SessionId)
@@ -61,8 +63,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputState`
 - `ListActiveInputs`
 - `RuntimeState`
+- `RuntimeRealtimeAttachmentStatus`
 - `LoadBoundaryReceipt`
-- `Recover`
 
 ## Signals
 - `Initialize`
@@ -95,6 +97,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: String, detail: String)
+- `RealtimeAttachmentStateChanged`
 - `ResolveAdmission`
 - `SubmitAdmittedIngressEffect`
 - `SubmitRunPrimitive`
@@ -487,6 +490,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
+### `RecoverFromInitializing`
+- From: `Initializing`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Initializing`
+
+### `RecoverFromIdle`
+- From: `Idle`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Idle`
+
+### `RecoverFromAttached`
+- From: `Attached`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Attached`
+
+### `RecoverFromRetired`
+- From: `Retired`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Retired`
+
+### `RecoverFromStopped`
+- From: `Stopped`
+- On: `Recover`()
+- Emits: `RuntimeNotice`
+- To: `Stopped`
+
 ### `Reset`
 - From: `Initializing`, `Idle`, `Attached`, `Retired`
 - On: `Reset`()
@@ -509,6 +542,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StopRuntimeExecutor`()
 - Emits: `RuntimeNotice`
+- To: `Running`
+
+### `IngestRealtimeAttachmentSignalAttached`
+- From: `Attached`
+- On: `IngestRealtimeAttachmentSignal`()
+- Guards:
+  - `runtime_is_bound`
+- Emits: `RealtimeAttachmentStateChanged`
+- To: `Attached`
+
+### `IngestRealtimeAttachmentSignalRunning`
+- From: `Running`
+- On: `IngestRealtimeAttachmentSignal`()
+- Guards:
+  - `runtime_is_bound`
+- Emits: `RealtimeAttachmentStateChanged`
 - To: `Running`
 
 ### `Destroy`

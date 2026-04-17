@@ -112,6 +112,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }
 meerkat-comms = { workspace = true }
+tokio-tungstenite = "0.28"
 
 [package.metadata.cargo-machete]
 ignored = ["thiserror"]  # proc macro (derive)

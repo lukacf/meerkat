@@ -400,6 +400,7 @@ machine! {
             Retire,
             Reset,
             StopRuntimeExecutor,
+            RuntimeExecutorExited,
             Destroy,
             // Absorbed inputs
             EnsureSessionWithExecutor { session_id: SessionId },
@@ -1048,6 +1049,60 @@ machine! {
             }
             to Running
             emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+        }
+
+        // RuntimeExecutorExited: async finalization of the stop-runtime path.
+        // Fired by the runtime loop after apply_executor_control sees the
+        // StopRuntimeExecutor control command complete and the driver has
+        // flipped to Stopped. Moves the DSL phase from whatever it was at
+        // stop-request time to Stopped.
+        transition RuntimeExecutorExitedFromAttached {
+            on input RuntimeExecutorExited
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Stopped
+            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+        }
+        transition RuntimeExecutorExitedFromRunning {
+            on input RuntimeExecutorExited
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Stopped
+            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+        }
+        transition RuntimeExecutorExitedFromIdle {
+            on input RuntimeExecutorExited
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Stopped
+            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+        }
+        transition RuntimeExecutorExitedFromRetired {
+            on input RuntimeExecutorExited
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Stopped
+            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+        }
+        transition RuntimeExecutorExitedFromStopped {
+            on input RuntimeExecutorExited
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
         }
 
         // 17. Destroy: from all non-Destroyed → Destroyed

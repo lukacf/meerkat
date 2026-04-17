@@ -178,14 +178,6 @@ enum RegistrationPhase {
 }
 
 impl RuntimeSessionEntry {
-    fn dsl_active_fence_token(&self) -> Option<u64> {
-        self.dsl_authority
-            .state
-            .active_fence_token
-            .as_ref()
-            .map(|token| token.0)
-    }
-
     fn control_snapshot(&self) -> crate::driver::ephemeral::RuntimeControlProjection {
         self.control_projection
             .read()
@@ -282,72 +274,12 @@ impl MeerkatMachine {
             .map(|entry| Arc::clone(&entry.mutation_gate))
     }
 
-    async fn sync_session_dsl_projection(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
-        let (driver, control_snapshot, active_fence_token) = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            (
-                entry.driver.clone(),
-                entry.control_snapshot(),
-                entry.dsl_active_fence_token(),
-            )
-        };
-
-        let (runtime_id, silent_intents) = {
-            let driver = driver.lock().await;
-            (
-                driver.runtime_id().clone(),
-                driver
-                    .silent_comms_intents()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
-            )
-        };
-
-        let (effective_phase, effective_run_id, effective_pre_run) =
-            dsl_authority::effective_lifecycle(
-                control_snapshot.phase,
-                control_snapshot.current_run_id.as_ref(),
-                control_snapshot.pre_run_phase,
-            );
-
-        let mut sessions = self.sessions.write().await;
-        let entry = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })?;
-        // Update ONLY coarse lifecycle fields — preserve absorbed substate
-        // (input_phases, op_statuses, drain_phase, visibility, etc.)
-        // which is maintained incrementally by DSL transitions.
-        let state = &mut entry.dsl_authority.state;
-        state.lifecycle_phase = dsl_authority::project_phase(effective_phase);
-        state.session_id = Some(dsl::SessionId::from_domain(session_id));
-        state.active_runtime_id = Some(dsl::AgentRuntimeId::from_domain(&runtime_id));
-        state.active_fence_token = active_fence_token.map(dsl::FenceToken::from);
-        state.current_run_id = effective_run_id.map(dsl::RunId::from_domain);
-        state.pre_run_phase = effective_pre_run.map(|p| p.to_string());
-        state.silent_intent_overrides = silent_intents;
-        Ok(())
-    }
-
     async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Box<dsl::MeerkatMachineState>, String> {
-        self.sync_session_dsl_projection(session_id)
-            .await
-            .map_err(|err| err.to_string())?;
-
         let mut sessions = self.sessions.write().await;
         let entry = sessions.get_mut(session_id).ok_or_else(|| {
             RuntimeDriverError::NotReady {

@@ -153,11 +153,6 @@ impl MeerkatMachine {
                     if let Some(ref tx) = wake_tx
                         && tx.send(()).await.is_ok()
                     {
-                        if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                        }
                         return Ok(MeerkatMachineCommandResult::RetireReport(report));
                     }
 
@@ -171,12 +166,6 @@ impl MeerkatMachine {
                     comp.resolve_all_terminated("retired without runtime loop");
                     report.inputs_abandoned += abandoned;
                     report.inputs_pending_drain = 0;
-                }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                 }
                 Ok(MeerkatMachineCommandResult::RetireReport(report))
             }
@@ -232,12 +221,6 @@ impl MeerkatMachine {
                 if let Some(ref tx) = wake_tx {
                     let _ = tx.try_send(());
                 }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                }
                 Ok(MeerkatMachineCommandResult::RecycleReport(RecycleReport {
                     inputs_transferred: transferred,
                 }))
@@ -279,12 +262,6 @@ impl MeerkatMachine {
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime reset");
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                }
                 Ok(MeerkatMachineCommandResult::ResetReport(report))
             }
             MeerkatMachineCommand::Recover { runtime_id } => {
@@ -338,12 +315,6 @@ impl MeerkatMachine {
                 if let Some(ref tx) = wake_tx {
                     let _ = tx.try_send(());
                 }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                }
                 Ok(MeerkatMachineCommandResult::RecoveryReport(report))
             }
             MeerkatMachineCommand::Destroy { runtime_id } => {
@@ -394,36 +365,15 @@ impl MeerkatMachine {
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(RuntimeControlPlaneError::Internal(err.to_string()));
-                }
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {
                 let session_id = Self::resolve_session_id(&runtime_id)?;
-                // Quick existence check BEFORE sync — so gone sessions
-                // return NotFound (→ NotReady{Destroyed}) instead of Internal.
-                {
-                    let sessions = self.sessions.read().await;
-                    if !sessions.contains_key(&session_id) {
-                        return Err(RuntimeControlPlaneError::NotFound(runtime_id));
-                    }
-                }
-                self.sync_session_dsl_projection(&session_id)
+                let state = self
+                    .existing_session_runtime_state(&session_id)
                     .await
-                    .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
-                let sessions = self.sessions.read().await;
-                let entry = sessions
-                    .get(&session_id)
-                    .ok_or(RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
-                Ok(MeerkatMachineCommandResult::RuntimeState(
-                    crate::meerkat_machine::dsl_authority::write_back_phase(
-                        entry.dsl_authority.state.lifecycle_phase,
-                    ),
-                ))
+                    .ok_or(RuntimeControlPlaneError::NotFound(runtime_id))?;
+                Ok(MeerkatMachineCommandResult::RuntimeState(state))
             }
             MeerkatMachineCommand::LoadBoundaryReceipt {
                 runtime_id,

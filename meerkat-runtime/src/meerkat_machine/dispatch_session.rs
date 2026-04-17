@@ -61,8 +61,30 @@ impl MeerkatMachine {
                 ) {
                     return Err(RuntimeDriverError::Destroyed);
                 }
-                self.ensure_session_with_executor_inner(session_id, executor)
+                // Inner creates the session entry (if new) and attaches the
+                // executor to the driver. DSL transition is staged after
+                // inner because stage_session_dsl_input requires the session
+                // entry to already exist.
+                self.ensure_session_with_executor_inner(session_id.clone(), executor)
                     .await;
+                if let Err(reason) = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
+                        },
+                        "EnsureSessionWithExecutor",
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %reason,
+                        "DSL rejected EnsureSessionWithExecutor"
+                    );
+                }
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::SetSilentIntents {
@@ -206,11 +228,6 @@ impl MeerkatMachine {
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
                 if let Err(err) = self.stop_runtime_executor_inner(&session_id, command).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
                     self.restore_session_dsl_state(&session_id, previous_dsl_state)
                         .await;
                     return Err(err);

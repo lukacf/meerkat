@@ -19,6 +19,11 @@ impl MeerkatMachine {
         let (ops_lifecycle, epoch_id, cursor_state) =
             self.recover_or_create_ops_state(&session_id).await;
         let control_projection = entry.control_projection_handle();
+        let driver_runtime_id = entry.runtime_id().clone();
+        let driver_silent_intents = entry
+            .silent_comms_intents()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         let dsl_authority = Box::new(super::dsl::MeerkatMachineAuthority::from_state(
             super::dsl_authority::project_state(
                 &session_id,
@@ -26,10 +31,10 @@ impl MeerkatMachine {
                     .read()
                     .map(|guard| guard.phase)
                     .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
+                Some(&driver_runtime_id),
                 None,
                 None,
-                None,
-                std::collections::BTreeSet::new(),
+                driver_silent_intents,
                 None,
             ),
         ));
@@ -189,6 +194,11 @@ impl MeerkatMachine {
                     )
                 } else {
                     let control_projection = recovered_entry.control_projection_handle();
+                    let driver_runtime_id = recovered_entry.runtime_id().clone();
+                    let driver_silent_intents = recovered_entry
+                        .silent_comms_intents()
+                        .into_iter()
+                        .collect::<std::collections::BTreeSet<_>>();
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
@@ -199,10 +209,10 @@ impl MeerkatMachine {
                                 .read()
                                 .map(|guard| guard.phase)
                                 .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
+                            Some(&driver_runtime_id),
                             None,
                             None,
-                            None,
-                            std::collections::BTreeSet::new(),
+                            driver_silent_intents,
                             None,
                         ),
                     ));

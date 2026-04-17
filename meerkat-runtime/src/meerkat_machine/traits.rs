@@ -231,13 +231,28 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Option<RuntimeState> {
-        let control = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(RuntimeSessionEntry::control_snapshot)
-        }?;
-        Some(control.phase)
+        let sessions = self.sessions.read().await;
+        let entry = sessions.get(session_id)?;
+        let dsl_phase = dsl_authority::write_back_phase(entry.dsl_authority.state.lifecycle_phase);
+        // Terminal-state projection: the async stop/destroy path in the
+        // runtime loop flips control_projection to Stopped/Destroyed without
+        // yet owning an Arc<MeerkatMachine> to fire the corresponding DSL
+        // input (RuntimeExecutorExited). Until that plumbing lands, promote
+        // terminal driver phases so observers don't race against DSL
+        // catch-up. DSL remains authoritative for all non-terminal reads.
+        let driver_phase = entry
+            .control_projection
+            .read()
+            .map(|guard| guard.phase)
+            .unwrap_or_else(|poisoned| poisoned.into_inner().phase);
+        if matches!(
+            driver_phase,
+            RuntimeState::Stopped | RuntimeState::Destroyed
+        ) && !matches!(dsl_phase, RuntimeState::Stopped | RuntimeState::Destroyed)
+        {
+            return Some(driver_phase);
+        }
+        Some(dsl_phase)
     }
 
     pub(super) async fn driver_runtime_state(driver: &SharedDriver) -> RuntimeState {

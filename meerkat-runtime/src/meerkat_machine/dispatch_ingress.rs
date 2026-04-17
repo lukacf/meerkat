@@ -195,12 +195,6 @@ impl MeerkatMachine {
                     );
                 }
 
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    tracing::error!(
-                        error = %err,
-                        "failed to resync DSL projection after AcceptWithCompletion"
-                    );
-                }
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {
                     outcome,
                     handle,
@@ -338,13 +332,6 @@ impl MeerkatMachine {
                             "DSL/runtime DISAGREEMENT on input lifecycle after accept_without_wake"
                         );
                     }
-                }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    tracing::error!(
-                        error = %err,
-                        "failed to resync DSL projection after AcceptWithoutWake"
-                    );
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
@@ -561,16 +548,6 @@ impl MeerkatMachine {
                     }
                 }
 
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    tracing::error!(
-                        error = %err,
-                        "failed to resync DSL projection after Prepare"
-                    );
-                    return Err(err);
-                }
-
                 Ok(MeerkatMachineCommandResult::Prepared(prepared))
             }
             MeerkatMachineCommand::Commit {
@@ -630,6 +607,7 @@ impl MeerkatMachine {
                     );
                 }
 
+                let commit_run_id = run_id.clone();
                 if let Err(err) = commit_runtime_loop_run(
                     &driver,
                     run_id,
@@ -641,6 +619,26 @@ impl MeerkatMachine {
                 {
                     self.restore_session_dsl_state(&session_id, previous_dsl_state)
                         .await;
+                    // Driver unwinds Running → pre-run phase on commit failure.
+                    // Apply DSL Fail to keep the machine phase in sync.
+                    if let Err(dsl_err) = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
+                                run_id: crate::meerkat_machine::dsl::RunId::from_domain(
+                                    &commit_run_id,
+                                ),
+                            },
+                            "Fail(commit_unwind)",
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %dsl_err,
+                            "DSL rejected Fail unwind after commit failure"
+                        );
+                    }
                     let should_unregister =
                         !err.to_string().contains("runtime boundary commit failed");
                     if should_unregister {
@@ -649,12 +647,6 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Internal(format!(
                         "runtime commit failed: {err}"
                     )));
-                }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
                 }
 
                 Ok(MeerkatMachineCommandResult::Unit)
@@ -702,12 +694,6 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Internal(format!(
                         "failed to persist runtime failure snapshot: {run_err}"
                     )));
-                }
-
-                if let Err(err) = self.sync_session_dsl_projection(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
                 }
 
                 Ok(MeerkatMachineCommandResult::Unit)

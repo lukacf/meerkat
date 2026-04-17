@@ -45,28 +45,6 @@ pub(crate) fn project_phase(state: RuntimeState) -> mm_dsl::MeerkatPhase {
     }
 }
 
-/// Extract the effective lifecycle triple from runtime state.
-///
-/// Normalises Running-without-run-id back to the pre-run phase, and
-/// strips run metadata from non-Running/non-Retired phases.
-pub(crate) fn effective_lifecycle(
-    runtime_phase: RuntimeState,
-    current_run_id: Option<&RunId>,
-    pre_run_phase: Option<RuntimeState>,
-) -> (RuntimeState, Option<&RunId>, Option<RuntimeState>) {
-    match (runtime_phase, current_run_id, pre_run_phase) {
-        (RuntimeState::Running, None, pre_run_phase) => (
-            crate::runtime_state::run_return_phase_from_pre_run_phase(pre_run_phase),
-            None,
-            None,
-        ),
-        (RuntimeState::Running | RuntimeState::Retired, current_run_id, pre_run_phase) => {
-            (runtime_phase, current_run_id, pre_run_phase)
-        }
-        (phase, _, _) => (phase, None, None),
-    }
-}
-
 pub(crate) fn project_state(
     session_id: &SessionId,
     runtime_phase: RuntimeState,

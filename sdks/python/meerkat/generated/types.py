@@ -184,6 +184,7 @@ class RuntimeRealtimeAttachmentStatusParams:
 @dataclass
 class RealtimeOpenRequest:
     """Request payload for `realtime/open_info`."""
+    channel_config: Optional[dict[str, Any]] = None
     reconnect_policy: Optional[dict[str, Any]] = None
     role: Literal['primary', 'observer'] = None
     target: dict[str, Any] = field(default_factory=dict)
@@ -334,6 +335,8 @@ class RealtimeReconnectPolicy:
 @dataclass
 class RealtimeCapabilities:
     """Product-facing realtime capability set for one target/provider combination."""
+    audio_input_format: Optional[dict[str, Any]] = None
+    audio_output_format: Optional[dict[str, Any]] = None
     input_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
     interrupt_supported: bool = False
     output_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
@@ -347,6 +350,7 @@ class RealtimeCapabilities:
 class RealtimeChannelStatus:
     """Public realtime channel status projection."""
     attempt_count: int = 0
+    deadline_at: Optional[str] = None
     next_retry_at: Optional[str] = None
     reason: Optional[str] = None
     state: Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error'] = None
@@ -390,9 +394,16 @@ class RealtimeTextDelta:
 
 @dataclass
 class RealtimeAudioChunk:
-    """An opaque realtime audio chunk with MIME metadata."""
+    """An opaque realtime audio chunk with MIME + format metadata.
+
+Both sender and receiver MUST stamp `sample_rate_hz` and `channels` so the
+transport layer can validate against the provider session's negotiated
+format instead of silently producing garbled audio when an ESP32 or browser
+client ships the wrong rate."""
+    channels: int = 0
     data: str = ''
     mime_type: str = ''
+    sample_rate_hz: int = 0
 
 
 @dataclass
@@ -442,6 +453,7 @@ class RealtimeChannelEventFrame:
 class RealtimeChannelErrorFrame:
     """Payload for `channel.error`."""
     code: str = ''
+    details: Optional[dict[str, Any]] = None
     message: str = ''
 
 

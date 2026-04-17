@@ -61,6 +61,16 @@
         "summary": "Force-cancel a mob member"
       }
     },
+    "/mob/{id}/members/{agent_identity}/realtime/attach": {
+      "post": {
+        "summary": "Attach realtime attachment intent to a mob member"
+      }
+    },
+    "/mob/{id}/members/{agent_identity}/realtime/detach": {
+      "post": {
+        "summary": "Detach realtime attachment intent from a mob member"
+      }
+    },
     "/mob/{id}/members/{agent_identity}/respawn": {
       "post": {
         "summary": "Respawn a mob member with topology restore"
@@ -68,7 +78,7 @@
     },
     "/mob/{id}/members/{agent_identity}/status": {
       "get": {
-        "summary": "Get live status for a mob member"
+        "summary": "Get realtime attachment status for a mob member"
       }
     },
     "/mob/{id}/spawn-helper": {
@@ -81,9 +91,29 @@
         "summary": "Get the compiled-in model catalog"
       }
     },
+    "/realtime/capabilities": {
+      "post": {
+        "summary": "Get product-layer realtime capabilities for a target"
+      }
+    },
+    "/realtime/open_info": {
+      "post": {
+        "summary": "Get bootstrap metadata for opening a realtime channel"
+      }
+    },
+    "/realtime/status": {
+      "post": {
+        "summary": "Get product-layer realtime channel status for a target"
+      }
+    },
     "/runtime/{id}/accept": {
       "post": {
         "summary": "Accept a runtime input"
+      }
+    },
+    "/runtime/{id}/realtime_attachment_status": {
+      "get": {
+        "summary": "Get runtime-owned realtime attachment status for a session"
       }
     },
     "/runtime/{id}/reset": {

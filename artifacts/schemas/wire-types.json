@@ -1830,17 +1830,30 @@
   },
   "RealtimeAudioChunk": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "An opaque realtime audio chunk with MIME metadata.",
+    "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
     "properties": {
+      "channels": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
       "data": {
         "type": "string"
       },
       "mime_type": {
         "type": "string"
+      },
+      "sample_rate_hz": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
       }
     },
     "required": [
       "mime_type",
+      "sample_rate_hz",
+      "channels",
       "data"
     ],
     "title": "RealtimeAudioChunk",
@@ -1848,6 +1861,34 @@
   },
   "RealtimeCapabilities": {
     "$defs": {
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
+        ],
+        "type": "object"
+      },
       "RealtimeInputKind": {
         "description": "Input modality kind supported by a realtime channel.",
         "enum": [
@@ -1878,6 +1919,28 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Product-facing realtime capability set for one target/provider combination.",
     "properties": {
+      "audio_input_format": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
+      },
+      "audio_output_format": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Audio format the provider session emits for output audio chunks."
+      },
       "input_kinds": {
         "items": {
           "$ref": "#/$defs/RealtimeInputKind"
@@ -1920,9 +1983,59 @@
   },
   "RealtimeCapabilitiesResult": {
     "$defs": {
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
+        ],
+        "type": "object"
+      },
       "RealtimeCapabilities": {
         "description": "Product-facing realtime capability set for one target/provider combination.",
         "properties": {
+          "audio_input_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
+          },
+          "audio_output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session emits for output audio chunks."
+          },
           "input_kinds": {
             "items": {
               "$ref": "#/$defs/RealtimeInputKind"
@@ -2017,13 +2130,290 @@
     "type": "object"
   },
   "RealtimeChannelErrorFrame": {
+    "$defs": {
+      "AudioFormatMismatchContext": {
+        "description": "Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`].",
+        "properties": {
+          "actual": {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          },
+          "expected": {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          }
+        },
+        "required": [
+          "expected",
+          "actual"
+        ],
+        "type": "object"
+      },
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
+        ],
+        "type": "object"
+      },
+      "RealtimeErrorCode": {
+        "description": "Typed realtime channel error code. Replaces the prior freeform `String` on\n[`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick\nexactly one variant so downstream SDKs can match without string folklore.",
+        "oneOf": [
+          {
+            "const": "invalid_frame",
+            "description": "Incoming frame could not be parsed.",
+            "type": "string"
+          },
+          {
+            "const": "expected_channel_open",
+            "description": "The first frame on a new socket was not `channel.open`.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_open_token",
+            "description": "The open token did not match any pending reservation.",
+            "type": "string"
+          },
+          {
+            "const": "open_token_expired",
+            "description": "The open token was valid but its TTL elapsed before use.",
+            "type": "string"
+          },
+          {
+            "const": "role_mismatch",
+            "description": "The client-requested role does not match the reservation.",
+            "type": "string"
+          },
+          {
+            "const": "turning_mode_mismatch",
+            "description": "The client-requested turning mode does not match the reservation.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_turning_mode",
+            "description": "The reservation requested a turning mode this host does not support.",
+            "type": "string"
+          },
+          {
+            "const": "target_busy",
+            "description": "The target already has an active primary channel.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The client handshake requested a protocol version this host cannot serve.",
+            "type": "string"
+          },
+          {
+            "const": "audio_format_mismatch",
+            "description": "An input audio chunk's sample rate or channel count did not match the\nformat the provider session is negotiated for.",
+            "type": "string"
+          },
+          {
+            "const": "unauthorized_realm",
+            "description": "The open token was minted for a different realm than the one the\nwebsocket session currently resolves to. Enforced server-side.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call_timeout",
+            "description": "A tool dispatch exceeded its configured budget.",
+            "type": "string"
+          },
+          {
+            "const": "internal_error",
+            "description": "Generic internal runtime error (fallback when no better code fits).",
+            "type": "string"
+          },
+          {
+            "const": "reconnect_exhausted",
+            "description": "Reconnect budget exhausted; channel is closing.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_target",
+            "description": "Realtime target did not parse or resolve.",
+            "type": "string"
+          },
+          {
+            "const": "channel_not_bound",
+            "description": "No realtime binding exists for this channel (driver not ready).",
+            "type": "string"
+          },
+          {
+            "const": "runtime_internal",
+            "description": "Runtime layer returned an internal error that has no more-specific code.",
+            "type": "string"
+          },
+          {
+            "const": "runtime_not_ready",
+            "description": "Runtime driver is not in a state that can accept this operation.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_closed",
+            "description": "Upstream provider session is closed.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_failed",
+            "description": "Upstream provider session failed to open or progressed fatally.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_unavailable",
+            "description": "Upstream provider session is temporarily unavailable.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_input_kind",
+            "description": "Input modality is not supported by the negotiated capabilities.",
+            "type": "string"
+          },
+          {
+            "const": "no_pending_turn",
+            "description": "No pending turn on this channel to commit or interrupt.",
+            "type": "string"
+          },
+          {
+            "const": "observer_read_only",
+            "description": "Observer channels may not send input or control frames.",
+            "type": "string"
+          },
+          {
+            "const": "unexpected_channel_open",
+            "description": "`channel.open` is valid only as the first frame on a new socket.",
+            "type": "string"
+          },
+          {
+            "const": "commit_turn_unavailable",
+            "description": "`channel.commit_turn` is only valid for explicit-commit turning mode.",
+            "type": "string"
+          },
+          {
+            "const": "channel_reconnecting",
+            "description": "Channel is reconnecting; the caller must wait for a ready state.",
+            "type": "string"
+          }
+        ]
+      },
+      "RealtimeErrorDetails": {
+        "description": "Structured typed context carried on a channel error frame. Each variant\ncorresponds to a specific [`RealtimeErrorCode`] and lets clients match\nthe reason without parsing the message string.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/AudioFormatMismatchContext",
+            "properties": {
+              "kind": {
+                "const": "audio_format_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/ToolCallTimeoutContext",
+            "properties": {
+              "kind": {
+                "const": "tool_call_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unsupported_protocol_version",
+                "type": "string"
+              },
+              "requested": {
+                "type": "string"
+              },
+              "supported": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "requested",
+              "supported"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ToolCallTimeoutContext": {
+        "description": "Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`].",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "call_id",
+          "elapsed_ms",
+          "timeout_ms"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Payload for `channel.error`.",
     "properties": {
       "code": {
-        "type": "string"
+        "$ref": "#/$defs/RealtimeErrorCode",
+        "description": "Typed error code. Single source of truth for branching in SDKs."
+      },
+      "details": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeErrorDetails"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Structured context keyed to the code, when additional fields are useful."
       },
       "message": {
+        "description": "Human-readable message suitable for logs and operator surfaces.",
         "type": "string"
       }
     },
@@ -2037,17 +2427,30 @@
   "RealtimeChannelEventFrame": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
         ],
         "type": "object"
@@ -2072,6 +2475,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_retry_at": {
             "type": [
@@ -2115,6 +2525,13 @@
           },
           {
             "properties": {
+              "prosody_hint": {
+                "description": "Opaque, provider-specific prosody annotation (tone / sentiment /\npitch hints). Additive field. Providers that do not surface\nstructured prosody leave it `None`; compactors and downstream\ntools may use this as a hint only — the authoritative transcript\nis still `text`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },
@@ -2282,6 +2699,58 @@
             "type": "object"
           },
           {
+            "description": "The tool dispatch exceeded its configured budget and was aborted;\na synthetic `ToolResult::Error` was injected back into the provider\nsession so the model sees a concrete failure instead of silence.",
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "elapsed_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "tool_call_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "call_id",
+              "elapsed_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The assistant output for `item_id` was truncated at\n`audio_played_ms` because the user barged in. `truncated_text` is the\ntranscript prefix the user actually heard, as reported by the\nprovider; when the provider has not yet supplied a re-projected\ntranscript the field is omitted (`None`) and downstream projectors\nshould keep the existing transcript until a later emission fills it in.",
+            "properties": {
+              "audio_played_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "truncated_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "assistant_transcript_truncated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "item_id",
+              "audio_played_ms"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "status": {
                 "$ref": "#/$defs/RealtimeChannelStatus"
@@ -2344,17 +2813,30 @@
   "RealtimeChannelInputFrame": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
         ],
         "type": "object"
@@ -2491,9 +2973,59 @@
   },
   "RealtimeChannelOpenedFrame": {
     "$defs": {
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
+        ],
+        "type": "object"
+      },
       "RealtimeCapabilities": {
         "description": "Product-facing realtime capability set for one target/provider combination.",
         "properties": {
+          "audio_input_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
+          },
+          "audio_output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session emits for output audio chunks."
+          },
           "input_kinds": {
             "items": {
               "$ref": "#/$defs/RealtimeInputKind"
@@ -2561,6 +3093,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_retry_at": {
             "type": [
@@ -2683,6 +3222,13 @@
         "minimum": 0,
         "type": "integer"
       },
+      "deadline_at": {
+        "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "next_retry_at": {
         "type": [
           "string",
@@ -2727,6 +3273,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_retry_at": {
             "type": [
@@ -2809,18 +3362,58 @@
   "RealtimeClientFrame": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
+        ],
+        "type": "object"
+      },
+      "RealtimeBargeInTruncateFrame": {
+        "description": "Payload for `channel.barge_in_truncate`.\n\nSent by the client the moment it detects the user starting to speak over\nthe assistant's audio, to tell the server what prefix was actually heard.\nField names mirror OpenAI Realtime's `conversation.item.truncate` so the\nprovider adapter can map straight through without re-encoding.",
+        "properties": {
+          "audio_played_ms": {
+            "description": "Milliseconds of assistant audio the client actually played back\nbefore the user interrupted. Must not exceed the true elapsed duration\nof the audio content.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_index": {
+            "description": "Content index within the item (0 for the primary audio/text stream).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_id": {
+            "description": "Assistant item whose output is being truncated. Matches the `item_id`\nemitted in the public `RealtimeEvent::AssistantTranscriptTruncated`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "item_id",
+          "content_index",
+          "audio_played_ms"
         ],
         "type": "object"
       },
@@ -3003,6 +3596,20 @@
         "type": "object"
       },
       {
+        "$ref": "#/$defs/RealtimeBargeInTruncateFrame",
+        "description": "Report a client-side barge-in with the playback cursor, so the server\ncan truncate the canonical transcript to what the user actually heard.",
+        "properties": {
+          "type": {
+            "const": "channel.barge_in_truncate",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
         "properties": {
           "type": {
             "const": "channel.close",
@@ -3020,17 +3627,30 @@
   "RealtimeEvent": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
         ],
         "type": "object"
@@ -3055,6 +3675,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_retry_at": {
             "type": [
@@ -3115,6 +3742,13 @@
       },
       {
         "properties": {
+          "prosody_hint": {
+            "description": "Opaque, provider-specific prosody annotation (tone / sentiment /\npitch hints). Additive field. Providers that do not surface\nstructured prosody leave it `None`; compactors and downstream\ntools may use this as a hint only — the authoritative transcript\nis still `text`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "text": {
             "type": "string"
           },
@@ -3282,6 +3916,58 @@
         "type": "object"
       },
       {
+        "description": "The tool dispatch exceeded its configured budget and was aborted;\na synthetic `ToolResult::Error` was injected back into the provider\nsession so the model sees a concrete failure instead of silence.",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "tool_call_timed_out",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "call_id",
+          "elapsed_ms"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The assistant output for `item_id` was truncated at\n`audio_played_ms` because the user barged in. `truncated_text` is the\ntranscript prefix the user actually heard, as reported by the\nprovider; when the provider has not yet supplied a re-projected\ntranscript the field is omitted (`None`) and downstream projectors\nshould keep the existing transcript until a later emission fills it in.",
+        "properties": {
+          "audio_played_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "truncated_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "assistant_transcript_truncated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "item_id",
+          "audio_played_ms"
+        ],
+        "type": "object"
+      },
+      {
         "properties": {
           "status": {
             "$ref": "#/$defs/RealtimeChannelStatus"
@@ -3315,17 +4001,30 @@
   "RealtimeInputChunk": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
         ],
         "type": "object"
@@ -3417,9 +4116,59 @@
   },
   "RealtimeOpenInfo": {
     "$defs": {
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
+        ],
+        "type": "object"
+      },
       "RealtimeCapabilities": {
         "description": "Product-facing realtime capability set for one target/provider combination.",
         "properties": {
+          "audio_input_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
+          },
+          "audio_output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session emits for output audio chunks."
+          },
           "input_kinds": {
             "items": {
               "$ref": "#/$defs/RealtimeInputKind"
@@ -3569,17 +4318,30 @@
   "RealtimeOutputChunk": {
     "$defs": {
       "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
         "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
         ],
         "type": "object"
@@ -3705,25 +4467,104 @@
   },
   "RealtimeServerFrame": {
     "$defs": {
-      "RealtimeAudioChunk": {
-        "description": "An opaque realtime audio chunk with MIME metadata.",
+      "AudioFormatMismatchContext": {
+        "description": "Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`].",
         "properties": {
+          "actual": {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          },
+          "expected": {
+            "$ref": "#/$defs/RealtimeAudioFormat"
+          }
+        },
+        "required": [
+          "expected",
+          "actual"
+        ],
+        "type": "object"
+      },
+      "RealtimeAudioChunk": {
+        "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
+        "properties": {
+          "channels": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
           "data": {
             "type": "string"
           },
           "mime_type": {
             "type": "string"
+          },
+          "sample_rate_hz": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "mime_type",
+          "sample_rate_hz",
+          "channels",
           "data"
+        ],
+        "type": "object"
+      },
+      "RealtimeAudioFormat": {
+        "description": "Descriptor for an expected or actual realtime audio format.",
+        "properties": {
+          "channels": {
+            "description": "Channel count; `1` for mono.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mime_type": {
+            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
+            "type": "string"
+          },
+          "sample_rate_hz": {
+            "description": "Sample rate in hertz, e.g. `24000`.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "mime_type",
+          "sample_rate_hz",
+          "channels"
         ],
         "type": "object"
       },
       "RealtimeCapabilities": {
         "description": "Product-facing realtime capability set for one target/provider combination.",
         "properties": {
+          "audio_input_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
+          },
+          "audio_output_format": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeAudioFormat"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Audio format the provider session emits for output audio chunks."
+          },
           "input_kinds": {
             "items": {
               "$ref": "#/$defs/RealtimeInputKind"
@@ -3779,9 +4620,22 @@
         "description": "Payload for `channel.error`.",
         "properties": {
           "code": {
-            "type": "string"
+            "$ref": "#/$defs/RealtimeErrorCode",
+            "description": "Typed error code. Single source of truth for branching in SDKs."
+          },
+          "details": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RealtimeErrorDetails"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Structured context keyed to the code, when additional fields are useful."
           },
           "message": {
+            "description": "Human-readable message suitable for logs and operator surfaces.",
             "type": "string"
           }
         },
@@ -3856,6 +4710,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "next_retry_at": {
             "type": [
               "string",
@@ -3889,6 +4750,200 @@
         ],
         "type": "object"
       },
+      "RealtimeErrorCode": {
+        "description": "Typed realtime channel error code. Replaces the prior freeform `String` on\n[`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick\nexactly one variant so downstream SDKs can match without string folklore.",
+        "oneOf": [
+          {
+            "const": "invalid_frame",
+            "description": "Incoming frame could not be parsed.",
+            "type": "string"
+          },
+          {
+            "const": "expected_channel_open",
+            "description": "The first frame on a new socket was not `channel.open`.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_open_token",
+            "description": "The open token did not match any pending reservation.",
+            "type": "string"
+          },
+          {
+            "const": "open_token_expired",
+            "description": "The open token was valid but its TTL elapsed before use.",
+            "type": "string"
+          },
+          {
+            "const": "role_mismatch",
+            "description": "The client-requested role does not match the reservation.",
+            "type": "string"
+          },
+          {
+            "const": "turning_mode_mismatch",
+            "description": "The client-requested turning mode does not match the reservation.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_turning_mode",
+            "description": "The reservation requested a turning mode this host does not support.",
+            "type": "string"
+          },
+          {
+            "const": "target_busy",
+            "description": "The target already has an active primary channel.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_protocol_version",
+            "description": "The client handshake requested a protocol version this host cannot serve.",
+            "type": "string"
+          },
+          {
+            "const": "audio_format_mismatch",
+            "description": "An input audio chunk's sample rate or channel count did not match the\nformat the provider session is negotiated for.",
+            "type": "string"
+          },
+          {
+            "const": "unauthorized_realm",
+            "description": "The open token was minted for a different realm than the one the\nwebsocket session currently resolves to. Enforced server-side.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call_timeout",
+            "description": "A tool dispatch exceeded its configured budget.",
+            "type": "string"
+          },
+          {
+            "const": "internal_error",
+            "description": "Generic internal runtime error (fallback when no better code fits).",
+            "type": "string"
+          },
+          {
+            "const": "reconnect_exhausted",
+            "description": "Reconnect budget exhausted; channel is closing.",
+            "type": "string"
+          },
+          {
+            "const": "invalid_target",
+            "description": "Realtime target did not parse or resolve.",
+            "type": "string"
+          },
+          {
+            "const": "channel_not_bound",
+            "description": "No realtime binding exists for this channel (driver not ready).",
+            "type": "string"
+          },
+          {
+            "const": "runtime_internal",
+            "description": "Runtime layer returned an internal error that has no more-specific code.",
+            "type": "string"
+          },
+          {
+            "const": "runtime_not_ready",
+            "description": "Runtime driver is not in a state that can accept this operation.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_closed",
+            "description": "Upstream provider session is closed.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_failed",
+            "description": "Upstream provider session failed to open or progressed fatally.",
+            "type": "string"
+          },
+          {
+            "const": "provider_session_unavailable",
+            "description": "Upstream provider session is temporarily unavailable.",
+            "type": "string"
+          },
+          {
+            "const": "unsupported_input_kind",
+            "description": "Input modality is not supported by the negotiated capabilities.",
+            "type": "string"
+          },
+          {
+            "const": "no_pending_turn",
+            "description": "No pending turn on this channel to commit or interrupt.",
+            "type": "string"
+          },
+          {
+            "const": "observer_read_only",
+            "description": "Observer channels may not send input or control frames.",
+            "type": "string"
+          },
+          {
+            "const": "unexpected_channel_open",
+            "description": "`channel.open` is valid only as the first frame on a new socket.",
+            "type": "string"
+          },
+          {
+            "const": "commit_turn_unavailable",
+            "description": "`channel.commit_turn` is only valid for explicit-commit turning mode.",
+            "type": "string"
+          },
+          {
+            "const": "channel_reconnecting",
+            "description": "Channel is reconnecting; the caller must wait for a ready state.",
+            "type": "string"
+          }
+        ]
+      },
+      "RealtimeErrorDetails": {
+        "description": "Structured typed context carried on a channel error frame. Each variant\ncorresponds to a specific [`RealtimeErrorCode`] and lets clients match\nthe reason without parsing the message string.",
+        "oneOf": [
+          {
+            "$ref": "#/$defs/AudioFormatMismatchContext",
+            "properties": {
+              "kind": {
+                "const": "audio_format_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/ToolCallTimeoutContext",
+            "properties": {
+              "kind": {
+                "const": "tool_call_timeout",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "unsupported_protocol_version",
+                "type": "string"
+              },
+              "requested": {
+                "type": "string"
+              },
+              "supported": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "requested",
+              "supported"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "RealtimeEvent": {
         "description": "Normalized realtime event stream payload.",
         "oneOf": [
@@ -3910,6 +4965,13 @@
           },
           {
             "properties": {
+              "prosody_hint": {
+                "description": "Opaque, provider-specific prosody annotation (tone / sentiment /\npitch hints). Additive field. Providers that do not surface\nstructured prosody leave it `None`; compactors and downstream\ntools may use this as a hint only — the authoritative transcript\nis still `text`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "text": {
                 "type": "string"
               },
@@ -4077,6 +5139,58 @@
             "type": "object"
           },
           {
+            "description": "The tool dispatch exceeded its configured budget and was aborted;\na synthetic `ToolResult::Error` was injected back into the provider\nsession so the model sees a concrete failure instead of silence.",
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "elapsed_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "tool_call_timed_out",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "call_id",
+              "elapsed_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The assistant output for `item_id` was truncated at\n`audio_played_ms` because the user barged in. `truncated_text` is the\ntranscript prefix the user actually heard, as reported by the\nprovider; when the provider has not yet supplied a re-projected\ntranscript the field is omitted (`None`) and downstream projectors\nshould keep the existing transcript until a later emission fills it in.",
+            "properties": {
+              "audio_played_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "item_id": {
+                "type": "string"
+              },
+              "truncated_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "assistant_transcript_truncated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "item_id",
+              "audio_played_ms"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "status": {
                 "$ref": "#/$defs/RealtimeChannelStatus"
@@ -4145,6 +5259,30 @@
         "required": [
           "mime_type",
           "data"
+        ],
+        "type": "object"
+      },
+      "ToolCallTimeoutContext": {
+        "description": "Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`].",
+        "properties": {
+          "call_id": {
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "call_id",
+          "elapsed_ms",
+          "timeout_ms"
         ],
         "type": "object"
       }
@@ -4242,6 +5380,13 @@
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "deadline_at": {
+            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_retry_at": {
             "type": [
@@ -7829,20 +8974,6 @@
     "title": "WireInputStateHistoryEntry",
     "type": "object"
   },
-  "WireRealtimeAttachmentStatus": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Public live attachment status projection used by runtime and mob surfaces.",
-    "enum": [
-      "unattached",
-      "intent_present_unbound",
-      "binding_not_ready",
-      "binding_ready",
-      "replacement_pending",
-      "reattach_required"
-    ],
-    "title": "WireRealtimeAttachmentStatus",
-    "type": "string"
-  },
   "WireProviderMeta": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Provider continuity metadata for transcript blocks.",
@@ -7947,6 +9078,20 @@
       }
     ],
     "title": "WireProviderMeta"
+  },
+  "WireRealtimeAttachmentStatus": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Public live attachment status projection used by runtime and mob surfaces.",
+    "enum": [
+      "unattached",
+      "intent_present_unbound",
+      "binding_not_ready",
+      "binding_ready",
+      "replacement_pending",
+      "reattach_required"
+    ],
+    "title": "WireRealtimeAttachmentStatus",
+    "type": "string"
   },
   "WireRenderClass": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

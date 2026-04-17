@@ -132,6 +132,7 @@ export interface RuntimeRealtimeAttachmentStatusParams {
 }
 
 export interface RealtimeOpenRequest {
+  channel_config?: Record<string, unknown>;
   reconnect_policy?: Record<string, unknown>;
   role: "primary" | "observer";
   target: Record<string, unknown>;
@@ -296,6 +297,8 @@ export interface RealtimeReconnectPolicy {
 }
 
 export interface RealtimeCapabilities {
+  audio_input_format?: Record<string, unknown>;
+  audio_output_format?: Record<string, unknown>;
   input_kinds?: "text" | "audio" | "video"[];
   interrupt_supported: boolean;
   output_kinds?: "text" | "audio" | "video"[];
@@ -307,6 +310,7 @@ export interface RealtimeCapabilities {
 
 export interface RealtimeChannelStatus {
   attempt_count?: number;
+  deadline_at?: string;
   next_retry_at?: string;
   reason?: string;
   state: "opening" | "ready" | "interrupted" | "reconnecting" | "closed" | "error";
@@ -339,8 +343,10 @@ export interface RealtimeTextDelta {
 }
 
 export interface RealtimeAudioChunk {
+  channels: number;
   data: string;
   mime_type: string;
+  sample_rate_hz: number;
 }
 
 export interface RealtimeVideoChunk {
@@ -376,6 +382,7 @@ export interface RealtimeChannelEventFrame {
 
 export interface RealtimeChannelErrorFrame {
   code: string;
+  details?: Record<string, unknown>;
   message: string;
 }
 

@@ -1719,6 +1719,21 @@
   },
   "RealtimeOpenRequest": {
     "$defs": {
+      "RealtimeChannelConfig": {
+        "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only — clients that do not carry this struct inherit the\nserver-default behavior via `#[serde(default)]` on the parent\n[`RealtimeOpenRequest`].",
+        "properties": {
+          "tool_timeout_ms": {
+            "description": "Maximum wall-clock time a tool dispatch may take before the channel\ngives up and injects a synthetic tool-error result. `None` disables the\ndeadline (product explicitly opted into unlimited tools); omitting the\nfield leaves the server default in place.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RealtimeChannelRole": {
         "description": "Opening role for a realtime channel.",
         "enum": [
@@ -1812,6 +1827,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `realtime/open_info`.",
     "properties": {
+      "channel_config": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeChannelConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional per-channel runtime knobs (tool budget, etc.). Omitted means\n\"use server defaults\"."
+      },
       "reconnect_policy": {
         "anyOf": [
           {

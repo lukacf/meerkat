@@ -35,10 +35,8 @@ pub mod identifiers;
 pub mod ingress_types;
 pub mod input;
 pub mod input_ledger;
-pub mod input_lifecycle_authority;
 pub mod input_scope;
 pub mod input_state;
-pub mod lifecycle_ops;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
@@ -75,16 +73,11 @@ pub use input::{
     ResponseProgressPhase, ResponseTerminalStatus,
 };
 pub use input_ledger::InputLedger;
-pub use input_lifecycle_authority::{
-    InputLifecycleAuthority, InputLifecycleEffect, InputLifecycleError, InputLifecycleInput,
-    InputLifecycleMutator, InputLifecycleTransition,
-};
 pub use input_scope::InputScope;
 pub use input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateEvent, InputStateHistoryEntry,
-    InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
+    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, ReconstructionSource,
 };
-pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
 pub use meerkat_machine_types::{

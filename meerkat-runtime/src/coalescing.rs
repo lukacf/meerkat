@@ -9,8 +9,9 @@ use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
 use crate::input::{Input, PeerConvention};
-use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
-use crate::input_state::{InputState, InputTerminalOutcome};
+use crate::input_state::{
+    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
+};
 
 /// Whether an input is eligible for coalescing.
 pub fn is_coalescing_eligible(input: &Input) -> bool {
@@ -76,24 +77,37 @@ pub fn check_supersession(
     }
 }
 
-/// Apply supersession: transition the superseded input to Superseded.
-pub fn apply_supersession(
-    superseded_state: &mut InputState,
-    superseded_by: InputId,
-) -> Result<(), InputLifecycleError> {
-    superseded_state.apply(InputLifecycleInput::Supersede)?;
-    superseded_state.set_terminal_outcome(InputTerminalOutcome::Superseded { superseded_by });
-    Ok(())
+/// Write the shell-side metadata for a supersession. Callers invoke the DSL
+/// `SupersedeInput` transition first (which flips `input_phases`), then call
+/// this to mirror the phase + enriched terminal outcome onto the shell's
+/// `InputState`.
+pub fn apply_supersession(superseded_state: &mut InputState, superseded_by: InputId) {
+    let now = Utc::now();
+    superseded_state.history.push(InputStateHistoryEntry {
+        timestamp: now,
+        from: superseded_state.phase,
+        to: InputLifecycleState::Superseded,
+        reason: Some("Supersede".into()),
+    });
+    superseded_state.phase = InputLifecycleState::Superseded;
+    superseded_state.terminal_outcome = Some(InputTerminalOutcome::Superseded { superseded_by });
+    superseded_state.updated_at = now;
 }
 
-/// Apply coalescing: transition the source input to Coalesced.
-pub fn apply_coalescing(
-    source_state: &mut InputState,
-    aggregate_id: InputId,
-) -> Result<(), InputLifecycleError> {
-    source_state.apply(InputLifecycleInput::Coalesce)?;
-    source_state.set_terminal_outcome(InputTerminalOutcome::Coalesced { aggregate_id });
-    Ok(())
+/// Write the shell-side metadata for a coalesce. Callers invoke the DSL
+/// `CoalesceInput` transition first, then call this to mirror the phase and
+/// enriched terminal outcome onto the shell's `InputState`.
+pub fn apply_coalescing(source_state: &mut InputState, aggregate_id: InputId) {
+    let now = Utc::now();
+    source_state.history.push(InputStateHistoryEntry {
+        timestamp: now,
+        from: source_state.phase,
+        to: InputLifecycleState::Coalesced,
+        reason: Some("Coalesce".into()),
+    });
+    source_state.phase = InputLifecycleState::Coalesced;
+    source_state.terminal_outcome = Some(InputTerminalOutcome::Coalesced { aggregate_id });
+    source_state.updated_at = now;
 }
 
 /// Create an aggregate input from multiple coalesced inputs.
@@ -292,37 +306,27 @@ mod tests {
     }
 
     #[test]
-    fn apply_supersession_transitions_state() {
+    fn apply_supersession_sets_phase_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state
-            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
-            .unwrap();
+        state.phase = InputLifecycleState::Queued;
         let superseder = InputId::new();
-        apply_supersession(&mut state, superseder).unwrap();
-        assert_eq!(
-            state.current_state(),
-            crate::input_state::InputLifecycleState::Superseded
-        );
+        apply_supersession(&mut state, superseder);
+        assert_eq!(state.phase, InputLifecycleState::Superseded);
         assert!(matches!(
-            state.terminal_outcome().cloned(),
+            state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Superseded { .. })
         ));
     }
 
     #[test]
-    fn apply_coalescing_transitions_state() {
+    fn apply_coalescing_sets_phase_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state
-            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
-            .unwrap();
+        state.phase = InputLifecycleState::Queued;
         let aggregate = InputId::new();
-        apply_coalescing(&mut state, aggregate).unwrap();
-        assert_eq!(
-            state.current_state(),
-            crate::input_state::InputLifecycleState::Coalesced
-        );
+        apply_coalescing(&mut state, aggregate);
+        assert_eq!(state.phase, InputLifecycleState::Coalesced);
         assert!(matches!(
-            state.terminal_outcome().cloned(),
+            state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Coalesced { .. })
         ));
     }

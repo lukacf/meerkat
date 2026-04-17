@@ -94,9 +94,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         )?;
         let mut input_updates = input_updates;
         for state in &mut input_updates {
-            state
-                .authority_mut()
-                .stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
+            state.stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
         }
 
         inner
@@ -376,7 +374,7 @@ mod tests {
 
         // Second write with updated state
         let mut state2 = InputState::new_accepted(input_id.clone());
-        let _ = state2.apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted);
+        state2.phase = crate::input_state::InputLifecycleState::Queued;
         store
             .atomic_apply(
                 &rid,

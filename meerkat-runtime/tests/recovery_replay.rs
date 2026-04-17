@@ -45,27 +45,17 @@ fn make_prompt(text: &str) -> Input {
 }
 
 fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> InputState {
+    use meerkat_runtime::input_state::InputLifecycleState;
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
-    // Transition through authority: Accepted -> Queued -> Staged -> Applied -> AppliedPendingConsumption
-    use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
-    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
-    state
-        .apply(InputLifecycleInput::StageForRun {
-            run_id: run_id.clone(),
-        })
-        .unwrap();
-    state
-        .apply(InputLifecycleInput::MarkApplied {
-            run_id: run_id.clone(),
-        })
-        .unwrap();
-    state
-        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
-            boundary_sequence: sequence,
-        })
-        .unwrap();
+    // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
+    // by setting the plain shell fields directly. History is not material
+    // to recovery.
+    state.phase = InputLifecycleState::AppliedPendingConsumption;
+    state.last_run_id = Some(run_id.clone());
+    state.last_boundary_sequence = Some(sequence);
+    state.attempt_count = 1;
     state
 }
 

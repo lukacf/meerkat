@@ -217,9 +217,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
                 )?;
                 let mut input_updates = input_updates;
                 for state in &mut input_updates {
-                    state
-                        .authority_mut()
-                        .stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
+                    state.stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
                 }
 
                 write_session_snapshot_in_txn(&tx, &session_snapshot)

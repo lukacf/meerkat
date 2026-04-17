@@ -8,7 +8,6 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::ContentShape;
-use crate::input_lifecycle_authority::InputLifecycleInput;
 use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
 };
@@ -321,7 +320,7 @@ impl DriverEntry {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => d.stage_input(input_id, run_id),
             DriverEntry::Persistent(d) => d.stage_input(input_id, run_id),
@@ -333,7 +332,7 @@ impl DriverEntry {
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => d.machine_realize_stage_batch(input_ids, run_id),
             DriverEntry::Persistent(d) => d.machine_realize_stage_batch(input_ids, run_id),
@@ -344,7 +343,7 @@ impl DriverEntry {
     pub(crate) fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => d.rollback_staged(input_ids),
             DriverEntry::Persistent(d) => d.rollback_staged(input_ids),
@@ -681,59 +680,77 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                         && policy.decision.consume_point == crate::policy::ConsumePoint::OnAccept
                 })
                 .unwrap_or(false);
+            let now = Utc::now();
+            let from = state.phase;
             if consume_on_accept {
-                let _ = state.apply(InputLifecycleInput::ConsumeOnAccept);
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to: InputLifecycleState::Consumed,
+                    reason: Some("recovery: ConsumeOnAccept (Ignore+OnAccept policy)".into()),
+                });
+                state.phase = InputLifecycleState::Consumed;
+                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                state.updated_at = now;
                 delta.abandoned += 1;
             } else {
-                let _ = state.apply(InputLifecycleInput::QueueAccepted);
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to: InputLifecycleState::Queued,
+                    reason: Some("recovery: QueueAccepted".into()),
+                });
+                state.phase = InputLifecycleState::Queued;
+                state.updated_at = now;
                 delta.requeued += 1;
             }
             delta.recovered += 1;
         }
         InputLifecycleState::Staged => {
-            let _ = state.apply(InputLifecycleInput::RollbackStaged);
+            // Crashed mid-stage — rollback to Queued so the replay path can
+            // pick it up. This mirrors the old `RollbackStaged` transition
+            // at its starting attempt_count (no bound check here; the live
+            // `rollback_staged` path handles the exhausted-attempts branch
+            // once the runtime resumes).
+            let now = Utc::now();
+            let from = state.phase;
+            state.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from,
+                to: InputLifecycleState::Queued,
+                reason: Some("recovery: RollbackStaged".into()),
+            });
+            state.phase = InputLifecycleState::Queued;
+            state.updated_at = now;
             delta.requeued += 1;
             delta.recovered += 1;
         }
         InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption => {
             if let Some(has_receipt) = applied_boundary_committed {
                 let now = Utc::now();
-                let from = state.current_state();
-                let auth = crate::input_lifecycle_authority::InputLifecycleAuthority::restore(
-                    if has_receipt {
-                        InputLifecycleState::Consumed
+                let from = state.phase;
+                let to = if has_receipt {
+                    InputLifecycleState::Consumed
+                } else {
+                    InputLifecycleState::Queued
+                };
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to,
+                    reason: Some(if has_receipt {
+                        "recovery: boundary receipt already committed".into()
                     } else {
-                        InputLifecycleState::Queued
-                    },
-                    if has_receipt {
-                        Some(InputTerminalOutcome::Consumed)
-                    } else {
-                        None
-                    },
-                    state.last_run_id().cloned(),
-                    state.last_boundary_sequence(),
-                    state.attempt_count(),
-                    {
-                        let mut h = state.history().to_vec();
-                        h.push(InputStateHistoryEntry {
-                            timestamp: now,
-                            from,
-                            to: if has_receipt {
-                                InputLifecycleState::Consumed
-                            } else {
-                                InputLifecycleState::Queued
-                            },
-                            reason: Some(if has_receipt {
-                                "recovery: boundary receipt already committed".into()
-                            } else {
-                                "recovery: missing boundary receipt".into()
-                            }),
-                        });
-                        h
-                    },
-                    now,
-                );
-                *state.authority_mut() = auth;
+                        "recovery: missing boundary receipt".into()
+                    }),
+                });
+                state.phase = to;
+                state.terminal_outcome = if has_receipt {
+                    Some(InputTerminalOutcome::Consumed)
+                } else {
+                    None
+                };
+                state.updated_at = now;
             }
             delta.recovered += 1;
         }

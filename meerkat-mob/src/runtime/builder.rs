@@ -681,7 +681,7 @@ impl MobBuilder {
     #[cfg(not(target_arch = "wasm32"))]
     fn member_ref_with_bootstrap_token(
         member_ref: crate::event::MemberRef,
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
     ) -> crate::event::MemberRef {
         match member_ref {
             crate::event::MemberRef::BackendPeer {

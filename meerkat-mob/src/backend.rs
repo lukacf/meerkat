@@ -1,3 +1,4 @@
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use serde::{Deserialize, Serialize};
 
 /// Supported mob member provisioning backends.
@@ -40,7 +41,7 @@ pub enum RuntimeBinding {
         address: String,
         /// One-time bootstrap proof for the initial supervisor bind.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<BridgeBootstrapToken>,
     },
 }
 

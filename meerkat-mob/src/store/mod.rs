@@ -27,6 +27,7 @@ use crate::run::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_machine_kernels::KernelState;
 use serde::{Deserialize, Serialize};
 
@@ -119,7 +120,7 @@ pub struct ExternalBindingOverlayRecord {
     /// Peer-only runtime binding when normalization succeeds.
     pub normalized_member_ref: Option<MemberRef>,
     /// Optional bootstrap proof for re-establishing supervisor control.
-    pub bootstrap_token: Option<String>,
+    pub bootstrap_token: Option<BridgeBootstrapToken>,
     /// Current normalization status.
     pub status: ExternalBindingOverlayStatus,
     /// Last update time for conflict resolution and diagnostics.

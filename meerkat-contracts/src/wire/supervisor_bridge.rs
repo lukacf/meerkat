@@ -222,6 +222,67 @@ pub struct BridgeSupervisorPayload {
     pub protocol_version: u32,
 }
 
+/// One-time bootstrap proof exchanged between a mob supervisor and a
+/// member runtime on initial bind.
+///
+/// Transparent over the wire (`#[serde(transparent)]` — a bare JSON string),
+/// but carries a redacting `Debug` impl and has no `Display` impl so the
+/// raw secret cannot accidentally land in logs or panic messages. Treat it
+/// like an API key: read `as_str()` only at the comms/transport boundary.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct BridgeBootstrapToken(String);
+
+impl BridgeBootstrapToken {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl From<String> for BridgeBootstrapToken {
+    fn from(token: String) -> Self {
+        Self(token)
+    }
+}
+
+impl From<&str> for BridgeBootstrapToken {
+    fn from(token: &str) -> Self {
+        Self(token.to_string())
+    }
+}
+
+impl std::fmt::Debug for BridgeBootstrapToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "BridgeBootstrapToken(empty)")
+        } else {
+            write!(f, "BridgeBootstrapToken(<redacted, {}B>)", self.0.len())
+        }
+    }
+}
+
+// Deliberately no `Display` impl: `Display` is the canonical "show me this
+// value" path and the bootstrap token must never flow into a format string
+// or user-facing surface. Call `as_str()` explicitly when bridging to the
+// comms layer.
+
 /// Bind a remote runtime to this supervisor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeBindPayload {
@@ -230,7 +291,7 @@ pub struct BridgeBindPayload {
     pub protocol_version: u32,
     pub expected_peer_id: String,
     pub expected_address: String,
-    pub bootstrap_token: String,
+    pub bootstrap_token: BridgeBootstrapToken,
 }
 
 /// Capabilities advertised by a member runtime on bind.
@@ -438,7 +499,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "peer-expected".to_string(),
             expected_address: "tcp://127.0.0.1:9000".to_string(),
-            bootstrap_token: "bootstrap-secret".to_string(),
+            bootstrap_token: "bootstrap-secret".into(),
         });
         assert_command_round_trip(&cmd);
     }

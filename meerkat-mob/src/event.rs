@@ -11,6 +11,7 @@ use crate::ids::{
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
@@ -90,7 +91,10 @@ pub enum MemberRef {
         /// Backend-provided address string.
         address: String,
         /// Optional bootstrap proof for re-establishing supervisor control.
-        bootstrap_token: Option<String>,
+        /// Not serialized on the wire (intentionally elided from `Serialize`
+        /// below); kept in memory as a redacting newtype so it does not leak
+        /// through `Debug` or `tracing` fields.
+        bootstrap_token: Option<BridgeBootstrapToken>,
         /// Optional bridge session binding when this member is bridged to a
         /// local session. Serialized additively as both `session_id` and
         /// `bridge_session_id` for compatibility.
@@ -164,7 +168,7 @@ enum MemberRefCanonical {
         peer_id: String,
         address: String,
         #[serde(default)]
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<BridgeBootstrapToken>,
         #[serde(default)]
         session_id: Option<SessionId>,
         #[serde(default)]
@@ -792,7 +796,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
-            bootstrap_token: Some("secret-bootstrap-proof".to_string()),
+            bootstrap_token: Some("secret-bootstrap-proof".into()),
             session_id: None,
         };
 

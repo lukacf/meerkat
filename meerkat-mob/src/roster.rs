@@ -528,7 +528,7 @@ impl Roster {
         prior_peer_id: &str,
         next_peer_id: &str,
         next_address: &str,
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
     ) -> Vec<(AgentIdentity, Generation)> {
         let mut updated = Vec::new();
         for entry in self.entries.values_mut() {

@@ -1,6 +1,7 @@
 //! Mob RPC wire contracts.
 
 use super::session::WireContentInput;
+use super::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::OutputSchema;
 use meerkat_core::{
     HandlingMode,
@@ -32,7 +33,7 @@ pub enum WireRuntimeBinding {
         peer_id: String,
         address: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<BridgeBootstrapToken>,
     },
 }
 

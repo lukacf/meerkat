@@ -456,7 +456,7 @@ fn validate_bind_request(
             ),
         ));
     }
-    if payload.bootstrap_token != expected_bootstrap_token {
+    if payload.bootstrap_token.as_str() != expected_bootstrap_token {
         return Err((
             BridgeRejectionCause::InvalidBootstrapToken,
             "bind member failed: invalid bootstrap token".to_string(),
@@ -1489,7 +1489,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "wrong-token".to_string(),
+            bootstrap_token: "wrong-token".into(),
         };
 
         let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
@@ -1521,7 +1521,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (authorized, advertised_address) =
@@ -1553,7 +1553,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: "inproc://receiver-real".to_string(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (_, advertised_address) =
@@ -1582,7 +1582,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: "inproc://receiver-stale".to_string(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
@@ -1614,7 +1614,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
@@ -1650,7 +1650,7 @@ mod tests {
             protocol_version: 1,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (cause, _error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
@@ -1677,7 +1677,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         };
 
         let (cause, error) = validate_bind_request(&runtime, &payload.supervisor.peer_id, &payload)
@@ -1700,7 +1700,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: "inproc://receiver".to_string(),
-            bootstrap_token: "expected-token".to_string(),
+            bootstrap_token: "expected-token".into(),
         }
     }
 
@@ -1879,7 +1879,7 @@ mod tests {
                     .advertised_address()
                     .unwrap_or_else(|| "inproc://bind-rebind-receiver".to_string()),
                 // Even with a *valid* bootstrap token, the rebind must fail.
-                bootstrap_token: runtime.bridge_bootstrap_token().unwrap_or_default(),
+                bootstrap_token: runtime.bridge_bootstrap_token().unwrap_or_default().into(),
             },
         );
         let candidate = bridge_candidate("ed25519:adversary", &command);
@@ -2018,7 +2018,7 @@ mod tests {
                 protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                 expected_peer_id: attacker_peer_id.clone(),
                 expected_address: attacker_address.clone(),
-                bootstrap_token: "expected-token".to_string(),
+                bootstrap_token: "expected-token".into(),
             },
         );
         let candidate = bridge_candidate(&authorized.peer_id, &command);

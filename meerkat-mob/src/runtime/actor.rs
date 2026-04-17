@@ -350,15 +350,15 @@ impl MobActor {
 
     fn bridge_bootstrap_token_from_binding(
         binding: &crate::RuntimeBinding,
-    ) -> Result<String, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeBootstrapToken, MobError> {
         match binding {
             crate::RuntimeBinding::External {
                 address,
                 bootstrap_token,
                 ..
             } => {
-                if let Some(token) = bootstrap_token.as_deref().filter(|token| !token.is_empty()) {
-                    return Ok(token.to_string());
+                if let Some(token) = bootstrap_token.as_ref().filter(|token| !token.is_empty()) {
+                    return Ok(token.clone());
                 }
                 let query = address.split_once('?').map(|(_, query)| query).ok_or_else(|| {
                     MobError::WiringError(format!(
@@ -372,7 +372,7 @@ impl MobActor {
                     if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
                         && !value.is_empty()
                     {
-                        return Ok(value.to_string());
+                        return Ok(super::bridge_protocol::BridgeBootstrapToken::new(value));
                     }
                 }
                 Err(MobError::WiringError(format!(

@@ -2519,7 +2519,7 @@ fn test_external_binding(meerkat_id: &str) -> crate::RuntimeBinding {
     crate::RuntimeBinding::External {
         peer_id: format!("ed25519:test-key:{meerkat_id}"),
         address: format!("tcp://test.invalid/{meerkat_id}"),
-        bootstrap_token: Some(bootstrap_token),
+        bootstrap_token: Some(bootstrap_token.into()),
     }
 }
 
@@ -2615,7 +2615,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let binding = crate::RuntimeBinding::External {
         peer_id: runtime.public_key().to_peer_id(),
         address: format!("inproc://{peer_name}"),
-        bootstrap_token: Some(bootstrap_token),
+        bootstrap_token: Some(bootstrap_token.into()),
     };
     let responder_runtime = runtime.clone();
     let bind_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4854,7 +4854,7 @@ async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
             "{}?{}={}",
             address,
             super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
-            bootstrap_token
+            bootstrap_token.as_str()
         ),
         bootstrap_token: None,
     };

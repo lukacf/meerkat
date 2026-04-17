@@ -1105,7 +1105,7 @@ struct ExternalBindingTarget {
     peer_name: String,
     peer_id: String,
     address: String,
-    bootstrap_token: Option<String>,
+    bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -1205,9 +1205,9 @@ impl MultiBackendProvisioner {
     fn bridge_bootstrap_token_from_binding(
         address: &str,
         bootstrap_token: Option<&str>,
-    ) -> Result<String, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeBootstrapToken, MobError> {
         if let Some(token) = bootstrap_token.filter(|token| !token.is_empty()) {
-            return Ok(token.to_string());
+            return Ok(super::bridge_protocol::BridgeBootstrapToken::new(token));
         }
         let query = address
             .split_once('?')
@@ -1224,7 +1224,7 @@ impl MultiBackendProvisioner {
             if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
                 && !value.is_empty()
             {
-                return Ok(value.to_string());
+                return Ok(super::bridge_protocol::BridgeBootstrapToken::new(value));
             }
         }
         Err(MobError::WiringError(format!(
@@ -1344,7 +1344,7 @@ impl MultiBackendProvisioner {
     async fn persist_rebound_binding(
         &self,
         prior_peer_id: &str,
-        bootstrap_token: Option<String>,
+        bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
         bind: &super::bridge_protocol::BridgeBindResponse,
     ) -> Result<(), MobError> {
         let Some(persistence) = self.binding_persistence.as_ref() else {
@@ -1408,7 +1408,9 @@ impl MultiBackendProvisioner {
                 Some((
                     peer_id.as_str(),
                     address.as_str(),
-                    bootstrap_token.as_deref(),
+                    bootstrap_token
+                        .as_ref()
+                        .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
                 )),
             )
             .await?;
@@ -1463,8 +1465,12 @@ impl MultiBackendProvisioner {
             address: real_address,
             bootstrap_token,
         } = target;
-        let effective_bootstrap_token =
-            Self::bridge_bootstrap_token_from_binding(&real_address, bootstrap_token.as_deref())?;
+        let effective_bootstrap_token = Self::bridge_bootstrap_token_from_binding(
+            &real_address,
+            bootstrap_token
+                .as_ref()
+                .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
+        )?;
         if !is_valid_external_peer_name(&peer_name) {
             return Err(MobError::WiringError(format!(
                 "invalid external peer name '{peer_name}': expected '<mob>/<profile>/<meerkat>' using identifier-safe segments"
@@ -1604,7 +1610,9 @@ impl MobProvisioner for MultiBackendProvisioner {
                         Some((
                             peer_id.as_str(),
                             address.as_str(),
-                            bootstrap_token.as_deref(),
+                            bootstrap_token
+                                .as_ref()
+                                .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
                         )),
                     )
                     .await?;
@@ -1639,7 +1647,9 @@ impl MobProvisioner for MultiBackendProvisioner {
                         Some((
                             peer_id.as_str(),
                             address.as_str(),
-                            bootstrap_token.as_deref(),
+                            bootstrap_token
+                                .as_ref()
+                                .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
                         )),
                     )
                     .await?;
@@ -1681,7 +1691,9 @@ impl MobProvisioner for MultiBackendProvisioner {
                         Some((
                             peer_id.as_str(),
                             address.as_str(),
-                            bootstrap_token.as_deref(),
+                            bootstrap_token
+                                .as_ref()
+                                .map(super::bridge_protocol::BridgeBootstrapToken::as_str),
                         )),
                     )
                     .await?;

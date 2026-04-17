@@ -1454,6 +1454,26 @@ impl SessionRuntime {
         self.service.clone()
     }
 
+    /// Apply runtime-owned system context appends to the canonical session
+    /// transcript through the persistent session service. Used by the
+    /// CoreExecutor context-only-immediate short-circuit so peer terminal
+    /// responses (and other context-only primitives) land as system-context
+    /// blocks rather than triggering a turn.
+    pub(crate) async fn apply_runtime_context_appends_via_service(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::lifecycle::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        self.service
+            .apply_runtime_context_appends(session_id, run_id, appends, contributing_input_ids)
+            .await
+    }
+
     /// Pre-initialize the callback channel and return the receiver half.
     ///
     /// Call this before any code that reads `callback_request_tx()` (e.g.
@@ -1878,8 +1898,14 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
-        if primitive.is_context_only_immediate()
-            && let RunPrimitive::StagedInput(staged) = primitive
+        // Context-only staged primitive (e.g. peer_response_terminal) must
+        // land as runtime system-context appends rather than trigger a turn.
+        // Runtime boundary is Steer-derived (RunCheckpoint), so the stricter
+        // `is_context_only_immediate` gate misses; use the
+        // appends-empty + context-appends-nonempty criterion directly.
+        if let RunPrimitive::StagedInput(staged) = primitive
+            && staged.appends.is_empty()
+            && !staged.context_appends.is_empty()
         {
             return self
                 .service
@@ -4030,17 +4056,6 @@ mod tests {
         );
     }
 
-    // TODO(realtime-voice-rebase): terminal peer response projection is not
-    // reaching the authoritative session snapshot in the rebased code. The
-    // ConversationContextAppend path in runtime_loop.rs runs, but the
-    // projected System messages don't surface in load_persisted_session
-    // before the 3s test deadline. This is a latent bug from the squash
-    // rebase (d273fff15) — the 3 terminal-peer-response tests were added
-    // together with provider work that predated the DSL cutover, and they
-    // never ran because the pre-port code did not compile cleanly. Tracked
-    // separately from the DSL port; expected to be fixed alongside the
-    // peer response materialization fix that PR #255 promised.
-    #[ignore]
     #[tokio::test]
     async fn realtime_open_config_includes_runtime_owned_terminal_peer_response_projection() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4153,8 +4168,6 @@ mod tests {
         );
     }
 
-    // TODO(realtime-voice-rebase): see sibling test above — same underlying bug.
-    #[ignore]
     #[tokio::test]
     async fn recovery_restores_runtime_owned_terminal_peer_response_from_authoritative_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -4329,8 +4342,6 @@ mod tests {
         );
     }
 
-    // TODO(realtime-voice-rebase): see sibling test above — same underlying bug.
-    #[ignore]
     #[tokio::test]
     async fn accept_input_with_completion_persists_runtime_owned_terminal_peer_response() {
         let temp = tempfile::tempdir().expect("tempdir");

@@ -578,8 +578,13 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         run_id: CoreRunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        if primitive.is_context_only_immediate()
-            && let RunPrimitive::StagedInput(staged) = &primitive
+        // Context-only staged primitive — no conversation appends, just
+        // context (e.g. peer_response_terminal with Steer→RunCheckpoint
+        // boundary). Must not trigger a turn. See SessionRuntimeExecutor
+        // for the rationale on relaxing the boundary==Immediate gate.
+        if let RunPrimitive::StagedInput(staged) = &primitive
+            && staged.appends.is_empty()
+            && !staged.context_appends.is_empty()
         {
             return self
                 .session_service

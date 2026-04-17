@@ -483,8 +483,13 @@ async fn apply_runtime_turn(
     primitive: &RunPrimitive,
     prompt: ContentInput,
 ) -> Result<CoreApplyOutput, SessionError> {
-    if primitive.is_context_only_immediate()
-        && let RunPrimitive::StagedInput(staged) = primitive
+    // Context-only staged primitive (e.g. peer_response_terminal). Runtime
+    // boundary is Steer-derived (RunCheckpoint); the stricter
+    // `is_context_only_immediate` gate doesn't match, so use the
+    // appends-empty + context-appends-nonempty criterion directly.
+    if let RunPrimitive::StagedInput(staged) = primitive
+        && staged.appends.is_empty()
+        && !staged.context_appends.is_empty()
     {
         return context
             .session_service

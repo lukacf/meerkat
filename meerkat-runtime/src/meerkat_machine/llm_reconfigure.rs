@@ -430,7 +430,8 @@ impl MeerkatMachine {
         // `turn_at_safe_boundary` enforces "wait for next natural boundary";
         // the shell's only job here is retry mechanics, not semantic waiting.
         // Step 1b already drove any Running turn toward DrainingBoundary.
-        let detach_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let detach_deadline =
+            meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             match self
                 .stage_session_dsl_input(
@@ -441,13 +442,13 @@ impl MeerkatMachine {
                 .await
             {
                 Ok(_) => break,
-                Err(reason) if tokio::time::Instant::now() < detach_deadline => {
+                Err(reason) if meerkat_core::time_compat::Instant::now() < detach_deadline => {
                     tracing::trace!(
                         %session_id,
                         reason = %reason,
                         "DSL rejected MarkLiveTopologyDetached; retrying"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    crate::tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 Err(reason) => {
                     let _ = self

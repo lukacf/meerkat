@@ -121,8 +121,8 @@ impl CoreExecutor for RecordingBatchExecutor {
 #[tokio::test]
 #[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_handle() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
@@ -166,8 +166,8 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
 #[tokio::test]
 #[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -260,8 +260,8 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
 #[tokio::test]
 #[ignore = "Phase 3 multi-contributor staged-run contract"]
 async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_order() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let seen = Arc::new(tokio::sync::Mutex::new(Vec::<Vec<InputId>>::new()));
 

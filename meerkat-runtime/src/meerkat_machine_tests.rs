@@ -262,7 +262,7 @@ async fn unregister_session_aborts_and_removes_drain_slot() {
 
 #[tokio::test]
 async fn session_service_runtime_ext_write_side_follows_machine_control_surface() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -323,7 +323,7 @@ async fn session_service_runtime_ext_write_side_follows_machine_control_surface(
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -361,7 +361,7 @@ async fn meerkat_machine_spine_snapshot_reports_registered_idle_session() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -425,7 +425,7 @@ async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_deduplicated_completion_waiters() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -488,7 +488,7 @@ async fn meerkat_machine_spine_snapshot_tracks_deduplicated_completion_waiters()
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_steered_prompt_input() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -535,7 +535,7 @@ async fn meerkat_machine_spine_snapshot_tracks_steered_prompt_input() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -560,7 +560,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset() 
         input_id
     );
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should succeed for idle queued runtime");
 
@@ -582,7 +582,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset() 
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recycle() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -609,7 +609,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve queued work");
     assert_eq!(report.inputs_transferred, 1);
@@ -632,7 +632,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         1
     );
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait().await {
@@ -645,7 +645,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_waiters() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -697,7 +697,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should reconcile waiters against active input truth");
     assert_eq!(report.inputs_transferred, 1);
@@ -725,7 +725,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
         other => panic!("expected recycled stale waiter termination, got {other:?}"),
     }
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait().await {
@@ -738,7 +738,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recover() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -765,7 +765,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve queued work");
     assert_eq!(report.inputs_recovered, 1);
@@ -788,7 +788,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         1
     );
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait().await {
@@ -801,7 +801,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_waiters() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -853,7 +853,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should reconcile waiters against active input truth");
     assert_eq!(report.inputs_recovered, 1);
@@ -881,7 +881,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
         other => panic!("expected recovered stale waiter termination, got {other:?}"),
     }
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait().await {
@@ -894,7 +894,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -925,7 +925,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should terminate active completion waiters");
     assert_eq!(report.inputs_abandoned, 1);
@@ -961,7 +961,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all()
  {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -1038,7 +1038,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should clear the steered completion waiter while preserving wait_all");
     assert_eq!(report.inputs_abandoned, 1);
@@ -1156,7 +1156,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -1216,7 +1216,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should synchronously clear queued waiters even with a live loop");
     assert_eq!(report.inputs_abandoned, 1);
@@ -1302,7 +1302,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -1467,7 +1467,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -1714,7 +1714,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -1972,7 +1972,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -2076,7 +2076,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
     assert_eq!(control_calls.load(Ordering::SeqCst), 1);
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split attached steered completion and wait_all lifetimes");
 
@@ -2163,7 +2163,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
 
 #[tokio::test]
 async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -2182,7 +2182,7 @@ async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
 
 #[tokio::test]
 async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -2244,7 +2244,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let cancel_calls = Arc::new(AtomicUsize::new(0));
@@ -2444,7 +2444,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
@@ -2603,7 +2603,7 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let interrupt_calls = Arc::new(AtomicUsize::new(0));
@@ -2840,7 +2840,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -3170,7 +3170,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -3229,7 +3229,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
         "reset has not yet attempted any executor control"
     );
 
-    let report = SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    let report = SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should succeed for attached queued runtime");
     assert_eq!(report.inputs_abandoned, 1);
@@ -3266,7 +3266,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_runtime_executor() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -3369,7 +3369,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -3474,7 +3474,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_without_runtime_loop()
  {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -3501,7 +3501,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should clear queued waiters when no runtime loop can drain");
     assert_eq!(report.inputs_abandoned, 1);
@@ -3567,7 +3567,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
@@ -3612,7 +3612,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve queued work for the live runtime loop to drain");
     assert_eq!(report.inputs_abandoned, 0);
@@ -3708,7 +3708,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -3766,7 +3766,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect(
             "recover should preserve queued completion waiters while replaying attached-loop work",
@@ -3889,7 +3889,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -3947,7 +3947,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect(
             "recycle should preserve queued completion waiters while replaying attached-loop work",
@@ -4023,7 +4023,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4059,7 +4059,7 @@ async fn meerkat_machine_spine_snapshot_tracks_epoch_cursor_state() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4125,7 +4125,7 @@ async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4194,7 +4194,7 @@ async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4243,7 +4243,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve the active wait_all carrier");
     assert_eq!(report.inputs_recovered, 0);
@@ -4311,7 +4311,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_lifetimes() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4378,7 +4378,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve both queued input and active wait_all");
     assert_eq!(report.inputs_recovered, 1);
@@ -4458,7 +4458,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
     assert_eq!(after_wait_all.ops.pending_wait_request_id, None);
     assert!(after_wait_all.ops.wait_operation_ids.is_empty());
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait().await {
@@ -4471,7 +4471,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait_all() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4546,7 +4546,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve steered input and active wait_all");
     assert_eq!(report.inputs_recovered, 1);
@@ -4622,7 +4622,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.ops.pending_wait_request_id, None);
     assert!(after_wait_all.ops.wait_operation_ids.is_empty());
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait().await {
@@ -4635,7 +4635,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait_all() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4710,7 +4710,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve steered input and active wait_all");
     assert_eq!(report.inputs_transferred, 1);
@@ -4786,7 +4786,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     assert_eq!(after_wait_all.ops.pending_wait_request_id, None);
     assert!(after_wait_all.ops.wait_operation_ids.is_empty());
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait().await {
@@ -4799,7 +4799,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4848,7 +4848,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve the active wait_all carrier");
     assert_eq!(report.inputs_transferred, 0);
@@ -4908,7 +4908,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_lifetimes() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -4975,7 +4975,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve both queued input and active wait_all");
     assert_eq!(report.inputs_transferred, 1);
@@ -5047,7 +5047,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
     assert_eq!(after_wait_all.ops.pending_wait_request_id, None);
     assert!(after_wait_all.ops.wait_operation_ids.is_empty());
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait().await {
@@ -5101,7 +5101,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -5187,7 +5187,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve wait_all while replaying attached-loop work");
     assert_eq!(report.inputs_recovered, 1);
@@ -5371,7 +5371,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -5465,7 +5465,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recover(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should split completion and wait_all lifetimes on attached runtimes");
     assert_eq!(report.inputs_recovered, 1);
@@ -5650,7 +5650,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -5736,7 +5736,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve wait_all while requeueing attached-loop work");
     assert_eq!(report.inputs_transferred, 1);
@@ -5891,7 +5891,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -5985,7 +5985,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should split completion and wait_all lifetimes on attached runtimes");
     assert_eq!(report.inputs_transferred, 1);
@@ -6132,7 +6132,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -6180,7 +6180,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
         "wait_all should track the active operation before reset"
     );
 
-    SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should succeed while the runtime is idle");
 
@@ -6240,7 +6240,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_but_preserves_wait_all()
  {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -6316,7 +6316,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
         "wait_all should track the active operation before reset"
     );
 
-    let report = SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    let report = SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should clear steered completion waiters while preserving wait_all");
     assert_eq!(report.inputs_abandoned, 1);
@@ -6401,7 +6401,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lifetimes() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -6467,7 +6467,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
         "wait_all should track the active operation before reset"
     );
 
-    let report = SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    let report = SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should split completion and wait_all lifetimes");
     assert_eq!(report.inputs_abandoned, 1);
@@ -6597,7 +6597,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -6673,7 +6673,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
         "reset has not yet attempted any executor control"
     );
 
-    let report = SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    let report = SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should preserve wait_all while abandoning queued attached-loop work");
     assert_eq!(report.inputs_abandoned, 1);
@@ -6804,7 +6804,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -6890,7 +6890,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
         "reset has not yet attempted any executor control"
     );
 
-    let report = SessionServiceRuntimeExt::reset_runtime(&adapter, &session_id)
+    let report = SessionServiceRuntimeExt::reset_runtime(&*adapter, &session_id)
         .await
         .expect("reset should preserve wait_all while abandoning queued attached-loop work");
     assert_eq!(report.inputs_abandoned, 1);
@@ -6974,7 +6974,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -7023,7 +7023,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed for an idle runtime");
     assert_eq!(report.inputs_abandoned, 0);
@@ -7093,7 +7093,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_lifetimes() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -7160,7 +7160,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split completion and wait_all lifetimes");
     assert_eq!(report.inputs_abandoned, 1);
@@ -7274,7 +7274,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -7354,7 +7354,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should preserve wait_all while abandoning queued attached-loop work");
     assert_eq!(report.inputs_abandoned, 1);
@@ -7461,7 +7461,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -7550,7 +7550,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split completion and wait_all lifetimes on attached runtimes");
     assert_eq!(report.inputs_abandoned, 1);
@@ -7632,7 +7632,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_executor() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -7765,7 +7765,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_waiter_and_queue_but_preserves_wait_all()
  {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -7932,7 +7932,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_and_wait_all_lifetimes()
  {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -8136,7 +8136,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -8327,7 +8327,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -8527,7 +8527,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -8576,7 +8576,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve the active wait_all carrier");
     assert_eq!(report.inputs_abandoned, 0);
@@ -8639,7 +8639,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_lifetimes() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -8706,7 +8706,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should split completion and wait_all lifetimes");
     assert_eq!(report.inputs_abandoned, 1);
@@ -8787,7 +8787,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
 
 #[tokio::test]
 async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_queue() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -8864,7 +8864,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should terminate the steered completion waiter while preserving wait_all");
     assert_eq!(report.inputs_abandoned, 1);
@@ -8983,7 +8983,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
@@ -9060,7 +9060,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve wait_all while the live loop drains queued work");
     assert_eq!(report.inputs_abandoned, 0);
@@ -9236,7 +9236,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let control_calls = Arc::new(AtomicUsize::new(0));
@@ -9329,7 +9329,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
     );
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let report = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve queued work and wait_all while the live loop drains");
     assert_eq!(report.inputs_abandoned, 0);
@@ -9540,14 +9540,14 @@ async fn meerkat_machine_spine_snapshot_tracks_stopped_comms_drain_state() {
 
 #[tokio::test]
 async fn register_session_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     // Transition to Destroyed via the control-plane destroy path.
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9573,7 +9573,7 @@ async fn register_session_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn unregister_session_rejects_unknown_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Unregister on a session that was never registered must return an error.
@@ -9597,13 +9597,13 @@ async fn unregister_session_rejects_unknown_session() {
 
 #[tokio::test]
 async fn interrupt_current_run_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9619,13 +9619,13 @@ async fn interrupt_current_run_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn cancel_after_boundary_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9641,13 +9641,13 @@ async fn cancel_after_boundary_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn stop_runtime_executor_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9737,7 +9737,7 @@ async fn notify_drain_exited_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn abort_comms_drain_tolerates_unknown_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Guard rejects unknown session but caller swallows the error.
@@ -9746,7 +9746,7 @@ async fn abort_comms_drain_tolerates_unknown_session() {
 
 #[tokio::test]
 async fn wait_comms_drain_tolerates_unknown_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Guard rejects unknown session but caller swallows the error.
@@ -9760,18 +9760,18 @@ async fn wait_comms_drain_tolerates_unknown_session() {
 
 #[tokio::test]
 async fn ingest_rejects_retired_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
 
     let input = make_prompt("should be rejected");
-    let err = crate::traits::RuntimeControlPlane::ingest(&adapter, &runtime_id, input)
+    let err = crate::traits::RuntimeControlPlane::ingest(&*adapter, &runtime_id, input)
         .await
         .expect_err("ingest should reject a retired session");
     assert!(
@@ -9787,7 +9787,7 @@ async fn ingest_rejects_retired_session() {
 
 #[tokio::test]
 async fn ingest_rejects_stopped_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -9805,7 +9805,7 @@ async fn ingest_rejects_stopped_session() {
         .expect("stop should succeed");
 
     let input = make_prompt("should be rejected");
-    let err = crate::traits::RuntimeControlPlane::ingest(&adapter, &runtime_id, input)
+    let err = crate::traits::RuntimeControlPlane::ingest(&*adapter, &runtime_id, input)
         .await
         .expect_err("ingest should reject a stopped session");
     assert!(
@@ -9821,7 +9821,7 @@ async fn ingest_rejects_stopped_session() {
 
 #[tokio::test]
 async fn retire_rejects_initializing_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     // Don't register, just create a session entry in Initializing state.
@@ -9844,7 +9844,7 @@ async fn retire_rejects_initializing_session() {
         .expect("stop should succeed");
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    let err = crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    let err = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect_err("retire should reject a stopped session");
     assert!(
@@ -9864,13 +9864,13 @@ async fn retire_rejects_initializing_session() {
 
 #[tokio::test]
 async fn accept_input_with_completion_rejects_retired_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
 
@@ -9889,13 +9889,13 @@ async fn accept_input_with_completion_rejects_retired_session() {
 
 #[tokio::test]
 async fn accept_input_with_completion_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9916,13 +9916,13 @@ async fn accept_input_with_completion_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn legacy_run_prepare_rejects_retired_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
 
@@ -9946,13 +9946,13 @@ async fn legacy_run_prepare_rejects_retired_session() {
 
 #[tokio::test]
 async fn legacy_run_prepare_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -9975,7 +9975,7 @@ async fn legacy_run_prepare_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_register() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -9990,7 +9990,7 @@ async fn spine_invariants_hold_after_register() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_queued_input() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10011,7 +10011,7 @@ async fn spine_invariants_hold_after_queued_input() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_destroy() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10022,7 +10022,7 @@ async fn spine_invariants_hold_after_destroy() {
         .expect("prompt should be accepted");
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -10037,7 +10037,7 @@ async fn spine_invariants_hold_after_destroy() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_retire() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10048,7 +10048,7 @@ async fn spine_invariants_hold_after_retire() {
         .expect("prompt should be accepted");
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::retire(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
 
@@ -10063,7 +10063,7 @@ async fn spine_invariants_hold_after_retire() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_reset() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10074,7 +10074,7 @@ async fn spine_invariants_hold_after_reset() {
         .expect("prompt should be accepted");
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::reset(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::reset(&*adapter, &runtime_id)
         .await
         .expect("reset should succeed");
 
@@ -10089,7 +10089,7 @@ async fn spine_invariants_hold_after_reset() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_recycle() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10100,7 +10100,7 @@ async fn spine_invariants_hold_after_recycle() {
         .expect("prompt should be accepted");
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should succeed");
 
@@ -10115,7 +10115,7 @@ async fn spine_invariants_hold_after_recycle() {
 
 #[tokio::test]
 async fn spine_invariants_hold_after_steered_input() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10149,7 +10149,7 @@ async fn spine_invariants_hold_after_steered_input() {
 
 #[tokio::test]
 async fn publish_committed_visible_set_succeeds_for_registered_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10181,7 +10181,7 @@ async fn publish_committed_visible_set_succeeds_for_registered_session() {
 
 #[tokio::test]
 async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10213,7 +10213,7 @@ async fn stage_persistent_filter_updates_machine_owned_visibility_state() {
 
 #[tokio::test]
 async fn request_deferred_tools_updates_machine_owned_visibility_state() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10249,7 +10249,7 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
 
 #[tokio::test]
 async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10272,7 +10272,7 @@ async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
 
 #[tokio::test]
 async fn publish_committed_visible_set_rejects_unknown_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     let state = meerkat_core::SessionToolVisibilityState::default();
@@ -10288,12 +10288,12 @@ async fn publish_committed_visible_set_rejects_unknown_session() {
 
 #[tokio::test]
 async fn publish_committed_visible_set_rejects_destroyed_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
-    crate::traits::RuntimeControlPlane::destroy(&adapter, &runtime_id)
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
 
@@ -10310,7 +10310,7 @@ async fn publish_committed_visible_set_rejects_destroyed_session() {
 
 #[tokio::test]
 async fn publish_committed_visible_set_rejects_stale_active_revision() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10333,7 +10333,7 @@ async fn publish_committed_visible_set_rejects_stale_active_revision() {
 
 #[tokio::test]
 async fn publish_committed_visible_set_rejects_equal_revisions_with_divergent_filters() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10356,7 +10356,7 @@ async fn publish_committed_visible_set_rejects_equal_revisions_with_divergent_fi
 
 #[tokio::test]
 async fn publish_committed_visible_set_rejects_active_requested_names_outside_staged() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
@@ -10379,7 +10379,7 @@ async fn publish_committed_visible_set_rejects_active_requested_names_outside_st
 
 #[tokio::test]
 async fn publish_committed_visible_set_accepts_active_ahead_of_staged() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10656,7 +10656,7 @@ fn test_llm_capability_surface(image_tool_results: bool) -> SessionLlmCapability
 
 #[tokio::test]
 async fn reconfigure_session_llm_identity_rejects_idle_session() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
     adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
@@ -10734,7 +10734,7 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10838,7 +10838,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -10979,7 +10979,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())
@@ -11177,7 +11177,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let bindings = adapter
         .prepare_bindings(session_id.clone())

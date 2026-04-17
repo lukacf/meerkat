@@ -105,8 +105,8 @@ impl CoreExecutor for RecordingExecutor {
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_reset_terminates_waited_progress_work_without_running_it() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -173,8 +173,8 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_work() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -249,8 +249,8 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_drains_waited_progress_work_to_completion() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -316,8 +316,8 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
     adapter.register_session(sid.clone()).await;

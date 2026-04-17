@@ -91,17 +91,17 @@ impl MeerkatMachine {
     }
 
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
-    /// `CoreExecutor`. When `accept_input()` queues an input and requests wake,
-    /// the loop dequeues it and calls `executor.apply()` (which triggers
-    /// `SessionService::start_turn()`).
+    /// `CoreExecutor`. Takes `self: &Arc<Self>` so the spawned runtime loop
+    /// can hold a `Weak<Self>` to fire `RuntimeExecutorExited` on async stop
+    /// realisation.
     pub async fn register_session_with_executor(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
         let _ = self
             .execute_meerkat_machine_command(
-                None,
+                Some(Arc::clone(self)),
                 MeerkatMachineCommand::EnsureSessionWithExecutor {
                     session_id,
                     executor,
@@ -114,15 +114,16 @@ impl MeerkatMachine {
     ///
     /// If a session was already registered without a loop, upgrade the
     /// existing driver in place so queued inputs remain attached to the same
-    /// runtime ledger and can start draining immediately.
+    /// runtime ledger and can start draining immediately. See
+    /// `register_session_with_executor` for why this takes `self: &Arc<Self>`.
     pub async fn ensure_session_with_executor(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
         let _ = self
             .execute_meerkat_machine_command(
-                None,
+                Some(Arc::clone(self)),
                 MeerkatMachineCommand::EnsureSessionWithExecutor {
                     session_id,
                     executor,
@@ -132,7 +133,7 @@ impl MeerkatMachine {
     }
 
     pub(super) async fn ensure_session_with_executor_inner(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
@@ -240,6 +241,28 @@ impl MeerkatMachine {
                 }
             };
 
+        // Stage the DSL EnsureSessionWithExecutor transition BEFORE mutating
+        // the driver, so a DSL rejection never leaves shell and DSL disagreeing.
+        // Session entry exists by this point (inner created it above).
+        if let Err(reason) = self
+            .stage_session_dsl_input(
+                &session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                },
+                "EnsureSessionWithExecutor",
+            )
+            .await
+        {
+            tracing::warn!(
+                %session_id,
+                error = %reason,
+                "DSL rejected EnsureSessionWithExecutor; aborting attach"
+            );
+            self.revert_attaching(&session_id).await;
+            return;
+        }
+
         let should_wake = {
             let mut driver_guard = driver.lock().await;
             match machine_executor_attach_projection(&mut driver_guard) {
@@ -329,6 +352,8 @@ impl MeerkatMachine {
                 Some(Arc::clone(&detached_wake_state)),
                 Some(completion_feed),
                 entry_cursor_state,
+                Arc::downgrade(self),
+                session_id.clone(),
             ));
 
         let (published, detach_after_abort) = {

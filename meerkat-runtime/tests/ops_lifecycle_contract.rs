@@ -287,7 +287,7 @@ fn make_operation_input(operation_id: OperationId, event: OpEvent) -> Input {
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_a = SessionId::new();
     let session_b = SessionId::new();
 
@@ -327,8 +327,8 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn ops_lifecycle_contract_runtime_admits_operation_inputs_for_child_and_background_events() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;

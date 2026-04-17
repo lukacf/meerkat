@@ -303,6 +303,25 @@ impl MeerkatMachine {
             *entry.dsl_authority = dsl::MeerkatMachineAuthority::from_state(*state);
         }
     }
+
+    /// Fire `RuntimeExecutorExited` on the session's DSL authority after the
+    /// runtime loop has realised an async stop into the driver's control
+    /// projection. Called via `Weak<Self>` from `control_plane`.
+    pub(crate) async fn notify_runtime_executor_exited(&self, session_id: &SessionId) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id)
+            && let Err(err) = dsl::MeerkatMachineMutator::apply(
+                &mut *entry.dsl_authority,
+                dsl::MeerkatMachineInput::RuntimeExecutorExited,
+            )
+        {
+            tracing::debug!(
+                %session_id,
+                error = %dsl_authority::map_error(err, "RuntimeExecutorExited"),
+                "DSL rejected RuntimeExecutorExited (terminal or phase-not-covered)"
+            );
+        }
+    }
 }
 
 /// Per-session comms drain slot, driven by direct in-kernel state.
@@ -486,9 +505,19 @@ impl MeerkatMachine {
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, MeerkatMachineCommandError> {
         match command {
+            MeerkatMachineCommand::EnsureSessionWithExecutor { .. } => {
+                let self_handle = self_handle.ok_or_else(|| {
+                    MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
+                        "EnsureSessionWithExecutor requires Arc<Self> machine handle".into(),
+                    ))
+                })?;
+                self_handle
+                    .execute_meerkat_machine_ensure_session_command(command)
+                    .await
+                    .map_err(Into::into)
+            }
             MeerkatMachineCommand::RegisterSession { .. }
             | MeerkatMachineCommand::UnregisterSession { .. }
-            | MeerkatMachineCommand::EnsureSessionWithExecutor { .. }
             | MeerkatMachineCommand::SetSilentIntents { .. }
             | MeerkatMachineCommand::InterruptCurrentRun { .. }
             | MeerkatMachineCommand::CancelAfterBoundary { .. }

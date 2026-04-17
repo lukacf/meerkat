@@ -5,9 +5,12 @@
 //! the per-session driver. These helpers keep the concrete stop/preemption
 //! behavior in one place.
 
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use std::sync::Weak;
 
-use crate::meerkat_machine::{SharedCompletionRegistry, SharedDriver};
+use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::types::SessionId;
+
+use crate::meerkat_machine::{MeerkatMachine, SharedCompletionRegistry, SharedDriver};
 use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeDriverError;
@@ -27,11 +30,17 @@ async fn mark_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriver
 
 /// Deliver one executor control command and report whether the runtime loop
 /// should stop after applying it.
+///
+/// When a stop completes, fires the DSL `RuntimeExecutorExited` transition on
+/// the session's machine so the machine phase reflects the async realisation
+/// of the stop (driver → Stopped). No shell→DSL read-through bridge.
 pub(crate) async fn apply_executor_control(
     driver: &SharedDriver,
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     command: RunControlCommand,
+    machine: &Weak<MeerkatMachine>,
+    session_id: &SessionId,
 ) -> bool {
     let should_stop = matches!(command, RunControlCommand::StopRuntimeExecutor { .. });
 
@@ -51,6 +60,10 @@ pub(crate) async fn apply_executor_control(
         reg.resolve_all_terminated("runtime stopped");
     }
 
+    if should_stop && let Some(machine) = machine.upgrade() {
+        machine.notify_runtime_executor_exited(session_id).await;
+    }
+
     should_stop
 }
 
@@ -61,11 +74,22 @@ pub(crate) async fn drain_ready_executor_controls(
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     control_rx: &mut mpsc::Receiver<RunControlCommand>,
+    machine: &Weak<MeerkatMachine>,
+    session_id: &SessionId,
 ) -> bool {
     loop {
         match control_rx.try_recv() {
             Ok(command) => {
-                if apply_executor_control(driver, completions, executor, command).await {
+                if apply_executor_control(
+                    driver,
+                    completions,
+                    executor,
+                    command,
+                    machine,
+                    session_id,
+                )
+                .await
+                {
                     return true;
                 }
             }

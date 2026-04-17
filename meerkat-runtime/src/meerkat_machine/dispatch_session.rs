@@ -51,42 +51,6 @@ impl MeerkatMachine {
                 self.unregister_session_inner(&session_id).await;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::EnsureSessionWithExecutor {
-                session_id,
-                executor,
-            } => {
-                if matches!(
-                    self.existing_session_runtime_state(&session_id).await,
-                    Some(RuntimeState::Destroyed)
-                ) {
-                    return Err(RuntimeDriverError::Destroyed);
-                }
-                // Inner creates the session entry (if new) and attaches the
-                // executor to the driver. DSL transition is staged after
-                // inner because stage_session_dsl_input requires the session
-                // entry to already exist.
-                self.ensure_session_with_executor_inner(session_id.clone(), executor)
-                    .await;
-                if let Err(reason) = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
-                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                                &session_id,
-                            ),
-                        },
-                        "EnsureSessionWithExecutor",
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %reason,
-                        "DSL rejected EnsureSessionWithExecutor"
-                    );
-                }
-                Ok(MeerkatMachineCommandResult::Unit)
-            }
             MeerkatMachineCommand::SetSilentIntents {
                 session_id,
                 intents,
@@ -664,6 +628,38 @@ impl MeerkatMachine {
                 ))
             }
             _ => unreachable!("non-session command routed to session handler"),
+        }
+    }
+
+    /// Arc-requiring session dispatch: handles commands that spawn background
+    /// tasks holding `Weak<Self>` for async DSL transitions (currently
+    /// `EnsureSessionWithExecutor` for runtime-loop `RuntimeExecutorExited`
+    /// wiring).
+    pub(super) async fn execute_meerkat_machine_ensure_session_command(
+        self: &Arc<Self>,
+        command: MeerkatMachineCommand,
+    ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        match command {
+            MeerkatMachineCommand::EnsureSessionWithExecutor {
+                session_id,
+                executor,
+            } => {
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+                // `inner` creates the session entry (if new), stages the DSL
+                // EnsureSessionWithExecutor transition BEFORE mutating the
+                // driver, attaches the executor, and spawns the runtime loop
+                // with `Weak<Self>` so the loop can fire
+                // `RuntimeExecutorExited` on async stop completion.
+                self.ensure_session_with_executor_inner(session_id, executor)
+                    .await;
+                Ok(MeerkatMachineCommandResult::Unit)
+            }
+            _ => unreachable!("non-ensure-session command routed to arc session handler"),
         }
     }
 }

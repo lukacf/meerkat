@@ -1520,49 +1520,7 @@ mod tests {
             .expect("meerkat machine schema should validate");
     }
 
-    // ---- Direction 3: Schema matches hand-written catalog ----
-
-    #[test]
-    fn schema_matches_hand_written() {
-        let dsl_schema = MeerkatMachineState::schema();
-        let hw_schema = meerkat_machine_schema::catalog::meerkat_machine();
-
-        // Same transition count
-        assert_eq!(
-            dsl_schema.transitions.len(),
-            hw_schema.transitions.len(),
-            "transition count mismatch: DSL={} vs hand-written={}",
-            dsl_schema.transitions.len(),
-            hw_schema.transitions.len()
-        );
-
-        // Same state field count
-        assert_eq!(
-            dsl_schema.state.fields.len(),
-            hw_schema.state.fields.len(),
-            "state field count mismatch: DSL={} vs hand-written={}",
-            dsl_schema.state.fields.len(),
-            hw_schema.state.fields.len()
-        );
-
-        // Same transition names and from-phases
-        for hw_t in &hw_schema.transitions {
-            let dsl_t = dsl_schema.transitions.iter().find(|t| t.name == hw_t.name);
-            assert!(
-                dsl_t.is_some(),
-                "DSL schema missing transition: {}",
-                hw_t.name
-            );
-            let dsl_t = dsl_t.unwrap();
-            assert_eq!(
-                dsl_t.from, hw_t.from,
-                "from-phases mismatch for transition {}: DSL={:?} vs HW={:?}",
-                hw_t.name, dsl_t.from, hw_t.from
-            );
-        }
-    }
-
-    // ---- Direction 4: TLA+ rendering ----
+    // ---- Direction 3: TLA+ rendering ----
 
     #[test]
     fn schema_renders_tla() {

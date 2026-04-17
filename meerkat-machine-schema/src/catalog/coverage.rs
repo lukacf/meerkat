@@ -5,10 +5,10 @@ use super::{
         meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
         schedule_runtime_bundle_composition,
     },
-    meerkat_machine::meerkat_machine,
-    mob_machine::mob_machine,
-    occurrence_lifecycle::occurrence_lifecycle_machine,
-    schedule_lifecycle::schedule_lifecycle_machine,
+    dsl::{
+        dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
+        dsl_schedule_lifecycle_machine,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +54,7 @@ pub struct CompositionCoverageManifest {
 pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
     vec![
         machine_manifest_from_schema(
-            &meerkat_machine(),
+            &dsl_meerkat_machine(),
             &[
                 anchor(
                     "meerkat_machine",
@@ -96,7 +96,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &mob_machine(),
+            &dsl_mob_machine(),
             &[
                 anchor(
                     "mob_handle_surface",
@@ -121,7 +121,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &schedule_lifecycle_machine(),
+            &dsl_schedule_lifecycle_machine(),
             &[anchor(
                 "schedule_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
@@ -133,7 +133,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             )],
         ),
         machine_manifest_from_schema(
-            &occurrence_lifecycle_machine(),
+            &dsl_occurrence_lifecycle_machine(),
             &[anchor(
                 "occurrence_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",

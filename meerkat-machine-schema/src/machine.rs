@@ -1136,15 +1136,18 @@ impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{MachineSchemaError, catalog::meerkat_machine};
+    use crate::{MachineSchemaError, catalog::dsl::dsl_meerkat_machine as meerkat_machine};
 
     #[test]
     fn validates_meerkat_machine_schema() {
         let schema = meerkat_machine();
 
         assert_eq!(schema.machine, "MeerkatMachine");
-        assert_eq!(schema.rust.crate_name, "meerkat-runtime");
-        assert_eq!(schema.rust.module, "generated::meerkat_machine");
+        // DSL-generated schema uses `rust: "self" / "catalog::dsl::meerkat_machine"`
+        // because it lives inside meerkat-machine-schema itself. The runtime
+        // owner is anchored in meerkat-runtime via its own `machine!` invocation.
+        assert_eq!(schema.rust.crate_name, "self");
+        assert_eq!(schema.rust.module, "catalog::dsl::meerkat_machine");
         assert_eq!(schema.state.phase.name, "MeerkatPhase");
         assert!(
             schema

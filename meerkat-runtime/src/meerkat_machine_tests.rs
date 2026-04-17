@@ -20,9 +20,8 @@ use meerkat_machine_kernels::generated::meerkat as modeled_meerkat_kernel;
 use meerkat_machine_kernels::{
     KernelEffect, KernelInput, KernelState, KernelValue, TransitionOutcome, TransitionRefusal,
 };
-use meerkat_machine_schema::{
-    MachineSchema, TriggerKind, TypeRef, meerkat_machine as schema_meerkat_machine,
-};
+use meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine as schema_meerkat_machine;
+use meerkat_machine_schema::{MachineSchema, TriggerKind, TypeRef};
 use serde::Serialize;
 use tokio::sync::Notify;
 

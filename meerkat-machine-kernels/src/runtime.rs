@@ -1166,7 +1166,10 @@ fn named_type_is_u64(name: &str) -> bool {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use meerkat_machine_schema::{canonical_machine_schemas, meerkat_machine, mob_machine};
+    use meerkat_machine_schema::canonical_machine_schemas;
+    use meerkat_machine_schema::catalog::dsl::{
+        dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    };
 
     use super::{
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,

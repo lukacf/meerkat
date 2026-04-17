@@ -5,7 +5,7 @@ use crate::runtime::{
 };
 
 pub fn schema() -> meerkat_machine_schema::MachineSchema {
-    meerkat_machine_schema::occurrence_lifecycle_machine()
+    meerkat_machine_schema::catalog::dsl::dsl_occurrence_lifecycle_machine()
 }
 
 pub fn kernel() -> GeneratedMachineKernel {

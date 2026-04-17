@@ -5,9 +5,12 @@ use meerkat_machine_codegen::{
     render_composition_mapping_coverage, render_composition_module,
     render_machine_mapping_coverage, render_machine_module,
 };
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+};
 use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
-    meerkat_machine, meerkat_mob_seam_composition, mob_machine,
+    meerkat_mob_seam_composition,
 };
 
 #[test]

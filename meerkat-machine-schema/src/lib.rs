@@ -9,9 +9,7 @@ mod machine;
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,
     SemanticCoverageEntry, canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_machine,
-    meerkat_mob_seam_composition, mob_machine, occurrence_lifecycle_machine,
-    schedule_lifecycle_machine,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
 };
 pub use compat::{flow_frame_machine, flow_run_machine, loop_iteration_machine};
 pub use composition::{
@@ -34,10 +32,8 @@ pub use machine::{
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Update, canonical_machine_coverage_manifests, canonical_machine_schemas,
-        schedule_lifecycle_machine,
-    };
+    use super::{Update, canonical_machine_coverage_manifests, canonical_machine_schemas};
+    use crate::catalog::dsl::dsl_schedule_lifecycle_machine as schedule_lifecycle_machine;
 
     #[test]
     fn schedule_and_occurrence_machines_are_registered_in_canonical_catalog() {

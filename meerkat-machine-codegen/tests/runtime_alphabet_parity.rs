@@ -1,4 +1,7 @@
-use meerkat_machine_schema::{TriggerKind, meerkat_machine, mob_machine};
+use meerkat_machine_schema::TriggerKind;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+};
 use meerkat_mob::canonical_mob_machine_command_manifest;
 use meerkat_runtime::canonical_meerkat_machine_command_manifest;
 use std::collections::BTreeSet;

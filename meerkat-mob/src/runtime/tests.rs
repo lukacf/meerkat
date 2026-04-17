@@ -45,7 +45,8 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
-use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind, mob_machine as schema_mob_machine};
+use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
+use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde::Serialize;

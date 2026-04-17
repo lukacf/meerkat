@@ -50,6 +50,14 @@ pub(crate) enum OpsLifecycleInput {
     /// Peer is ready for a mob-member-child operation (Running|Retiring, must be MobMemberChild).
     PeerReady { operation_id: OperationId },
     /// Register a completion watcher (operation must exist).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "authority input retained for internal test suite; shell no longer calls it (Vec<Sender> replaces watcher_count)"
+        )
+    )]
+    #[cfg_attr(test, allow(dead_code))]
     RegisterWatcher { operation_id: OperationId },
     /// Progress reported (Running|Retiring).
     ProgressReported { operation_id: OperationId },

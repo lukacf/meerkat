@@ -28,7 +28,8 @@ use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::ops_lifecycle_authority::{
-    OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput, OpsLifecycleMutator,
+    OperationCanonicalState, OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput,
+    OpsLifecycleMutator,
 };
 
 // ---------------------------------------------------------------------------
@@ -371,7 +372,10 @@ impl ShellState {
                         self.authority.watchers_drained(operation_id, watcher_count);
                     }
                     // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
-                    let auth_kind = self.authority.operation(operation_id).map(|op| op.kind());
+                    let auth_kind = self
+                        .authority
+                        .operation(operation_id)
+                        .map(OperationCanonicalState::kind);
                     let dsl_kind = self.dsl_operation_kind(operation_id);
                     if let (Some(auth_k), Some(dsl_k)) = (auth_kind, &dsl_kind)
                         && auth_k != *dsl_k

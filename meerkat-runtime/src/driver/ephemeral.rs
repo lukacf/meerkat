@@ -2,7 +2,9 @@
 //!
 //! Implements `RuntimeDriver` with:
 //! - Input acceptance with validation, policy resolution, dedup, supersession
-//! - InputState lifecycle management via InputLifecycleAuthority
+//! - Input lifecycle transitions driven directly through the MeerkatMachine
+//!   DSL authority (`input_phases` + associated transitions); `InputState`
+//!   carries only shell-mirror metadata (history, timestamps, retry counter)
 //! - InputQueue FIFO management
 //! - S24 ephemeral recovery
 //! - S25 retire/reset/destroy lifecycle operations
@@ -10,6 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock as StdRwLock};
 
+use chrono::Utc;
 use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use meerkat_core::types::HandlingMode;
 
@@ -21,8 +24,10 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::{ContentShape, RequestId, ReservationKey};
 use crate::input::Input;
 use crate::input_ledger::InputLedger;
-use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
-use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, PolicySnapshot};
+use crate::input_state::{
+    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
+    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot,
+};
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
 use crate::queue::InputQueue;
@@ -220,7 +225,7 @@ impl EphemeralRuntimeDriver {
 
     /// Apply a DSL input locally, mapping any rejection into a driver error.
     /// Used inside the ingress/input lifecycle paths that previously flowed
-    /// through the deleted `RuntimeIngressAuthority` / `InputLifecycleAuthority`.
+    /// through the deleted `RuntimeIngressAuthority` helper.
     fn dsl_apply(
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
@@ -565,14 +570,22 @@ impl EphemeralRuntimeDriver {
             None,
         );
 
-        // 2. Persist the input payload on the ledger and transition to Queued.
+        // 2. Persist the input payload on the ledger and mirror the phase
+        //    transition on the shell copy.
+        let now = Utc::now();
         if let Some(s) = self.ledger.get_mut(input_id) {
             s.persisted_input = Some(input.clone());
-            let _ = s.apply(InputLifecycleInput::QueueAccepted);
+            s.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from: s.phase,
+                to: InputLifecycleState::Queued,
+                reason: Some("QueueAccepted".into()),
+            });
+            s.phase = InputLifecycleState::Queued;
+            s.updated_at = now;
         }
 
-        // 3. Flip DSL phase to Queued (tracking into input_phases + assigns
-        //    the admission sequence; lane membership is decided by step 5).
+        // 3. DSL phase transition (authoritative).
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::QueueAccepted {
                 input_id: Self::dsl_key(input_id),
@@ -598,8 +611,7 @@ impl EphemeralRuntimeDriver {
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
                     if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        let _ =
-                            crate::coalescing::apply_coalescing(existing_state, input_id.clone());
+                        crate::coalescing::apply_coalescing(existing_state, input_id.clone());
                     }
                 }
                 ExistingQueuedAdmissionAction::Supersede { existing_id } => {
@@ -615,8 +627,7 @@ impl EphemeralRuntimeDriver {
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
                     if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        let _ =
-                            crate::coalescing::apply_supersession(existing_state, input_id.clone());
+                        crate::coalescing::apply_supersession(existing_state, input_id.clone());
                     }
                 }
             }
@@ -889,21 +900,16 @@ impl EphemeralRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
+    ) -> Result<(), RuntimeDriverError> {
         self.stage_batch(std::slice::from_ref(input_id), run_id)
     }
 
-    /// Stage a batch of inputs in a single `StageDrainSnapshot` call.
-    ///
-    /// All input IDs are passed as contributing work IDs to the ingress
-    /// authority atomically, avoiding the guard rejection that occurs when
-    /// `stage_input` is called one-at-a-time (since the first call sets
-    /// `current_run` and subsequent calls fail the `no_current_run` guard).
+    /// Stage a batch of inputs via DSL `StageForRun` transitions.
     pub fn stage_batch(
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
+    ) -> Result<(), RuntimeDriverError> {
         self.machine_realize_stage_batch(input_ids, run_id)
     }
 
@@ -912,31 +918,31 @@ impl EphemeralRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
-        // The checked-in Meerkat machine already owns contributor-set legality
-        // for starting a run batch. Production applies the already-decided
-        // queue removal and staged lifecycle updates directly via the DSL.
+    ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             let key = Self::dsl_key(input_id);
             self.dsl.0.state.queue_lane.remove(&key);
             self.dsl.0.state.steer_lane.remove(&key);
-            if let Err(e) = self.dsl_apply(
+            self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::StageForRun {
                     input_id: key,
                     run_id: run_id.to_string(),
                 },
                 "StageForRun",
-            ) {
-                return Err(InputLifecycleError::InvalidTransition {
-                    from: InputLifecycleState::Queued,
-                    input: format!("StageForRun ({e})"),
-                });
-            }
+            )?;
 
+            let now = Utc::now();
             if let Some(state) = self.ledger.get_mut(input_id) {
-                state.apply(InputLifecycleInput::StageForRun {
-                    run_id: run_id.clone(),
-                })?;
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: state.phase,
+                    to: InputLifecycleState::Staged,
+                    reason: Some(format!("StageForRun({run_id})")),
+                });
+                state.phase = InputLifecycleState::Staged;
+                state.last_run_id = Some(run_id.clone());
+                state.attempt_count = state.attempt_count.saturating_add(1);
+                state.updated_at = now;
             }
             self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Staged {
                 input_id: input_id.clone(),
@@ -953,20 +959,39 @@ impl EphemeralRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
-        let state =
-            self.ledger
-                .get_mut(input_id)
-                .ok_or(InputLifecycleError::InvalidTransition {
-                    from: InputLifecycleState::Staged,
-                    input: "MarkApplied (input not found)".into(),
-                })?;
-        state.apply(InputLifecycleInput::MarkApplied {
-            run_id: run_id.clone(),
-        })?;
-        state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
-            boundary_sequence: 0,
-        })?;
+    ) -> Result<(), RuntimeDriverError> {
+        let key = Self::dsl_key(input_id);
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::MarkApplied {
+                input_id: key.clone(),
+            },
+            "MarkApplied",
+        )?;
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::MarkAppliedPendingConsumption { input_id: key },
+            "MarkAppliedPendingConsumption",
+        )?;
+
+        let now = Utc::now();
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from: state.phase,
+                to: InputLifecycleState::Applied,
+                reason: Some(format!("MarkApplied({run_id})")),
+            });
+            state.phase = InputLifecycleState::Applied;
+            state.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from: InputLifecycleState::Applied,
+                to: InputLifecycleState::AppliedPendingConsumption,
+                reason: Some("MarkAppliedPendingConsumption(boundary_sequence=0)".into()),
+            });
+            state.phase = InputLifecycleState::AppliedPendingConsumption;
+            state.last_boundary_sequence = Some(0);
+            state.updated_at = now;
+        }
+
         self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Applied {
             input_id: input_id.clone(),
             run_id: run_id.clone(),
@@ -978,86 +1003,112 @@ impl EphemeralRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &RunId,
-    ) -> Result<(), InputLifecycleError> {
+    ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(input_id) {
-                match state.apply(InputLifecycleInput::Consume) {
-                    Ok(_) => {
-                        self.events
-                            .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                                InputLifecycleEvent::Consumed {
-                                    input_id: input_id.clone(),
-                                    run_id: run_id.clone(),
-                                },
-                            )));
-                    }
-                    Err(
-                        InputLifecycleError::InvalidTransition { .. }
-                        | InputLifecycleError::TerminalState { .. },
-                    ) => {}
-                    Err(err) => return Err(err),
-                }
+            let Some(state) = self.ledger.get(input_id) else {
+                continue;
+            };
+            if state.phase.is_terminal()
+                || state.phase != InputLifecycleState::AppliedPendingConsumption
+            {
+                continue;
             }
+
+            let key = Self::dsl_key(input_id);
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::ConsumeInput { input_id: key },
+                "ConsumeInput",
+            )?;
+
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: state.phase,
+                    to: InputLifecycleState::Consumed,
+                    reason: Some("Consume".into()),
+                });
+                state.phase = InputLifecycleState::Consumed;
+                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                state.updated_at = now;
+            }
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Consumed {
+                        input_id: input_id.clone(),
+                        run_id: run_id.clone(),
+                    },
+                )));
         }
         Ok(())
     }
 
-    pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), InputLifecycleError> {
-        let mut terminal_inputs: Vec<(InputId, crate::input_state::InputTerminalOutcome)> =
-            Vec::new();
-
+    pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
-            if let Some(state) = self.ledger.get_mut(input_id) {
-                match state.apply(InputLifecycleInput::RollbackStaged) {
-                    Ok(transition) => {
-                        if transition.next_phase != crate::input_state::InputLifecycleState::Queued
-                        {
-                            tracing::warn!(
-                                input_id = %input_id,
-                                next_phase = ?transition.next_phase,
-                                "input abandoned after max stage attempts"
-                            );
-                            if let Some(outcome) = state.terminal_outcome().cloned() {
-                                terminal_inputs.push((input_id.clone(), outcome.clone()));
-                                if let crate::input_state::InputTerminalOutcome::Abandoned {
-                                    reason,
-                                } = outcome
-                                {
-                                    self.events.push(self.make_envelope(
-                                        RuntimeEvent::InputLifecycle(
-                                            InputLifecycleEvent::Abandoned {
-                                                input_id: input_id.clone(),
-                                                reason: format!("{reason:?}"),
-                                            },
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    Err(
-                        InputLifecycleError::InvalidTransition { .. }
-                        | InputLifecycleError::TerminalState { .. },
-                    ) => {}
-                    Err(err) => return Err(err),
-                }
+            // Skip inputs that are no longer in Staged (terminal or never-staged).
+            let Some(state) = self.ledger.get(input_id) else {
+                continue;
+            };
+            if state.phase != InputLifecycleState::Staged {
+                continue;
             }
-        }
 
-        // Mirror lifecycle + terminal outcome changes into the DSL so queue
-        // projections stay in lockstep with per-input lifecycle moves.
-        for input_id in input_ids {
-            let lifecycle = self
-                .ledger
-                .get(input_id)
-                .map(crate::input_state::InputState::current_state);
+            let attempts = state.attempt_count;
             let key = Self::dsl_key(input_id);
-            if matches!(lifecycle, Some(InputLifecycleState::Queued)) {
-                self.dsl
-                    .0
-                    .state
-                    .input_phases
-                    .insert(key.clone(), "Queued".to_string());
+
+            if attempts >= MAX_STAGE_ATTEMPTS {
+                // Max stage attempts exhausted — Abandon instead of RollbackStaged.
+                // Remove from lanes first so the DSL AbandonInput idempotently
+                // clears both.
+                self.dsl.0.state.queue_lane.remove(&key);
+                self.dsl.0.state.steer_lane.remove(&key);
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::AbandonInput {
+                        input_id: key.clone(),
+                    },
+                    "AbandonInput(MaxAttemptsExhausted)",
+                )?;
+
+                let now = Utc::now();
+                tracing::warn!(
+                    input_id = %input_id,
+                    attempts,
+                    "input abandoned after max stage attempts"
+                );
+                let outcome = InputTerminalOutcome::Abandoned {
+                    reason: InputAbandonReason::MaxAttemptsExhausted { attempts },
+                };
+                if let Some(state) = self.ledger.get_mut(input_id) {
+                    state.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: state.phase,
+                        to: InputLifecycleState::Abandoned,
+                        reason: Some(format!("RollbackStaged→Abandon(attempts={attempts})")),
+                    });
+                    state.phase = InputLifecycleState::Abandoned;
+                    state.terminal_outcome = Some(outcome.clone());
+                    state.updated_at = now;
+                }
+                self.events
+                    .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                        InputLifecycleEvent::Abandoned {
+                            input_id: input_id.clone(),
+                            reason: format!(
+                                "{:?}",
+                                InputAbandonReason::MaxAttemptsExhausted { attempts }
+                            ),
+                        },
+                    )));
+            } else {
+                // Still have attempts — rollback to Queued.
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::RollbackStaged {
+                        input_id: key.clone(),
+                    },
+                    "RollbackStaged",
+                )?;
+                // Put the input back into the correct lane so the next
+                // drain sees it.
                 match self.handling_mode.get(input_id).copied() {
                     Some(HandlingMode::Steer) => {
                         self.dsl.0.state.steer_lane.insert(key);
@@ -1066,19 +1117,19 @@ impl EphemeralRuntimeDriver {
                         self.dsl.0.state.queue_lane.insert(key);
                     }
                 }
+
+                let now = Utc::now();
+                if let Some(state) = self.ledger.get_mut(input_id) {
+                    state.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: state.phase,
+                        to: InputLifecycleState::Queued,
+                        reason: Some("RollbackStaged".into()),
+                    });
+                    state.phase = InputLifecycleState::Queued;
+                    state.updated_at = now;
+                }
             }
-        }
-        for (work_id, outcome) in &terminal_inputs {
-            let key = Self::dsl_key(work_id);
-            self.dsl.0.state.queue_lane.remove(&key);
-            self.dsl.0.state.steer_lane.remove(&key);
-            let phase = match outcome {
-                crate::input_state::InputTerminalOutcome::Consumed => "Consumed",
-                crate::input_state::InputTerminalOutcome::Superseded { .. } => "Superseded",
-                crate::input_state::InputTerminalOutcome::Coalesced { .. } => "Coalesced",
-                crate::input_state::InputTerminalOutcome::Abandoned { .. } => "Abandoned",
-            };
-            self.dsl.0.state.input_phases.insert(key, phase.to_string());
         }
 
         self.rebuild_queue_projections();
@@ -1218,47 +1269,46 @@ impl EphemeralRuntimeDriver {
             .map(|(id, _)| id.clone())
             .collect();
         let mut count = 0;
-        let mut terminal_inputs: Vec<(InputId, crate::input_state::InputTerminalOutcome)> =
-            Vec::new();
         for id in &non_terminal_ids {
-            let outcome = if let Some(state) = self.ledger.get_mut(id)
-                && state
-                    .apply(InputLifecycleInput::Abandon {
-                        reason: reason.clone(),
-                    })
-                    .is_ok()
-            {
-                count += 1;
-                state.terminal_outcome().cloned()
-            } else {
-                None
-            };
-            if outcome.is_some() {
-                self.events
-                    .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                        InputLifecycleEvent::Abandoned {
-                            input_id: id.clone(),
-                            reason: format!("{reason:?}"),
-                        },
-                    )));
-            }
-            if let Some(outcome) = outcome {
-                terminal_inputs.push((id.clone(), outcome));
-            }
-        }
-        // Mirror terminal moves into the DSL: remove from both lanes and
-        // set the phase so readers stay in lockstep.
-        for (work_id, outcome) in &terminal_inputs {
-            let key = Self::dsl_key(work_id);
+            let key = Self::dsl_key(id);
+            // Remove from lanes first so DSL AbandonInput's membership
+            // invariants hold regardless of prior lane presence.
             self.dsl.0.state.queue_lane.remove(&key);
             self.dsl.0.state.steer_lane.remove(&key);
-            let phase = match outcome {
-                crate::input_state::InputTerminalOutcome::Consumed => "Consumed",
-                crate::input_state::InputTerminalOutcome::Superseded { .. } => "Superseded",
-                crate::input_state::InputTerminalOutcome::Coalesced { .. } => "Coalesced",
-                crate::input_state::InputTerminalOutcome::Abandoned { .. } => "Abandoned",
-            };
-            self.dsl.0.state.input_phases.insert(key, phase.to_string());
+            if self
+                .dsl_apply(
+                    mm_dsl::MeerkatMachineInput::AbandonInput {
+                        input_id: key.clone(),
+                    },
+                    "AbandonInput",
+                )
+                .is_err()
+            {
+                continue;
+            }
+
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: state.phase,
+                    to: InputLifecycleState::Abandoned,
+                    reason: Some(format!("Abandon({reason:?})")),
+                });
+                state.phase = InputLifecycleState::Abandoned;
+                state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
+                    reason: reason.clone(),
+                });
+                state.updated_at = now;
+            }
+            count += 1;
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Abandoned {
+                        input_id: id.clone(),
+                        reason: format!("{reason:?}"),
+                    },
+                )));
         }
         count
     }
@@ -1282,28 +1332,16 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Machine-owned realization for a validated run-completion transition.
+    ///
+    /// Delegates to `consume_inputs`, which drives the DSL `ConsumeInput`
+    /// transition and mirrors the `Consumed` phase on each contributor's
+    /// shell `InputState`.
     pub(crate) fn machine_realize_run_completed(
         &mut self,
         run_id: &RunId,
         consumed_input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
-        // The checked-in Meerkat machine already owns contributor-set legality
-        // for completion. Fire DSL ConsumeInput for each contributor to
-        // update input_phases and remove from queue lanes, then consume in
-        // the per-input shell authority.
-        for input_id in consumed_input_ids {
-            let key = Self::dsl_key(input_id);
-            if self.dsl.0.state.input_phases.contains_key(&key) {
-                self.dsl_apply(
-                    mm_dsl::MeerkatMachineInput::ConsumeInput { input_id: key },
-                    "ConsumeInput",
-                )?;
-            }
-        }
-
         self.consume_inputs(consumed_input_ids, run_id)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        Ok(())
     }
 
     pub async fn run_failed(
@@ -1324,28 +1362,6 @@ impl EphemeralRuntimeDriver {
         contributing_input_ids: &[InputId],
         replay_plan: &ReplayQueuedContributorsPlan,
     ) -> Result<(), RuntimeDriverError> {
-        // Replay the queue lanes directly into the driver-local DSL. Each
-        // replayed input goes back to `Queued` and is inserted into the
-        // appropriate lane — the subsequent rollback_staged() will also
-        // adjust per-input lifecycle and terminal-outcome bookkeeping.
-        for wid in &replay_plan.queue_work_ids {
-            let key = Self::dsl_key(wid);
-            self.dsl
-                .0
-                .state
-                .input_phases
-                .insert(key.clone(), "Queued".to_string());
-            self.dsl.0.state.queue_lane.insert(key);
-        }
-        for wid in &replay_plan.steer_work_ids {
-            let key = Self::dsl_key(wid);
-            self.dsl
-                .0
-                .state
-                .input_phases
-                .insert(key.clone(), "Queued".to_string());
-            self.dsl.0.state.steer_lane.insert(key);
-        }
         if replay_plan.wake_runtime && self.post_admission_signal < PostAdmissionSignal::WakeLoop {
             self.post_admission_signal = PostAdmissionSignal::WakeLoop;
         }
@@ -1357,9 +1373,10 @@ impl EphemeralRuntimeDriver {
             "runtime replayed queued contributors"
         );
 
+        // `rollback_staged` drives the DSL `RollbackStaged` / `AbandonInput`
+        // transitions and re-inserts surviving contributors into the correct
+        // lane — no separate lane seeding is needed here.
         self.rollback_staged(contributing_input_ids)
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-        Ok(())
     }
 
     pub async fn boundary_applied(
@@ -1377,15 +1394,28 @@ impl EphemeralRuntimeDriver {
         run_id: &RunId,
         receipt: &RunBoundaryReceipt,
     ) -> Result<(), RuntimeDriverError> {
-        // The checked-in Meerkat machine already owns contributor-set legality
-        // for boundary application. Fire the DSL MarkApplied and
-        // MarkAppliedPendingConsumption transitions for each contributor so
-        // input_phases stays authoritative.
+        tracing::debug!(
+            contributors = receipt.contributing_input_ids.len(),
+            sequence = receipt.sequence,
+            "runtime boundary applied"
+        );
+
         for input_id in &receipt.contributing_input_ids {
             let key = Self::dsl_key(input_id);
             if !self.dsl.0.state.input_phases.contains_key(&key) {
                 continue;
             }
+            // The matches_last_run guard on the DSL / shell is enforced by
+            // the MeerkatMachine contributor-set validation before this
+            // realization runs; here we just drive the transitions.
+            let staged = matches!(
+                self.ledger.get(input_id).map(|s| s.phase),
+                Some(InputLifecycleState::Staged)
+            );
+            if !staged {
+                continue;
+            }
+
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::MarkApplied {
                     input_id: key.clone(),
@@ -1405,33 +1435,36 @@ impl EphemeralRuntimeDriver {
                 },
                 "RecordBoundarySeq",
             )?;
-        }
-        tracing::debug!(
-            contributors = receipt.contributing_input_ids.len(),
-            sequence = receipt.sequence,
-            "runtime boundary applied"
-        );
 
-        for input_id in &receipt.contributing_input_ids {
+            let now = Utc::now();
             if let Some(state) = self.ledger.get_mut(input_id) {
-                let applied = state
-                    .apply(InputLifecycleInput::MarkApplied {
-                        run_id: run_id.clone(),
-                    })
-                    .is_ok();
-                let _ = state.apply(InputLifecycleInput::MarkAppliedPendingConsumption {
-                    boundary_sequence: receipt.sequence,
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: state.phase,
+                    to: InputLifecycleState::Applied,
+                    reason: Some(format!("MarkApplied({run_id})")),
                 });
-                if applied {
-                    self.events
-                        .push(self.make_envelope(RuntimeEvent::InputLifecycle(
-                            InputLifecycleEvent::Applied {
-                                input_id: input_id.clone(),
-                                run_id: run_id.clone(),
-                            },
-                        )));
-                }
+                state.phase = InputLifecycleState::Applied;
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: InputLifecycleState::Applied,
+                    to: InputLifecycleState::AppliedPendingConsumption,
+                    reason: Some(format!(
+                        "MarkAppliedPendingConsumption(boundary_sequence={})",
+                        receipt.sequence
+                    )),
+                });
+                state.phase = InputLifecycleState::AppliedPendingConsumption;
+                state.last_boundary_sequence = Some(receipt.sequence);
+                state.updated_at = now;
             }
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Applied {
+                        input_id: input_id.clone(),
+                        run_id: run_id.clone(),
+                    },
+                )));
         }
         Ok(())
     }
@@ -1554,8 +1587,17 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                     },
                     "ConsumeOnAccept",
                 )?;
+                let now = Utc::now();
                 if let Some(s) = self.ledger.get_mut(&input_id) {
-                    let _ = s.apply(InputLifecycleInput::ConsumeOnAccept);
+                    s.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: s.phase,
+                        to: InputLifecycleState::Consumed,
+                        reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
+                    });
+                    s.phase = InputLifecycleState::Consumed;
+                    s.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                    s.updated_at = now;
                 }
                 tracing::debug!(work_id = ?input_id, "input consumed on accept");
             }

@@ -12,9 +12,9 @@ use meerkat_core::lifecycle::{
 use meerkat_core::types::{ContentBlock, ImageData};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
-    InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputLifecycleState, InputOrigin,
-    InputState, InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput,
-    RuntimeDriver, RuntimeState, RuntimeStore, SessionDelta,
+    InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
+    InputVisibility, LogicalRuntimeId, PersistentRuntimeDriver, PromptInput, RuntimeDriver,
+    RuntimeState, RuntimeStore, SessionDelta,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -546,24 +546,13 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
-    // Transition through authority: Accepted -> Queued -> Staged -> Applied -> AppliedPendingConsumption
-    use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
-    state.apply(InputLifecycleInput::QueueAccepted).unwrap();
-    state
-        .apply(InputLifecycleInput::StageForRun {
-            run_id: run_id.clone(),
-        })
-        .unwrap();
-    state
-        .apply(InputLifecycleInput::MarkApplied {
-            run_id: run_id.clone(),
-        })
-        .unwrap();
-    state
-        .apply(InputLifecycleInput::MarkAppliedPendingConsumption {
-            boundary_sequence: 0,
-        })
-        .unwrap();
+    // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
+    // by setting the plain shell fields directly.
+    use meerkat_runtime::input_state::InputLifecycleState;
+    state.phase = InputLifecycleState::AppliedPendingConsumption;
+    state.last_run_id = Some(run_id.clone());
+    state.last_boundary_sequence = Some(0);
+    state.attempt_count = 1;
     store.persist_input_state(&rid, &state).await.unwrap();
     store
         .atomic_apply(

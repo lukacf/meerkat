@@ -32,8 +32,7 @@ use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
 };
 use meerkat_runtime::identifiers::LogicalRuntimeId;
-use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
-use meerkat_runtime::input_state::InputState;
+use meerkat_runtime::input_state::{InputLifecycleState, InputState, InputTerminalOutcome};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
 use meerkat_store::SessionStore;
@@ -314,12 +313,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .iter()
                     .find(|candidate| &candidate.input_id == input_id)?
                     .clone();
-                // Stamp the run association and boundary sequence onto the authority,
-                // then apply the Consume transition through the canonical lifecycle.
-                state
-                    .authority_mut()
-                    .stamp_receipt_metadata(run_id.clone(), sequence);
-                let _ = state.apply(InputLifecycleInput::Consume);
+                // Stamp receipt metadata and mirror the Consumed terminal on
+                // the persisted snapshot. The authoritative DSL transition
+                // fires on the live driver via `machine_realize_run_completed`;
+                // this clone is only what the store persists alongside the
+                // boundary receipt, so `updated_at` tracks that receipt's
+                // logical moment rather than wall-clock.
+                state.stamp_receipt_metadata(run_id.clone(), sequence);
+                state.phase = InputLifecycleState::Consumed;
+                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 Some(state)
             })
             .collect())

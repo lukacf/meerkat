@@ -177,7 +177,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.stage_input(input_id, run_id)
     }
 
@@ -186,7 +186,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.stage_batch(input_ids, run_id)
     }
 
@@ -194,7 +194,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.machine_realize_stage_batch(input_ids, run_id)
     }
 
@@ -203,7 +203,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_id: &InputId,
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.apply_input(input_id, run_id)
     }
 
@@ -211,7 +211,7 @@ impl PersistentRuntimeDriver {
     pub fn rollback_staged(
         &mut self,
         input_ids: &[InputId],
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.rollback_staged(input_ids)
     }
 
@@ -220,7 +220,7 @@ impl PersistentRuntimeDriver {
         &mut self,
         input_ids: &[InputId],
         run_id: &meerkat_core::lifecycle::RunId,
-    ) -> Result<(), crate::input_lifecycle_authority::InputLifecycleError> {
+    ) -> Result<(), crate::traits::RuntimeDriverError> {
         self.inner.consume_inputs(input_ids, run_id)
     }
 

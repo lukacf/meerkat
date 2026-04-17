@@ -12,7 +12,9 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
-use meerkat_runtime::input_state::{InputLifecycleState, InputState};
+use meerkat_runtime::input_state::{
+    InputLifecycleState, InputState, InputStateSeed, StoredInputState,
+};
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore};
 use meerkat_runtime::traits::RuntimeDriver;
 use meerkat_store::MemoryBlobStore;
@@ -44,19 +46,21 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
-fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> InputState {
-    use meerkat_runtime::input_state::InputLifecycleState;
+fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> StoredInputState {
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
-    // by setting the plain shell fields directly. History is not material
-    // to recovery.
-    state.phase = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(sequence);
+    // by seeding the DSL-owned phase + run association alongside the shell.
     state.attempt_count = 1;
-    state
+    StoredInputState {
+        state,
+        seed: InputStateSeed {
+            phase: InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(sequence),
+        },
+    }
 }
 
 fn sorted_ids(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
@@ -100,17 +104,24 @@ async fn recovery_replay_red_ok_requeues_missing_boundary_contributors_through_p
     );
 
     for input_id in [&first_id, &second_id] {
-        let state = driver.input_state(input_id).expect("driver input state");
-        assert_eq!(state.current_state(), InputLifecycleState::Queued);
+        assert!(
+            driver.input_state(input_id).is_some(),
+            "driver should expose recovered input state"
+        );
+        assert_eq!(
+            driver.inner_ref().input_phase(input_id),
+            Some(InputLifecycleState::Queued),
+            "DSL phase should be requeued after recovery"
+        );
 
         let stored = store
             .load_input_state(&runtime_id, input_id)
             .await
             .expect("load persisted state")
             .expect("persisted input record");
-        assert_eq!(stored.current_state(), InputLifecycleState::Queued);
-        assert_eq!(stored.last_run_id().cloned(), Some(run_id.clone()));
-        assert_eq!(stored.last_boundary_sequence(), Some(0));
+        assert_eq!(stored.seed.phase, InputLifecycleState::Queued);
+        assert_eq!(stored.seed.last_run_id, Some(run_id.clone()));
+        assert_eq!(stored.seed.last_boundary_sequence, Some(0));
     }
 
     let replayed = vec![

@@ -10,10 +10,11 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
+use meerkat_runtime::input_state::StoredInputState;
 use meerkat_runtime::{
-    Input, InputDurability, InputHeader, InputOrigin, InputState, InputVisibility,
-    LogicalRuntimeId, MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore,
-    RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
+    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, LogicalRuntimeId,
+    MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore, RuntimeStoreError,
+    SessionDelta, SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -99,7 +100,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         run_id: RunId,
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
     ) -> Result<meerkat_core::lifecycle::RunBoundaryReceipt, RuntimeStoreError> {
         self.inner
             .commit_session_boundary(
@@ -118,7 +119,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_atomic_apply {
@@ -140,7 +141,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn load_input_states(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-    ) -> Result<Vec<InputState>, RuntimeStoreError> {
+    ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
         if !self.load_input_states_delay.is_zero() {
             tokio::time::sleep(self.load_input_states_delay).await;
         }
@@ -168,7 +169,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &InputState,
+        state: &StoredInputState,
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .persist_input_state_calls
@@ -188,7 +189,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeStoreError> {
+    ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
@@ -211,7 +212,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         runtime_state: RuntimeState,
-        input_states: &[InputState],
+        input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .atomic_lifecycle_commit_calls
@@ -337,11 +338,11 @@ async fn recycle_preserves_ephemeral_queued_work() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_state.current_state(),
+        first_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
     assert_eq!(
-        second_state.current_state(),
+        second_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -380,11 +381,11 @@ async fn recycle_preserves_persistent_queued_work() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_state.current_state(),
+        first_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
     assert_eq!(
-        second_state.current_state(),
+        second_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -727,7 +728,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            is.current_state(),
+            is.seed.phase,
             InputLifecycleState::Queued | InputLifecycleState::Abandoned
         ),
         "Failed execution should roll input back or abandon it after retry budget exhaustion, not strand it in AppliedPendingConsumption"
@@ -792,7 +793,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         !matches!(
-            state.current_state(),
+            state.seed.phase,
             InputLifecycleState::Staged | InputLifecycleState::AppliedPendingConsumption
         ),
         "failed inputs must not remain stuck in an in-flight lifecycle state"
@@ -882,7 +883,7 @@ async fn failed_executor_continues_processing_backlog() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(second_state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -894,7 +895,7 @@ async fn failed_executor_continues_processing_backlog() {
     let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            first_state.current_state(),
+            first_state.seed.phase,
             InputLifecycleState::Queued | InputLifecycleState::Consumed
         ),
         "the initially failed input should have been safely rolled back or retried after the backlog drained"
@@ -979,7 +980,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
 
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state(),
+        is.seed.phase,
         InputLifecycleState::Consumed,
         "the pre-upgrade queued input should be processed once the loop is attached"
     );
@@ -1065,7 +1066,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
         "the racy registration path should still attach a live runtime loop"
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
@@ -1196,7 +1197,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     .expect("ensuring with executor should repair the stale attached driver");
 
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -1358,7 +1359,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
         RuntimeState::Idle
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -1432,7 +1433,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
         RuntimeState::Attached
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -1893,7 +1894,7 @@ async fn accept_input_and_run_rejects_deduplicated_admission() {
 
     let state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
     assert_eq!(
-        state.current_state(),
+        state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -2281,7 +2282,7 @@ async fn successful_execution_fires_boundary_applied() {
     // Input should have gone through full lifecycle: Queued → Staged → Applied → APC → Consumed
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state(),
+        is.seed.phase,
         InputLifecycleState::Consumed,
         "Successful execution should consume the input"
     );

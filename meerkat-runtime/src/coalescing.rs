@@ -78,34 +78,44 @@ pub fn check_supersession(
 }
 
 /// Write the shell-side metadata for a supersession. Callers invoke the DSL
-/// `SupersedeInput` transition first (which flips `input_phases`), then call
-/// this to mirror the phase + enriched terminal outcome onto the shell's
-/// `InputState`.
-pub fn apply_supersession(superseded_state: &mut InputState, superseded_by: InputId) {
+/// `SupersedeInput` transition first (which flips `input_phases` and records
+/// the structured terminal metadata in the typed terminal maps); this helper
+/// keeps the shell's history log and typed outcome cache in step.
+///
+/// `from_phase` is the DSL-tracked lifecycle the input held at the moment the
+/// DSL transition fired, captured by the caller so the history entry is
+/// accurate.
+pub fn apply_supersession(
+    superseded_state: &mut InputState,
+    from_phase: InputLifecycleState,
+    superseded_by: InputId,
+) {
     let now = Utc::now();
     superseded_state.history.push(InputStateHistoryEntry {
         timestamp: now,
-        from: superseded_state.phase,
+        from: from_phase,
         to: InputLifecycleState::Superseded,
         reason: Some("Supersede".into()),
     });
-    superseded_state.phase = InputLifecycleState::Superseded;
     superseded_state.terminal_outcome = Some(InputTerminalOutcome::Superseded { superseded_by });
     superseded_state.updated_at = now;
 }
 
 /// Write the shell-side metadata for a coalesce. Callers invoke the DSL
-/// `CoalesceInput` transition first, then call this to mirror the phase and
-/// enriched terminal outcome onto the shell's `InputState`.
-pub fn apply_coalescing(source_state: &mut InputState, aggregate_id: InputId) {
+/// `CoalesceInput` transition first; this helper keeps the shell's history
+/// log and typed outcome cache in step.
+pub fn apply_coalescing(
+    source_state: &mut InputState,
+    from_phase: InputLifecycleState,
+    aggregate_id: InputId,
+) {
     let now = Utc::now();
     source_state.history.push(InputStateHistoryEntry {
         timestamp: now,
-        from: source_state.phase,
+        from: from_phase,
         to: InputLifecycleState::Coalesced,
         reason: Some("Coalesce".into()),
     });
-    source_state.phase = InputLifecycleState::Coalesced;
     source_state.terminal_outcome = Some(InputTerminalOutcome::Coalesced { aggregate_id });
     source_state.updated_at = now;
 }
@@ -306,29 +316,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_supersession_sets_phase_and_outcome() {
+    fn apply_supersession_records_history_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state.phase = InputLifecycleState::Queued;
         let superseder = InputId::new();
-        apply_supersession(&mut state, superseder);
-        assert_eq!(state.phase, InputLifecycleState::Superseded);
+        apply_supersession(&mut state, InputLifecycleState::Queued, superseder);
         assert!(matches!(
             state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Superseded { .. })
         ));
+        assert!(!state.history.is_empty());
+        assert_eq!(
+            state.history.last().map(|e| e.to),
+            Some(InputLifecycleState::Superseded)
+        );
     }
 
     #[test]
-    fn apply_coalescing_sets_phase_and_outcome() {
+    fn apply_coalescing_records_history_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state.phase = InputLifecycleState::Queued;
         let aggregate = InputId::new();
-        apply_coalescing(&mut state, aggregate);
-        assert_eq!(state.phase, InputLifecycleState::Coalesced);
+        apply_coalescing(&mut state, InputLifecycleState::Queued, aggregate);
         assert!(matches!(
             state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Coalesced { .. })
         ));
+        assert!(!state.history.is_empty());
+        assert_eq!(
+            state.history.last().map(|e| e.to),
+            Some(InputLifecycleState::Coalesced)
+        );
     }
 
     #[test]

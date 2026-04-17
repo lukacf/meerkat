@@ -1,9 +1,6 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
-use super::mob_member_bootstrap_authority::{
-    MobMemberBootstrapAuthority, MobMemberBootstrapEffect, MobMemberBootstrapInput,
-};
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::mob_wiring_authority::{
     ExternalUnwirePlan, ExternalWireInput, ExternalWirePlan, LocalUnwirePlan, LocalWirePlan,
@@ -35,8 +32,6 @@ impl InitialTurnHandle {
     }
 }
 
-// Sized for real mob-scale startup/shutdown fan-out (50+ members).
-const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
 /// Resolve the runtime binding for a spawn request.
@@ -405,37 +400,218 @@ impl MobActor {
             .and_then(|entry| entry.kickoff.as_ref().map(|snapshot| snapshot.phase))
     }
 
-    async fn clear_kickoff_state(&self, meerkat_id: &MeerkatId) {
+    fn kickoff_phase_to_dsl(phase: crate::roster::MobMemberKickoffPhase) -> mob_dsl::KickoffPhase {
+        match phase {
+            crate::roster::MobMemberKickoffPhase::Pending => mob_dsl::KickoffPhase::Pending,
+            crate::roster::MobMemberKickoffPhase::Starting => mob_dsl::KickoffPhase::Starting,
+            crate::roster::MobMemberKickoffPhase::Started => mob_dsl::KickoffPhase::Started,
+            crate::roster::MobMemberKickoffPhase::CallbackPending => {
+                mob_dsl::KickoffPhase::CallbackPending
+            }
+            crate::roster::MobMemberKickoffPhase::Failed => mob_dsl::KickoffPhase::Failed,
+            crate::roster::MobMemberKickoffPhase::Cancelled => mob_dsl::KickoffPhase::Cancelled,
+        }
+    }
+
+    fn kickoff_phase_from_dsl(
+        phase: mob_dsl::KickoffPhase,
+    ) -> crate::roster::MobMemberKickoffPhase {
+        match phase {
+            mob_dsl::KickoffPhase::Pending => crate::roster::MobMemberKickoffPhase::Pending,
+            mob_dsl::KickoffPhase::Starting => crate::roster::MobMemberKickoffPhase::Starting,
+            mob_dsl::KickoffPhase::Started => crate::roster::MobMemberKickoffPhase::Started,
+            mob_dsl::KickoffPhase::CallbackPending => {
+                crate::roster::MobMemberKickoffPhase::CallbackPending
+            }
+            mob_dsl::KickoffPhase::Failed => crate::roster::MobMemberKickoffPhase::Failed,
+            mob_dsl::KickoffPhase::Cancelled => crate::roster::MobMemberKickoffPhase::Cancelled,
+        }
+    }
+
+    fn kickoff_outcome_string(outcome: &meerkat_runtime::completion::CompletionOutcome) -> String {
+        match outcome {
+            meerkat_runtime::completion::CompletionOutcome::Completed(_)
+            | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                "Started".to_string()
+            }
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
+                "CallbackPending".to_string()
+            }
+            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+                reason.clone()
+            }
+        }
+    }
+
+    fn kickoff_notice_intent(intent: &str) -> Option<&'static str> {
+        match intent {
+            "Failed" => Some("mob.kickoff_failed"),
+            "Cancelled" => Some("mob.kickoff_cancelled"),
+            _ => None,
+        }
+    }
+
+    async fn clear_kickoff_state(&mut self, meerkat_id: &MeerkatId) {
+        self.dsl_authority
+            .state
+            .member_kickoff_pending
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_starting
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_callback_pending
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_started
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_failed
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_cancelled
+            .remove(&meerkat_id.to_string());
+        self.dsl_authority
+            .state
+            .member_kickoff_error
+            .remove(&meerkat_id.to_string());
         self.roster.write().await.set_kickoff(meerkat_id, None);
     }
 
     async fn apply_kickoff_input(
-        &self,
+        &mut self,
         meerkat_id: &MeerkatId,
-        input: MobMemberBootstrapInput,
+        input: mob_dsl::MobMachineInput,
     ) -> Result<bool, MobError> {
-        let current_phase = self.kickoff_phase_for(meerkat_id).await;
-        let mut authority = MobMemberBootstrapAuthority::new(current_phase);
-        let transition = match authority.apply(input) {
+        if !self
+            .dsl_authority
+            .state
+            .member_kickoff_pending
+            .contains(&meerkat_id.to_string())
+            && !self
+                .dsl_authority
+                .state
+                .member_kickoff_starting
+                .contains(&meerkat_id.to_string())
+            && !self
+                .dsl_authority
+                .state
+                .member_kickoff_callback_pending
+                .contains(&meerkat_id.to_string())
+            && !self
+                .dsl_authority
+                .state
+                .member_kickoff_started
+                .contains(&meerkat_id.to_string())
+            && !self
+                .dsl_authority
+                .state
+                .member_kickoff_failed
+                .contains(&meerkat_id.to_string())
+            && !self
+                .dsl_authority
+                .state
+                .member_kickoff_cancelled
+                .contains(&meerkat_id.to_string())
+            && let Some(current_phase) = self.kickoff_phase_for(meerkat_id).await
+        {
+            match Self::kickoff_phase_to_dsl(current_phase) {
+                mob_dsl::KickoffPhase::Pending => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_pending
+                        .insert(meerkat_id.to_string());
+                }
+                mob_dsl::KickoffPhase::Starting => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_starting
+                        .insert(meerkat_id.to_string());
+                }
+                mob_dsl::KickoffPhase::CallbackPending => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_callback_pending
+                        .insert(meerkat_id.to_string());
+                }
+                mob_dsl::KickoffPhase::Started => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_started
+                        .insert(meerkat_id.to_string());
+                }
+                mob_dsl::KickoffPhase::Failed => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_failed
+                        .insert(meerkat_id.to_string());
+                }
+                mob_dsl::KickoffPhase::Cancelled => {
+                    self.dsl_authority
+                        .state
+                        .member_kickoff_cancelled
+                        .insert(meerkat_id.to_string());
+                }
+            }
+            if let Some(error) = self.roster.read().await.get(meerkat_id).and_then(|entry| {
+                entry
+                    .kickoff
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.error.clone())
+            }) {
+                self.dsl_authority
+                    .state
+                    .member_kickoff_error
+                    .insert(meerkat_id.to_string(), error);
+            }
+        }
+
+        let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
             Ok(transition) => transition,
             Err(_) => return Ok(false),
         };
 
         for effect in transition.effects {
             match effect {
-                MobMemberBootstrapEffect::PersistKickoff { phase, error } => {
-                    self.persist_kickoff_state(meerkat_id, phase, error).await?;
+                mob_dsl::MobMachineEffect::PersistKickoffUpdate {
+                    member_id: _,
+                    phase,
+                } => {
+                    let phase = Self::kickoff_phase_from_dsl(phase);
+                    self.persist_kickoff_state(meerkat_id, phase, None).await?;
                 }
-                MobMemberBootstrapEffect::EmitLifecycleNotice { intent } => {
-                    if let Err(error) = self.notify_kickoff_event(meerkat_id, intent).await {
+                mob_dsl::MobMachineEffect::PersistKickoffFailureUpdate {
+                    member_id: _,
+                    phase,
+                    error,
+                } => {
+                    let phase = Self::kickoff_phase_from_dsl(phase);
+                    self.persist_kickoff_state(meerkat_id, phase, Some(error))
+                        .await?;
+                }
+                mob_dsl::MobMachineEffect::EmitKickoffLifecycleNotice {
+                    member_id: _,
+                    intent,
+                } => {
+                    if let Some(notice_intent) = Self::kickoff_notice_intent(&intent)
+                        && let Err(error) =
+                            self.notify_kickoff_event(meerkat_id, notice_intent).await
+                    {
                         tracing::warn!(
                             meerkat_id = %meerkat_id,
                             error = %error,
-                            intent,
+                            intent = %intent,
                             "failed to emit kickoff lifecycle notice"
                         );
                     }
                 }
+                _ => {}
             }
         }
 
@@ -1145,7 +1321,7 @@ impl MobActor {
     }
 
     async fn resolve_kickoff_outcome(
-        &self,
+        &mut self,
         meerkat_id: &MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
     ) -> Result<(), MobError> {
@@ -1163,15 +1339,23 @@ impl MobActor {
         let _ = self
             .apply_kickoff_input(
                 meerkat_id,
-                MobMemberBootstrapInput::ResolveOutcome { outcome },
+                mob_dsl::MobMachineInput::KickoffResolveOutcome {
+                    member_id: meerkat_id.to_string(),
+                    outcome: Self::kickoff_outcome_string(&outcome),
+                },
             )
             .await?;
         Ok(())
     }
 
-    async fn maybe_mark_kickoff_cancelled(&self, meerkat_id: &MeerkatId) {
+    async fn maybe_mark_kickoff_cancelled(&mut self, meerkat_id: &MeerkatId) {
         if let Err(error) = self
-            .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::CancelRequested)
+            .apply_kickoff_input(
+                meerkat_id,
+                mob_dsl::MobMachineInput::KickoffCancelRequested {
+                    member_id: meerkat_id.to_string(),
+                },
+            )
             .await
         {
             tracing::warn!(
@@ -1200,7 +1384,7 @@ impl MobActor {
     /// Does NOT unregister the session — that happens only on dispose (retire/destroy).
     /// This allows resume to re-spawn the comms drain without re-registering.
     async fn stop_autonomous_member(
-        &self,
+        &mut self,
         meerkat_id: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
@@ -1259,7 +1443,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn stop_all_autonomous_members(&self) -> Result<(), MobError> {
+    async fn stop_all_autonomous_members(&mut self) -> Result<(), MobError> {
         let entries = {
             let roster = self.roster.read().await;
             roster
@@ -1271,19 +1455,9 @@ impl MobActor {
         if entries.is_empty() {
             return Ok(());
         }
-        let actor: &MobActor = self;
-        let mut remaining = entries.into_iter();
-        let mut in_flight = FuturesUnordered::new();
         let mut first_error: Option<MobError> = None;
-
-        for _ in 0..MAX_PARALLEL_HOST_LOOP_OPS {
-            let Some(entry) = remaining.next() else {
-                break;
-            };
-            in_flight.push(actor.stop_autonomous_member_entry(entry));
-        }
-
-        while let Some(result) = in_flight.next().await {
+        for entry in entries {
+            let result = self.stop_autonomous_member_entry(entry).await;
             if let Err((meerkat_id, error)) = result {
                 tracing::warn!(
                     meerkat_id = %meerkat_id,
@@ -1294,9 +1468,6 @@ impl MobActor {
                     first_error = Some(error);
                 }
             }
-            if let Some(entry) = remaining.next() {
-                in_flight.push(actor.stop_autonomous_member_entry(entry));
-            }
         }
 
         if let Some(error) = first_error {
@@ -1306,7 +1477,7 @@ impl MobActor {
     }
 
     async fn stop_autonomous_member_entry(
-        &self,
+        &mut self,
         entry: RosterEntry,
     ) -> Result<(), (MeerkatId, MobError)> {
         self.stop_autonomous_member(&entry.meerkat_id, &entry.member_ref)
@@ -1662,10 +1833,8 @@ impl MobActor {
                             // race with subsequent external cleanup (e.g. DML deletes).
                             self.provisioner.cancel_all_checkpointers().await;
                             let mut stop_result: Result<(), MobError> = Ok(());
-                            let (loop_result, mcp_result) = tokio::join!(
-                                self.stop_all_autonomous_members(),
-                                self.stop_mcp_servers()
-                            );
+                            let loop_result = self.stop_all_autonomous_members().await;
+                            let mcp_result = self.stop_mcp_servers().await;
                             if let Err(error) = loop_result {
                                 tracing::warn!(
                                     mob_id = %self.definition.id,
@@ -2820,8 +2989,6 @@ impl MobActor {
             pending_items.push((pending, result));
         }
 
-        let mut in_flight = FuturesUnordered::new();
-        let actor: &MobActor = self;
         for (pending, result) in pending_items {
             let PendingSpawn {
                 profile_name,
@@ -2836,55 +3003,46 @@ impl MobActor {
                 progress: _,
                 reply_tx,
             } = pending;
-            in_flight.push(async move {
-                let reply = match result {
-                    Ok(spawn_receipt) => {
-                        let provision = PendingProvision::new(
-                            spawn_receipt.member_ref.clone(),
-                            meerkat_id.clone(),
-                            actor.provisioner.clone(),
-                        );
-                        if let Err(error) = actor
-                            .require_state(&[MobState::Running])
-                        {
-                            if let Err(retire_error) = provision.rollback().await {
-                                Err(MobError::Internal(format!(
-                                    "spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
-                                )))
-                            } else {
-                                Err(error)
-                            }
+            let reply = match result {
+                Ok(spawn_receipt) => {
+                    let provision = PendingProvision::new(
+                        spawn_receipt.member_ref.clone(),
+                        meerkat_id.clone(),
+                        self.provisioner.clone(),
+                    );
+                    if let Err(error) = self.require_state(&[MobState::Running]) {
+                        if let Err(retire_error) = provision.rollback().await {
+                            Err(MobError::Internal(format!(
+                                "spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
+                            )))
                         } else {
-                            let fence = actor.issue_fence_token();
-                            actor.finalize_spawn_from_pending(
-                                &profile_name,
-                                &meerkat_id,
-                                crate::ids::Generation::INITIAL,
-                                fence,
-                                runtime_mode,
-                                prompt,
-                                labels,
-                                provision,
-                                spawn_receipt.operation_id,
-                                owner_bridge_session_id,
-                                auto_wire_parent,
-                                restore_wiring,
-                                effective_profile_override,
-                            )
-                            .await
-                            .map(|outcome| outcome.receipt)
+                            Err(error)
                         }
+                    } else {
+                        let fence = self.issue_fence_token();
+                        self.finalize_spawn_from_pending(
+                            &profile_name,
+                            &meerkat_id,
+                            crate::ids::Generation::INITIAL,
+                            fence,
+                            runtime_mode,
+                            prompt,
+                            labels,
+                            provision,
+                            spawn_receipt.operation_id,
+                            owner_bridge_session_id,
+                            auto_wire_parent,
+                            restore_wiring,
+                            effective_profile_override,
+                        )
+                        .await
+                        .map(|outcome| outcome.receipt)
                     }
-                    Err(error) => Err(error),
-                };
-                (reply_tx, reply)
-            });
-        }
-
-        while let Some((reply_tx, reply)) = in_flight.next().await {
+                }
+                Err(error) => Err(error),
+            };
             let _ = reply_tx.send(reply);
         }
-        drop(in_flight);
 
         if let Err(error) = self.ensure_pending_spawn_alignment("spawn batch completion") {
             tracing::error!(
@@ -3092,7 +3250,7 @@ impl MobActor {
 
     #[allow(clippy::too_many_arguments)]
     async fn finalize_spawn_from_pending(
-        &self,
+        &mut self,
         profile_name: &ProfileName,
         meerkat_id: &MeerkatId,
         generation: crate::ids::Generation,
@@ -3170,7 +3328,12 @@ impl MobActor {
         self.restore_diagnostics.write().await.remove(meerkat_id);
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
-                .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::MarkPending)
+                .apply_kickoff_input(
+                    meerkat_id,
+                    mob_dsl::MobMachineInput::KickoffMarkPending {
+                        member_id: meerkat_id.to_string(),
+                    },
+                )
                 .await?;
         }
         tracing::debug!(
@@ -3203,7 +3366,12 @@ impl MobActor {
 
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
-                .apply_kickoff_input(meerkat_id, MobMemberBootstrapInput::MarkStarting)
+                .apply_kickoff_input(
+                    meerkat_id,
+                    mob_dsl::MobMachineInput::KickoffMarkStarting {
+                        member_id: meerkat_id.to_string(),
+                    },
+                )
                 .await?;
             if let Err(start_error) = self
                 .start_autonomous_member(meerkat_id, &member_ref, prompt)
@@ -3407,14 +3575,14 @@ impl MobActor {
     ///
     /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
     /// pipeline (policy-driven), then unconditional roster removal.
-    async fn handle_retire(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    async fn handle_retire(&mut self, meerkat_id: MeerkatId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
         self.handle_retire_inner(&meerkat_id, false).await?;
         self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
     async fn handle_retire_inner(
-        &self,
+        &mut self,
         meerkat_id: &MeerkatId,
         bulk: bool,
     ) -> Result<(), MobError> {
@@ -3814,7 +3982,7 @@ impl MobActor {
     /// member from the roster and prunes wire edge locks. The finally block
     /// runs regardless of whether the policy aborted.
     async fn dispose_member(
-        &self,
+        &mut self,
         ctx: &DisposalContext,
         policy: &mut dyn ErrorPolicy,
     ) -> DisposalReport {
@@ -3844,7 +4012,7 @@ impl MobActor {
     /// Dispatch a disposal step. Exhaustive match ensures compiler forces new
     /// arms when `DisposalStep` variants are added.
     async fn execute_step(
-        &self,
+        &mut self,
         step: DisposalStep,
         ctx: &DisposalContext,
     ) -> Result<(), MobError> {
@@ -3857,7 +4025,7 @@ impl MobActor {
     }
 
     /// Stop the autonomous member and unregister session (disposal only).
-    async fn dispose_stop_host_loop(&self, ctx: &DisposalContext) -> Result<(), MobError> {
+    async fn dispose_stop_host_loop(&mut self, ctx: &DisposalContext) -> Result<(), MobError> {
         if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             self.stop_autonomous_member(&ctx.meerkat_id, &ctx.entry.member_ref)
                 .await?;
@@ -4689,18 +4857,9 @@ impl MobActor {
             return Ok(());
         }
 
-        let mut remaining = ids.into_iter();
-        let mut in_flight = FuturesUnordered::new();
         let mut retire_failures: Vec<String> = Vec::new();
-
-        for _ in 0..MAX_PARALLEL_HOST_LOOP_OPS {
-            let Some(id) = remaining.next() else {
-                break;
-            };
-            in_flight.push(self.retire_one(id));
-        }
-
-        while let Some(result) = in_flight.next().await {
+        for id in ids {
+            let result = self.retire_one(id).await;
             if let Err((id, error)) = result {
                 tracing::warn!(
                     mob_id = %self.definition.id,
@@ -4709,9 +4868,6 @@ impl MobActor {
                     "{context}: retire failed for member"
                 );
                 retire_failures.push(format!("{id}: {error}"));
-            }
-            if let Some(id) = remaining.next() {
-                in_flight.push(self.retire_one(id));
             }
         }
 
@@ -4726,7 +4882,7 @@ impl MobActor {
         Ok(())
     }
 
-    async fn retire_one(&self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
+    async fn retire_one(&mut self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
         self.handle_retire_inner(&id, true)
             .await
             .map_err(|error| (id, error))

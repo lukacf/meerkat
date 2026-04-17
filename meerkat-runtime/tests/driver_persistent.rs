@@ -10,6 +10,7 @@ use meerkat_core::lifecycle::{
     InputId, RunId, run_primitive::RunApplyBoundary, run_receipt::RunBoundaryReceipt,
 };
 use meerkat_core::types::{ContentBlock, ImageData};
+use meerkat_runtime::input_state::{InputStateSeed, StoredInputState};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
@@ -20,6 +21,13 @@ use meerkat_store::MemoryBlobStore;
 
 fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())
+}
+
+fn stored_accepted(state: InputState) -> StoredInputState {
+    StoredInputState {
+        seed: InputStateSeed::new_accepted(),
+        state,
+    }
 }
 
 struct FailPersistInputStore {
@@ -45,7 +53,7 @@ impl RuntimeStore for FailPersistInputStore {
         run_id: RunId,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
     ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
         self.inner
             .commit_session_boundary(
@@ -64,7 +72,7 @@ impl RuntimeStore for FailPersistInputStore {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         self.inner
@@ -81,7 +89,7 @@ impl RuntimeStore for FailPersistInputStore {
     async fn load_input_states(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Vec<InputState>, RuntimeStoreError> {
+    ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
         self.inner.load_input_states(runtime_id).await
     }
 
@@ -106,7 +114,7 @@ impl RuntimeStore for FailPersistInputStore {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &InputState,
+        state: &StoredInputState,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_persist_input_state.swap(false, Ordering::SeqCst) {
             return Err(RuntimeStoreError::WriteFailed(
@@ -120,7 +128,7 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeStoreError> {
+    ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
@@ -143,7 +151,7 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
         runtime_state: RuntimeState,
-        input_states: &[InputState],
+        input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
         self.inner
             .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
@@ -233,7 +241,7 @@ async fn durable_before_ack() {
     // Verify state was persisted to store BEFORE we returned
     let stored = store.load_input_state(&rid, &input_id).await.unwrap();
     assert!(stored.is_some());
-    assert!(stored.unwrap().persisted_input.is_some());
+    assert!(stored.unwrap().state.persisted_input.is_some());
 }
 
 #[tokio::test]
@@ -272,7 +280,10 @@ async fn recover_from_store() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
-    store.persist_input_state(&rid, &state).await.unwrap();
+    store
+        .persist_input_state(&rid, &stored_accepted(state))
+        .await
+        .unwrap();
 
     // Create a fresh driver (simulating restart)
     let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
@@ -304,7 +315,10 @@ async fn recover_rebuilds_dedup_index() {
     let mut state = InputState::new_accepted(input_id.clone());
     state.idempotency_key = Some(key.clone());
     state.durability = Some(InputDurability::Durable);
-    store.persist_input_state(&rid, &state).await.unwrap();
+    store
+        .persist_input_state(&rid, &stored_accepted(state))
+        .await
+        .unwrap();
 
     // Create a fresh driver and recover
     let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
@@ -331,7 +345,10 @@ async fn recover_filters_ephemeral_inputs() {
     let input_id = InputId::new();
     let mut state = InputState::new_accepted(input_id.clone());
     state.durability = Some(InputDurability::Ephemeral);
-    store.persist_input_state(&rid, &state).await.unwrap();
+    store
+        .persist_input_state(&rid, &stored_accepted(state))
+        .await
+        .unwrap();
 
     // Create fresh driver and recover
     let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
@@ -407,6 +424,7 @@ async fn durable_runtime_input_externalizes_inline_images_before_ack() {
         .unwrap()
         .expect("persisted input should exist");
     let persisted_input = stored
+        .state
         .persisted_input
         .expect("accepted durable input should be persisted");
     match persisted_input {
@@ -502,7 +520,7 @@ async fn retire_preserves_inputs_for_drain() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.current_state(),
+        stored.seed.phase,
         meerkat_runtime::input_state::InputLifecycleState::Queued
     );
 }
@@ -526,7 +544,7 @@ async fn reset_persists_abandoned_inputs() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        stored.current_state(),
+        stored.seed.phase,
         meerkat_runtime::input_state::InputLifecycleState::Abandoned
     );
 }
@@ -547,13 +565,18 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
-    // by setting the plain shell fields directly.
+    // by seeding the DSL-owned phase + run association alongside the shell.
     use meerkat_runtime::input_state::InputLifecycleState;
-    state.phase = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(0);
     state.attempt_count = 1;
-    store.persist_input_state(&rid, &state).await.unwrap();
+    let stored = StoredInputState {
+        state,
+        seed: InputStateSeed {
+            phase: InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(0),
+        },
+    };
+    store.persist_input_state(&rid, &stored).await.unwrap();
     store
         .atomic_apply(
             &rid,
@@ -566,7 +589,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
                 message_count: 1,
                 sequence: 0,
             },
-            vec![state.clone()],
+            vec![stored.clone()],
             None,
         )
         .await
@@ -580,10 +603,10 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         recovered.is_some(),
         "committed input should remain queryable after recovery"
     );
-    let Some(recovered) = recovered else {
-        unreachable!("asserted some recovery state above");
-    };
-    assert_eq!(recovered.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(
+        driver.inner_ref().input_phase(&input_id),
+        Some(InputLifecycleState::Consumed)
+    );
     assert!(
         driver.active_input_ids().is_empty(),
         "committed applied inputs should not stay active after recovery"

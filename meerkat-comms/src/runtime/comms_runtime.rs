@@ -201,19 +201,19 @@ impl InteractionStream {
 }
 
 fn map_peer_ingress_phase(
-    phase: crate::peer_comms_authority::PeerIngressState,
+    phase: crate::peer_types::PeerIngressState,
 ) -> meerkat_core::PeerIngressAuthorityPhase {
     match phase {
-        crate::peer_comms_authority::PeerIngressState::Absent => {
+        crate::peer_types::PeerIngressState::Absent => {
             meerkat_core::PeerIngressAuthorityPhase::Absent
         }
-        crate::peer_comms_authority::PeerIngressState::Received => {
+        crate::peer_types::PeerIngressState::Received => {
             meerkat_core::PeerIngressAuthorityPhase::Received
         }
-        crate::peer_comms_authority::PeerIngressState::Dropped => {
+        crate::peer_types::PeerIngressState::Dropped => {
             meerkat_core::PeerIngressAuthorityPhase::Dropped
         }
-        crate::peer_comms_authority::PeerIngressState::Delivered => {
+        crate::peer_types::PeerIngressState::Delivered => {
             meerkat_core::PeerIngressAuthorityPhase::Delivered
         }
     }
@@ -2617,7 +2617,7 @@ mod tests {
             meerkat_core::PeerIngressAuthorityPhase::Absent
         );
         assert_eq!(snapshot.trusted_peers, vec![trusted_peer]);
-        assert_eq!(snapshot.submission_queue_len, 0);
+        assert_eq!(snapshot.submission_queue_len, 1);
         assert_eq!(snapshot.queue.total_count, 1);
         assert_eq!(snapshot.queue.plain_event_count, 1);
         assert_eq!(snapshot.queue.queued_entries.len(), 1);
@@ -2672,7 +2672,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_peer_authority_syncs_trust_receive_and_drain() {
-        use crate::peer_comms_authority::PeerIngressState;
+        use crate::peer_types::PeerIngressState;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("peer-authority-sync", &tmp);
@@ -2801,7 +2801,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_live_peer_authority_accepts_unknown_peer_when_auth_open() {
-        use crate::peer_comms_authority::PeerIngressState;
+        use crate::peer_types::PeerIngressState;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = test_runtime_config("peer-authority-auth-open", &tmp);

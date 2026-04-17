@@ -195,8 +195,10 @@ async fn accepted_response_no_wake() {
 
     // Input should be queued (StageRunBoundary queues for boundary application)
     if let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = &outcome {
-        let state = driver.input_state(input_id).unwrap();
-        assert_eq!(state.current_state(), InputLifecycleState::Queued);
+        assert_eq!(
+            driver.input_phase(input_id),
+            Some(InputLifecycleState::Queued)
+        );
     }
 }
 

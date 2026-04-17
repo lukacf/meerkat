@@ -97,7 +97,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/authority.rs` — schedule lifecycle authority and revision ownership
+- `meerkat-schedule/src/lifecycle.rs` — Schedule::apply domain-facing lifecycle transition seam over the DSL
 
 ### Scenarios
 - `schedule_pause_resume_delete` — schedule transitions through create, pause, resume, and delete while advancing revision

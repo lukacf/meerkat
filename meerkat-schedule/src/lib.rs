@@ -6,9 +6,9 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub use ::tokio;
 
-mod authority;
 mod driver;
 mod error;
+mod lifecycle;
 pub(crate) mod machines;
 mod service;
 mod store;
@@ -18,16 +18,16 @@ mod tools;
 mod trigger;
 mod types;
 
-pub use authority::{
-    OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput,
-    OccurrenceLifecycleMutator, ScheduleLifecycleAuthority, ScheduleLifecycleError,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator,
-};
 pub use driver::{
     DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ScheduleDriver, ScheduleDriverConfig,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport, TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
+pub use lifecycle::{
+    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceLifecycleMutator, ScheduleLifecycleEffect, ScheduleLifecycleError,
+    ScheduleLifecycleInput, ScheduleLifecycleMutator,
+};
 pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,

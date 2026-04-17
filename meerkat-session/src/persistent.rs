@@ -32,7 +32,7 @@ use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
 };
 use meerkat_runtime::identifiers::LogicalRuntimeId;
-use meerkat_runtime::input_state::{InputLifecycleState, InputState, InputTerminalOutcome};
+use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
 use meerkat_store::SessionStore;
@@ -292,7 +292,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         run_id: &RunId,
         sequence: u64,
         contributing_input_ids: &[InputId],
-    ) -> Result<Vec<InputState>, SessionError> {
+    ) -> Result<Vec<StoredInputState>, SessionError> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
             return Ok(Vec::new());
         };
@@ -309,9 +309,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(contributing_input_ids
             .iter()
             .filter_map(|input_id| {
-                let mut state = stored_states
+                let mut bundle = stored_states
                     .iter()
-                    .find(|candidate| &candidate.input_id == input_id)?
+                    .find(|candidate| &candidate.state.input_id == input_id)?
                     .clone();
                 // Stamp receipt metadata and mirror the Consumed terminal on
                 // the persisted snapshot. The authoritative DSL transition
@@ -319,10 +319,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 // this clone is only what the store persists alongside the
                 // boundary receipt, so `updated_at` tracks that receipt's
                 // logical moment rather than wall-clock.
-                state.stamp_receipt_metadata(run_id.clone(), sequence);
-                state.phase = InputLifecycleState::Consumed;
-                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                Some(state)
+                bundle.seed.last_run_id = Some(run_id.clone());
+                bundle.seed.last_boundary_sequence = Some(sequence);
+                bundle.seed.phase = InputLifecycleState::Consumed;
+                bundle.state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                Some(bundle)
             })
             .collect())
     }

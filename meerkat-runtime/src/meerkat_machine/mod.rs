@@ -37,7 +37,7 @@ use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_state::{InputLifecycleState, InputState};
+use crate::input_state::InputLifecycleState;
 use crate::meerkat_machine_types::{
     HydratedSessionLlmState, MeerkatAdmittedInputSnapshot, MeerkatBindingSnapshot,
     MeerkatCompletionWaiterSnapshot, MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot,
@@ -86,6 +86,7 @@ mod dispatch_drain;
 mod dispatch_ingress;
 mod dispatch_session;
 #[allow(unused_variables, dead_code, clippy::cmp_owned)]
+#[allow(clippy::assign_op_pattern)]
 pub(crate) mod dsl;
 pub(crate) mod dsl_authority;
 mod llm_reconfigure;
@@ -94,6 +95,7 @@ mod session_management;
 mod traits;
 mod visibility;
 
+pub use comms_drain::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 

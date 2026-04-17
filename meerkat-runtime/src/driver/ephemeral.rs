@@ -4,7 +4,8 @@
 //! - Input acceptance with validation, policy resolution, dedup, supersession
 //! - Input lifecycle transitions driven directly through the MeerkatMachine
 //!   DSL authority (`input_phases` + associated transitions); `InputState`
-//!   carries only shell-mirror metadata (history, timestamps, retry counter)
+//!   carries only shell-mirror metadata (history, timestamps, cached terminal
+//!   outcome, compatibility retry counter)
 //! - InputQueue FIFO management
 //! - S24 ephemeral recovery
 //! - S25 retire/reset/destroy lifecycle operations
@@ -25,8 +26,8 @@ use crate::ingress_types::{ContentShape, RequestId, ReservationKey};
 use crate::input::Input;
 use crate::input_ledger::InputLedger;
 use crate::input_state::{
-    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry,
-    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot,
+    InputAbandonReason, InputLifecycleState, InputState, InputStateHistoryEntry, InputStateSeed,
+    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, StoredInputState,
 };
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
@@ -272,11 +273,20 @@ impl EphemeralRuntimeDriver {
         candidates.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// Read the tracked lifecycle for an input from the DSL.
-    fn dsl_lifecycle(&self, input_id: &InputId) -> Option<InputLifecycleState> {
+    /// Read the tracked lifecycle phase for an input from the DSL.
+    ///
+    /// Authoritative: the DSL is the sole writer of `input_phases`. Returns
+    /// `None` if the DSL has never seen this input (e.g. pre-admission or
+    /// post-GC).
+    pub fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         let key = Self::dsl_key(input_id);
         let phase = self.dsl.0.state.input_phases.get(&key)?;
-        match phase.as_str() {
+        Self::parse_phase_str(phase.as_str())
+    }
+
+    fn parse_phase_str(phase: &str) -> Option<InputLifecycleState> {
+        match phase {
+            "Accepted" => Some(InputLifecycleState::Accepted),
             "Queued" => Some(InputLifecycleState::Queued),
             "Staged" => Some(InputLifecycleState::Staged),
             "Applied" => Some(InputLifecycleState::Applied),
@@ -287,6 +297,19 @@ impl EphemeralRuntimeDriver {
             "Abandoned" => Some(InputLifecycleState::Abandoned),
             _ => None,
         }
+    }
+
+    /// Read the run association an input was last staged for, from the DSL.
+    pub fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
+        let key = Self::dsl_key(input_id);
+        let raw = self.dsl.0.state.input_run_associations.get(&key)?;
+        raw.parse::<uuid::Uuid>().ok().map(RunId::from_uuid)
+    }
+
+    /// Read the committed boundary sequence for an input, from the DSL.
+    pub fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
+        let key = Self::dsl_key(input_id);
+        self.dsl.0.state.input_boundary_sequences.get(&key).copied()
     }
 
     // ---- Admission metadata accessors (read-only) ----
@@ -338,7 +361,7 @@ impl EphemeralRuntimeDriver {
 
     /// DSL-tracked lifecycle phase for the given input, if known.
     pub fn ingress_lifecycle(&self, input_id: &InputId) -> Option<InputLifecycleState> {
-        self.dsl_lifecycle(input_id)
+        self.input_phase(input_id)
     }
 
     pub(crate) fn control_handle(&self) -> Arc<StdRwLock<RuntimeControlProjection>> {
@@ -431,7 +454,8 @@ impl EphemeralRuntimeDriver {
         content_shape: ContentShape,
         handling_mode: HandlingMode,
         is_prompt: bool,
-        lifecycle_state: InputLifecycleState,
+        recovered_state: &InputState,
+        recovered_seed: &InputStateSeed,
         policy: PolicyDecision,
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
@@ -441,7 +465,8 @@ impl EphemeralRuntimeDriver {
             &content_shape,
             handling_mode,
             is_prompt,
-            lifecycle_state,
+            recovered_state,
+            recovered_seed,
             &policy,
             request_id.as_ref(),
             reservation_key.as_ref(),
@@ -463,7 +488,8 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Seed driver state for a recovered input. No DSL transitions fire —
-    /// this path directly writes the post-recovery phase into the DSL state.
+    /// this path directly writes the post-recovery phase into the DSL state
+    /// from the deserialized seed, which the caller obtained from the store.
     #[allow(clippy::too_many_arguments)]
     fn seed_recovered_input(
         &mut self,
@@ -471,12 +497,14 @@ impl EphemeralRuntimeDriver {
         content_shape: &ContentShape,
         handling_mode: HandlingMode,
         is_prompt: bool,
-        lifecycle_state: InputLifecycleState,
+        recovered_state: &InputState,
+        recovered_seed: &InputStateSeed,
         policy: &PolicyDecision,
         request_id: Option<&RequestId>,
         reservation_key: Option<&ReservationKey>,
     ) {
         let key = Self::dsl_key(work_id);
+        let lifecycle_state = recovered_seed.phase;
         self.record_admission_metadata(
             work_id,
             content_shape,
@@ -490,6 +518,104 @@ impl EphemeralRuntimeDriver {
             key.clone(),
             Self::phase_str_for(lifecycle_state).to_string(),
         );
+        match recovered_state.terminal_outcome().cloned() {
+            Some(InputTerminalOutcome::Consumed) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_terminal_kind
+                    .insert(key.clone(), "Consumed".to_string());
+                self.dsl.0.state.input_superseded_by.remove(&key);
+                self.dsl.0.state.input_aggregate_id.remove(&key);
+                self.dsl.0.state.input_abandon_reason.remove(&key);
+                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+            }
+            Some(InputTerminalOutcome::Superseded { superseded_by }) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_terminal_kind
+                    .insert(key.clone(), "Superseded".to_string());
+                self.dsl
+                    .0
+                    .state
+                    .input_superseded_by
+                    .insert(key.clone(), superseded_by.to_string());
+                self.dsl.0.state.input_aggregate_id.remove(&key);
+                self.dsl.0.state.input_abandon_reason.remove(&key);
+                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+            }
+            Some(InputTerminalOutcome::Coalesced { aggregate_id }) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_terminal_kind
+                    .insert(key.clone(), "Coalesced".to_string());
+                self.dsl
+                    .0
+                    .state
+                    .input_aggregate_id
+                    .insert(key.clone(), aggregate_id.to_string());
+                self.dsl.0.state.input_superseded_by.remove(&key);
+                self.dsl.0.state.input_abandon_reason.remove(&key);
+                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+            }
+            Some(InputTerminalOutcome::Abandoned { reason }) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_terminal_kind
+                    .insert(key.clone(), "Abandoned".to_string());
+                self.dsl
+                    .0
+                    .state
+                    .input_abandon_reason
+                    .insert(key.clone(), format!("{reason:?}"));
+                self.dsl
+                    .0
+                    .state
+                    .input_abandon_attempt_count
+                    .insert(key.clone(), u64::from(recovered_state.attempt_count()));
+                self.dsl.0.state.input_superseded_by.remove(&key);
+                self.dsl.0.state.input_aggregate_id.remove(&key);
+            }
+            None => {
+                self.dsl.0.state.input_terminal_kind.remove(&key);
+                self.dsl.0.state.input_superseded_by.remove(&key);
+                self.dsl.0.state.input_aggregate_id.remove(&key);
+                self.dsl.0.state.input_abandon_reason.remove(&key);
+                self.dsl.0.state.input_abandon_attempt_count.remove(&key);
+            }
+        }
+        self.dsl
+            .0
+            .state
+            .input_attempt_counts
+            .insert(key.clone(), u64::from(recovered_state.attempt_count()));
+        match recovered_seed.last_run_id.clone() {
+            Some(run_id) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_run_associations
+                    .insert(key.clone(), run_id.to_string());
+            }
+            None => {
+                self.dsl.0.state.input_run_associations.remove(&key);
+            }
+        }
+        match recovered_seed.last_boundary_sequence {
+            Some(seq) => {
+                self.dsl
+                    .0
+                    .state
+                    .input_boundary_sequences
+                    .insert(key.clone(), seq);
+            }
+            None => {
+                self.dsl.0.state.input_boundary_sequences.remove(&key);
+            }
+        }
         if !self.dsl.0.state.input_admission_seq.contains_key(&key) {
             let seq = self.dsl.0.state.next_admission_seq;
             self.dsl
@@ -570,18 +696,18 @@ impl EphemeralRuntimeDriver {
             None,
         );
 
-        // 2. Persist the input payload on the ledger and mirror the phase
-        //    transition on the shell copy.
+        // 2. Persist the input payload on the ledger and record the
+        //    history transition. The DSL apply below is the authoritative
+        //    phase writer; the shell only carries the history/metadata cache.
         let now = Utc::now();
         if let Some(s) = self.ledger.get_mut(input_id) {
             s.persisted_input = Some(input.clone());
             s.history.push(InputStateHistoryEntry {
                 timestamp: now,
-                from: s.phase,
+                from: InputLifecycleState::Accepted,
                 to: InputLifecycleState::Queued,
                 reason: Some("QueueAccepted".into()),
             });
-            s.phase = InputLifecycleState::Queued;
             s.updated_at = now;
         }
 
@@ -600,34 +726,52 @@ impl EphemeralRuntimeDriver {
             match action {
                 ExistingQueuedAdmissionAction::Coalesce { existing_id } => {
                     let existing_key = Self::dsl_key(existing_id);
+                    let aggregate_key = Self::dsl_key(input_id);
+                    let from_phase = self
+                        .input_phase(existing_id)
+                        .unwrap_or(InputLifecycleState::Queued);
                     self.dsl.0.state.queue_lane.remove(&existing_key);
                     self.dsl.0.state.steer_lane.remove(&existing_key);
                     self.dsl_apply(
                         mm_dsl::MeerkatMachineInput::CoalesceInput {
                             input_id: existing_key,
+                            aggregate_id: aggregate_key,
                         },
                         "CoalesceInput",
                     )?;
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
                     if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        crate::coalescing::apply_coalescing(existing_state, input_id.clone());
+                        crate::coalescing::apply_coalescing(
+                            existing_state,
+                            from_phase,
+                            input_id.clone(),
+                        );
                     }
                 }
                 ExistingQueuedAdmissionAction::Supersede { existing_id } => {
                     let existing_key = Self::dsl_key(existing_id);
+                    let superseded_by = Self::dsl_key(input_id);
+                    let from_phase = self
+                        .input_phase(existing_id)
+                        .unwrap_or(InputLifecycleState::Queued);
                     self.dsl.0.state.queue_lane.remove(&existing_key);
                     self.dsl.0.state.steer_lane.remove(&existing_key);
                     self.dsl_apply(
                         mm_dsl::MeerkatMachineInput::SupersedeInput {
                             input_id: existing_key,
+                            superseded_by,
                         },
                         "SupersedeInput",
                     )?;
                     let _ = self.queue.remove(existing_id);
                     let _ = self.steer_queue.remove(existing_id);
                     if let Some(existing_state) = self.ledger.get_mut(existing_id) {
-                        crate::coalescing::apply_supersession(existing_state, input_id.clone());
+                        crate::coalescing::apply_supersession(
+                            existing_state,
+                            from_phase,
+                            input_id.clone(),
+                        );
                     }
                 }
             }
@@ -864,8 +1008,41 @@ impl EphemeralRuntimeDriver {
     pub(crate) fn ledger_mut(&mut self) -> &mut InputLedger {
         &mut self.ledger
     }
-    pub fn input_states_snapshot(&self) -> Vec<InputState> {
-        self.ledger.iter().map(|(_, state)| state.clone()).collect()
+    /// Build a `StoredInputState` bundle for a specific input, pairing the
+    /// ledger-side shell with the DSL-owned seed (phase / run association /
+    /// boundary sequence). Used by persistence callsites and test helpers.
+    pub fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
+        let state = self.ledger.get(input_id)?.clone();
+        let phase = self
+            .input_phase(input_id)
+            .unwrap_or(InputLifecycleState::Accepted);
+        let seed = InputStateSeed {
+            phase,
+            last_run_id: self.input_last_run_id(input_id),
+            last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+        };
+        Some(StoredInputState { state, seed })
+    }
+
+    /// Snapshot of every ledger entry paired with its DSL seed.
+    pub fn stored_input_states_snapshot(&self) -> Vec<StoredInputState> {
+        self.ledger
+            .iter()
+            .map(|(input_id, state)| {
+                let phase = self
+                    .input_phase(input_id)
+                    .unwrap_or(InputLifecycleState::Accepted);
+                let seed = InputStateSeed {
+                    phase,
+                    last_run_id: self.input_last_run_id(input_id),
+                    last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+                };
+                StoredInputState {
+                    state: state.clone(),
+                    seed,
+                }
+            })
+            .collect()
     }
     /// Clear the physical queue projections without touching canonical ingress
     /// truth. Used by recovery contract tests to simulate projection loss.
@@ -921,6 +1098,11 @@ impl EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             let key = Self::dsl_key(input_id);
+            // Snapshot the pre-transition phase off the DSL for history
+            // bookkeeping before the StageForRun apply flips it to Staged.
+            let from_phase = self
+                .input_phase(input_id)
+                .unwrap_or(InputLifecycleState::Queued);
             self.dsl.0.state.queue_lane.remove(&key);
             self.dsl.0.state.steer_lane.remove(&key);
             self.dsl_apply(
@@ -930,17 +1112,21 @@ impl EphemeralRuntimeDriver {
                 },
                 "StageForRun",
             )?;
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::IncrementAttemptCount {
+                    input_id: Self::dsl_key(input_id),
+                },
+                "IncrementAttemptCount",
+            )?;
 
             let now = Utc::now();
             if let Some(state) = self.ledger.get_mut(input_id) {
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
-                    from: state.phase,
+                    from: from_phase,
                     to: InputLifecycleState::Staged,
                     reason: Some(format!("StageForRun({run_id})")),
                 });
-                state.phase = InputLifecycleState::Staged;
-                state.last_run_id = Some(run_id.clone());
                 state.attempt_count = state.attempt_count.saturating_add(1);
                 state.updated_at = now;
             }
@@ -961,6 +1147,11 @@ impl EphemeralRuntimeDriver {
         run_id: &RunId,
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(input_id);
+        // Snapshot the phase the input is coming from (typically Staged) off
+        // the DSL before MarkApplied flips it to Applied.
+        let from_phase = self
+            .input_phase(input_id)
+            .unwrap_or(InputLifecycleState::Staged);
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::MarkApplied {
                 input_id: key.clone(),
@@ -976,19 +1167,16 @@ impl EphemeralRuntimeDriver {
         if let Some(state) = self.ledger.get_mut(input_id) {
             state.history.push(InputStateHistoryEntry {
                 timestamp: now,
-                from: state.phase,
+                from: from_phase,
                 to: InputLifecycleState::Applied,
                 reason: Some(format!("MarkApplied({run_id})")),
             });
-            state.phase = InputLifecycleState::Applied;
             state.history.push(InputStateHistoryEntry {
                 timestamp: now,
                 from: InputLifecycleState::Applied,
                 to: InputLifecycleState::AppliedPendingConsumption,
                 reason: Some("MarkAppliedPendingConsumption(boundary_sequence=0)".into()),
             });
-            state.phase = InputLifecycleState::AppliedPendingConsumption;
-            state.last_boundary_sequence = Some(0);
             state.updated_at = now;
         }
 
@@ -1005,14 +1193,11 @@ impl EphemeralRuntimeDriver {
         run_id: &RunId,
     ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
-            let Some(state) = self.ledger.get(input_id) else {
-                continue;
-            };
-            if state.phase.is_terminal()
-                || state.phase != InputLifecycleState::AppliedPendingConsumption
-            {
+            let phase = self.input_phase(input_id);
+            if phase != Some(InputLifecycleState::AppliedPendingConsumption) {
                 continue;
             }
+            let from_phase = phase.unwrap_or(InputLifecycleState::AppliedPendingConsumption);
 
             let key = Self::dsl_key(input_id);
             self.dsl_apply(
@@ -1024,11 +1209,10 @@ impl EphemeralRuntimeDriver {
             if let Some(state) = self.ledger.get_mut(input_id) {
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
-                    from: state.phase,
+                    from: from_phase,
                     to: InputLifecycleState::Consumed,
                     reason: Some("Consume".into()),
                 });
-                state.phase = InputLifecycleState::Consumed;
                 state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 state.updated_at = now;
             }
@@ -1046,12 +1230,12 @@ impl EphemeralRuntimeDriver {
     pub fn rollback_staged(&mut self, input_ids: &[InputId]) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
             // Skip inputs that are no longer in Staged (terminal or never-staged).
+            if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
+                continue;
+            }
             let Some(state) = self.ledger.get(input_id) else {
                 continue;
             };
-            if state.phase != InputLifecycleState::Staged {
-                continue;
-            }
 
             let attempts = state.attempt_count;
             let key = Self::dsl_key(input_id);
@@ -1062,9 +1246,15 @@ impl EphemeralRuntimeDriver {
                 // clears both.
                 self.dsl.0.state.queue_lane.remove(&key);
                 self.dsl.0.state.steer_lane.remove(&key);
+                let attempts_count = u64::from(attempts);
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {
                         input_id: key.clone(),
+                        reason: format!(
+                            "{:?}",
+                            InputAbandonReason::MaxAttemptsExhausted { attempts }
+                        ),
+                        attempt_count: attempts_count,
                     },
                     "AbandonInput(MaxAttemptsExhausted)",
                 )?;
@@ -1081,11 +1271,10 @@ impl EphemeralRuntimeDriver {
                 if let Some(state) = self.ledger.get_mut(input_id) {
                     state.history.push(InputStateHistoryEntry {
                         timestamp: now,
-                        from: state.phase,
+                        from: InputLifecycleState::Staged,
                         to: InputLifecycleState::Abandoned,
                         reason: Some(format!("RollbackStaged→Abandon(attempts={attempts})")),
                     });
-                    state.phase = InputLifecycleState::Abandoned;
                     state.terminal_outcome = Some(outcome.clone());
                     state.updated_at = now;
                 }
@@ -1122,11 +1311,10 @@ impl EphemeralRuntimeDriver {
                 if let Some(state) = self.ledger.get_mut(input_id) {
                     state.history.push(InputStateHistoryEntry {
                         timestamp: now,
-                        from: state.phase,
+                        from: InputLifecycleState::Staged,
                         to: InputLifecycleState::Queued,
                         reason: Some("RollbackStaged".into()),
                     });
-                    state.phase = InputLifecycleState::Queued;
                     state.updated_at = now;
                 }
             }
@@ -1271,6 +1459,14 @@ impl EphemeralRuntimeDriver {
         let mut count = 0;
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
+            let attempt_count = self
+                .ledger
+                .get(id)
+                .map(|state| u64::from(state.attempt_count))
+                .unwrap_or(0);
+            let from_phase = self
+                .input_phase(id)
+                .unwrap_or(InputLifecycleState::Accepted);
             // Remove from lanes first so DSL AbandonInput's membership
             // invariants hold regardless of prior lane presence.
             self.dsl.0.state.queue_lane.remove(&key);
@@ -1279,6 +1475,8 @@ impl EphemeralRuntimeDriver {
                 .dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {
                         input_id: key.clone(),
+                        reason: format!("{reason:?}"),
+                        attempt_count,
                     },
                     "AbandonInput",
                 )
@@ -1291,11 +1489,10 @@ impl EphemeralRuntimeDriver {
             if let Some(state) = self.ledger.get_mut(id) {
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
-                    from: state.phase,
+                    from: from_phase,
                     to: InputLifecycleState::Abandoned,
                     reason: Some(format!("Abandon({reason:?})")),
                 });
-                state.phase = InputLifecycleState::Abandoned;
                 state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
                     reason: reason.clone(),
                 });
@@ -1408,11 +1605,7 @@ impl EphemeralRuntimeDriver {
             // The matches_last_run guard on the DSL / shell is enforced by
             // the MeerkatMachine contributor-set validation before this
             // realization runs; here we just drive the transitions.
-            let staged = matches!(
-                self.ledger.get(input_id).map(|s| s.phase),
-                Some(InputLifecycleState::Staged)
-            );
-            if !staged {
+            if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
                 continue;
             }
 
@@ -1440,11 +1633,10 @@ impl EphemeralRuntimeDriver {
             if let Some(state) = self.ledger.get_mut(input_id) {
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
-                    from: state.phase,
+                    from: InputLifecycleState::Staged,
                     to: InputLifecycleState::Applied,
                     reason: Some(format!("MarkApplied({run_id})")),
                 });
-                state.phase = InputLifecycleState::Applied;
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
                     from: InputLifecycleState::Applied,
@@ -1454,8 +1646,6 @@ impl EphemeralRuntimeDriver {
                         receipt.sequence
                     )),
                 });
-                state.phase = InputLifecycleState::AppliedPendingConsumption;
-                state.last_boundary_sequence = Some(receipt.sequence);
                 state.updated_at = now;
             }
             self.events
@@ -1591,11 +1781,10 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 if let Some(s) = self.ledger.get_mut(&input_id) {
                     s.history.push(InputStateHistoryEntry {
                         timestamp: now,
-                        from: s.phase,
+                        from: InputLifecycleState::Accepted,
                         to: InputLifecycleState::Consumed,
                         reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
                     });
-                    s.phase = InputLifecycleState::Consumed;
                     s.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                     s.updated_at = now;
                 }
@@ -1646,6 +1835,18 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     }
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.ledger.get(input_id)
+    }
+    fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
+        EphemeralRuntimeDriver::input_phase(self, input_id)
+    }
+    fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
+        EphemeralRuntimeDriver::input_last_run_id(self, input_id)
+    }
+    fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
+        EphemeralRuntimeDriver::input_last_boundary_sequence(self, input_id)
+    }
+    fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
+        EphemeralRuntimeDriver::stored_input_state(self, input_id)
     }
     fn active_input_ids(&self) -> Vec<InputId> {
         self.ledger.active_input_ids()

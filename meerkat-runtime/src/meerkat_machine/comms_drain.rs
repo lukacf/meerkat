@@ -1,7 +1,53 @@
 use super::*;
 
-use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
-use meerkat_core::comms_drain_lifecycle_authority::{CommsDrainMode, CommsDrainPhase};
+use std::fmt;
+
+/// Phase of the comms drain slot.
+///
+/// Shell-side mechanics tracking for the runtime-owned drain task. The DSL's
+/// `drain_phase` is the canonical lifecycle authority; this slot phase is the
+/// mechanical companion that tracks whether a tokio `JoinHandle` is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommsDrainPhase {
+    Inactive,
+    Starting,
+    Running,
+    ExitedRespawnable,
+    Stopped,
+}
+
+impl fmt::Display for CommsDrainPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inactive => write!(f, "Inactive"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Running => write!(f, "Running"),
+            Self::ExitedRespawnable => write!(f, "ExitedRespawnable"),
+            Self::Stopped => write!(f, "Stopped"),
+        }
+    }
+}
+
+/// Mode for the comms drain task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommsDrainMode {
+    /// Legacy timed drain with idle timeout.
+    Timed,
+    /// Live session ingress while a runtime-backed session is attached.
+    AttachedSession,
+    /// Long-lived host drain (no idle timeout, respawnable on failure).
+    PersistentHost,
+}
+
+/// Reason the drain task exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainExitReason {
+    IdleTimeout,
+    Dismissed,
+    Failed,
+    Aborted,
+    SessionShutdown,
+}
 
 pub struct CommsDrainSlot {
     pub phase: CommsDrainPhase,

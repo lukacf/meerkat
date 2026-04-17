@@ -160,10 +160,10 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
         "reset should clear all active inputs"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -236,10 +236,10 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
         "stopping the runtime should drain active inputs from the ledger"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -309,8 +309,8 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
         "retire+drain should leave no active inputs behind"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
@@ -351,10 +351,10 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
         "retire without a loop should not leave active inputs behind"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Retired,
         })

@@ -1,5 +1,5 @@
-use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleInput};
 use crate::error::ScheduleStoreError;
+use crate::lifecycle::OccurrenceLifecycleInput;
 use crate::types::{
     DeliveryReceipt, DeliveryReceiptStage, Occurrence, OccurrenceFailureClass, OccurrenceId,
     OccurrencePhase, Schedule, ScheduleId, SchedulePhase, ScheduleRevision,
@@ -333,14 +333,12 @@ impl ScheduleStore for MemoryScheduleStore {
                 {
                     continue;
                 }
-                let updated = OccurrenceLifecycleAuthority
-                    .apply(
-                        occurrence.clone(),
-                        OccurrenceLifecycleInput::Supersede {
-                            superseded_by_revision: supersession.superseded_by_revision,
-                            at_utc: supersession.at_utc,
-                        },
-                    )
+                let updated = occurrence
+                    .clone()
+                    .apply(OccurrenceLifecycleInput::Supersede {
+                        superseded_by_revision: supersession.superseded_by_revision,
+                        at_utc: supersession.at_utc,
+                    })
                     .map_err(|error| ScheduleStoreError::Internal(error.to_string()))?
                     .into_occurrence();
                 *occurrence = updated;
@@ -432,7 +430,6 @@ impl ScheduleStore for MemoryScheduleStore {
         &self,
         request: ClaimDueRequest,
     ) -> Result<ClaimDueResult, ScheduleStoreError> {
-        let authority = OccurrenceLifecycleAuthority;
         let store_now_utc = Utc::now();
         let mut state = self.inner.write().await;
 
@@ -459,15 +456,12 @@ impl ScheduleStore for MemoryScheduleStore {
                 continue;
             };
             let detail = existing.misfire_detail_at(store_now_utc);
-            let mut updated = authority
-                .apply(
-                    existing,
-                    OccurrenceLifecycleInput::Misfire {
-                        detail: detail.clone(),
-                        failure_class: None,
-                        at_utc: store_now_utc,
-                    },
-                )
+            let mut updated = existing
+                .apply(OccurrenceLifecycleInput::Misfire {
+                    detail: detail.clone(),
+                    failure_class: None,
+                    at_utc: store_now_utc,
+                })
                 .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                 .into_occurrence();
             let mut receipt = DeliveryReceipt::new(
@@ -524,13 +518,10 @@ impl ScheduleStore for MemoryScheduleStore {
                 continue;
             };
             let existing = if existing.is_reclaimable_at(store_now_utc) {
-                let lease_expired = authority
-                    .apply(
-                        existing,
-                        OccurrenceLifecycleInput::LeaseExpired {
-                            at_utc: store_now_utc,
-                        },
-                    )
+                let lease_expired = existing
+                    .apply(OccurrenceLifecycleInput::LeaseExpired {
+                        at_utc: store_now_utc,
+                    })
                     .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                     .into_occurrence();
                 let mut receipt = DeliveryReceipt::new(
@@ -556,16 +547,13 @@ impl ScheduleStore for MemoryScheduleStore {
             };
             let lease_expires_at_utc = store_now_utc + request.lease_duration;
             let claim_token = Uuid::now_v7();
-            let updated = authority
-                .apply(
-                    existing,
-                    OccurrenceLifecycleInput::Claim {
-                        owner_id: request.owner_id.clone(),
-                        at_utc: store_now_utc,
-                        lease_expires_at_utc,
-                        claim_token,
-                    },
-                )
+            let updated = existing
+                .apply(OccurrenceLifecycleInput::Claim {
+                    owner_id: request.owner_id.clone(),
+                    at_utc: store_now_utc,
+                    lease_expires_at_utc,
+                    claim_token,
+                })
                 .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
                 .into_occurrence();
             state
@@ -587,7 +575,6 @@ impl ScheduleStore for MemoryScheduleStore {
         expected_claim_token: Option<Uuid>,
         transition: OccurrenceLifecycleInput,
     ) -> Result<Option<Occurrence>, ScheduleStoreError> {
-        let authority = OccurrenceLifecycleAuthority;
         let mut state = self.inner.write().await;
         let Some(current) = state.occurrences.get(occurrence_id).cloned() else {
             return Ok(None);
@@ -597,8 +584,8 @@ impl ScheduleStore for MemoryScheduleStore {
         {
             return Ok(None);
         }
-        let updated = authority
-            .apply(current, transition)
+        let updated = current
+            .apply(transition)
             .map_err(|error| ScheduleStoreError::Concurrency(error.to_string()))?
             .into_occurrence();
         state

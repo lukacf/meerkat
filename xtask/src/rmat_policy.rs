@@ -38,7 +38,7 @@ impl AuditPolicy {
             authority_modules: vec![
                 AuthorityModuleRule::new("meerkat-runtime/src/meerkat_machine.rs"),
                 AuthorityModuleRule::new("meerkat-mob/src/runtime/actor.rs"),
-                AuthorityModuleRule::new("meerkat-schedule/src/authority.rs"),
+                AuthorityModuleRule::new("meerkat-schedule/src/lifecycle.rs"),
             ],
             protected_fields: vec![
                 ProtectedFieldRule::new(

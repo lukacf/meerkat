@@ -105,6 +105,15 @@ impl HandleDslAuthority {
             .map(|_| ())
             .map_err(|err| DslTransitionError::new(context, format!("{err}")))
     }
+
+    /// Clone the current DSL state under the shared authority's mutex.
+    pub(crate) fn snapshot_state(&self) -> mm_dsl::MeerkatMachineState {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.state.clone()
+    }
 }
 
 impl std::fmt::Debug for HandleDslAuthority {

@@ -19,7 +19,6 @@ pub mod blob;
 pub mod budget;
 pub mod checkpoint;
 pub mod comms;
-pub mod comms_drain_lifecycle_authority;
 pub mod compact;
 pub mod completion_feed;
 pub mod config;
@@ -81,11 +80,6 @@ pub use comms::{
     PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, SendAndStreamError,
     SendError, SendReceipt, StreamError, StreamScope,
 };
-pub use comms_drain_lifecycle_authority::{
-    CommsDrainLifecycleAuthority, CommsDrainLifecycleEffect, CommsDrainLifecycleError,
-    CommsDrainLifecycleInput, CommsDrainLifecycleMutator, CommsDrainLifecycleTransition,
-    CommsDrainMode, CommsDrainPhase, DrainExitReason,
-};
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
@@ -131,7 +125,8 @@ pub use gateway::{
 };
 pub use handles::{
     CommsDrainHandle, DslTransitionError, ExternalToolSurfaceHandle, PeerCommsHandle,
-    SessionAdmissionHandle, TurnStateHandle,
+    SessionAdmissionHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle,
+    TurnStateSnapshot,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
@@ -222,9 +217,8 @@ pub use tool_scope::{
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};
 pub use turn_execution_authority::{
-    ContentShape, TurnExecutionAuthority, TurnExecutionEffect, TurnExecutionInput,
-    TurnExecutionMutator, TurnExecutionTransition, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalOutcome,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnPhase,
+    TurnPrimitiveKind, TurnTerminalOutcome,
 };
 pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,

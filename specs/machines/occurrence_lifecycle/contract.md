@@ -127,7 +127,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Coverage
 ### Code Anchors
-- `meerkat-schedule/src/authority.rs` — occurrence lifecycle authority
+- `meerkat-schedule/src/lifecycle.rs` — Occurrence::apply domain-facing lifecycle transition seam over the DSL
 
 ### Scenarios
 - `occurrence_start_complete_fail` — occurrence transitions through pending, running, and terminal lifecycle states

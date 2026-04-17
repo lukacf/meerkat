@@ -1,4 +1,5 @@
 use super::*;
+use crate::input_state::StoredInputState;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -95,7 +96,7 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         &self,
         session_id: &SessionId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeDriverError> {
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(
                 None,

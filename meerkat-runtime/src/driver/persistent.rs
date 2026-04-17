@@ -13,7 +13,7 @@ use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::{Input, externalize_input_images};
-use crate::input_state::{InputAbandonReason, InputState};
+use crate::input_state::{InputAbandonReason, InputLifecycleState, InputState, StoredInputState};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
@@ -224,7 +224,7 @@ impl PersistentRuntimeDriver {
         self.inner.consume_inputs(input_ids, run_id)
     }
 
-    async fn persist_state(&self, state: &InputState) -> Result<(), RuntimeDriverError> {
+    async fn persist_state(&self, state: &StoredInputState) -> Result<(), RuntimeDriverError> {
         self.store
             .persist_input_state(&self.runtime_id, state)
             .await
@@ -237,7 +237,7 @@ impl PersistentRuntimeDriver {
     ) -> Result<usize, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let abandoned = self.inner.abandon_pending_inputs(reason);
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -266,7 +266,7 @@ impl PersistentRuntimeDriver {
         let checkpoint = self.inner.clone();
         let silent_intents = self.inner.silent_comms_intents();
         let control = self.inner.control_handle();
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -294,7 +294,7 @@ impl PersistentRuntimeDriver {
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let report = self.inner.finalize_retire();
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -327,7 +327,7 @@ impl PersistentRuntimeDriver {
     ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         let report = self.inner.reset_cleanup();
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -357,7 +357,7 @@ impl PersistentRuntimeDriver {
 
     pub async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
         let abandoned = self.inner.destroy_cleanup();
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -387,7 +387,7 @@ impl PersistentRuntimeDriver {
     pub async fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.clone();
         self.inner.stop_runtime_cleanup();
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -441,10 +441,10 @@ impl PersistentRuntimeDriver {
         {
             return Ok(());
         }
-        let input_updates: Vec<InputState> = receipt
+        let input_updates: Vec<StoredInputState> = receipt
             .contributing_input_ids
             .iter()
-            .filter_map(|id| self.inner.input_state(id).cloned())
+            .filter_map(|id| self.inner.stored_input_state(id))
             .collect();
 
         self.store
@@ -482,7 +482,7 @@ impl PersistentRuntimeDriver {
         let checkpoint = self.inner.clone();
         self.inner
             .machine_realize_run_completed(run_id, consumed_input_ids)?;
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -535,7 +535,7 @@ impl PersistentRuntimeDriver {
             error,
             "persistent driver realized machine-owned failed-run replay"
         );
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .atomic_lifecycle_commit(
@@ -570,7 +570,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
             ref mut state,
             ..
         } = outcome
-            && let Some(inner_state) = self.inner.input_state(input_id).cloned()
+            && let Some(mut bundle) = self.inner.stored_input_state(input_id)
         {
             let mut input_for_recovery = input_for_recovery.clone();
             if let Err(err) =
@@ -581,14 +581,13 @@ impl RuntimeDriver for PersistentRuntimeDriver {
                     "failed to externalize runtime input images: {err}"
                 )));
             }
-            let mut persisted = inner_state;
-            persisted.persisted_input = Some(input_for_recovery);
-            self.inner.ledger_mut().accept(persisted.clone());
-            if let Err(err) = self.persist_state(&persisted).await {
+            bundle.state.persisted_input = Some(input_for_recovery);
+            self.inner.ledger_mut().accept(bundle.state.clone());
+            if let Err(err) = self.persist_state(&bundle).await {
                 self.inner = checkpoint;
                 return Err(err);
             }
-            *state = persisted;
+            *state = bundle.state;
         }
 
         Ok(outcome)
@@ -610,7 +609,7 @@ impl RuntimeDriver for PersistentRuntimeDriver {
         .await?;
 
         // Persist recovered state atomically
-        let input_states = self.inner.input_states_snapshot();
+        let input_states = self.inner.stored_input_states_snapshot();
         self.store
             .atomic_lifecycle_commit(
                 &self.runtime_id,
@@ -628,6 +627,22 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 
     fn input_state(&self, input_id: &InputId) -> Option<&InputState> {
         self.inner.input_state(input_id)
+    }
+
+    fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
+        self.inner.input_phase(input_id)
+    }
+
+    fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
+        self.inner.input_last_run_id(input_id)
+    }
+
+    fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
+        self.inner.input_last_boundary_sequence(input_id)
+    }
+
+    fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
+        self.inner.stored_input_state(input_id)
     }
 
     fn active_input_ids(&self) -> Vec<InputId> {

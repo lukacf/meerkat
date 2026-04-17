@@ -270,6 +270,21 @@ machine! {
             active_fence_token: Option<FenceToken>,
             current_run_id: Option<RunId>,
             pre_run_phase: Option<String>,
+            turn_phase: String,
+            primitive_kind: Option<String>,
+            admitted_content_shape: Option<String>,
+            vision_enabled: bool,
+            image_tool_results_enabled: bool,
+            tool_calls_pending: u64,
+            pending_op_refs: Set<String>,
+            barrier_operation_ids: Set<String>,
+            has_barrier_ops: bool,
+            barrier_satisfied: bool,
+            boundary_count: u64,
+            cancel_after_boundary: bool,
+            terminal_outcome: Option<String>,
+            extraction_attempts: u64,
+            max_extraction_retries: u64,
             silent_intent_overrides: Set<String>,
 
             // --- Registration substate ---
@@ -289,7 +304,11 @@ machine! {
 
             // --- Input lifecycle substate ---
             input_phases: Map<String, String>,
-            input_terminal_outcomes: Map<String, String>,
+            input_terminal_kind: Map<String, String>,
+            input_superseded_by: Map<String, String>,
+            input_aggregate_id: Map<String, String>,
+            input_abandon_reason: Map<String, String>,
+            input_abandon_attempt_count: Map<String, u64>,
             input_attempt_counts: Map<String, u64>,
             input_run_associations: Map<String, String>,
             input_boundary_sequences: Map<String, u64>,
@@ -309,6 +328,28 @@ machine! {
             wait_active: bool,
             wait_operation_ids: Set<String>,
             next_completion_seq: u64,
+
+            // --- External tool surface substate ---
+            known_surfaces: Set<String>,
+            visible_surfaces: Set<String>,
+            surface_base_state: Map<String, String>,
+            surface_pending_op: Map<String, String>,
+            surface_staged_op: Map<String, String>,
+            surface_staged_intent_sequence: Map<String, u64>,
+            next_staged_intent_sequence: u64,
+            surface_pending_task_sequence: Map<String, u64>,
+            next_pending_task_sequence: u64,
+            surface_pending_lineage_sequence: Map<String, u64>,
+            surface_inflight_calls: Map<String, u64>,
+            surface_last_delta_operation: Map<String, String>,
+            surface_last_delta_phase: Map<String, String>,
+            snapshot_epoch: u64,
+            snapshot_aligned_epoch: u64,
+            surface_draining_since_ms: Map<String, u64>,
+            surface_removal_timeout_at_ms: Map<String, u64>,
+            surface_removal_applied_at_turn: Map<String, u64>,
+            surface_phase: String,
+            removal_timeout_ms: u64,
         }
 
         init(Initializing) {
@@ -317,6 +358,21 @@ machine! {
             active_fence_token = None,
             current_run_id = None,
             pre_run_phase = None,
+            turn_phase = "Ready",
+            primitive_kind = None,
+            admitted_content_shape = None,
+            vision_enabled = false,
+            image_tool_results_enabled = false,
+            tool_calls_pending = 0,
+            pending_op_refs = EmptySet,
+            barrier_operation_ids = EmptySet,
+            has_barrier_ops = false,
+            barrier_satisfied = false,
+            boundary_count = 0,
+            cancel_after_boundary = false,
+            terminal_outcome = None,
+            extraction_attempts = 0,
+            max_extraction_retries = 0,
             silent_intent_overrides = EmptySet,
             // Registration substate
             registration_phase = "Queuing",
@@ -332,7 +388,11 @@ machine! {
             staged_deferred_names = EmptySet,
             // Input lifecycle substate
             input_phases = EmptyMap,
-            input_terminal_outcomes = EmptyMap,
+            input_terminal_kind = EmptyMap,
+            input_superseded_by = EmptyMap,
+            input_aggregate_id = EmptyMap,
+            input_abandon_reason = EmptyMap,
+            input_abandon_attempt_count = EmptyMap,
             input_attempt_counts = EmptyMap,
             input_run_associations = EmptyMap,
             input_boundary_sequences = EmptyMap,
@@ -351,6 +411,26 @@ machine! {
             wait_active = false,
             wait_operation_ids = EmptySet,
             next_completion_seq = 0,
+            known_surfaces = EmptySet,
+            visible_surfaces = EmptySet,
+            surface_base_state = EmptyMap,
+            surface_pending_op = EmptyMap,
+            surface_staged_op = EmptyMap,
+            surface_staged_intent_sequence = EmptyMap,
+            next_staged_intent_sequence = 0,
+            surface_pending_task_sequence = EmptyMap,
+            next_pending_task_sequence = 0,
+            surface_pending_lineage_sequence = EmptyMap,
+            surface_inflight_calls = EmptyMap,
+            surface_last_delta_operation = EmptyMap,
+            surface_last_delta_phase = EmptyMap,
+            snapshot_epoch = 0,
+            snapshot_aligned_epoch = 0,
+            surface_draining_since_ms = EmptyMap,
+            surface_removal_timeout_at_ms = EmptyMap,
+            surface_removal_applied_at_turn = EmptyMap,
+            surface_phase = "Operating",
+            removal_timeout_ms = 30000,
         }
 
         terminal [Destroyed]
@@ -424,17 +504,58 @@ machine! {
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
             Recycle,
+            StartConversationRun {
+                run_id: RunId,
+                primitive_kind: String,
+                admitted_content_shape: String,
+                vision_enabled: bool,
+                image_tool_results_enabled: bool,
+                max_extraction_retries: u64,
+            },
+            StartImmediateAppend { run_id: RunId, admitted_content_shape: String },
+            StartImmediateContext { run_id: RunId, admitted_content_shape: String },
+            PrimitiveApplied,
+            LlmReturnedToolCalls { tool_count: u64 },
+            LlmReturnedTerminal,
+            RegisterPendingOps { op_refs: Set<String>, barrier_operation_ids: Set<String> },
+            ToolCallsResolved,
+            OpsBarrierSatisfied { operation_ids: Set<String> },
+            BoundaryContinue,
+            BoundaryComplete,
+            EnterExtraction,
+            ExtractionStart,
+            ExtractionValidationPassed,
+            ExtractionValidationFailed { error: String },
+            RecoverableFailure { error: String },
+            FatalFailure { error: String },
+            RetryRequested,
+            CancelNow,
+            RequestCancelAfterBoundary,
+            CancellationObserved,
+            AcknowledgeTerminal { outcome: String },
+            TurnLimitReached,
+            BudgetExhausted,
+            TimeBudgetExceeded,
+            ForceCancelNoRun,
+            RunCompleted { run_id: RunId },
+            RunFailed { run_id: RunId, error: String },
+            RunCancelled { run_id: RunId },
             // Input lifecycle inputs
             QueueAccepted { input_id: String },
             StageForRun { input_id: String, run_id: String },
+            IncrementAttemptCount { input_id: String },
             RollbackStaged { input_id: String },
             MarkApplied { input_id: String },
             MarkAppliedPendingConsumption { input_id: String },
             ConsumeInput { input_id: String },
             ConsumeOnAccept { input_id: String },
-            SupersedeInput { input_id: String },
-            CoalesceInput { input_id: String },
-            AbandonInput { input_id: String },
+            SupersedeInput { input_id: String, superseded_by: String },
+            CoalesceInput { input_id: String, aggregate_id: String },
+            AbandonInput {
+                input_id: String,
+                reason: String,
+                attempt_count: u64,
+            },
             RecordBoundarySeq { input_id: String, seq: u64 },
             // Ops lifecycle inputs
             RegisterOp { operation_id: String, kind: String },
@@ -460,6 +581,23 @@ machine! {
             CommitVisibilityFilter { filter: String, revision: u64 },
             StageDeferredNames { names: Set<String> },
             CommitDeferredNames { names: Set<String> },
+            SurfaceRegister { surface_id: String },
+            SurfaceStageAdd { surface_id: String, now_ms: u64 },
+            SurfaceStageRemove { surface_id: String, now_ms: u64 },
+            SurfaceStageReload { surface_id: String, now_ms: u64 },
+            SurfaceApplyBoundary { surface_id: String, now_ms: u64, current_turn: u64 },
+            SurfaceMarkPendingSucceeded {
+                surface_id: String,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+            },
+            SurfaceMarkPendingFailed { surface_id: String, reason: String },
+            SurfaceCallStarted { surface_id: String },
+            SurfaceCallFinished { surface_id: String },
+            SurfaceFinalizeRemovalClean { surface_id: String },
+            SurfaceFinalizeRemovalForced { surface_id: String },
+            SurfaceSnapshotAligned { epoch: u64 },
+            SurfaceShutdown,
         }
 
         surface_only [
@@ -478,30 +616,21 @@ machine! {
             Initialize,
             BoundaryApplied { revision: u64 },
             DrainQueuedRun { run_id: RunId },
-            StartConversationRun,
-            StartImmediateAppend,
-            StartImmediateContext,
             ClassifyExternalEnvelope,
             ClassifyPlainEvent,
             EnsureDrainRunning,
-            StageAdd,
-            StageRemove,
-            StageReload,
-            ApplySurfaceBoundary,
-            PendingSucceeded,
-            PendingFailed,
-            CallStarted,
-            CallFinished,
-            FinalizeRemovalClean,
-            FinalizeRemovalForced,
-            SnapshotAligned,
-            ShutdownSurface,
         }
 
         effect MeerkatMachineEffect {
             RuntimeBound { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             RuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            TurnRunStarted { run_id: RunId },
+            TurnBoundaryApplied { run_id: RunId, boundary_sequence: u64 },
+            TurnRunCompleted { run_id: RunId, outcome: String },
+            TurnRunFailed { run_id: RunId, error: String },
+            TurnRunCancelled { run_id: RunId, reason: String },
+            TurnCheckCompaction,
             RequestCancellationAtBoundary,
             WakeInterrupt,
             CommittedVisibleSetPublished { revision: u64 },
@@ -534,11 +663,17 @@ machine! {
             CollectCompletedResult,
             EnqueueClassifiedEntry,
             SpawnDrainTask,
-            ScheduleSurfaceCompletion,
+            ScheduleSurfaceCompletion {
+                surface_id: String,
+                operation: String,
+                pending_task_sequence: u64,
+                staged_intent_sequence: u64,
+                applied_at_turn: u64,
+            },
             RefreshVisibleSurfaceSet,
-            EmitExternalToolDelta,
-            CloseSurfaceConnection,
-            RejectSurfaceCall,
+            EmitExternalToolDelta { surface_id: String, operation: String, phase: String },
+            CloseSurfaceConnection { surface_id: String },
+            RejectSurfaceCall { surface_id: String, reason: String },
         }
 
         // =====================================================================
@@ -548,6 +683,12 @@ machine! {
         disposition RuntimeBound => routed [MobMachine],
         disposition RuntimeRetired => routed [MobMachine],
         disposition RuntimeDestroyed => routed [MobMachine],
+        disposition TurnRunStarted => local,
+        disposition TurnBoundaryApplied => local,
+        disposition TurnRunCompleted => local,
+        disposition TurnRunFailed => local,
+        disposition TurnRunCancelled => local,
+        disposition TurnCheckCompaction => local,
         disposition RequestCancellationAtBoundary => local,
         disposition WakeInterrupt => local,
         disposition CommittedVisibleSetPublished => external,
@@ -1483,31 +1624,925 @@ machine! {
             emit SubmitRunPrimitive
         }
 
-        // 30. StartConversationRun/StartImmediateAppend/StartImmediateContext:
-        //     Attached self-loops (signals), emit SubmitRunPrimitive
+        // 30. Turn execution absorption
+        transition StartConversationRunInitializing {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some(primitive_kind);
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = vision_enabled;
+                self.image_tool_results_enabled = image_tool_results_enabled;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = max_extraction_retries;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
         transition StartConversationRunAttached {
-            on signal StartConversationRun
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit SubmitRunPrimitive
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some(primitive_kind);
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = vision_enabled;
+                self.image_tool_results_enabled = image_tool_results_enabled;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = max_extraction_retries;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+        transition StartConversationRunRunning {
+            on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some(primitive_kind);
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = vision_enabled;
+                self.image_tool_results_enabled = image_tool_results_enabled;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = max_extraction_retries;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+
+        transition StartImmediateAppendInitializing {
+            on input StartImmediateAppend { run_id, admitted_content_shape }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateAppendAttached {
-            on signal StartImmediateAppend
+            on input StartImmediateAppend { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit SubmitRunPrimitive
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+        transition StartImmediateAppendRunning {
+            on input StartImmediateAppend { run_id, admitted_content_shape }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+
+        transition StartImmediateContextInitializing {
+            on input StartImmediateContext { run_id, admitted_content_shape }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateContextAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateContextAttached {
-            on signal StartImmediateContext
+            on input StartImmediateContext { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateContextAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+        transition StartImmediateContextRunning {
+            on input StartImmediateContext { run_id, admitted_content_shape }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_resettable" {
+                self.turn_phase == "Ready"
+                || self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.current_run_id = Some(run_id);
+                self.turn_phase = "ApplyingPrimitive";
+                self.primitive_kind = Some("ImmediateContextAppend");
+                self.admitted_content_shape = Some(admitted_content_shape);
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = None;
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+            emit TurnRunStarted { run_id: run_id }
+        }
+
+        transition PrimitiveAppliedConversation {
+            on input PrimitiveApplied
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_applying_conversation" {
+                self.turn_phase == "ApplyingPrimitive"
+                && self.primitive_kind == Some("ConversationTurn")
+            }
+            update {
+                self.turn_phase = "CallingLlm";
+            }
+            to Running
+            emit TurnCheckCompaction
+        }
+
+        transition PrimitiveAppliedImmediate {
+            on input PrimitiveApplied
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_applying_immediate" {
+                self.turn_phase == "ApplyingPrimitive"
+                && (self.primitive_kind == Some("ImmediateAppend")
+                    || self.primitive_kind == Some("ImmediateContextAppend"))
+            }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.turn_phase = "Completed";
+                self.terminal_outcome = Some("Completed");
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnCheckCompaction
+        }
+
+        transition LlmReturnedToolCallsPositive {
+            on input LlmReturnedToolCalls { tool_count }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            guard "tool_count_positive" { tool_count > 0 }
+            update {
+                self.turn_phase = "WaitingForOps";
+                self.tool_calls_pending = tool_count;
+            }
+            to Running
+        }
+
+        transition LlmReturnedToolCallsZero {
+            on input LlmReturnedToolCalls { tool_count }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            guard "tool_count_zero" { tool_count == 0 }
+            update {
+                self.turn_phase = "DrainingBoundary";
+                self.tool_calls_pending = 0;
+            }
+            to Running
+        }
+
+        transition LlmReturnedTerminal {
+            on input LlmReturnedTerminal
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            update {
+                self.turn_phase = "DrainingBoundary";
+            }
+            to Running
+        }
+
+        transition RegisterPendingOps {
+            on input RegisterPendingOps { op_refs, barrier_operation_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_waiting_or_calling" { self.turn_phase == "CallingLlm" || self.turn_phase == "WaitingForOps" }
+            update {
+                self.turn_phase = "WaitingForOps";
+                self.pending_op_refs = op_refs;
+                self.barrier_operation_ids = barrier_operation_ids;
+                self.has_barrier_ops = self.barrier_operation_ids != EmptySet;
+                self.barrier_satisfied = self.barrier_operation_ids == EmptySet;
+                self.tool_calls_pending = 0;
+            }
+            to Running
+        }
+
+        transition ToolCallsResolvedToCalling {
+            on input ToolCallsResolved
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "barrier_not_satisfied" { self.barrier_satisfied == false }
+            update {
+                self.turn_phase = "CallingLlm";
+            }
+            to Running
+        }
+
+        transition ToolCallsResolvedToBoundary {
+            on input ToolCallsResolved
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "barrier_satisfied" { self.barrier_satisfied == true }
+            update {
+                self.turn_phase = "DrainingBoundary";
+            }
+            to Running
+        }
+
+        transition OpsBarrierSatisfied {
+            on input OpsBarrierSatisfied { operation_ids }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "matching_barrier_ids" { operation_ids == self.barrier_operation_ids }
+            update {
+                self.barrier_satisfied = true;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+            }
+            to Running
+        }
+
+        transition BoundaryContinue {
+            on input BoundaryContinue
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.turn_phase = "CallingLlm";
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnCheckCompaction
+        }
+
+        transition BoundaryComplete {
+            on input BoundaryComplete
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.turn_phase = "Completed";
+                self.terminal_outcome = Some("Completed");
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnCheckCompaction
+        }
+
+        transition EnterExtraction {
+            on input EnterExtraction
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            update {
+                self.turn_phase = "Extracting";
+                self.extraction_attempts = self.extraction_attempts + 1;
+            }
+            to Running
+        }
+
+        transition ExtractionStart {
+            on input ExtractionStart
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_extracting" { self.turn_phase == "Extracting" }
             update {}
+            to Running
+        }
+
+        transition ExtractionValidationPassed {
+            on input ExtractionValidationPassed
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            update {
+                self.turn_phase = "Completed";
+                self.terminal_outcome = Some("Completed");
+            }
+            to Running
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnCheckCompaction
+        }
+
+        transition ExtractionValidationFailedRetry {
+            on input ExtractionValidationFailed { error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "retries_remaining" { self.extraction_attempts < self.max_extraction_retries }
+            update {
+                self.turn_phase = "CallingLlm";
+            }
+            to Running
+            emit TurnCheckCompaction
+        }
+
+        transition ExtractionValidationFailedExhausted {
+            on input ExtractionValidationFailed { error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some("ExtractionExhausted");
+            }
+            to Running
+            emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "ExtractionExhausted" }
+        }
+
+        transition RecoverableFailure {
+            on input RecoverableFailure { error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_non_terminal" {
+                self.turn_phase == "CallingLlm"
+                || self.turn_phase == "WaitingForOps"
+                || self.turn_phase == "DrainingBoundary"
+                || self.turn_phase == "Extracting"
+            }
+            update {
+                self.turn_phase = "ErrorRecovery";
+            }
+            to Running
+        }
+
+        transition FatalFailure {
+            on input FatalFailure { error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some(error);
+            }
+            to Running
+            emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: error }
+        }
+
+        transition RetryRequested {
+            on input RetryRequested
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_error_recovery" { self.turn_phase == "ErrorRecovery" }
+            update {
+                self.turn_phase = "CallingLlm";
+            }
+            to Running
+            emit TurnCheckCompaction
+        }
+
+        transition CancelNow {
+            on input CancelNow
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_cancellable" {
+                self.turn_phase != "Ready"
+                && self.turn_phase != "Completed"
+                && self.turn_phase != "Failed"
+                && self.turn_phase != "Cancelled"
+            }
+            update {
+                self.turn_phase = "Cancelling";
+            }
+            to Running
+        }
+
+        transition RequestCancelAfterBoundary {
+            on input RequestCancelAfterBoundary
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_cancellable" {
+                self.turn_phase != "Ready"
+                && self.turn_phase != "Completed"
+                && self.turn_phase != "Failed"
+                && self.turn_phase != "Cancelled"
+            }
+            update {
+                self.cancel_after_boundary = true;
+            }
+            to Running
+        }
+
+        transition CancellationObserved {
+            on input CancellationObserved
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_cancelling" { self.turn_phase == "Cancelling" }
+            update {
+                self.turn_phase = "Cancelled";
+                self.terminal_outcome = Some("Cancelled");
+            }
+            to Running
+            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: "observed" }
+        }
+
+        transition AcknowledgeTerminal {
+            on input AcknowledgeTerminal { outcome }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_terminal" {
+                self.turn_phase == "Completed"
+                || self.turn_phase == "Failed"
+                || self.turn_phase == "Cancelled"
+            }
+            update {
+                self.turn_phase = "Ready";
+                self.primitive_kind = None;
+                self.admitted_content_shape = None;
+                self.vision_enabled = false;
+                self.image_tool_results_enabled = false;
+                self.tool_calls_pending = 0;
+                self.pending_op_refs = EmptySet;
+                self.barrier_operation_ids = EmptySet;
+                self.has_barrier_ops = false;
+                self.barrier_satisfied = false;
+                self.boundary_count = 0;
+                self.cancel_after_boundary = false;
+                self.terminal_outcome = Some(outcome);
+                self.extraction_attempts = 0;
+                self.max_extraction_retries = 0;
+            }
+            to Running
+        }
+
+        transition TurnLimitReached {
+            on input TurnLimitReached
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some("TurnLimitReached");
+            }
+            to Running
+            emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "TurnLimitReached" }
+        }
+
+        transition BudgetExhausted {
+            on input BudgetExhausted
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some("BudgetExhausted");
+            }
+            to Running
+            emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "BudgetExhausted" }
+        }
+
+        transition TimeBudgetExceeded {
+            on input TimeBudgetExceeded
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some("TimeBudgetExceeded");
+            }
+            to Running
+            emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "TimeBudgetExceeded" }
+        }
+
+        transition ForceCancelNoRun {
+            on input ForceCancelNoRun
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "no_run_bound" { self.current_run_id == None }
+            guard "turn_ready" { self.turn_phase == "Ready" }
+            update {
+                self.turn_phase = "Cancelled";
+                self.terminal_outcome = Some("ForceCancelNoRun");
+            }
+            to Running
+        }
+
+        transition RunCompleted {
+            on input RunCompleted { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.turn_phase = "Completed";
+                self.terminal_outcome = Some("Completed");
+            }
+            to Running
+        }
+
+        transition RunFailed {
+            on input RunFailed { run_id, error }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.turn_phase = "Failed";
+                self.terminal_outcome = Some(error);
+            }
+            to Running
+        }
+
+        transition RunCancelled {
+            on input RunCancelled { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.turn_phase = "Cancelled";
+                self.terminal_outcome = Some("RunCancelled");
+            }
+            to Running
+        }
+
+        transition SurfaceRegisterAttached {
+            on input SurfaceRegister { surface_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.known_surfaces.insert(surface_id);
+            }
             to Attached
-            emit SubmitRunPrimitive
+        }
+        transition SurfaceRegisterRunning {
+            on input SurfaceRegister { surface_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.known_surfaces.insert(surface_id);
+            }
+            to Running
+        }
+
+        transition SurfaceStageAddAttached {
+            on input SurfaceStageAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Add");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+        }
+        transition SurfaceStageAddRunning {
+            on input SurfaceStageAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Add");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+        }
+
+        transition SurfaceStageRemoveAttached {
+            on input SurfaceStageRemove { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Remove");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+        }
+        transition SurfaceStageRemoveRunning {
+            on input SurfaceStageRemove { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Remove");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+        }
+
+        transition SurfaceStageReloadAttached {
+            on input SurfaceStageReload { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Reload");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+        }
+        transition SurfaceStageReloadRunning {
+            on input SurfaceStageReload { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == "Operating" }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, "Reload");
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+        }
+
+        transition SurfaceApplyBoundaryAttached {
+            on input SurfaceApplyBoundary { surface_id, now_ms, current_turn }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Attached
+        }
+        transition SurfaceApplyBoundaryRunning {
+            on input SurfaceApplyBoundary { surface_id, now_ms, current_turn }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.snapshot_epoch = self.snapshot_epoch + 1;
+            }
+            to Running
+        }
+
+        transition SurfaceMarkPendingSucceededAttached {
+            on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_last_delta_phase.insert(surface_id, "Applied");
+            }
+            to Attached
+        }
+        transition SurfaceMarkPendingSucceededRunning {
+            on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_last_delta_phase.insert(surface_id, "Applied");
+            }
+            to Running
+        }
+
+        transition SurfaceMarkPendingFailedAttached {
+            on input SurfaceMarkPendingFailed { surface_id, reason }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_last_delta_phase.insert(surface_id, "Failed");
+            }
+            to Attached
+        }
+        transition SurfaceMarkPendingFailedRunning {
+            on input SurfaceMarkPendingFailed { surface_id, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_last_delta_phase.insert(surface_id, "Failed");
+            }
+            to Running
+        }
+
+        transition SurfaceCallStartedAttached {
+            on input SurfaceCallStarted { surface_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_inflight_calls.increment(surface_id, 1);
+            }
+            to Attached
+        }
+        transition SurfaceCallStartedRunning {
+            on input SurfaceCallStarted { surface_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_inflight_calls.increment(surface_id, 1);
+            }
+            to Running
+        }
+
+        transition SurfaceCallFinishedAttached {
+            on input SurfaceCallFinished { surface_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_inflight_calls.insert(surface_id, 0);
+            }
+            to Attached
+        }
+        transition SurfaceCallFinishedRunning {
+            on input SurfaceCallFinished { surface_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_inflight_calls.insert(surface_id, 0);
+            }
+            to Running
+        }
+
+        transition SurfaceFinalizeRemovalCleanAttached {
+            on input SurfaceFinalizeRemovalClean { surface_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_base_state.insert(surface_id, "Removed");
+            }
+            to Attached
+            emit CloseSurfaceConnection { surface_id: surface_id }
+        }
+        transition SurfaceFinalizeRemovalCleanRunning {
+            on input SurfaceFinalizeRemovalClean { surface_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_base_state.insert(surface_id, "Removed");
+            }
+            to Running
+            emit CloseSurfaceConnection { surface_id: surface_id }
+        }
+
+        transition SurfaceFinalizeRemovalForcedAttached {
+            on input SurfaceFinalizeRemovalForced { surface_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_base_state.insert(surface_id, "Removed");
+                self.surface_last_delta_phase.insert(surface_id, "Forced");
+            }
+            to Attached
+            emit CloseSurfaceConnection { surface_id: surface_id }
+        }
+        transition SurfaceFinalizeRemovalForcedRunning {
+            on input SurfaceFinalizeRemovalForced { surface_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_base_state.insert(surface_id, "Removed");
+                self.surface_last_delta_phase.insert(surface_id, "Forced");
+            }
+            to Running
+            emit CloseSurfaceConnection { surface_id: surface_id }
+        }
+
+        transition SurfaceSnapshotAlignedAttached {
+            on input SurfaceSnapshotAligned { epoch }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.snapshot_aligned_epoch = epoch;
+            }
+            to Attached
+        }
+        transition SurfaceSnapshotAlignedRunning {
+            on input SurfaceSnapshotAligned { epoch }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.snapshot_aligned_epoch = epoch;
+            }
+            to Running
+        }
+
+        transition SurfaceShutdownAttached {
+            on input SurfaceShutdown
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.surface_phase = "Shutdown";
+            }
+            to Attached
+        }
+        transition SurfaceShutdownRunning {
+            on input SurfaceShutdown
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.surface_phase = "Shutdown";
+            }
+            to Running
         }
 
         // 31. Commit: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
@@ -1583,196 +2618,6 @@ machine! {
             emit RecordTerminalOutcome
         }
 
-        // 33. MCP surface signals: Attached/Running per-phase, emit EmitExternalToolDelta (or other)
-        transition StageAddAttached {
-            on signal StageAdd
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition StageAddRunning {
-            on signal StageAdd
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition StageRemoveAttached {
-            on signal StageRemove
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition StageRemoveRunning {
-            on signal StageRemove
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition StageReloadAttached {
-            on signal StageReload
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition StageReloadRunning {
-            on signal StageReload
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition ApplySurfaceBoundaryAttached {
-            on signal ApplySurfaceBoundary
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit ScheduleSurfaceCompletion
-        }
-        transition ApplySurfaceBoundaryRunning {
-            on signal ApplySurfaceBoundary
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit ScheduleSurfaceCompletion
-        }
-        transition PendingSucceededAttached {
-            on signal PendingSucceeded
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition PendingSucceededRunning {
-            on signal PendingSucceeded
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition PendingFailedAttached {
-            on signal PendingFailed
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition PendingFailedRunning {
-            on signal PendingFailed
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition CallStartedAttached {
-            on signal CallStarted
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-        }
-        transition CallStartedRunning {
-            on signal CallStarted
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-        }
-        transition CallFinishedAttached {
-            on signal CallFinished
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-        }
-        transition CallFinishedRunning {
-            on signal CallFinished
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-        }
-        transition FinalizeRemovalCleanAttached {
-            on signal FinalizeRemovalClean
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition FinalizeRemovalCleanRunning {
-            on signal FinalizeRemovalClean
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition FinalizeRemovalForcedAttached {
-            on signal FinalizeRemovalForced
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition FinalizeRemovalForcedRunning {
-            on signal FinalizeRemovalForced
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition SnapshotAlignedAttached {
-            on signal SnapshotAligned
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition SnapshotAlignedRunning {
-            on signal SnapshotAligned
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-        transition ShutdownSurfaceAttached {
-            on signal ShutdownSurface
-            guard { self.lifecycle_phase == Phase::Attached }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Attached
-            emit EmitExternalToolDelta
-        }
-        transition ShutdownSurfaceRunning {
-            on signal ShutdownSurface
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "session_registered" { self.session_id != None }
-            update {}
-            to Running
-            emit EmitExternalToolDelta
-        }
-
         // 34. Recycle: from Idle/Retired → Idle, from Attached → Attached
         transition RecycleFromIdleOrRetired {
             on input Recycle
@@ -1829,6 +2674,17 @@ machine! {
             }
             to Idle
             emit RecordRunAssociation
+        }
+
+        // IncrementAttemptCount: count this stage attempt for an input.
+        transition IncrementAttemptCount {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input IncrementAttemptCount { input_id }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            update {
+                self.input_attempt_counts.increment(input_id, 1);
+            }
+            to Idle
         }
 
         // RollbackStaged: return a staged input to queued
@@ -1903,6 +2759,11 @@ machine! {
                 self.input_phases.insert(input_id, "Consumed");
                 self.queue_lane.remove(input_id);
                 self.steer_lane.remove(input_id);
+                self.input_terminal_kind.insert(input_id, "Consumed");
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -1911,11 +2772,16 @@ machine! {
         // SupersedeInput: terminal — mark input superseded, remove from queue
         transition SupersedeInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input SupersedeInput { input_id }
+            on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, "Superseded");
                 self.queue_lane.remove(input_id);
+                self.input_terminal_kind.insert(input_id, "Superseded");
+                self.input_superseded_by.insert(input_id, superseded_by);
+                self.input_aggregate_id.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -1924,11 +2790,16 @@ machine! {
         // CoalesceInput: terminal — mark input coalesced, remove from queue
         transition CoalesceInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CoalesceInput { input_id }
+            on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, "Coalesced");
                 self.queue_lane.remove(input_id);
+                self.input_terminal_kind.insert(input_id, "Coalesced");
+                self.input_aggregate_id.insert(input_id, aggregate_id);
+                self.input_superseded_by.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome
@@ -1937,12 +2808,17 @@ machine! {
         // AbandonInput: terminal — mark input abandoned, remove from lanes
         transition AbandonInput {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AbandonInput { input_id }
+            on input AbandonInput { input_id, reason, attempt_count }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
                 self.input_phases.insert(input_id, "Abandoned");
                 self.queue_lane.remove(input_id);
                 self.steer_lane.remove(input_id);
+                self.input_terminal_kind.insert(input_id, "Abandoned");
+                self.input_abandon_reason.insert(input_id, reason);
+                self.input_abandon_attempt_count.insert(input_id, attempt_count);
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome

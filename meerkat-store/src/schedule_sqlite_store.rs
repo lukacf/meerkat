@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use meerkat_schedule::{
     ClaimDueRequest, ClaimDueResult, DeliveryReceipt, DeliveryReceiptStage, Occurrence,
-    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleAuthority,
-    OccurrenceLifecycleError, OccurrenceLifecycleInput, PendingSupersession, Schedule,
-    ScheduleFilter, ScheduleStore, ScheduleStoreError, ScheduleStoreKind,
+    OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceLifecycleError,
+    OccurrenceLifecycleInput, PendingSupersession, Schedule, ScheduleFilter, ScheduleStore,
+    ScheduleStoreError, ScheduleStoreKind,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -301,7 +301,6 @@ impl SqliteScheduleStore {
             let tx = begin_immediate_transaction(&mut conn)?;
             let store_now_ms = select_store_now_ms(&tx)?;
             let store_now_utc = utc_from_millis(store_now_ms);
-            let authority = OccurrenceLifecycleAuthority;
 
             let limit = i64::try_from(request.limit).unwrap_or(i64::MAX);
             let mut candidates = Vec::new();
@@ -330,13 +329,10 @@ impl SqliteScheduleStore {
             let mut claimed = Vec::new();
             for occurrence in candidates {
                 let occurrence = if occurrence.is_reclaimable_at(store_now_utc) {
-                    let expired = authority
-                        .apply(
-                            occurrence,
-                            OccurrenceLifecycleInput::LeaseExpired {
-                                at_utc: store_now_utc,
-                            },
-                        )
+                    let expired = occurrence
+                        .apply(OccurrenceLifecycleInput::LeaseExpired {
+                            at_utc: store_now_utc,
+                        })
                         .map_err(|error: OccurrenceLifecycleError| {
                             StoreError::Internal(error.to_string())
                         })?
@@ -359,16 +355,13 @@ impl SqliteScheduleStore {
 
                 let claim_token = Uuid::now_v7();
                 let lease_expires_at_utc = store_now_utc + request.lease_duration;
-                let claimed_occurrence = authority
-                    .apply(
-                        occurrence,
-                        OccurrenceLifecycleInput::Claim {
-                            owner_id: request.owner_id.clone(),
-                            at_utc: store_now_utc,
-                            lease_expires_at_utc,
-                            claim_token,
-                        },
-                    )
+                let claimed_occurrence = occurrence
+                    .apply(OccurrenceLifecycleInput::Claim {
+                        owner_id: request.owner_id.clone(),
+                        at_utc: store_now_utc,
+                        lease_expires_at_utc,
+                        claim_token,
+                    })
                     .map_err(|error: OccurrenceLifecycleError| {
                         StoreError::Internal(error.to_string())
                     })?
@@ -549,8 +542,8 @@ impl ScheduleStore for SqliteScheduleStore {
                 return Ok(None);
             }
 
-            let updated = OccurrenceLifecycleAuthority
-                .apply(current, transition)
+            let updated = current
+                .apply(transition)
                 .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
                 .into_occurrence();
             write_occurrence_in_txn(&tx, &updated)?;
@@ -703,14 +696,11 @@ fn supersede_pending_occurrences_in_txn(
         if occurrence.schedule_revision >= supersession.superseded_by_revision {
             continue;
         }
-        let updated = OccurrenceLifecycleAuthority
-            .apply(
-                occurrence,
-                OccurrenceLifecycleInput::Supersede {
-                    superseded_by_revision: supersession.superseded_by_revision,
-                    at_utc: supersession.at_utc,
-                },
-            )
+        let updated = occurrence
+            .apply(OccurrenceLifecycleInput::Supersede {
+                superseded_by_revision: supersession.superseded_by_revision,
+                at_utc: supersession.at_utc,
+            })
             .map_err(|error: OccurrenceLifecycleError| StoreError::Internal(error.to_string()))?
             .into_occurrence();
         write_occurrence_in_txn(tx, &updated)?;

@@ -4,6 +4,9 @@
 //! all ExternalToolSurface state mutations flow through the machine authority.
 //! Handwritten shell code calls [`ExternalToolSurfaceAuthority::apply`] and
 //! executes returned effects; it cannot mutate canonical state directly.
+//! In `meerkat-mcp`, this remains the standalone/local owner path; runtime-
+//! backed router instances now use the shared surface handle as production
+//! owner and only preserve this authority for standalone behavior.
 //!
 //! The transition table encoded here is the single source of truth, matching
 //! the machine schema in `meerkat-machine-schema/src/catalog/external_tool_surface.rs`:

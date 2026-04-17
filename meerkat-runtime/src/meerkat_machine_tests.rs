@@ -4,11 +4,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use chrono::Utc;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::comms_drain_lifecycle_authority::{
-    CommsDrainMode, CommsDrainPhase, DrainExitReason,
-};
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
@@ -296,7 +294,7 @@ async fn session_service_runtime_ext_write_side_follows_machine_control_surface(
     .await
     .expect("input_state should route through the machine seam");
     assert_eq!(
-        active_state.map(|state| state.current_state()),
+        active_state.map(|stored| stored.seed.phase),
         Some(crate::input_state::InputLifecycleState::Queued),
         "accepted prompt should still be visible through machine-routed input_state"
     );
@@ -12822,12 +12820,13 @@ async fn prepare_runtime_loop_batch_start_unwinds_run_state_when_staging_rejects
         driver.current_run_id().is_none(),
         "helper should clear the transient run id on staging failure"
     );
-    let state = driver
-        .input_state(&accepted_input_id)
-        .expect("accepted input should still be present after unwind");
+    assert!(
+        driver.input_state(&accepted_input_id).is_some(),
+        "accepted input should still be present after unwind"
+    );
     assert_eq!(
-        state.current_state(),
-        crate::input_state::InputLifecycleState::Queued,
+        driver.input_phase(&accepted_input_id),
+        Some(crate::input_state::InputLifecycleState::Queued),
         "staging failure should leave the queued input untouched"
     );
 }

@@ -221,12 +221,11 @@ impl MeerkatMachine {
                     request_id: ingress.request_id(&input_id),
                     reservation_key: ingress.reservation_key(&input_id),
                     handling_mode: ingress.handling_mode(&input_id),
-                    lifecycle: ledger_state.map(crate::input_state::InputState::current_state),
+                    lifecycle: driver.input_phase(&input_id),
                     terminal_outcome: ledger_state
                         .and_then(|state| state.terminal_outcome().cloned()),
-                    last_run_id: ledger_state.and_then(|state| state.last_run_id().cloned()),
-                    last_boundary_sequence: ledger_state
-                        .and_then(crate::input_state::InputState::last_boundary_sequence),
+                    last_run_id: driver.input_last_run_id(&input_id),
+                    last_boundary_sequence: driver.input_last_boundary_sequence(&input_id),
                     is_prompt: ingress.is_prompt(&input_id),
                     input_id,
                 }
@@ -277,9 +276,11 @@ impl MeerkatMachine {
                 abandoned_count: 0,
             };
 
-            for (_input_id, state) in driver.ledger().iter() {
+            for (input_id, _state) in driver.ledger().iter() {
                 snapshot.input_count += 1;
-                let lifecycle = state.current_state();
+                let lifecycle = driver
+                    .input_phase(input_id)
+                    .unwrap_or(InputLifecycleState::Accepted);
                 if !lifecycle.is_terminal() {
                     snapshot.non_terminal_count += 1;
                 }

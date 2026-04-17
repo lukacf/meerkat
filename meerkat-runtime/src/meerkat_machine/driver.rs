@@ -9,7 +9,8 @@ use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::ContentShape;
 use crate::input_state::{
-    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
+    InputLifecycleState, InputState, InputStateHistoryEntry, InputStateSeed, InputTerminalOutcome,
+    StoredInputState,
 };
 use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::Mutex;
@@ -99,6 +100,18 @@ impl DriverEntry {
             DriverEntry::Ephemeral(d) => d,
             DriverEntry::Persistent(d) => d,
         }
+    }
+
+    pub(crate) fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
+        self.as_driver().input_phase(input_id)
+    }
+
+    pub(crate) fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId> {
+        self.as_driver().input_last_run_id(input_id)
+    }
+
+    pub(crate) fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64> {
+        self.as_driver().input_last_boundary_sequence(input_id)
     }
 
     /// Set the silent comms intents for the underlying driver.
@@ -511,10 +524,7 @@ pub(crate) fn machine_validate_stage_drain_snapshot(
     }
 
     for work_id in contributing_work_ids {
-        let lifecycle = driver
-            .as_driver()
-            .input_state(work_id)
-            .map(InputState::current_state);
+        let lifecycle = driver.as_driver().input_phase(work_id);
         if lifecycle != Some(InputLifecycleState::Queued) {
             return Err(RuntimeDriverError::Internal(format!(
                 "stage drain snapshot requires queued contributors, but {work_id:?} is {lifecycle:?}"
@@ -550,10 +560,7 @@ pub(crate) fn machine_validate_boundary_applied(
     }
 
     for work_id in contributing_work_ids {
-        let lifecycle = driver
-            .as_driver()
-            .input_state(work_id)
-            .map(InputState::current_state);
+        let lifecycle = driver.as_driver().input_phase(work_id);
         if lifecycle != Some(InputLifecycleState::Staged) {
             return Err(RuntimeDriverError::Internal(format!(
                 "boundary applied requires staged contributors, but {work_id:?} is {lifecycle:?}"
@@ -575,10 +582,7 @@ pub(crate) fn machine_validate_run_completed(
     }
 
     for work_id in contributing_work_ids {
-        let lifecycle = driver
-            .as_driver()
-            .input_state(work_id)
-            .map(InputState::current_state);
+        let lifecycle = driver.as_driver().input_phase(work_id);
         if lifecycle != Some(InputLifecycleState::AppliedPendingConsumption) {
             return Err(RuntimeDriverError::Internal(format!(
                 "run completed requires contributors pending consumption, but {work_id:?} is {lifecycle:?}"
@@ -595,11 +599,7 @@ pub(crate) fn machine_staged_contributors(driver: &DriverEntry) -> Vec<InputId> 
         .active_input_ids()
         .into_iter()
         .filter(|work_id| {
-            driver
-                .as_driver()
-                .input_state(work_id)
-                .map(InputState::current_state)
-                == Some(InputLifecycleState::Staged)
+            driver.as_driver().input_phase(work_id) == Some(InputLifecycleState::Staged)
         })
         .collect()
 }
@@ -615,10 +615,7 @@ pub(crate) fn machine_validate_run_failed(
     }
 
     for work_id in contributing_work_ids {
-        let lifecycle = driver
-            .as_driver()
-            .input_state(work_id)
-            .map(InputState::current_state);
+        let lifecycle = driver.as_driver().input_phase(work_id);
         if lifecycle != Some(InputLifecycleState::Staged) {
             return Err(RuntimeDriverError::Internal(format!(
                 "run failed requires staged contributors, but {work_id:?} is {lifecycle:?}"
@@ -632,14 +629,17 @@ pub(crate) fn machine_validate_run_failed(
 pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
-    mut state: InputState,
-) -> Result<InputState, RuntimeDriverError> {
+    mut bundle: StoredInputState,
+) -> Result<StoredInputState, RuntimeDriverError> {
     let applied_boundary_committed = if matches!(
-        state.current_state(),
+        bundle.seed.phase,
         InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
     ) {
         Some(
-            match (state.last_run_id().cloned(), state.last_boundary_sequence()) {
+            match (
+                bundle.seed.last_run_id.clone(),
+                bundle.seed.last_boundary_sequence,
+            ) {
                 (Some(run_id), Some(sequence)) => store
                     .load_boundary_receipt(runtime_id, &run_id, sequence)
                     .await
@@ -652,9 +652,9 @@ pub(crate) async fn machine_normalize_recovered_input_state(
         None
     };
 
-    let _ = machine_apply_recovered_input_normalization(&mut state, applied_boundary_committed);
+    let _ = machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed);
 
-    Ok(state)
+    Ok(bundle)
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -665,12 +665,13 @@ pub(crate) struct MachineRecoveryDelta {
 }
 
 pub(crate) fn machine_apply_recovered_input_normalization(
-    state: &mut InputState,
+    bundle: &mut StoredInputState,
     applied_boundary_committed: Option<bool>,
 ) -> MachineRecoveryDelta {
     let mut delta = MachineRecoveryDelta::default();
+    let StoredInputState { state, seed } = bundle;
 
-    match state.current_state() {
+    match seed.phase {
         InputLifecycleState::Accepted => {
             let consume_on_accept = state
                 .policy
@@ -681,7 +682,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                 })
                 .unwrap_or(false);
             let now = Utc::now();
-            let from = state.phase;
+            let from = seed.phase;
             if consume_on_accept {
                 state.history.push(InputStateHistoryEntry {
                     timestamp: now,
@@ -689,7 +690,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                     to: InputLifecycleState::Consumed,
                     reason: Some("recovery: ConsumeOnAccept (Ignore+OnAccept policy)".into()),
                 });
-                state.phase = InputLifecycleState::Consumed;
+                seed.phase = InputLifecycleState::Consumed;
                 state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 state.updated_at = now;
                 delta.abandoned += 1;
@@ -700,7 +701,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                     to: InputLifecycleState::Queued,
                     reason: Some("recovery: QueueAccepted".into()),
                 });
-                state.phase = InputLifecycleState::Queued;
+                seed.phase = InputLifecycleState::Queued;
                 state.updated_at = now;
                 delta.requeued += 1;
             }
@@ -708,19 +709,20 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         }
         InputLifecycleState::Staged => {
             // Crashed mid-stage — rollback to Queued so the replay path can
-            // pick it up. This mirrors the old `RollbackStaged` transition
-            // at its starting attempt_count (no bound check here; the live
-            // `rollback_staged` path handles the exhausted-attempts branch
-            // once the runtime resumes).
+            // pick it up. This mirrors the recovery view of
+            // `RollbackStaged`: phase goes back to `Queued`, while the
+            // attempt counter remains whatever the persisted shell/DSL caches
+            // already recorded. The live `rollback_staged` path still owns
+            // the exhausted-attempts branch once the runtime resumes.
             let now = Utc::now();
-            let from = state.phase;
+            let from = seed.phase;
             state.history.push(InputStateHistoryEntry {
                 timestamp: now,
                 from,
                 to: InputLifecycleState::Queued,
                 reason: Some("recovery: RollbackStaged".into()),
             });
-            state.phase = InputLifecycleState::Queued;
+            seed.phase = InputLifecycleState::Queued;
             state.updated_at = now;
             delta.requeued += 1;
             delta.recovered += 1;
@@ -728,7 +730,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
         InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption => {
             if let Some(has_receipt) = applied_boundary_committed {
                 let now = Utc::now();
-                let from = state.phase;
+                let from = seed.phase;
                 let to = if has_receipt {
                     InputLifecycleState::Consumed
                 } else {
@@ -744,7 +746,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                         "recovery: missing boundary receipt".into()
                     }),
                 });
-                state.phase = to;
+                seed.phase = to;
                 state.terminal_outcome = if has_receipt {
                     Some(InputTerminalOutcome::Consumed)
                 } else {
@@ -770,7 +772,6 @@ pub(crate) struct RecoveredIngressEntry {
     pub content_shape: crate::ingress_types::ContentShape,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub is_prompt: bool,
-    pub lifecycle_state: InputLifecycleState,
     pub policy: crate::policy::PolicyDecision,
 }
 
@@ -802,7 +803,6 @@ pub(crate) fn machine_build_recovered_ingress_entry(
             state.persisted_input.as_ref(),
             Some(crate::input::Input::Prompt(_))
         ),
-        lifecycle_state: state.current_state(),
         policy,
     })
 }
@@ -837,40 +837,54 @@ pub(crate) fn machine_recover_ephemeral_driver(
     let mut abandoned = 0;
     let mut requeued = 0;
 
+    // Normalize every active input. Build a bundle from the live driver
+    // (ledger + DSL) so the normalization can read/rewrite the seed, then
+    // push the normalized bundle back through `admit_recovered_to_ingress`
+    // to re-seed the DSL maps.
     let active_ids: Vec<InputId> = driver
         .ledger()
         .iter_non_terminal()
         .map(|(input_id, _)| input_id.clone())
         .collect();
 
+    let mut normalized: Vec<(InputId, StoredInputState)> = Vec::with_capacity(active_ids.len());
     for input_id in &active_ids {
-        let Some(state) = driver.ledger_mut().get_mut(input_id) else {
+        let Some(mut bundle) = driver.stored_input_state(input_id) else {
             continue;
         };
-        let delta = machine_apply_recovered_input_normalization(state, None);
+        let delta = machine_apply_recovered_input_normalization(&mut bundle, None);
         recovered += delta.recovered;
         abandoned += delta.abandoned;
         requeued += delta.requeued;
+        // Persist the normalized shell back into the ledger; the DSL seeding
+        // happens below via admit_recovered_to_ingress.
+        if let Some(ledger_slot) = driver.ledger_mut().get_mut(input_id) {
+            *ledger_slot = bundle.state.clone();
+        }
+        normalized.push((input_id.clone(), bundle));
     }
 
     // Re-seed the driver's local ingress state directly from the ledger.
     // No rebuilt authority — the DSL is the only owner; `admit_recovered_to_ingress`
-    // writes the current phase into `input_phases` and the appropriate lane.
-    let recovered_entries: Vec<(InputId, RecoveredIngressEntry)> = driver
-        .ledger()
-        .iter()
-        .filter_map(|(input_id, state)| {
-            machine_build_recovered_ingress_entry(state).map(|entry| (input_id.clone(), entry))
-        })
-        .collect();
+    // writes the recovered phase, run/boundary associations, typed terminal
+    // metadata, attempt count, and the appropriate lane.
+    let recovered_entries: Vec<(InputId, RecoveredIngressEntry, InputState, InputStateSeed)> =
+        normalized
+            .into_iter()
+            .filter_map(|(input_id, bundle)| {
+                machine_build_recovered_ingress_entry(&bundle.state)
+                    .map(|entry| (input_id, entry, bundle.state, bundle.seed))
+            })
+            .collect();
 
-    for (input_id, entry) in recovered_entries {
+    for (input_id, entry, state, seed) in recovered_entries {
         driver.admit_recovered_to_ingress(
             input_id,
             entry.content_shape,
             entry.handling_mode,
             entry.is_prompt,
-            entry.lifecycle_state,
+            &state,
+            &seed,
             entry.policy,
             None,
             None,
@@ -899,30 +913,31 @@ pub(crate) async fn machine_recover_persistent_driver(
 
     let mut recovered_payloads = Vec::new();
 
-    for state in stored_states {
-        let state = machine_normalize_recovered_input_state(store, runtime_id, state).await?;
+    for bundle in stored_states {
+        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
-        if driver.input_state(&state.input_id).is_none() {
-            let Some(entry) = machine_build_recovered_ingress_entry(&state) else {
-                driver.ledger_mut().recover(state);
+        if driver.input_state(&bundle.state.input_id).is_none() {
+            let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
+                driver.ledger_mut().recover(bundle.state);
                 continue;
             };
 
-            let inserted = driver.ledger_mut().recover(state.clone());
+            let inserted = driver.ledger_mut().recover(bundle.state.clone());
             if !inserted {
                 continue;
             }
 
-            if let Some(input) = state.persisted_input.clone() {
-                recovered_payloads.push((state.input_id.clone(), input));
+            if let Some(input) = bundle.state.persisted_input.clone() {
+                recovered_payloads.push((bundle.state.input_id.clone(), input));
             }
 
             driver.admit_recovered_to_ingress(
-                state.input_id.clone(),
+                bundle.state.input_id.clone(),
                 entry.content_shape,
                 entry.handling_mode,
                 entry.is_prompt,
-                state.current_state(),
+                &bundle.state,
+                &bundle.seed,
                 entry.policy,
                 None,
                 None,
@@ -933,9 +948,8 @@ pub(crate) async fn machine_recover_persistent_driver(
     let report = machine_recover_ephemeral_driver(driver)?;
 
     for (input_id, _input) in recovered_payloads {
-        let should_requeue = driver.input_state(&input_id).is_some_and(|state| {
-            state.current_state() == crate::input_state::InputLifecycleState::Queued
-        });
+        let should_requeue =
+            driver.input_phase(&input_id) == Some(crate::input_state::InputLifecycleState::Queued);
         if should_requeue && !driver.has_queued_input(&input_id) {
             return Err(RuntimeDriverError::Internal(format!(
                 "persistent recover left queued input '{input_id}' out of the runtime queue projection"

@@ -345,8 +345,11 @@ async fn on_run_completed_consumes() {
     complete_run_projection(&mut driver, RuntimeState::Idle);
 
     // Input should be consumed
-    let state = driver.input_state(&input_id).unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert!(driver.input_state(&input_id).is_some());
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Consumed)
+    );
     assert_eq!(driver.runtime_state(), RuntimeState::Idle);
 }
 
@@ -381,8 +384,11 @@ async fn on_run_failed_rollbacks() {
     complete_run_projection(&mut driver, RuntimeState::Idle);
 
     // Input should be rolled back to Queued
-    let state = driver.input_state(&input_id).unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert!(driver.input_state(&input_id).is_some());
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Queued)
+    );
     assert_eq!(driver.runtime_state(), RuntimeState::Idle);
     assert_queue_projection_alignment(&driver);
 }
@@ -456,8 +462,11 @@ async fn recovery_counts_queued_as_recovered() -> Result<(), RuntimeDriverError>
     driver.accept_input(input).await.unwrap();
 
     // After accept, state is Queued (policy applied immediately)
-    let state = driver.input_state(&input_id).unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert!(driver.input_state(&input_id).is_some());
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Queued)
+    );
 
     // Drain the queue (simulating crash losing queue state)
     driver.clear_queue_projections();
@@ -489,10 +498,10 @@ async fn recovery_applied_stays_applied() -> Result<(), RuntimeDriverError> {
     assert_eq!(report.inputs_recovered, 1);
 
     // Applied stays Applied (side effects already happened)
-    let state = driver.input_state(&input_id).unwrap();
+    assert!(driver.input_state(&input_id).is_some());
     assert_eq!(
-        state.current_state(),
-        InputLifecycleState::AppliedPendingConsumption
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::AppliedPendingConsumption)
     );
     assert_queue_projection_alignment(&driver);
     Ok(())
@@ -596,8 +605,11 @@ async fn progress_peer_staged_boundary() {
 
     assert!(result.is_accepted());
     // Per §17: ResponseProgress → StageRunBoundary + NoWake + Coalesce + OnRunComplete
-    let state = driver.input_state(&input_id).unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert!(driver.input_state(&input_id).is_some());
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Queued)
+    );
     let signal = driver.take_post_admission_signal();
     assert_eq!(
         signal,

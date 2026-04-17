@@ -57,6 +57,8 @@ pub struct AgentBuilder {
     pub(super) call_timeout_override: CallTimeoutOverride,
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
+    pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
 }
 
 impl AgentBuilder {
@@ -89,6 +91,8 @@ impl AgentBuilder {
             call_timeout_override: CallTimeoutOverride::default(),
             epoch_cursor_state: None,
             tool_visibility_owner: None,
+            turn_state_handle: None,
+            external_tool_surface_handle: None,
         }
     }
 
@@ -322,7 +326,9 @@ impl AgentBuilder {
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
-            turn_authority: crate::turn_execution_authority::TurnExecutionAuthority::new(),
+            turn_state_handle: self.turn_state_handle,
+            turn_state: super::turn_state::LocalTurnExecutionState::new(),
+            external_tool_surface_handle: self.external_tool_surface_handle,
             cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
@@ -514,6 +520,21 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the runtime-backed turn-state diagnostic handle for this build.
+    pub fn with_turn_state_handle(mut self, handle: Arc<dyn crate::TurnStateHandle>) -> Self {
+        self.turn_state_handle = Some(handle);
+        self
+    }
+
+    /// Set the runtime-backed external tool-surface diagnostic handle for this build.
+    pub fn with_external_tool_surface_handle(
+        mut self,
+        handle: Arc<dyn crate::ExternalToolSurfaceHandle>,
+    ) -> Self {
+        self.external_tool_surface_handle = Some(handle);
+        self
+    }
+
     /// Set the explicit call-timeout override from the build/config composition seam.
     ///
     /// - `Inherit`: defer to profile-derived default via the resolver
@@ -535,7 +556,7 @@ mod tests {
     use crate::event_tap::EventTapState;
     use crate::lifecycle::RunId;
     use crate::ops::{AsyncOpRef, OperationId};
-    use crate::turn_execution_authority::{ContentShape, TurnExecutionInput, TurnExecutionMutator};
+    use crate::turn_execution_authority::{ContentShape, TurnExecutionInput};
     use crate::types::{AssistantBlock, StopReason, ToolCallView, ToolDef, UserMessage};
     use async_trait::async_trait;
     use std::sync::atomic::AtomicBool;
@@ -779,7 +800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execution_snapshot_reflects_turn_authority() {
+    async fn test_execution_snapshot_reflects_turn_state() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
@@ -790,7 +811,7 @@ mod tests {
         let detached_id = OperationId::new();
 
         let start_result = agent
-            .turn_authority
+            .turn_state
             .apply(TurnExecutionInput::StartConversationRun {
                 run_id: run_id.clone(),
             });
@@ -799,7 +820,7 @@ mod tests {
             "start run should succeed: {start_result:?}"
         );
         let primitive_result = agent
-            .turn_authority
+            .turn_state
             .apply(TurnExecutionInput::PrimitiveApplied {
                 run_id: run_id.clone(),
                 admitted_content_shape: ContentShape("prompt_text".into()),
@@ -810,29 +831,27 @@ mod tests {
             primitive_result.is_ok(),
             "primitive applied should succeed: {primitive_result:?}"
         );
-        let tool_call_result =
-            agent
-                .turn_authority
-                .apply(TurnExecutionInput::LlmReturnedToolCalls {
-                    run_id: run_id.clone(),
-                    tool_count: 2,
-                });
+        let tool_call_result = agent
+            .turn_state
+            .apply(TurnExecutionInput::LlmReturnedToolCalls {
+                run_id: run_id.clone(),
+                tool_count: 2,
+            });
         assert!(
             tool_call_result.is_ok(),
             "tool call transition should succeed: {tool_call_result:?}"
         );
-        let pending_ops_result =
-            agent
-                .turn_authority
-                .apply(TurnExecutionInput::RegisterPendingOps {
-                    run_id: run_id.clone(),
-                    op_refs: vec![
-                        AsyncOpRef::barrier(barrier_id.clone()),
-                        AsyncOpRef::detached(detached_id.clone()),
-                    ],
-                    barrier_operation_ids: vec![barrier_id.clone()],
-                    has_barrier_ops: true,
-                });
+        let pending_ops_result = agent
+            .turn_state
+            .apply(TurnExecutionInput::RegisterPendingOps {
+                run_id: run_id.clone(),
+                op_refs: vec![
+                    AsyncOpRef::barrier(barrier_id.clone()),
+                    AsyncOpRef::detached(detached_id.clone()),
+                ],
+                barrier_operation_ids: vec![barrier_id.clone()],
+                has_barrier_ops: true,
+            });
         assert!(
             pending_ops_result.is_ok(),
             "pending ops should register: {pending_ops_result:?}"

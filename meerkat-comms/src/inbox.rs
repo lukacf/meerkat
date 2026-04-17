@@ -14,15 +14,13 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::classify::IngressClassificationContext;
 use crate::classify::PreparedIngressItem;
-use crate::peer_comms_authority::{
-    PeerCommsAuthority, PeerCommsEffect, PeerCommsInput, PeerCommsMutator, PeerId,
-    PeerIngressState, RawItemId, RequestId,
-};
+use crate::peer_types::{PeerId, PeerIngressState};
 use crate::types::InboxItem;
 use meerkat_core::{
     InteractionId, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
     PeerInputClass,
 };
+use std::collections::BTreeSet;
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
 
@@ -45,7 +43,9 @@ struct ClassifiedInboxQueue {
     capacity: usize,
     closed: bool,
     entries: VecDeque<ClassifiedInboxEntry>,
-    peer_authority: PeerCommsAuthority,
+    auth_required: bool,
+    trusted_peers: BTreeSet<PeerId>,
+    phase: PeerIngressState,
 }
 
 impl ClassifiedInboxQueue {
@@ -54,95 +54,66 @@ impl ClassifiedInboxQueue {
             capacity,
             closed: false,
             entries: VecDeque::new(),
-            peer_authority: PeerCommsAuthority::new_with_auth_required(auth_required),
+            auth_required,
+            trusted_peers: BTreeSet::new(),
+            phase: PeerIngressState::Absent,
         }
     }
 
     fn sync_trusted_peer_added(&mut self, peer_id: &str) {
-        if let Err(err) = self.peer_authority.apply(PeerCommsInput::TrustPeer {
-            peer_id: PeerId(peer_id.to_string()),
-        }) {
-            tracing::warn!(%peer_id, ?err, "peer authority trust-add sync failed");
-        }
+        self.trusted_peers.insert(PeerId(peer_id.to_string()));
     }
 
     fn sync_trusted_peer_removed(&mut self, peer_id: &str) {
-        if let Err(err) = self
-            .peer_authority
-            .apply(PeerCommsInput::RemoveTrustedPeer {
-                peer_id: PeerId(peer_id.to_string()),
-            })
-        {
-            tracing::warn!(%peer_id, ?err, "peer authority trust-remove sync failed");
-        }
+        self.trusted_peers.remove(&PeerId(peer_id.to_string()));
     }
 
-    fn sync_peer_receive(&mut self, prepared: &PreparedIngressItem) -> (bool, Option<bool>) {
+    /// Admit a prepared item into the peer-ingress lifecycle.
+    ///
+    /// Returns `(should_enqueue, trusted_snapshot)`:
+    /// - For plain events: always enqueue, no trust snapshot.
+    /// - For external envelopes: consult the trust set + auth-required policy.
+    ///   Untrusted senders with auth required are dropped (no enqueue); the
+    ///   trust snapshot still records the decision for queue visibility.
+    ///
+    /// Updates `phase` to track the observable lifecycle:
+    /// `Absent → Received` (admitted), `Received → Received` (more work),
+    /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
+    /// work keeps `Received`.
+    fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> (bool, Option<bool>) {
         let InboxItem::External { envelope } = &prepared.item else {
             return (true, None);
         };
-        let raw_item_id = RawItemId(prepared.raw_item_id.clone());
-        let result = self
-            .peer_authority
-            .apply(PeerCommsInput::ReceivePeerEnvelope {
-                raw_item_id: raw_item_id.clone(),
-                peer_id: PeerId(envelope.from.to_peer_id()),
-                raw_kind: prepared.raw_kind.clone(),
-                text_projection: prepared.text_projection.clone(),
-                content_shape: prepared.content_shape.clone(),
-                request_id: prepared.request_id.clone().map(RequestId),
-                reservation_key: None,
-                lifecycle_peer: prepared.lifecycle_peer.clone(),
-            });
+        let peer_id = PeerId(envelope.from.to_peer_id());
+        let trusted = self.trusted_peers.contains(&peer_id);
+        let admitted = trusted || !self.auth_required;
+        let had_queued_work = !self.entries.is_empty();
 
-        match result {
-            Ok(_) => (
-                self.peer_authority.has_classified_item(&raw_item_id),
-                self.peer_authority.trusted_snapshot_for(&raw_item_id),
-            ),
-            Err(err) => {
-                tracing::warn!(
-                    raw_item_id = %prepared.raw_item_id,
-                    ?err,
-                    "peer authority receive sync failed; falling back to classified queue admission"
-                );
-                (true, None)
-            }
+        if admitted {
+            self.phase = PeerIngressState::Received;
+            (true, Some(trusted))
+        } else if had_queued_work {
+            self.phase = PeerIngressState::Received;
+            (false, Some(false))
+        } else {
+            self.phase = PeerIngressState::Dropped;
+            (false, Some(false))
         }
     }
 
-    fn sync_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
+    /// Advance `phase` on dequeue.
+    ///
+    /// External items drive the transition: an empty queue after dequeue moves
+    /// to `Delivered`; otherwise we stay in `Received`. Plain events do not
+    /// drive the peer-ingress phase.
+    fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
         let InboxItem::External { .. } = &entry.item else {
             return;
         };
-
-        let result = self
-            .peer_authority
-            .apply(PeerCommsInput::SubmitTypedPeerInput {
-                raw_item_id: RawItemId(entry.raw_item_id.clone()),
-            });
-
-        match result {
-            Ok(transition) => {
-                if let Some(PeerCommsEffect::SubmitPeerInputCandidate(effect)) =
-                    transition.effects.first()
-                {
-                    debug_assert_eq!(effect.peer_input_class, entry.class);
-                    debug_assert_eq!(effect.lifecycle_peer, entry.lifecycle_peer);
-                    debug_assert_eq!(
-                        effect.request_id.as_ref().map(|id| id.0.clone()),
-                        entry.request_id
-                    );
-                    debug_assert_eq!(effect.text_projection, entry.text_projection);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    raw_item_id = %entry.raw_item_id,
-                    ?err,
-                    "peer authority submit sync failed during dequeue"
-                );
-            }
+        if self.entries.is_empty() {
+            self.phase = PeerIngressState::Delivered;
+        } else {
+            self.phase = PeerIngressState::Received;
         }
     }
 
@@ -160,7 +131,7 @@ impl ClassifiedInboxQueue {
     fn drain(&mut self) -> Vec<ClassifiedInboxEntry> {
         let drained: Vec<_> = self.entries.drain(..).collect();
         for entry in &drained {
-            self.sync_peer_dequeue(entry);
+            self.note_peer_dequeue(entry);
         }
         drained
     }
@@ -168,7 +139,7 @@ impl ClassifiedInboxQueue {
     fn pop_front(&mut self) -> Option<ClassifiedInboxEntry> {
         let entry = self.entries.pop_front();
         if let Some(entry_ref) = entry.as_ref() {
-            self.sync_peer_dequeue(entry_ref);
+            self.note_peer_dequeue(entry_ref);
         }
         entry
     }
@@ -222,11 +193,8 @@ impl ClassifiedInboxQueue {
     }
 
     fn runtime_snapshot(&self) -> (PeerIngressQueueSnapshot, PeerIngressState, usize) {
-        (
-            self.snapshot(),
-            self.peer_authority.phase(),
-            self.peer_authority.queue_len(),
-        )
+        let queue_len = self.entries.len();
+        (self.snapshot(), self.phase, queue_len)
     }
 }
 
@@ -389,10 +357,7 @@ impl Inbox {
     pub(crate) fn peer_authority_test_snapshot(&self) -> Option<(PeerIngressState, usize)> {
         self.classified_queue.as_ref().map(|queue| {
             let queue = queue.lock();
-            (
-                queue.peer_authority.phase(),
-                queue.peer_authority.queue_len(),
-            )
+            (queue.phase, queue.entries.len())
         })
     }
 
@@ -401,8 +366,8 @@ impl Inbox {
         self.classified_queue.as_ref().map(|queue| {
             queue
                 .lock()
-                .peer_authority
-                .is_peer_trusted(&PeerId(peer_id.to_string()))
+                .trusted_peers
+                .contains(&PeerId(peer_id.to_string()))
         })
     }
 }
@@ -452,7 +417,7 @@ impl InboxSender {
             let kind = result.ingress_kind();
             let (should_enqueue, trusted_snapshot) = {
                 let mut queue = classified_queue.lock();
-                queue.sync_peer_receive(&result)
+                queue.admit_peer_receive(&result)
             };
             if !should_enqueue {
                 return Ok(());

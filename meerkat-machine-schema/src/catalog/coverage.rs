@@ -123,9 +123,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         machine_manifest_from_schema(
             &schedule_lifecycle_machine(),
             &[anchor(
-                "schedule_authority",
-                "meerkat-schedule/src/authority.rs",
-                "schedule lifecycle authority and revision ownership",
+                "schedule_lifecycle",
+                "meerkat-schedule/src/lifecycle.rs",
+                "Schedule::apply domain-facing lifecycle transition seam over the DSL",
             )],
             &[scenario(
                 "schedule_pause_resume_delete",
@@ -135,9 +135,9 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         machine_manifest_from_schema(
             &occurrence_lifecycle_machine(),
             &[anchor(
-                "occurrence_authority",
-                "meerkat-schedule/src/authority.rs",
-                "occurrence lifecycle authority",
+                "occurrence_lifecycle",
+                "meerkat-schedule/src/lifecycle.rs",
+                "Occurrence::apply domain-facing lifecycle transition seam over the DSL",
             )],
             &[scenario(
                 "occurrence_start_complete_fail",

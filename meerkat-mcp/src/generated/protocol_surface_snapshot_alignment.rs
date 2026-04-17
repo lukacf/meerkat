@@ -3,10 +3,8 @@
 // Closure policy: AckRequired
 // Liveness: eventual snapshot acknowledgement under surface host liveness
 
-use crate::external_tool_surface_authority::{
-    ExternalToolSurfaceAuthority, ExternalToolSurfaceEffect, ExternalToolSurfaceError,
-    ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition,
-};
+use crate::external_tool_surface_authority::ExternalToolSurfaceEffect;
+use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceHandle};
 
 #[derive(Debug, Clone)]
 pub struct SurfaceSnapshotAlignmentObligation {
@@ -30,11 +28,8 @@ pub fn extract_obligations(
 }
 
 pub fn submit_snapshot_aligned(
-    authority: &mut ExternalToolSurfaceAuthority,
+    handle: &dyn ExternalToolSurfaceHandle,
     obligation: SurfaceSnapshotAlignmentObligation,
-) -> Result<ExternalToolSurfaceTransition, ExternalToolSurfaceError> {
-    let transition = authority.apply(ExternalToolSurfaceInput::SnapshotAligned {
-        snapshot_epoch: obligation.snapshot_epoch,
-    })?;
-    Ok(transition)
+) -> Result<(), DslTransitionError> {
+    handle.snapshot_aligned(obligation.snapshot_epoch)
 }

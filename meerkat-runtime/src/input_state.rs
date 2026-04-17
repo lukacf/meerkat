@@ -1,17 +1,16 @@
 //! §13 InputState — per-input data shell.
 //!
 //! Canonical lifecycle truth for every input lives in the MeerkatMachine DSL
-//! (`input_phases` map plus the `QueueAccepted` / `StageForRun` / etc.
+//! (`input_phases`, `input_run_associations`, `input_boundary_sequences` plus
+//! the `QueueAccepted` / `StageForRun` / `RecordBoundarySeq` / etc.
 //! transitions). This module owns ONLY the per-input shell metadata that has
-//! no DSL home: a history log, timestamps, retry counter, policy snapshot,
-//! durability class, idempotency key, and the cached payload needed to
-//! rebuild queued work after recovery. None of it drives semantics.
+//! no DSL home today: a history log, timestamps, policy snapshot, durability
+//! class, idempotency key, and the cached payload needed to rebuild queued
+//! work after recovery.
 //!
-//! Mutation rule: callers update `InputState` fields directly (they are
-//! `pub`). Transitions do NOT flow through an `apply()` method on this type —
-//! there isn't one and deliberately never will be. Every lifecycle advance
-//! is a DSL transition fired via the driver's `dsl_apply` helper; the
-//! shell metadata is written alongside it at the same callsite.
+//! `InputState` still caches terminal outcome and attempt count for persistence,
+//! recovery normalization, and compatibility reads, but the authoritative live
+//! copies now live in the DSL's typed terminal/attempt maps.
 
 use chrono::{DateTime, Utc};
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -59,9 +58,10 @@ pub enum InputAbandonReason {
     MaxAttemptsExhausted { attempts: u32 },
 }
 
-/// Terminal outcome of an input — written by the shell alongside the
-/// matching DSL terminal transition. Superseded / Coalesced carry caller-
-/// provided references that the DSL transition cannot know at apply time.
+/// Terminal outcome cache for an input.
+///
+/// The authoritative live copy is split across the DSL's typed terminal maps.
+/// The shell keeps this typed cache for persistence and compatibility reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome_type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -117,20 +117,66 @@ pub struct InputStateEvent {
 /// guard.
 pub const MAX_STAGE_ATTEMPTS: u32 = 3;
 
+/// DSL-owned lifecycle projection for an input.
+///
+/// Carries the three fields that are authoritative in the MeerkatMachine DSL
+/// (`input_phases`, `input_run_associations`, `input_boundary_sequences`) so
+/// they can travel alongside a persisted [`InputState`] at the store boundary,
+/// where no live DSL is available to query. Inside a running driver, these
+/// values are always read from the DSL directly, never from the seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputStateSeed {
+    pub phase: InputLifecycleState,
+    pub last_run_id: Option<RunId>,
+    pub last_boundary_sequence: Option<u64>,
+}
+
+impl InputStateSeed {
+    /// Freshly-accepted input: no run association, no boundary sequence yet.
+    pub fn new_accepted() -> Self {
+        Self {
+            phase: InputLifecycleState::Accepted,
+            last_run_id: None,
+            last_boundary_sequence: None,
+        }
+    }
+}
+
+/// Persisted bundle: shell [`InputState`] plus its [`InputStateSeed`].
+///
+/// Used at the store boundary so the three DSL-owned fields survive persistence
+/// without being re-shadowed onto `InputState` itself. Also used by recovery
+/// bootstrap, which hydrates a driver's DSL from the seed before the driver is
+/// fully alive.
+#[derive(Debug, Clone)]
+pub struct StoredInputState {
+    pub state: InputState,
+    pub seed: InputStateSeed,
+}
+
+impl StoredInputState {
+    /// Convenience: freshly-accepted bundle.
+    pub fn new_accepted(input_id: InputId) -> Self {
+        Self {
+            state: InputState::new_accepted(input_id),
+            seed: InputStateSeed::new_accepted(),
+        }
+    }
+}
+
 /// Per-input shell data. Plain fields, no hidden state machine.
 ///
-/// The canonical phase of this input lives in the DSL's `input_phases` map.
-/// The `phase` field below is a shell mirror written at the same callsite
-/// that fires the DSL transition, used for observability, snapshot
-/// assembly, and on-disk persistence. Queries that need live semantic truth
-/// should read the DSL, not this struct.
+/// The DSL owns the `phase`, `last_run_id`, and `last_boundary_sequence`
+/// fields formerly mirrored here. Live code reads them from the DSL via the
+/// driver; persistence callsites serialize them via [`InputStateSeed`].
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
-    pub phase: InputLifecycleState,
+    /// Compatibility cache of the DSL's typed terminal metadata maps:
+    /// `input_terminal_kind`, `input_superseded_by`, `input_aggregate_id`,
+    /// `input_abandon_reason`, and `input_abandon_attempt_count`.
     pub terminal_outcome: Option<InputTerminalOutcome>,
-    pub last_run_id: Option<RunId>,
-    pub last_boundary_sequence: Option<u64>,
+    /// Compatibility cache of the DSL's `input_attempt_counts` map.
     pub attempt_count: u32,
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
@@ -144,15 +190,14 @@ pub struct InputState {
 }
 
 impl InputState {
-    /// Create a fresh InputState in the `Accepted` phase.
+    /// Create a fresh InputState. Paired DSL state starts in the `Accepted`
+    /// phase via [`InputStateSeed::new_accepted`]; callers that need the
+    /// bundle use [`StoredInputState::new_accepted`].
     pub fn new_accepted(input_id: InputId) -> Self {
         let now = Utc::now();
         Self {
             input_id,
-            phase: InputLifecycleState::Accepted,
             terminal_outcome: None,
-            last_run_id: None,
-            last_boundary_sequence: None,
             attempt_count: 0,
             history: Vec::new(),
             updated_at: now,
@@ -166,17 +211,16 @@ impl InputState {
         }
     }
 
-    /// Current lifecycle phase mirror (shell copy of the DSL's `input_phases`).
-    pub fn current_state(&self) -> InputLifecycleState {
-        self.phase
-    }
-
-    /// Whether the mirrored phase is terminal.
+    /// Whether this input has reached a terminal outcome.
+    ///
+    /// Invariant (held by every writer in the tree): `terminal_outcome` is
+    /// kept in sync with the DSL's typed terminal metadata for persistence and
+    /// compatibility consumers.
     pub fn is_terminal(&self) -> bool {
-        self.phase.is_terminal()
+        self.terminal_outcome.is_some()
     }
 
-    /// Shell-side terminal outcome (populated alongside DSL terminal transitions).
+    /// Compatibility cache of the DSL terminal outcome metadata.
     pub fn terminal_outcome(&self) -> Option<&InputTerminalOutcome> {
         self.terminal_outcome.as_ref()
     }
@@ -185,28 +229,12 @@ impl InputState {
         &self.history
     }
 
-    pub fn last_run_id(&self) -> Option<&RunId> {
-        self.last_run_id.as_ref()
-    }
-
-    pub fn last_boundary_sequence(&self) -> Option<u64> {
-        self.last_boundary_sequence
-    }
-
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
     }
 
     pub fn attempt_count(&self) -> u32 {
         self.attempt_count
-    }
-
-    /// Stamp receipt metadata (run id + boundary sequence) on the shell copy.
-    /// Pure shell mechanics, not a lifecycle transition; used by the
-    /// persistence layer after a boundary receipt lands.
-    pub fn stamp_receipt_metadata(&mut self, run_id: RunId, boundary_sequence: u64) {
-        self.last_run_id = Some(run_id);
-        self.last_boundary_sequence = Some(boundary_sequence);
     }
 }
 
@@ -217,7 +245,10 @@ impl InputState {
 // `InputStateSerde` is the on-disk contract exercised by
 // `recovery_contract`, `recovery_replay`, and `driver_persistent` tests.
 // Field names, types, defaults, and `skip_serializing_if` markers are kept
-// verbatim from the pre-5A/4 release.
+// verbatim from the pre-5G/1 release. Since `InputState` no longer owns the
+// three DSL-authoritative fields, serialization flows through
+// [`StoredInputState`] where shell + seed can be bundled into the wire
+// struct.
 
 #[derive(Serialize, Deserialize)]
 struct InputStateSerde {
@@ -249,38 +280,35 @@ struct InputStateSerde {
     updated_at: DateTime<Utc>,
 }
 
-impl Serialize for InputState {
+impl Serialize for StoredInputState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let helper = InputStateSerde {
-            input_id: self.input_id.clone(),
-            current_state: self.phase,
-            policy: self.policy.clone(),
-            terminal_outcome: self.terminal_outcome.clone(),
-            durability: self.durability,
-            idempotency_key: self.idempotency_key.clone(),
-            attempt_count: self.attempt_count,
-            recovery_count: self.recovery_count,
-            history: self.history.clone(),
-            reconstruction_source: self.reconstruction_source.clone(),
-            persisted_input: self.persisted_input.clone(),
-            last_run_id: self.last_run_id.clone(),
-            last_boundary_sequence: self.last_boundary_sequence,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
+            input_id: self.state.input_id.clone(),
+            current_state: self.seed.phase,
+            policy: self.state.policy.clone(),
+            terminal_outcome: self.state.terminal_outcome.clone(),
+            durability: self.state.durability,
+            idempotency_key: self.state.idempotency_key.clone(),
+            attempt_count: self.state.attempt_count,
+            recovery_count: self.state.recovery_count,
+            history: self.state.history.clone(),
+            reconstruction_source: self.state.reconstruction_source.clone(),
+            persisted_input: self.state.persisted_input.clone(),
+            last_run_id: self.seed.last_run_id.clone(),
+            last_boundary_sequence: self.seed.last_boundary_sequence,
+            created_at: self.state.created_at,
+            updated_at: self.state.updated_at,
         };
         helper.serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for InputState {
+impl<'de> Deserialize<'de> for StoredInputState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let helper = InputStateSerde::deserialize(deserializer)?;
-        Ok(InputState {
+        let state = InputState {
             input_id: helper.input_id,
-            phase: helper.current_state,
             terminal_outcome: helper.terminal_outcome,
-            last_run_id: helper.last_run_id,
-            last_boundary_sequence: helper.last_boundary_sequence,
             attempt_count: helper.attempt_count,
             history: helper.history,
             updated_at: helper.updated_at,
@@ -291,7 +319,13 @@ impl<'de> Deserialize<'de> for InputState {
             reconstruction_source: helper.reconstruction_source,
             persisted_input: helper.persisted_input,
             created_at: helper.created_at,
-        })
+        };
+        let seed = InputStateSeed {
+            phase: helper.current_state,
+            last_run_id: helper.last_run_id,
+            last_boundary_sequence: helper.last_boundary_sequence,
+        };
+        Ok(StoredInputState { state, seed })
     }
 }
 
@@ -305,15 +339,22 @@ mod tests {
     use meerkat_core::ops::{OpEvent, OperationId};
 
     #[test]
-    fn new_accepted_starts_in_accepted_phase() {
+    fn new_accepted_starts_with_no_terminal_outcome() {
         let id = InputId::new();
         let state = InputState::new_accepted(id.clone());
         assert_eq!(state.input_id, id);
-        assert_eq!(state.phase, InputLifecycleState::Accepted);
         assert!(!state.is_terminal());
         assert_eq!(state.attempt_count, 0);
         assert!(state.history.is_empty());
         assert!(state.terminal_outcome.is_none());
+    }
+
+    #[test]
+    fn seed_new_accepted_defaults_match_queue_lifecycle() {
+        let seed = InputStateSeed::new_accepted();
+        assert_eq!(seed.phase, InputLifecycleState::Accepted);
+        assert!(seed.last_run_id.is_none());
+        assert!(seed.last_boundary_sequence.is_none());
     }
 
     #[test]
@@ -350,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn input_state_serde_roundtrip_preserves_fields() {
+    fn stored_input_state_serde_roundtrip_preserves_fields() {
         let mut state = InputState::new_accepted(InputId::new());
         state.policy = Some(PolicySnapshot {
             version: PolicyVersion(1),
@@ -366,58 +407,78 @@ mod tests {
                 policy_version: PolicyVersion(1),
             },
         });
-        state.phase = InputLifecycleState::Queued;
         state.history.push(InputStateHistoryEntry {
             timestamp: state.updated_at,
             from: InputLifecycleState::Accepted,
             to: InputLifecycleState::Queued,
             reason: Some("QueueAccepted".into()),
         });
+        let bundle = StoredInputState {
+            state,
+            seed: InputStateSeed {
+                phase: InputLifecycleState::Queued,
+                last_run_id: None,
+                last_boundary_sequence: None,
+            },
+        };
 
-        let json = serde_json::to_value(&state).unwrap();
-        let parsed: InputState = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.input_id, state.input_id);
-        assert_eq!(parsed.phase, state.phase);
-        assert_eq!(parsed.history.len(), 1);
+        let json = serde_json::to_value(&bundle).unwrap();
+        let parsed: StoredInputState = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.state.input_id, bundle.state.input_id);
+        assert_eq!(parsed.seed.phase, bundle.seed.phase);
+        assert_eq!(parsed.state.history.len(), 1);
     }
 
     #[test]
-    fn input_state_deserializes_legacy_persisted_input_tags() {
-        let mut continuation_state = InputState::new_accepted(InputId::new());
-        continuation_state.persisted_input = Some(Input::Continuation(
-            crate::input::ContinuationInput::detached_background_op_completed(),
-        ));
-        let mut continuation_json = serde_json::to_value(&continuation_state).unwrap();
+    fn stored_input_state_deserializes_legacy_persisted_input_tags() {
+        let continuation_bundle = StoredInputState {
+            state: InputState {
+                persisted_input: Some(Input::Continuation(
+                    crate::input::ContinuationInput::detached_background_op_completed(),
+                )),
+                ..InputState::new_accepted(InputId::new())
+            },
+            seed: InputStateSeed::new_accepted(),
+        };
+        let mut continuation_json = serde_json::to_value(&continuation_bundle).unwrap();
         continuation_json["persisted_input"]["input_type"] =
             serde_json::Value::String("system_generated".into());
-        let parsed: InputState = serde_json::from_value(continuation_json).unwrap();
+        let parsed: StoredInputState = serde_json::from_value(continuation_json).unwrap();
         assert!(matches!(
-            parsed.persisted_input,
+            parsed.state.persisted_input,
             Some(Input::Continuation(_))
         ));
 
-        let mut operation_state = InputState::new_accepted(InputId::new());
-        operation_state.persisted_input = Some(Input::Operation(crate::input::OperationInput {
-            header: crate::input::InputHeader {
-                id: InputId::new(),
-                timestamp: Utc::now(),
-                source: crate::input::InputOrigin::System,
-                durability: crate::input::InputDurability::Derived,
-                visibility: crate::input::InputVisibility::default(),
-                idempotency_key: None,
-                supersession_key: None,
-                correlation_id: None,
+        let operation_bundle = StoredInputState {
+            state: InputState {
+                persisted_input: Some(Input::Operation(crate::input::OperationInput {
+                    header: crate::input::InputHeader {
+                        id: InputId::new(),
+                        timestamp: Utc::now(),
+                        source: crate::input::InputOrigin::System,
+                        durability: crate::input::InputDurability::Derived,
+                        visibility: crate::input::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    operation_id: OperationId::new(),
+                    event: OpEvent::Cancelled {
+                        id: OperationId::new(),
+                    },
+                })),
+                ..InputState::new_accepted(InputId::new())
             },
-            operation_id: OperationId::new(),
-            event: OpEvent::Cancelled {
-                id: OperationId::new(),
-            },
-        }));
-        let mut operation_json = serde_json::to_value(&operation_state).unwrap();
+            seed: InputStateSeed::new_accepted(),
+        };
+        let mut operation_json = serde_json::to_value(&operation_bundle).unwrap();
         operation_json["persisted_input"]["input_type"] =
             serde_json::Value::String("projected".into());
-        let parsed: InputState = serde_json::from_value(operation_json).unwrap();
-        assert!(matches!(parsed.persisted_input, Some(Input::Operation(_))));
+        let parsed: StoredInputState = serde_json::from_value(operation_json).unwrap();
+        assert!(matches!(
+            parsed.state.persisted_input,
+            Some(Input::Operation(_))
+        ));
     }
 
     #[test]

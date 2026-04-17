@@ -84,7 +84,9 @@ pub use input_state::{
     InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, ReconstructionSource,
 };
 pub use meerkat_core::types::HandlingMode;
-pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
+pub use meerkat_machine::{
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatMachine, RuntimeBindingsError,
+};
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
     SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,

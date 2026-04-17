@@ -48,8 +48,11 @@ fn to_wire_input_lifecycle_state(
     })
 }
 
-fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputState, String> {
-    let json = serde_json::to_value(&state).map_err(|err| err.to_string())?;
+fn to_wire_input_state(
+    bundle: meerkat_runtime::input_state::StoredInputState,
+) -> Result<WireInputState, String> {
+    let json = serde_json::to_value(&bundle).map_err(|err| err.to_string())?;
+    let meerkat_runtime::input_state::StoredInputState { state, seed } = bundle;
     let history = state
         .history()
         .iter()
@@ -64,7 +67,7 @@ fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputSt
         .collect::<Result<Vec<_>, String>>()?;
     Ok(WireInputState {
         input_id: state.input_id.to_string(),
-        current_state: to_wire_input_lifecycle_state(state.current_state())?,
+        current_state: to_wire_input_lifecycle_state(seed.phase)?,
         policy: json.get("policy").cloned().filter(|value| !value.is_null()),
         terminal_outcome: json
             .get("terminal_outcome")
@@ -89,14 +92,14 @@ fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputSt
             .get("persisted_input")
             .cloned()
             .filter(|value| !value.is_null()),
-        last_run_id: state.last_run_id().map(ToString::to_string),
-        last_boundary_sequence: state.last_boundary_sequence(),
+        last_run_id: seed.last_run_id.map(|id| id.to_string()),
+        last_boundary_sequence: seed.last_boundary_sequence,
         created_at: state.created_at.to_rfc3339(),
         updated_at: state.updated_at().to_rfc3339(),
     })
 }
 
-fn to_wire_accept_result(
+pub(crate) fn to_wire_accept_result(
     outcome: meerkat_runtime::AcceptOutcome,
 ) -> Result<RuntimeAcceptResult, String> {
     Ok(match outcome {
@@ -104,14 +107,28 @@ fn to_wire_accept_result(
             input_id,
             policy,
             state,
-        } => RuntimeAcceptResult {
-            outcome_type: RuntimeAcceptOutcomeType::Accepted,
-            input_id: Some(input_id.to_string()),
-            existing_id: None,
-            reason: None,
-            policy: Some(serde_json::to_value(policy).map_err(|err| err.to_string())?),
-            state: Some(to_wire_input_state(state)?),
-        },
+        } => {
+            // Re-bundle the returned shell with a queue-seeded seed for the
+            // wire payload. accept_input transitions the DSL to Queued for
+            // durable/queued inputs; callers that need exact phase/run_id
+            // should use input_state lookups post-accept.
+            let bundle = meerkat_runtime::input_state::StoredInputState {
+                state,
+                seed: meerkat_runtime::input_state::InputStateSeed {
+                    phase: meerkat_runtime::InputLifecycleState::Queued,
+                    last_run_id: None,
+                    last_boundary_sequence: None,
+                },
+            };
+            RuntimeAcceptResult {
+                outcome_type: RuntimeAcceptOutcomeType::Accepted,
+                input_id: Some(input_id.to_string()),
+                existing_id: None,
+                reason: None,
+                policy: Some(serde_json::to_value(policy).map_err(|err| err.to_string())?),
+                state: Some(to_wire_input_state(bundle)?),
+            }
+        }
         meerkat_runtime::AcceptOutcome::Deduplicated {
             input_id,
             existing_id,
@@ -336,9 +353,10 @@ pub async fn handle_input_list(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_runtime::input_state::StoredInputState;
     use meerkat_runtime::{
-        AcceptOutcome, Input, InputState, PromptInput, ResetReport, RetireReport,
-        RuntimeDriverError, RuntimeMode, RuntimeState,
+        AcceptOutcome, Input, PromptInput, ResetReport, RetireReport, RuntimeDriverError,
+        RuntimeMode, RuntimeState,
     };
     use serde_json::{json, value::to_raw_value};
 
@@ -401,7 +419,7 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _input_id: &InputId,
-        ) -> Result<Option<InputState>, RuntimeDriverError> {
+        ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
             Ok(None)
         }
 

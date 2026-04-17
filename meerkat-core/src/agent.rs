@@ -10,6 +10,7 @@ mod hook_impl;
 mod runner;
 pub mod skills;
 mod state;
+mod turn_state;
 
 use crate::budget::Budget;
 use crate::comms::{
@@ -128,12 +129,11 @@ impl LlmStreamResult {
     }
 }
 
-/// Diagnostic snapshot of the core agent's live execution state.
+/// Snapshot of the core agent's live execution state.
 ///
-/// This is an observational surface over the existing agent loop and
-/// `TurnExecutionAuthority`. It does not create new semantic ownership; it
-/// exposes the current canonical turn-execution truth for MeerkatMachine
-/// mapping work.
+/// When a runtime-backed turn-state handle is attached, this snapshots the
+/// runtime-owned turn machine; otherwise it falls back to the in-process
+/// standalone turn state used by core-only execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentExecutionSnapshot {
     pub loop_state: LoopState,
@@ -796,7 +796,7 @@ where
     /// Optional shared lifecycle registry for async operations.
     ///
     /// When set, the agent loop waits on the exact turn-local operation IDs
-    /// registered in `turn_authority.pending_op_refs()`.
+    /// registered in `turn_state.pending_op_refs()`.
     pub(crate) ops_lifecycle: Option<Arc<dyn crate::ops_lifecycle::OpsLifecycleRegistry>>,
     /// Optional completion feed for cursor-based completion delivery.
     pub(crate) completion_feed: Option<Arc<dyn crate::completion_feed::CompletionFeed>>,
@@ -813,8 +813,15 @@ where
     /// of the canonical `session.build_state().mob_tool_authority_context`.
     pub(crate) mob_authority_handle:
         Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
-    /// Machine authority for turn-execution state transitions (RMAT).
-    pub(crate) turn_authority: crate::turn_execution_authority::TurnExecutionAuthority,
+    /// Runtime-backed turn-state handle, when provided by the session runtime
+    /// bindings. Writes route here first when the mapping is available, with
+    /// `turn_state` retained as the standalone fallback owner.
+    pub(crate) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    /// Standalone local owner for turn-execution state when no runtime handle exists.
+    pub(crate) turn_state: turn_state::LocalTurnExecutionState,
+    /// Runtime-backed external tool-surface diagnostic handle, when provided
+    /// by the session runtime bindings.
+    pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     /// Shared live flag for cancellation at the next turn boundary.
     pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).

@@ -324,7 +324,7 @@ impl MeerkatMachine {
                 };
                 let driver = driver.lock().await;
                 Ok(MeerkatMachineCommandResult::InputState(
-                    driver.as_driver().input_state(&input_id).cloned(),
+                    driver.as_driver().stored_input_state(&input_id),
                 ))
             }
             MeerkatMachineCommand::ListActiveInputs { session_id } => {

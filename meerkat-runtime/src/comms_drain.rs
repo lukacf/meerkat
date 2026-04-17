@@ -14,12 +14,10 @@ use meerkat_core::interaction::PeerInputClass;
 use meerkat_core::lifecycle::RunControlCommand;
 use meerkat_core::types::SessionId;
 
-use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
-
 use crate::comms_bridge::classified_interaction_to_runtime_input;
 use crate::completion::CompletionOutcome;
 use crate::identifiers::LogicalRuntimeId;
-use crate::meerkat_machine::MeerkatMachine;
+use crate::meerkat_machine::{DrainExitReason, MeerkatMachine};
 use crate::service_ext::SessionServiceRuntimeExt as _;
 use crate::tokio::sync::mpsc;
 

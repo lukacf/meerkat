@@ -1634,7 +1634,7 @@ impl SessionRuntime {
         });
 
         self.runtime_adapter
-            .accept_input(session_id, input)
+            .accept_input_without_wake(session_id, input)
             .await
             .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,

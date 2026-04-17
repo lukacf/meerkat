@@ -11,15 +11,219 @@ use crate::state::LoopState;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_scope::{
-    EXTERNAL_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScopeRevision, ToolScopeStageError,
+    EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
+    ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
+    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, ToolFilter, ToolScopeRevision,
+    ToolScopeStageError,
+};
+use crate::turn_execution_authority::{
+    ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
 };
 use crate::types::{ContentInput, Message, RunResult};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
+
+fn parse_turn_phase(value: &str) -> Option<TurnPhase> {
+    match value {
+        "Ready" => Some(TurnPhase::Ready),
+        "ApplyingPrimitive" => Some(TurnPhase::ApplyingPrimitive),
+        "CallingLlm" => Some(TurnPhase::CallingLlm),
+        "WaitingForOps" => Some(TurnPhase::WaitingForOps),
+        "DrainingBoundary" => Some(TurnPhase::DrainingBoundary),
+        "Extracting" => Some(TurnPhase::Extracting),
+        "ErrorRecovery" => Some(TurnPhase::ErrorRecovery),
+        "Cancelling" => Some(TurnPhase::Cancelling),
+        "Completed" => Some(TurnPhase::Completed),
+        "Failed" => Some(TurnPhase::Failed),
+        "Cancelled" => Some(TurnPhase::Cancelled),
+        _ => None,
+    }
+}
+
+fn parse_primitive_kind(value: Option<&str>) -> Option<TurnPrimitiveKind> {
+    match value {
+        Some("None") | None => Some(TurnPrimitiveKind::None),
+        Some("ConversationTurn") => Some(TurnPrimitiveKind::ConversationTurn),
+        Some("ImmediateAppend") => Some(TurnPrimitiveKind::ImmediateAppend),
+        Some("ImmediateContextAppend" | "ImmediateContext") => {
+            Some(TurnPrimitiveKind::ImmediateContextAppend)
+        }
+        Some(_) => None,
+    }
+}
+
+fn parse_terminal_outcome(value: Option<&str>) -> Option<TurnTerminalOutcome> {
+    match value {
+        Some("None") | None => Some(TurnTerminalOutcome::None),
+        Some("Completed") => Some(TurnTerminalOutcome::Completed),
+        Some("Cancelled" | "ForceCancelNoRun" | "RunCancelled") => {
+            Some(TurnTerminalOutcome::Cancelled)
+        }
+        Some("Failed" | "TurnLimitReached" | "ExtractionExhausted") => {
+            Some(TurnTerminalOutcome::Failed)
+        }
+        Some("BudgetExhausted") => Some(TurnTerminalOutcome::BudgetExhausted),
+        Some("TimeBudgetExceeded") => Some(TurnTerminalOutcome::TimeBudgetExceeded),
+        Some("StructuredOutputValidationFailed") => {
+            Some(TurnTerminalOutcome::StructuredOutputValidationFailed)
+        }
+        Some(_) => None,
+    }
+}
+
+fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
+    Uuid::parse_str(value).ok().map(crate::ops::OperationId)
+}
+
+fn parse_surface_phase(value: &str) -> Option<ExternalToolSurfaceGlobalPhase> {
+    match value {
+        "Operating" => Some(ExternalToolSurfaceGlobalPhase::Operating),
+        "Shutdown" => Some(ExternalToolSurfaceGlobalPhase::Shutdown),
+        _ => None,
+    }
+}
+
+fn parse_surface_base_state(value: Option<&str>) -> Option<ExternalToolSurfaceBaseState> {
+    match value {
+        Some("Absent") | None => Some(ExternalToolSurfaceBaseState::Absent),
+        Some("Active") => Some(ExternalToolSurfaceBaseState::Active),
+        Some("Removing") => Some(ExternalToolSurfaceBaseState::Removing),
+        Some("Removed") => Some(ExternalToolSurfaceBaseState::Removed),
+        Some(_) => None,
+    }
+}
+
+fn parse_surface_pending_op(value: Option<&str>) -> Option<ExternalToolSurfacePendingOp> {
+    match value {
+        Some("None") | None => Some(ExternalToolSurfacePendingOp::None),
+        Some("Add") => Some(ExternalToolSurfacePendingOp::Add),
+        Some("Reload") => Some(ExternalToolSurfacePendingOp::Reload),
+        Some(_) => None,
+    }
+}
+
+fn parse_surface_staged_op(value: Option<&str>) -> Option<ExternalToolSurfaceStagedOp> {
+    match value {
+        Some("None") | None => Some(ExternalToolSurfaceStagedOp::None),
+        Some("Add") => Some(ExternalToolSurfaceStagedOp::Add),
+        Some("Remove") => Some(ExternalToolSurfaceStagedOp::Remove),
+        Some("Reload") => Some(ExternalToolSurfaceStagedOp::Reload),
+        Some(_) => None,
+    }
+}
+
+fn parse_surface_delta_operation(value: Option<&str>) -> Option<ExternalToolSurfaceDeltaOperation> {
+    match value {
+        Some("None") | None => Some(ExternalToolSurfaceDeltaOperation::None),
+        Some("Add") => Some(ExternalToolSurfaceDeltaOperation::Add),
+        Some("Remove") => Some(ExternalToolSurfaceDeltaOperation::Remove),
+        Some("Reload") => Some(ExternalToolSurfaceDeltaOperation::Reload),
+        Some(_) => None,
+    }
+}
+
+fn parse_surface_delta_phase(value: Option<&str>) -> Option<ExternalToolSurfaceDeltaPhase> {
+    match value {
+        Some("None") | None => Some(ExternalToolSurfaceDeltaPhase::None),
+        Some("Pending") => Some(ExternalToolSurfaceDeltaPhase::Pending),
+        Some("Applied") => Some(ExternalToolSurfaceDeltaPhase::Applied),
+        Some("Draining") => Some(ExternalToolSurfaceDeltaPhase::Draining),
+        Some("Failed") => Some(ExternalToolSurfaceDeltaPhase::Failed),
+        Some("Forced") => Some(ExternalToolSurfaceDeltaPhase::Forced),
+        Some(_) => None,
+    }
+}
+
+fn runtime_execution_snapshot(
+    handle: &dyn crate::TurnStateHandle,
+    active_run_id: Option<crate::lifecycle::RunId>,
+    applied_cursor: crate::completion_feed::CompletionSeq,
+) -> Option<crate::AgentExecutionSnapshot> {
+    let snapshot = handle.snapshot();
+    let turn_phase = parse_turn_phase(&snapshot.turn_phase)?;
+    let primitive_kind = parse_primitive_kind(snapshot.primitive_kind.as_deref())?;
+    let terminal_outcome = parse_terminal_outcome(snapshot.terminal_outcome.as_deref())?;
+    let pending_operation_ids = if snapshot.pending_op_refs.is_empty() {
+        None
+    } else {
+        Some(
+            snapshot
+                .pending_op_refs
+                .iter()
+                .map(|id| parse_operation_id(id))
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let barrier_operation_ids = snapshot
+        .barrier_operation_ids
+        .iter()
+        .map(|id| parse_operation_id(id))
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(crate::AgentExecutionSnapshot {
+        loop_state: turn_phase.to_loop_state(),
+        turn_phase,
+        active_run_id,
+        primitive_kind,
+        admitted_content_shape: snapshot.admitted_content_shape.map(ContentShape),
+        vision_enabled: snapshot.vision_enabled,
+        image_tool_results_enabled: snapshot.image_tool_results_enabled,
+        tool_calls_pending: u32::try_from(snapshot.tool_calls_pending).ok()?,
+        pending_operation_ids,
+        barrier_operation_ids,
+        has_barrier_ops: snapshot.has_barrier_ops,
+        barrier_satisfied: snapshot.barrier_satisfied,
+        boundary_count: u32::try_from(snapshot.boundary_count).ok()?,
+        cancel_after_boundary: snapshot.cancel_after_boundary,
+        terminal_outcome,
+        extraction_attempts: u32::try_from(snapshot.extraction_attempts).ok()?,
+        max_extraction_retries: u32::try_from(snapshot.max_extraction_retries).ok()?,
+        applied_cursor,
+    })
+}
+
+fn runtime_external_tool_surface_snapshot(
+    handle: &dyn crate::ExternalToolSurfaceHandle,
+) -> Option<ExternalToolSurfaceSnapshot> {
+    let snapshot = handle.diagnostic_snapshot();
+    let phase = parse_surface_phase(&snapshot.surface_phase)?;
+    let visible_surfaces = snapshot.visible_surfaces;
+    let snapshot_epoch = snapshot.snapshot_epoch;
+    let snapshot_aligned_epoch = snapshot.snapshot_aligned_epoch;
+    let mut entries = Vec::with_capacity(snapshot.entries.len());
+    for entry in snapshot.entries {
+        entries.push(ExternalToolSurfaceEntrySnapshot {
+            visible: visible_surfaces.contains(&entry.surface_id),
+            surface_id: entry.surface_id,
+            base_state: parse_surface_base_state(entry.base_state.as_deref())?,
+            has_removal_timing: entry.removal_draining_since_ms.is_some()
+                || entry.removal_timeout_at_ms.is_some()
+                || entry.removal_applied_at_turn.is_some(),
+            pending_op: parse_surface_pending_op(entry.pending_op.as_deref())?,
+            staged_op: parse_surface_staged_op(entry.staged_op.as_deref())?,
+            staged_intent_sequence: entry.staged_intent_sequence.unwrap_or(0),
+            pending_task_sequence: entry.pending_task_sequence.unwrap_or(0),
+            pending_lineage_sequence: entry.pending_lineage_sequence.unwrap_or(0),
+            inflight_call_count: entry.inflight_calls,
+            last_delta_operation: parse_surface_delta_operation(
+                entry.last_delta_operation.as_deref(),
+            )?,
+            last_delta_phase: parse_surface_delta_phase(entry.last_delta_phase.as_deref())?,
+        });
+    }
+    Some(ExternalToolSurfaceSnapshot {
+        phase,
+        snapshot_epoch,
+        snapshot_aligned_epoch,
+        entries,
+    })
+}
 
 /// Minimal runner interface for an Agent.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -250,32 +454,45 @@ where
 
     /// Snapshot the agent's live execution state for diagnostics and mapping.
     pub fn execution_snapshot(&self) -> crate::AgentExecutionSnapshot {
+        if let Some(handle) = self.turn_state_handle.as_deref() {
+            if let Some(snapshot) = runtime_execution_snapshot(
+                handle,
+                self.turn_state.active_run().cloned(),
+                self.applied_cursor,
+            ) {
+                return snapshot;
+            }
+            tracing::warn!(
+                "failed to convert runtime turn-state snapshot; falling back to standalone core snapshot"
+            );
+        }
+
         crate::AgentExecutionSnapshot {
             loop_state: self.state.clone(),
-            turn_phase: self.turn_authority.phase(),
-            active_run_id: self.turn_authority.active_run().cloned(),
-            primitive_kind: self.turn_authority.primitive_kind(),
-            admitted_content_shape: self.turn_authority.admitted_content_shape().cloned(),
-            vision_enabled: self.turn_authority.vision_enabled(),
-            image_tool_results_enabled: self.turn_authority.image_tool_results_enabled(),
-            tool_calls_pending: self.turn_authority.tool_calls_pending(),
+            turn_phase: self.turn_state.phase(),
+            active_run_id: self.turn_state.active_run().cloned(),
+            primitive_kind: self.turn_state.primitive_kind(),
+            admitted_content_shape: self.turn_state.admitted_content_shape().cloned(),
+            vision_enabled: self.turn_state.vision_enabled(),
+            image_tool_results_enabled: self.turn_state.image_tool_results_enabled(),
+            tool_calls_pending: self.turn_state.tool_calls_pending(),
             pending_operation_ids: self
-                .turn_authority
+                .turn_state
                 .pending_op_ids()
                 .map(|ids| ids.into_iter().cloned().collect()),
             barrier_operation_ids: self
-                .turn_authority
+                .turn_state
                 .barrier_op_ids()
                 .into_iter()
                 .cloned()
                 .collect(),
-            has_barrier_ops: self.turn_authority.has_barrier_ops(),
-            barrier_satisfied: self.turn_authority.barrier_satisfied(),
-            boundary_count: self.turn_authority.boundary_count(),
-            cancel_after_boundary: self.turn_authority.cancel_after_boundary(),
-            terminal_outcome: self.turn_authority.terminal_outcome(),
-            extraction_attempts: self.turn_authority.extraction_attempts(),
-            max_extraction_retries: self.turn_authority.max_extraction_retries(),
+            has_barrier_ops: self.turn_state.has_barrier_ops(),
+            barrier_satisfied: self.turn_state.barrier_satisfied(),
+            boundary_count: self.turn_state.boundary_count(),
+            cancel_after_boundary: self.turn_state.cancel_after_boundary(),
+            terminal_outcome: self.turn_state.terminal_outcome(),
+            extraction_attempts: self.turn_state.extraction_attempts(),
+            max_extraction_retries: self.turn_state.max_extraction_retries(),
             applied_cursor: self.applied_cursor,
         }
     }
@@ -287,6 +504,14 @@ where
 
     /// Snapshot the live external tool-surface state, if supported by the dispatcher chain.
     pub fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
+        if let Some(handle) = self.external_tool_surface_handle.as_deref() {
+            if let Some(snapshot) = runtime_external_tool_surface_snapshot(handle) {
+                return Some(snapshot);
+            }
+            tracing::warn!(
+                "failed to convert runtime external-tool-surface snapshot; falling back to dispatcher snapshot"
+            );
+        }
         self.tools.external_tool_surface_snapshot()
     }
 
@@ -680,7 +905,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
+        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -769,7 +994,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
-        self.turn_authority = crate::turn_execution_authority::TurnExecutionAuthority::new();
+        self.turn_state = super::turn_state::LocalTurnExecutionState::new();
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -804,17 +1029,16 @@ where
 
     /// Cancel the current run
     pub fn cancel(&mut self) {
-        use crate::turn_execution_authority::{TurnExecutionInput, TurnExecutionMutator};
+        use crate::turn_execution_authority::TurnExecutionInput;
 
-        // Route through the authority whenever cancellation is requested.
-        let input = if let Some(run_id) = self.turn_authority.active_run().cloned() {
+        // Route through the shared turn-input path so runtime-backed turn
+        // state stays aligned with the standalone local fallback.
+        let input = if let Some(run_id) = self.turn_state.active_run().cloned() {
             TurnExecutionInput::CancelNow { run_id }
         } else {
             TurnExecutionInput::ForceCancelNoRun
         };
-        if let Ok(transition) = self.turn_authority.apply(input) {
-            self.state = transition.next_phase.to_loop_state();
-        }
+        let _ = self.apply_turn_input(input);
     }
 
     /// Consume canonical pending `skill_references` staged by the surface and

@@ -16,8 +16,7 @@ use crate::state::LoopState;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionMutator,
-    TurnExecutionTransition,
+    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
@@ -69,6 +68,24 @@ fn hidden_deferred_catalog_names(
         .map(|entry| entry.tool.name.clone())
         .filter(|name| !visible_names.contains(name))
         .collect()
+}
+
+fn turn_terminal_outcome_label(
+    outcome: crate::turn_execution_authority::TurnTerminalOutcome,
+) -> &'static str {
+    match outcome {
+        crate::turn_execution_authority::TurnTerminalOutcome::None => "None",
+        crate::turn_execution_authority::TurnTerminalOutcome::Completed => "Completed",
+        crate::turn_execution_authority::TurnTerminalOutcome::Failed => "Failed",
+        crate::turn_execution_authority::TurnTerminalOutcome::Cancelled => "Cancelled",
+        crate::turn_execution_authority::TurnTerminalOutcome::BudgetExhausted => "BudgetExhausted",
+        crate::turn_execution_authority::TurnTerminalOutcome::TimeBudgetExceeded => {
+            "TimeBudgetExceeded"
+        }
+        crate::turn_execution_authority::TurnTerminalOutcome::StructuredOutputValidationFailed => {
+            "StructuredOutputValidationFailed"
+        }
+    }
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -292,19 +309,141 @@ where
         Ok(())
     }
 
-    /// Apply a typed input to the turn-execution authority and sync the
-    /// observable `LoopState` from the resulting canonical phase.
-    fn apply_turn_input(
+    /// Apply a typed input to the runtime-backed turn state when available,
+    /// then mirror through the standalone local fallback and observable
+    /// `LoopState`.
+    fn apply_turn_input_via_runtime_handle(
+        &self,
+        input: &TurnExecutionInput,
+    ) -> Result<(), AgentError> {
+        let Some(handle) = self.turn_state_handle.as_deref() else {
+            return Ok(());
+        };
+
+        let result = match input {
+            // Runtime Start* inputs absorb primitive details that the
+            // standalone fallback receives later via PrimitiveApplied, so defer the
+            // runtime mutation until PrimitiveApplied carries the full payload.
+            TurnExecutionInput::StartConversationRun { .. }
+            | TurnExecutionInput::StartImmediateAppend { .. }
+            | TurnExecutionInput::StartImmediateContext { .. } => {
+                return Ok(());
+            }
+            TurnExecutionInput::PrimitiveApplied {
+                run_id,
+                admitted_content_shape,
+                vision_enabled,
+                image_tool_results_enabled,
+            } => match self.turn_state.primitive_kind() {
+                crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn => handle
+                    .start_conversation_run(
+                        run_id.clone(),
+                        "ConversationTurn".to_string(),
+                        admitted_content_shape.0.clone(),
+                        *vision_enabled,
+                        *image_tool_results_enabled,
+                        if self.config.output_schema.is_some() {
+                            u64::from(self.config.structured_output_retries)
+                        } else {
+                            0
+                        },
+                    )
+                    .and_then(|()| handle.primitive_applied()),
+                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateAppend => handle
+                    .start_immediate_append(run_id.clone(), admitted_content_shape.0.clone())
+                    .and_then(|()| handle.primitive_applied()),
+                crate::turn_execution_authority::TurnPrimitiveKind::ImmediateContextAppend => {
+                    handle
+                        .start_immediate_context(run_id.clone(), admitted_content_shape.0.clone())
+                        .and_then(|()| handle.primitive_applied())
+                }
+                crate::turn_execution_authority::TurnPrimitiveKind::None => return Ok(()),
+            },
+            TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
+                handle.llm_returned_tool_calls(u64::from(*tool_count))
+            }
+            TurnExecutionInput::LlmReturnedTerminal { .. } => handle.llm_returned_terminal(),
+            TurnExecutionInput::RegisterPendingOps {
+                op_refs,
+                barrier_operation_ids,
+                ..
+            } => handle.register_pending_ops(
+                op_refs
+                    .iter()
+                    .map(|op| op.operation_id.to_string())
+                    .collect(),
+                barrier_operation_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            ),
+            TurnExecutionInput::ToolCallsResolved { .. } => handle.tool_calls_resolved(),
+            TurnExecutionInput::OpsBarrierSatisfied { operation_ids, .. } => handle
+                .ops_barrier_satisfied(operation_ids.iter().map(ToString::to_string).collect()),
+            TurnExecutionInput::BoundaryContinue { .. } => handle.boundary_continue(),
+            TurnExecutionInput::BoundaryComplete { .. } => handle.boundary_complete(),
+            TurnExecutionInput::RecoverableFailure { .. } => {
+                handle.recoverable_failure("recoverable_failure".to_string())
+            }
+            TurnExecutionInput::FatalFailure { .. } => handle.fatal_failure(
+                self.pending_fatal_diagnostic
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "fatal_failure".to_string()),
+            ),
+            TurnExecutionInput::RetryRequested { .. } => handle.retry_requested(),
+            TurnExecutionInput::CancelNow { .. } => handle.cancel_now(),
+            TurnExecutionInput::CancelAfterBoundary { .. } => {
+                handle.request_cancel_after_boundary()
+            }
+            TurnExecutionInput::CancellationObserved { .. } => handle.cancellation_observed(),
+            TurnExecutionInput::AcknowledgeTerminal { .. } => handle.acknowledge_terminal(
+                turn_terminal_outcome_label(self.turn_state.terminal_outcome()).to_string(),
+            ),
+            TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
+            TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
+            TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
+            TurnExecutionInput::EnterExtraction { .. } => handle.enter_extraction(),
+            TurnExecutionInput::ExtractionValidationPassed { .. } => {
+                handle.extraction_validation_passed()
+            }
+            TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
+                handle.extraction_validation_failed(error.clone())
+            }
+            TurnExecutionInput::ExtractionStart { .. } => handle.extraction_start(),
+            TurnExecutionInput::ForceCancelNoRun => handle.force_cancel_no_run(),
+        };
+
+        result.map_err(|err| {
+            AgentError::InternalError(format!(
+                "runtime turn-state handle rejected {input:?}: {err}"
+            ))
+        })
+    }
+
+    pub(super) fn apply_turn_input(
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
-        let transition = self.turn_authority.apply(input)?;
+        let runtime_backed = self.turn_state_handle.is_some() && self.turn_state.can_accept(&input);
+        if runtime_backed {
+            self.apply_turn_input_via_runtime_handle(&input)?;
+        }
+        let transition = self.turn_state.apply(input.clone()).map_err(|err| {
+            if runtime_backed {
+                AgentError::InternalError(format!(
+                    "standalone turn-state shadow diverged after runtime accepted {input:?}: {err}"
+                ))
+            } else {
+                err
+            }
+        })?;
         self.state = transition.next_phase.to_loop_state();
         Ok(transition)
     }
 
     /// Execute side effects from a transition. Handles CheckCompaction
-    /// effects that the authority emits on CallingLlm entry.
+    /// effects emitted on CallingLlm entry.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
@@ -391,14 +530,12 @@ where
             return Ok(());
         }
 
-        if self.turn_authority.active_run() != Some(run_id)
-            || self.turn_authority.cancel_after_boundary()
-        {
+        if self.turn_state.active_run() != Some(run_id) || self.turn_state.cancel_after_boundary() {
             return Ok(());
         }
 
         use crate::turn_execution_authority::TurnPhase;
-        match self.turn_authority.phase() {
+        match self.turn_state.phase() {
             TurnPhase::ApplyingPrimitive
             | TurnPhase::CallingLlm
             | TurnPhase::WaitingForOps
@@ -959,7 +1096,7 @@ where
                     }
 
                     // In extraction mode, override tools/temperature/params
-                    let in_extraction = self.turn_authority.in_extraction_flow();
+                    let in_extraction = self.turn_state.in_extraction_flow();
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
@@ -1463,7 +1600,7 @@ where
                             has_barrier_ops,
                         })?;
 
-                        if self.turn_authority.has_barrier_ops() {
+                        if self.turn_state.has_barrier_ops() {
                             // Stay in WaitingForOps — the outer match arm will
                             // await completion of barrier ops via wait-set.
                             continue;
@@ -1480,7 +1617,7 @@ where
                         })?;
                         self.execute_turn_effects(&t, turn_count, &event_tx).await;
                         turn_count += 1;
-                    } else if self.turn_authority.in_extraction_flow() {
+                    } else if self.turn_state.in_extraction_flow() {
                         // Extraction turn response — validate against schema
                         self.session.push(Message::BlockAssistant(assistant_msg));
 
@@ -1565,7 +1702,7 @@ where
                                 },
                             )?;
 
-                            if !self.turn_authority.phase().is_terminal() {
+                            if !self.turn_state.phase().is_terminal() {
                                 // Authority decided to retry — push retry prompt
                                 let retry_prompt = format!(
                                     "The previous output was invalid: {error}. \
@@ -1584,7 +1721,7 @@ where
                                 tracing::warn!("Failed to save session: {}", e);
                             }
                             return Err(AgentError::StructuredOutputValidationFailed {
-                                attempts: self.turn_authority.extraction_attempts(),
+                                attempts: self.turn_state.extraction_attempts(),
                                 reason: error,
                                 last_output: self.session.last_assistant_text().unwrap_or_default(),
                             });
@@ -1625,7 +1762,7 @@ where
 
                         // Check if we need to perform extraction turn for structured output
                         if let Some(output_schema) = self.config.output_schema.as_ref()
-                            && !self.turn_authority.in_extraction_flow()
+                            && !self.turn_state.in_extraction_flow()
                         {
                             // Enter extraction mode via authority
                             self.extraction_result = None;
@@ -1688,12 +1825,12 @@ where
                     // Await completion of all pending barrier operations via
                     // the machine-owned turn-local wait-set. Only barrier ops
                     // block the turn; detached ops run independently.
-                    if self.turn_authority.pending_op_refs().is_none() {
+                    if self.turn_state.pending_op_refs().is_none() {
                         return Err(AgentError::InternalError(
                             "WaitingForOps entered without registered pending_op_refs".to_string(),
                         ));
                     }
-                    let barrier_ids = self.turn_authority.barrier_op_ids();
+                    let barrier_ids = self.turn_state.barrier_op_ids();
                     if !barrier_ids.is_empty() {
                         let owned_ids: Vec<crate::ops::OperationId> =
                             barrier_ids.iter().map(|id| (*id).clone()).collect();
@@ -1708,18 +1845,15 @@ where
                                 "barrier ops registered without ops_lifecycle registry".to_string(),
                             ));
                         };
-                        // Feed OpsBarrierSatisfied through the generated protocol
-                        // helper using the authority-derived obligation token.
-                        use crate::generated::protocol_ops_barrier_satisfaction::{
-                            accept_wait_all_satisfied, submit_ops_barrier_satisfied,
-                        };
+                        // Feed OpsBarrierSatisfied through the shared turn-input
+                        // path so the runtime handle remains the primary writer
+                        // when present.
+                        use crate::generated::protocol_ops_barrier_satisfaction::accept_wait_all_satisfied;
                         let obligation = accept_wait_all_satisfied(wait_result.satisfied);
-                        let transition = submit_ops_barrier_satisfied(
-                            &mut self.turn_authority,
-                            obligation,
-                            run_id.clone(),
-                        )?;
-                        self.state = transition.next_phase.to_loop_state();
+                        self.apply_turn_input(TurnExecutionInput::OpsBarrierSatisfied {
+                            run_id: run_id.clone(),
+                            operation_ids: obligation.operation_ids,
+                        })?;
                     }
                     self.observe_cancel_after_boundary_request(&run_id)?;
                     self.apply_turn_input(TurnExecutionInput::ToolCallsResolved {
@@ -1765,7 +1899,7 @@ where
     async fn build_result(&mut self, turns: u32, tool_calls: u32) -> Result<RunResult, AgentError> {
         use crate::generated::terminal_surface_mapping::{SurfaceResultClass, classify_terminal};
 
-        let outcome = self.turn_authority.terminal_outcome();
+        let outcome = self.turn_state.terminal_outcome();
         let classification = classify_terminal(&outcome);
 
         match classification {

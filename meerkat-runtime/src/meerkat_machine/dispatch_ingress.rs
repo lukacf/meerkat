@@ -96,8 +96,8 @@ impl MeerkatMachine {
                         AcceptOutcome::Accepted { input_id, .. } => {
                             let is_terminal = driver
                                 .as_driver()
-                                .input_state(input_id)
-                                .map(|state| state.current_state().is_terminal())
+                                .input_phase(input_id)
+                                .map(|phase| phase.is_terminal())
                                 .unwrap_or(true);
                             let handle = if is_terminal {
                                 None
@@ -110,9 +110,10 @@ impl MeerkatMachine {
                             (result, signal, handle)
                         }
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
-                            let existing_state = driver.as_driver().input_state(existing_id);
-                            let is_terminal = existing_state
-                                .map(|s| s.current_state().is_terminal())
+                            let is_terminal = driver
+                                .as_driver()
+                                .input_phase(existing_id)
+                                .map(|phase| phase.is_terminal())
                                 .unwrap_or(true);
 
                             if is_terminal {
@@ -148,8 +149,8 @@ impl MeerkatMachine {
                         AcceptOutcome::Accepted { input_id, .. } => {
                             let drv = driver.lock().await;
                             drv.as_driver()
-                                .input_state(input_id)
-                                .map(|s| s.current_state().is_terminal())
+                                .input_phase(input_id)
+                                .map(|phase| phase.is_terminal())
                                 .unwrap_or(true)
                         }
                         _ => false,
@@ -296,8 +297,8 @@ impl MeerkatMachine {
                         AcceptOutcome::Accepted { input_id, .. } => {
                             let drv = driver.lock().await;
                             drv.as_driver()
-                                .input_state(input_id)
-                                .map(|s| s.current_state().is_terminal())
+                                .input_phase(input_id)
+                                .map(|phase| phase.is_terminal())
                                 .unwrap_or(true)
                         }
                         _ => false,
@@ -549,6 +550,9 @@ impl MeerkatMachine {
                     crate::meerkat_machine::dsl::MeerkatMachineInput::StageForRun {
                         input_id: prepared.input_id.to_string(),
                         run_id: prepared.run_id.to_string(),
+                    },
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::IncrementAttemptCount {
+                        input_id: prepared.input_id.to_string(),
                     },
                 ] {
                     if let Err(err) = self

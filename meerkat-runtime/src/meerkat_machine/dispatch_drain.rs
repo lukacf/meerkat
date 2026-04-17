@@ -99,8 +99,7 @@ impl MeerkatMachine {
                     slots
                         .iter()
                         .filter(|(_, slot)| {
-                            slot.phase
-                                == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
+                            slot.phase == crate::meerkat_machine::CommsDrainPhase::Running
                         })
                         .map(|(sid, _)| sid.clone())
                         .collect()
@@ -126,10 +125,7 @@ impl MeerkatMachine {
                     let slots = self.comms_drain_slots.read().await;
                     slots
                         .get(&session_id)
-                        .map(|s| {
-                            s.phase
-                                == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
-                        })
+                        .map(|s| s.phase == crate::meerkat_machine::CommsDrainPhase::Running)
                         .unwrap_or(false)
                 };
                 if drain_is_running {
@@ -159,16 +155,13 @@ impl MeerkatMachine {
                 }
                 let mut slots = self.comms_drain_slots.write().await;
                 if let Some(slot) = slots.get_mut(&session_id)
-                    && slot.phase
-                        == meerkat_core::comms_drain_lifecycle_authority::CommsDrainPhase::Running
+                    && slot.phase == crate::meerkat_machine::CommsDrainPhase::Running
                 {
                     // Stage DSL DrainExitedClean for safety net before
                     // mutating the slot. Determine respawnable based on
                     // mode + Failed reason (safety net always uses Failed).
-                    let is_respawnable = slot.mode
-                        == Some(
-                            meerkat_core::comms_drain_lifecycle_authority::CommsDrainMode::PersistentHost,
-                        );
+                    let is_respawnable =
+                        slot.mode == Some(crate::meerkat_machine::CommsDrainMode::PersistentHost);
                     drop(slots);
                     {
                         let dsl_input = if is_respawnable {
@@ -207,7 +200,7 @@ impl MeerkatMachine {
                     let mut slots = self.comms_drain_slots.write().await;
                     if let Some(slot) = slots.get_mut(&session_id) {
                         slot.mark_task_exit_if_running_for_safety(
-                            meerkat_core::comms_drain_lifecycle_authority::DrainExitReason::Failed,
+                            crate::meerkat_machine::DrainExitReason::Failed,
                         );
                     }
                 }

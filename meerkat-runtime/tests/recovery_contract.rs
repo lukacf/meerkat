@@ -15,7 +15,9 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PromptInput,
 };
-use meerkat_runtime::input_state::{InputLifecycleState, InputState, InputTerminalOutcome};
+use meerkat_runtime::input_state::{
+    InputLifecycleState, InputState, InputStateSeed, InputTerminalOutcome, StoredInputState,
+};
 use meerkat_runtime::runtime_state::RuntimeState;
 use meerkat_runtime::store::{InMemoryRuntimeStore, RuntimeStore, SessionDelta};
 use meerkat_runtime::traits::RuntimeDriver;
@@ -101,20 +103,31 @@ fn make_receipt(
     }
 }
 
-fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> InputState {
-    use meerkat_runtime::input_state::InputLifecycleState;
+fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> StoredInputState {
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
-    // by setting the plain shell fields directly. The recovery path
-    // normalises these to a recovered phase based on the persisted
-    // boundary receipt; the history chain is not material to recovery.
-    state.phase = InputLifecycleState::AppliedPendingConsumption;
-    state.last_run_id = Some(run_id.clone());
-    state.last_boundary_sequence = Some(sequence);
+    // by seeding the DSL-owned phase + run association alongside the shell.
+    // The recovery path normalises these to a recovered phase based on the
+    // persisted boundary receipt; the history chain is not material to
+    // recovery.
     state.attempt_count = 1;
-    state
+    StoredInputState {
+        state,
+        seed: InputStateSeed {
+            phase: InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(sequence),
+        },
+    }
+}
+
+fn fresh_stored(input_id: InputId) -> StoredInputState {
+    StoredInputState {
+        state: InputState::new_accepted(input_id),
+        seed: InputStateSeed::new_accepted(),
+    }
 }
 
 fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
@@ -160,8 +173,8 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
                 RunApplyBoundary::RunStart,
                 vec![first_id.clone(), second_id.clone()],
                 vec![
-                    InputState::new_accepted(first_id.clone()),
-                    InputState::new_accepted(second_id.clone()),
+                    fresh_stored(first_id.clone()),
+                    fresh_stored(second_id.clone()),
                 ],
             )
             .await
@@ -214,25 +227,25 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
             .unwrap()
             .unwrap();
         assert_eq!(
-            first_state.last_run_id().cloned(),
+            first_state.seed.last_run_id,
             Some(run_id.clone()),
             "{}: first contributor should record the authoritative run id",
             harness.name
         );
         assert_eq!(
-            first_state.last_boundary_sequence(),
+            first_state.seed.last_boundary_sequence,
             Some(0),
             "{}: first contributor should record the authoritative boundary sequence",
             harness.name
         );
         assert_eq!(
-            second_state.last_run_id().cloned(),
+            second_state.seed.last_run_id,
             Some(run_id.clone()),
             "{}: second contributor should record the authoritative run id",
             harness.name
         );
         assert_eq!(
-            second_state.last_boundary_sequence(),
+            second_state.seed.last_boundary_sequence,
             Some(0),
             "{}: second contributor should record the authoritative boundary sequence",
             harness.name
@@ -248,7 +261,7 @@ async fn recovery_store_contract_commits_authoritative_receipts_across_supported
                 run_id.clone(),
                 RunApplyBoundary::Immediate,
                 vec![second_id.clone()],
-                vec![InputState::new_accepted(second_id.clone())],
+                vec![fresh_stored(second_id.clone())],
             )
             .await
             .unwrap();
@@ -303,10 +316,14 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
         );
 
         for input_id in [&first_id, &second_id] {
-            let state = driver.input_state(input_id).unwrap();
+            assert!(
+                driver.input_state(input_id).is_some(),
+                "{}: driver should expose recovered input state",
+                harness.name
+            );
             assert_eq!(
-                state.current_state(),
-                InputLifecycleState::Queued,
+                driver.inner_ref().input_phase(input_id),
+                Some(InputLifecycleState::Queued),
                 "{}: missing receipts should roll applied contributors back to queued",
                 harness.name
             );
@@ -317,7 +334,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                stored.current_state(),
+                stored.seed.phase,
                 InputLifecycleState::Queued,
                 "{}: recovered replay state should be persisted back to the store",
                 harness.name
@@ -449,8 +466,8 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
         for input_id in [&first_id, &second_id] {
             let recovered = driver.input_state(input_id).unwrap();
             assert_eq!(
-                recovered.current_state(),
-                InputLifecycleState::Consumed,
+                driver.inner_ref().input_phase(input_id),
+                Some(InputLifecycleState::Consumed),
                 "{}: committed contributors should recover as consumed",
                 harness.name
             );
@@ -468,7 +485,7 @@ async fn recovery_persistent_driver_contract_consumes_committed_boundary_contrib
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                stored.current_state(),
+                stored.seed.phase,
                 InputLifecycleState::Consumed,
                 "{}: consumed recovery state should be persisted back to the store",
                 harness.name
@@ -540,10 +557,13 @@ async fn recovery_ephemeral_driver_contract_keeps_applied_boundary_inputs_out_of
     );
 
     for input_id in [&first_id, &second_id] {
-        let state = driver.input_state(input_id).unwrap();
+        assert!(
+            driver.input_state(input_id).is_some(),
+            "ephemeral recovery should keep contributors visible"
+        );
         assert_eq!(
-            state.current_state(),
-            InputLifecycleState::AppliedPendingConsumption,
+            driver.input_phase(input_id),
+            Some(InputLifecycleState::AppliedPendingConsumption),
             "ephemeral recovery should not replay already-applied contributors"
         );
     }

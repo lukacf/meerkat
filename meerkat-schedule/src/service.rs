@@ -1,5 +1,5 @@
-use crate::authority::{ScheduleLifecycleAuthority, ScheduleLifecycleInput};
 use crate::error::{ScheduleDomainError, ScheduleStoreError};
+use crate::lifecycle::ScheduleLifecycleInput;
 use crate::store::{OccurrenceFilter, PendingSupersession, ScheduleFilter, ScheduleStore};
 use crate::trigger::occurrences_for_horizon;
 use crate::types::{
@@ -19,7 +19,6 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 pub struct ScheduleService {
     store: Arc<dyn ScheduleStore>,
-    schedule_authority: Arc<ScheduleLifecycleAuthority>,
     planning_lock: Arc<Mutex<()>>,
 }
 
@@ -27,7 +26,6 @@ impl ScheduleService {
     pub fn new(store: Arc<dyn ScheduleStore>) -> Self {
         Self {
             store,
-            schedule_authority: Arc::new(ScheduleLifecycleAuthority),
             planning_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -41,9 +39,7 @@ impl ScheduleService {
         request: CreateScheduleRequest,
     ) -> Result<Schedule, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
-        let mut mutator = self
-            .schedule_authority
-            .apply(None, ScheduleLifecycleInput::Create(request))
+        let mut mutator = Schedule::apply(None, ScheduleLifecycleInput::Create(request))
             .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
         let planned = self
@@ -89,10 +85,9 @@ impl ScheduleService {
     ) -> Result<Schedule, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
-        let mut mutator = self
-            .schedule_authority
-            .apply(Some(current), ScheduleLifecycleInput::Update(request))
-            .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        let mut mutator =
+            Schedule::apply(Some(current), ScheduleLifecycleInput::Update(request))
+                .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
 
         let planned = self
@@ -114,15 +109,13 @@ impl ScheduleService {
     pub async fn pause(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
-        let mutator = self
-            .schedule_authority
-            .apply(
-                Some(current),
-                ScheduleLifecycleInput::Pause {
-                    at_utc: self.store.get_store_time_utc().await?,
-                },
-            )
-            .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        let mutator = Schedule::apply(
+            Some(current),
+            ScheduleLifecycleInput::Pause {
+                at_utc: self.store.get_store_time_utc().await?,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         self.store.put_schedule(mutator.schedule.clone()).await?;
         Ok(mutator.schedule)
     }
@@ -130,15 +123,13 @@ impl ScheduleService {
     pub async fn resume(&self, schedule_id: &ScheduleId) -> Result<Schedule, ScheduleDomainError> {
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
-        let mut mutator = self
-            .schedule_authority
-            .apply(
-                Some(current),
-                ScheduleLifecycleInput::Resume {
-                    at_utc: self.store.get_store_time_utc().await?,
-                },
-            )
-            .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        let mut mutator = Schedule::apply(
+            Some(current),
+            ScheduleLifecycleInput::Resume {
+                at_utc: self.store.get_store_time_utc().await?,
+            },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let store_now = self.store.get_store_time_utc().await?;
         let planned = self
             .plan_schedule_occurrences(&mut mutator.schedule, store_now)
@@ -153,13 +144,11 @@ impl ScheduleService {
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
         let store_now = self.store.get_store_time_utc().await?;
-        let mutator = self
-            .schedule_authority
-            .apply(
-                Some(current),
-                ScheduleLifecycleInput::Delete { at_utc: store_now },
-            )
-            .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
+        let mutator = Schedule::apply(
+            Some(current),
+            ScheduleLifecycleInput::Delete { at_utc: store_now },
+        )
+        .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
         let deleted = mutator.schedule.clone();
         self.store
             .commit_schedule_mutation(
@@ -361,16 +350,14 @@ impl ScheduleService {
             else {
                 return Ok(planned);
             };
-            let mutator = self
-                .schedule_authority
-                .apply(
-                    Some(schedule.clone()),
-                    ScheduleLifecycleInput::RecordPlanningWindow {
-                        planning_cursor_utc,
-                        next_occurrence_ordinal: schedule.next_occurrence_ordinal,
-                    },
-                )
-                .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+            let mutator = Schedule::apply(
+                Some(schedule.clone()),
+                ScheduleLifecycleInput::RecordPlanningWindow {
+                    planning_cursor_utc,
+                    next_occurrence_ordinal: schedule.next_occurrence_ordinal,
+                },
+            )
+            .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
             *schedule = mutator.schedule;
             schedule.touch();
         }

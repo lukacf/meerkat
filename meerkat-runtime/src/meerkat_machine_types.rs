@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use indexmap::IndexSet;
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
-use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
@@ -22,7 +22,6 @@ use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OperationLifecycleSnapshot;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
-use meerkat_core::{CommsDrainMode, CommsDrainPhase};
 use meerkat_machine_derive::CommandManifest;
 use serde::{Deserialize, Serialize};
 
@@ -31,8 +30,8 @@ use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::{ContentShape, RequestId, ReservationKey};
 use crate::input::Input;
 use crate::input_state::InputLifecycleState;
-use crate::input_state::InputState;
 use crate::input_state::InputTerminalOutcome;
+use crate::input_state::StoredInputState;
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
@@ -330,7 +329,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     Spawned(bool),
     OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
     Bindings(meerkat_core::SessionRuntimeBindings),
-    InputState(Option<InputState>),
+    InputState(Option<StoredInputState>),
     ActiveInputs(Vec<InputId>),
     LlmReconfigured(SessionLlmReconfigureReport),
     VisibilityRevision(meerkat_core::ToolScopeRevision),

@@ -107,6 +107,17 @@ impl WorkId {
     }
 }
 
+/// Kickoff lifecycle phase for a member's initial autonomous turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KickoffPhase {
+    Pending,
+    Starting,
+    CallbackPending,
+    Started,
+    Failed,
+    Cancelled,
+}
+
 // ---------------------------------------------------------------------------
 // Machine definition
 // ---------------------------------------------------------------------------
@@ -124,6 +135,13 @@ machine! {
             active_run_count: u64,
             pending_spawn_count: u64,
             coordinator_bound: bool,
+            member_kickoff_pending: Set<String>,
+            member_kickoff_starting: Set<String>,
+            member_kickoff_callback_pending: Set<String>,
+            member_kickoff_started: Set<String>,
+            member_kickoff_failed: Set<String>,
+            member_kickoff_cancelled: Set<String>,
+            member_kickoff_error: Map<String, String>,
         }
 
         init(Running) {
@@ -133,6 +151,13 @@ machine! {
             active_run_count = 0,
             pending_spawn_count = 0,
             coordinator_bound = true,
+            member_kickoff_pending = EmptySet,
+            member_kickoff_starting = EmptySet,
+            member_kickoff_callback_pending = EmptySet,
+            member_kickoff_started = EmptySet,
+            member_kickoff_failed = EmptySet,
+            member_kickoff_cancelled = EmptySet,
+            member_kickoff_error = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -184,6 +209,10 @@ machine! {
             SetSpawnPolicy,
             Shutdown,
             ForceCancel,
+            KickoffMarkPending { member_id: String },
+            KickoffMarkStarting { member_id: String },
+            KickoffResolveOutcome { member_id: String, outcome: String },
+            KickoffCancelRequested { member_id: String },
         }
 
         surface_only [
@@ -250,6 +279,9 @@ machine! {
             AdmitPeerInput,
             EmitProgressNote,
             EmitTaskNotice,
+            PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
+            PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
+            EmitKickoffLifecycleNotice { member_id: String, intent: String },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -268,6 +300,9 @@ machine! {
         disposition AdmitPeerInput => external,
         disposition EmitProgressNote => external,
         disposition EmitTaskNotice => external,
+        disposition PersistKickoffUpdate => local,
+        disposition PersistKickoffFailureUpdate => local,
+        disposition EmitKickoffLifecycleNotice => external,
 
         // =====================================================================
         // Direct transitions
@@ -296,6 +331,159 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             update {}
             to Running
+        }
+
+        transition KickoffMarkPending {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffMarkPending { member_id }
+            guard "kickoff_not_started" {
+                !self.member_kickoff_pending.contains(member_id)
+                && !self.member_kickoff_starting.contains(member_id)
+                && !self.member_kickoff_callback_pending.contains(member_id)
+                && !self.member_kickoff_started.contains(member_id)
+                && !self.member_kickoff_failed.contains(member_id)
+                && !self.member_kickoff_cancelled.contains(member_id)
+            }
+            update {
+                self.member_kickoff_pending.insert(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Pending }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Pending" }
+        }
+
+        transition KickoffMarkStarting {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffMarkStarting { member_id }
+            guard "kickoff_pending" { self.member_kickoff_pending.contains(member_id) }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.insert(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Starting }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Starting" }
+        }
+
+        transition KickoffResolveStarted {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveOutcome { member_id, outcome }
+            guard "kickoff_starting" {
+                self.member_kickoff_starting.contains(member_id)
+                && outcome == "Started"
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.insert(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Started }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Started" }
+        }
+
+        transition KickoffResolveCallbackPending {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveOutcome { member_id, outcome }
+            guard "kickoff_starting" {
+                self.member_kickoff_starting.contains(member_id)
+                && outcome == "CallbackPending"
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.insert(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::CallbackPending }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "CallbackPending" }
+        }
+
+        transition KickoffResolveFailedFromStarting {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveOutcome { member_id, outcome }
+            guard "kickoff_active_failed" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id)
+                    || self.member_kickoff_callback_pending.contains(member_id))
+                && outcome != "Started"
+                && outcome != "CallbackPending"
+                && outcome != "Cancelled"
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.insert(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.insert(member_id, outcome);
+            }
+            to Running
+            emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: outcome }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Failed" }
+        }
+
+        transition KickoffResolveCancelled {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffResolveOutcome { member_id, outcome }
+            guard "kickoff_cancelled" {
+                !self.member_kickoff_started.contains(member_id)
+                && outcome == "Cancelled"
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Cancelled" }
+        }
+
+        transition KickoffCancelRequested {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffCancelRequested { member_id }
+            guard "kickoff_cancellable" {
+                (self.member_kickoff_pending.contains(member_id)
+                    || self.member_kickoff_starting.contains(member_id)
+                    || self.member_kickoff_callback_pending.contains(member_id))
+            }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.insert(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
+            emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Cancelled" }
         }
 
         transition SubmitWorkRunningExternal {

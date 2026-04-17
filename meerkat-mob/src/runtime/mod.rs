@@ -68,7 +68,6 @@ pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
 pub(crate) mod loop_iteration_authority;
-mod mob_member_bootstrap_authority;
 mod mob_member_lifecycle_authority;
 mod mob_runtime_bridge_authority;
 mod mob_wiring_authority;

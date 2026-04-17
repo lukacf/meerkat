@@ -143,12 +143,12 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
         "runtime-backed ingress should resolve through the completion handle"
     );
 
-    let state = runtime
+    let stored = runtime
         .input_state(&sid, &input_id)
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         runtime.runtime_state(&sid).await.expect("runtime state"),
         RuntimeState::Idle
@@ -190,14 +190,14 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         "queued ingress should resolve as terminated when control-plane reset wins"
     );
 
-    let state = runtime
+    let stored = runtime
         .input_state(&sid, &input_id)
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })

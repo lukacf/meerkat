@@ -11,7 +11,7 @@ mod inner {
     use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
     use crate::identifiers::LogicalRuntimeId;
-    use crate::input_state::InputState;
+    use crate::input_state::StoredInputState;
     use crate::runtime_state::RuntimeState;
     use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
 
@@ -127,10 +127,10 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
     fn upsert_input_states(
         tx: &Transaction<'_>,
         runtime_id: &LogicalRuntimeId,
-        input_states: &[InputState],
+        input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
-        for state in input_states {
-            let state_json = serde_json::to_vec(state)
+        for bundle in input_states {
+            let state_json = serde_json::to_vec(bundle)
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             tx.execute(
                 r"
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
                 ",
                 params![
                     runtime_id_text(runtime_id),
-                    state.input_id.0.to_string(),
+                    bundle.state.input_id.0.to_string(),
                     state_json
                 ],
             )
@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             run_id: RunId,
             boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
             contributing_input_ids: Vec<InputId>,
-            input_updates: Vec<InputState>,
+            input_updates: Vec<StoredInputState>,
         ) -> Result<RunBoundaryReceipt, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -216,8 +216,9 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
                     sequence,
                 )?;
                 let mut input_updates = input_updates;
-                for state in &mut input_updates {
-                    state.stamp_receipt_metadata(receipt.run_id.clone(), receipt.sequence);
+                for bundle in &mut input_updates {
+                    bundle.seed.last_run_id = Some(receipt.run_id.clone());
+                    bundle.seed.last_boundary_sequence = Some(receipt.sequence);
                 }
 
                 write_session_snapshot_in_txn(&tx, &session_snapshot)
@@ -238,7 +239,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             runtime_id: &LogicalRuntimeId,
             session_delta: Option<SessionDelta>,
             receipt: RunBoundaryReceipt,
-            input_updates: Vec<InputState>,
+            input_updates: Vec<StoredInputState>,
             _session_store_key: Option<meerkat_core::types::SessionId>,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
@@ -276,7 +277,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
         async fn load_input_states(
             &self,
             runtime_id: &LogicalRuntimeId,
-        ) -> Result<Vec<InputState>, RuntimeStoreError> {
+        ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -367,7 +368,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
         async fn persist_input_state(
             &self,
             runtime_id: &LogicalRuntimeId,
-            state: &InputState,
+            state: &StoredInputState,
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -388,7 +389,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             &self,
             runtime_id: &LogicalRuntimeId,
             input_id: &InputId,
-        ) -> Result<Option<InputState>, RuntimeStoreError> {
+        ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
             let input_id = input_id.clone();
@@ -463,7 +464,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             &self,
             runtime_id: &LogicalRuntimeId,
             runtime_state: RuntimeState,
-            input_states: &[InputState],
+            input_states: &[StoredInputState],
         ) -> Result<(), RuntimeStoreError> {
             let path = self.path.clone();
             let runtime_id = runtime_id.clone();
@@ -544,7 +545,7 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
 
         use super::*;
         use crate::identifiers::LogicalRuntimeId;
-        use crate::input_state::InputState;
+        use crate::input_state::StoredInputState;
         use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
         use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 
@@ -559,8 +560,8 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             LogicalRuntimeId("runtime-1".to_string())
         }
 
-        fn input_state() -> InputState {
-            InputState::new_accepted(InputId::new())
+        fn input_state() -> StoredInputState {
+            StoredInputState::new_accepted(InputId::new())
         }
 
         #[tokio::test]

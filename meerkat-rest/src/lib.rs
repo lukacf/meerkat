@@ -1248,7 +1248,39 @@ async fn runtime_accept(
                 .into_response());
         }
     };
-    Ok(Json(serde_json::to_value(outcome).unwrap_or_default()))
+    Ok(Json(accept_outcome_to_json(outcome)))
+}
+
+/// Translate an in-process [`meerkat_runtime::AcceptOutcome`] into the REST
+/// JSON shape exposed at `POST /runtime/{id}/accept`.
+///
+/// `AcceptOutcome` is a domain envelope without `Serialize`; the wire-facing
+/// projection is materialized here to keep parity with prior responses.
+fn accept_outcome_to_json(outcome: meerkat_runtime::AcceptOutcome) -> Value {
+    match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted {
+            input_id, policy, ..
+        } => json!({
+            "outcome_type": "accepted",
+            "input_id": input_id.to_string(),
+            "policy": serde_json::to_value(policy).unwrap_or(Value::Null),
+        }),
+        meerkat_runtime::AcceptOutcome::Deduplicated {
+            input_id,
+            existing_id,
+        } => json!({
+            "outcome_type": "deduplicated",
+            "input_id": input_id.to_string(),
+            "existing_id": existing_id.to_string(),
+        }),
+        meerkat_runtime::AcceptOutcome::Rejected { reason } => json!({
+            "outcome_type": "rejected",
+            "reason": serde_json::to_value(&reason).unwrap_or(Value::Null),
+        }),
+        _ => json!({
+            "outcome_type": "unknown",
+        }),
+    }
 }
 
 /// POST /runtime/{id}/retire

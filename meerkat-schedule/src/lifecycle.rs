@@ -1,3 +1,9 @@
+//! Domain-facing lifecycle inputs, effects, errors, and mutators for schedules
+//! and occurrences. The `apply()` methods live on `Schedule` / `Occurrence` in
+//! `types.rs` and delegate to the DSL kernels in `machines::*`. This module
+//! houses the pure data types consumed by callers and by the `ScheduleStore`
+//! trait wire contract.
+
 use crate::machines::occurrence_lifecycle as occ_dsl;
 use crate::machines::schedule_lifecycle as sched_dsl;
 use crate::types::{
@@ -158,22 +164,24 @@ pub enum OccurrenceLifecycleError {
 }
 
 // ===========================================================================
-// OccurrenceLifecycleAuthority — DSL-backed dispatch
+// Occurrence::apply — DSL-backed lifecycle transition on the domain type
 // ===========================================================================
 
-#[derive(Debug, Default)]
-pub struct OccurrenceLifecycleAuthority;
-
-impl OccurrenceLifecycleAuthority {
+impl Occurrence {
+    /// Apply a lifecycle input to this occurrence, projecting through the DSL
+    /// kernel and writing the resulting machine-owned state back into `self`.
+    ///
+    /// Non-machine fields (trigger_snapshot, target_snapshot, policies,
+    /// created_at_utc) are preserved verbatim; the DSL is sole authority over
+    /// phase, claim fields, timestamps, attempt_count, and failure data.
     pub fn apply(
-        &self,
-        mut occurrence: Occurrence,
+        mut self,
         input: OccurrenceLifecycleInput,
     ) -> Result<OccurrenceLifecycleMutator, OccurrenceLifecycleError> {
         // 1. Project domain → DSL state
-        let dsl_state = project_occurrence(&occurrence);
+        let dsl_state = project_occurrence(&self);
 
-        // 2. Convert authority input → DSL input
+        // 2. Convert domain input → DSL input
         let dsl_input = convert_occurrence_input(&input);
 
         // 3. Run DSL dispatch
@@ -183,7 +191,7 @@ impl OccurrenceLifecycleAuthority {
                 .map_err(|e| map_occurrence_error(e, &input))?;
 
         // 4. Write DSL state → occurrence
-        write_back_occurrence(&dsl_auth.state, &mut occurrence, &input);
+        write_back_occurrence(&dsl_auth.state, &mut self, &input);
 
         // 5. Map effects
         let effects = transition
@@ -193,7 +201,7 @@ impl OccurrenceLifecycleAuthority {
             .collect();
 
         Ok(OccurrenceLifecycleMutator {
-            occurrence,
+            occurrence: self,
             effects,
         })
     }
@@ -239,7 +247,7 @@ fn project_occurrence(occ: &Occurrence) -> occ_dsl::OccurrenceLifecycleMachineSt
     }
 }
 
-/// Convert authority input to DSL input.
+/// Convert domain input to DSL input.
 fn convert_occurrence_input(input: &OccurrenceLifecycleInput) -> occ_dsl::OccurrenceLifecycleInput {
     match input {
         OccurrenceLifecycleInput::Claim {
@@ -402,7 +410,7 @@ fn write_back_occurrence(
     };
 }
 
-/// Map DSL error to the appropriate authority error variant.
+/// Map DSL error to the appropriate domain error variant.
 fn map_occurrence_error(
     _error: occ_dsl::OccurrenceLifecycleMachineTransitionError,
     input: &OccurrenceLifecycleInput,
@@ -426,7 +434,7 @@ fn map_occurrence_error(
     }
 }
 
-/// Map DSL effect → authority effect (1:1 by name).
+/// Map DSL effect → domain effect (1:1 by name).
 fn map_occurrence_effect(effect: &occ_dsl::OccurrenceLifecycleEffect) -> OccurrenceLifecycleEffect {
     match effect {
         occ_dsl::OccurrenceLifecycleEffect::Claimed => OccurrenceLifecycleEffect::Claimed,
@@ -448,15 +456,16 @@ fn map_occurrence_effect(effect: &occ_dsl::OccurrenceLifecycleEffect) -> Occurre
 }
 
 // ===========================================================================
-// ScheduleLifecycleAuthority — DSL-backed dispatch
+// Schedule::apply — DSL-backed lifecycle transition on the domain type
 // ===========================================================================
 
-#[derive(Debug, Default)]
-pub struct ScheduleLifecycleAuthority;
-
-impl ScheduleLifecycleAuthority {
+impl Schedule {
+    /// Apply a lifecycle input. `Create` constructs a fresh schedule (self is
+    /// ignored); all other inputs require an existing schedule. The DSL is sole
+    /// authority over `phase`, `revision`, `planning_cursor_utc`, and
+    /// `next_occurrence_ordinal`; `config.updated_at_utc` / `config.deleted_at_utc`
+    /// are touched here since the DSL does not track them.
     pub fn apply(
-        &self,
         schedule: Option<Schedule>,
         input: ScheduleLifecycleInput,
     ) -> Result<ScheduleLifecycleMutator, ScheduleLifecycleError> {
@@ -481,7 +490,7 @@ impl ScheduleLifecycleAuthority {
             // handles only the machine-owned Revise transition.
             ScheduleLifecycleInput::Update(request) => {
                 let mut schedule = schedule.ok_or(ScheduleLifecycleError::MissingSchedule)?;
-                let revision_bumped = self.apply_update(&mut schedule, request)?;
+                let revision_bumped = apply_update(&mut schedule, request)?;
                 let mut effects = vec![ScheduleLifecycleEffect::EmitScheduleNotice {
                     new_state: schedule.phase,
                     revision: schedule.revision,
@@ -508,7 +517,7 @@ impl ScheduleLifecycleAuthority {
                     planning_cursor_utc_ms: datetime_to_millis(planning_cursor_utc),
                     next_occurrence_ordinal: next_occurrence_ordinal.0,
                 };
-                let (transition, dsl_state) = self.run_schedule_dsl(&schedule, dsl_input)?;
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule);
                 let effects = transition
                     .effects
@@ -527,7 +536,7 @@ impl ScheduleLifecycleAuthority {
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::Pause {
                     at_utc_ms: datetime_to_millis(at_utc),
                 };
-                let (transition, dsl_state) = self.run_schedule_dsl(&schedule, dsl_input)?;
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule);
                 schedule.config.updated_at_utc = at_utc;
                 let effects = transition
@@ -549,7 +558,7 @@ impl ScheduleLifecycleAuthority {
                 let dsl_input = sched_dsl::ScheduleLifecycleInput::Resume {
                     at_utc_ms: datetime_to_millis(at_utc),
                 };
-                let (transition, dsl_state) = self.run_schedule_dsl(&schedule, dsl_input)?;
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule);
                 schedule.config.updated_at_utc = at_utc;
                 let effects = transition
@@ -572,7 +581,7 @@ impl ScheduleLifecycleAuthority {
                     at_utc_ms: datetime_to_millis(at_utc),
                 };
                 let old_revision = schedule.revision;
-                let (transition, dsl_state) = self.run_schedule_dsl(&schedule, dsl_input)?;
+                let (transition, dsl_state) = run_schedule_dsl(&schedule, dsl_input)?;
                 write_back_schedule(&dsl_state, &mut schedule);
                 schedule.config.deleted_at_utc = Some(at_utc);
                 schedule.config.updated_at_utc = at_utc;
@@ -592,105 +601,100 @@ impl ScheduleLifecycleAuthority {
             }
         }
     }
+}
 
-    /// Apply config-level update changes. If any revision-affecting field changes,
-    /// delegate the revision bump to the DSL via a Revise input.
-    pub fn apply_update(
-        &self,
-        schedule: &mut Schedule,
-        request: UpdateScheduleRequest,
-    ) -> Result<bool, ScheduleLifecycleError> {
-        if schedule.phase == SchedulePhase::Deleted {
-            return Err(ScheduleLifecycleError::Deleted);
-        }
-
-        if let Some(expected_revision) = request.expected_revision
-            && expected_revision != schedule.revision
-        {
-            return Err(ScheduleLifecycleError::RevisionMismatch {
-                expected: expected_revision.0,
-                actual: schedule.revision.0,
-            });
-        }
-
-        let mut revision_affecting_change = false;
-
-        // Config-only changes (not tracked by the DSL)
-        if let Some(name) = request.name {
-            schedule.config.name = Some(name);
-        }
-        if let Some(description) = request.description {
-            schedule.config.description = Some(description);
-        }
-        if let Some(days) = request.planning_horizon_days {
-            schedule.config.planning_horizon_days = days;
-        }
-        if let Some(count) = request.planning_horizon_occurrences {
-            schedule.config.planning_horizon_occurrences = count;
-        }
-        if let Some(labels) = request.labels {
-            schedule.config.labels = labels;
-        }
-
-        // Revision-affecting changes — detect diffs
-        if let Some(trigger) = request.trigger {
-            revision_affecting_change |= trigger != schedule.trigger;
-            schedule.trigger = trigger;
-        }
-        if let Some(target) = request.target {
-            revision_affecting_change |= target != schedule.target;
-            schedule.target = target;
-        }
-        if let Some(policy) = request.misfire_policy {
-            revision_affecting_change |= policy != schedule.misfire_policy;
-            schedule.misfire_policy = policy;
-        }
-        if let Some(policy) = request.overlap_policy {
-            revision_affecting_change |= policy != schedule.overlap_policy;
-            schedule.overlap_policy = policy;
-        }
-        if let Some(policy) = request.missing_target_policy {
-            revision_affecting_change |= policy != schedule.missing_target_policy;
-            schedule.missing_target_policy = policy;
-        }
-
-        if revision_affecting_change {
-            // Use the DSL Revise transition for the revision bump + planning cursor clear
-            let dsl_input = sched_dsl::ScheduleLifecycleInput::Revise {
-                trigger_key: trigger_stable_key(&schedule.trigger),
-                target_binding_key: schedule.target.stable_key(),
-                misfire_policy: to_dsl_misfire_policy(&schedule.misfire_policy),
-                overlap_policy: to_dsl_overlap_policy(&schedule.overlap_policy),
-                missing_target_policy: to_dsl_missing_target_policy(
-                    &schedule.missing_target_policy,
-                ),
-            };
-            let (_transition, dsl_state) = self.run_schedule_dsl(schedule, dsl_input)?;
-            write_back_schedule(&dsl_state, schedule);
-        }
-        schedule.touch();
-        Ok(revision_affecting_change)
+/// Apply config-level update changes. If any revision-affecting field changes,
+/// delegate the revision bump to the DSL via a Revise input.
+fn apply_update(
+    schedule: &mut Schedule,
+    request: UpdateScheduleRequest,
+) -> Result<bool, ScheduleLifecycleError> {
+    if schedule.phase == SchedulePhase::Deleted {
+        return Err(ScheduleLifecycleError::Deleted);
     }
 
-    /// Project schedule → DSL state, apply DSL input, return transition + new state.
-    fn run_schedule_dsl(
-        &self,
-        schedule: &Schedule,
-        dsl_input: sched_dsl::ScheduleLifecycleInput,
-    ) -> Result<
-        (
-            sched_dsl::ScheduleLifecycleMachineTransition,
-            sched_dsl::ScheduleLifecycleMachineState,
-        ),
-        ScheduleLifecycleError,
-    > {
-        let dsl_state = project_schedule(schedule);
-        let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::from_state(dsl_state);
-        let transition =
-            sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
-                .map_err(|_| ScheduleLifecycleError::Deleted)?;
-        Ok((transition, dsl_auth.state))
+    if let Some(expected_revision) = request.expected_revision
+        && expected_revision != schedule.revision
+    {
+        return Err(ScheduleLifecycleError::RevisionMismatch {
+            expected: expected_revision.0,
+            actual: schedule.revision.0,
+        });
     }
+
+    let mut revision_affecting_change = false;
+
+    // Config-only changes (not tracked by the DSL)
+    if let Some(name) = request.name {
+        schedule.config.name = Some(name);
+    }
+    if let Some(description) = request.description {
+        schedule.config.description = Some(description);
+    }
+    if let Some(days) = request.planning_horizon_days {
+        schedule.config.planning_horizon_days = days;
+    }
+    if let Some(count) = request.planning_horizon_occurrences {
+        schedule.config.planning_horizon_occurrences = count;
+    }
+    if let Some(labels) = request.labels {
+        schedule.config.labels = labels;
+    }
+
+    // Revision-affecting changes — detect diffs
+    if let Some(trigger) = request.trigger {
+        revision_affecting_change |= trigger != schedule.trigger;
+        schedule.trigger = trigger;
+    }
+    if let Some(target) = request.target {
+        revision_affecting_change |= target != schedule.target;
+        schedule.target = target;
+    }
+    if let Some(policy) = request.misfire_policy {
+        revision_affecting_change |= policy != schedule.misfire_policy;
+        schedule.misfire_policy = policy;
+    }
+    if let Some(policy) = request.overlap_policy {
+        revision_affecting_change |= policy != schedule.overlap_policy;
+        schedule.overlap_policy = policy;
+    }
+    if let Some(policy) = request.missing_target_policy {
+        revision_affecting_change |= policy != schedule.missing_target_policy;
+        schedule.missing_target_policy = policy;
+    }
+
+    if revision_affecting_change {
+        // Use the DSL Revise transition for the revision bump + planning cursor clear
+        let dsl_input = sched_dsl::ScheduleLifecycleInput::Revise {
+            trigger_key: trigger_stable_key(&schedule.trigger),
+            target_binding_key: schedule.target.stable_key(),
+            misfire_policy: to_dsl_misfire_policy(&schedule.misfire_policy),
+            overlap_policy: to_dsl_overlap_policy(&schedule.overlap_policy),
+            missing_target_policy: to_dsl_missing_target_policy(&schedule.missing_target_policy),
+        };
+        let (_transition, dsl_state) = run_schedule_dsl(schedule, dsl_input)?;
+        write_back_schedule(&dsl_state, schedule);
+    }
+    schedule.touch();
+    Ok(revision_affecting_change)
+}
+
+/// Project schedule → DSL state, apply DSL input, return transition + new state.
+fn run_schedule_dsl(
+    schedule: &Schedule,
+    dsl_input: sched_dsl::ScheduleLifecycleInput,
+) -> Result<
+    (
+        sched_dsl::ScheduleLifecycleMachineTransition,
+        sched_dsl::ScheduleLifecycleMachineState,
+    ),
+    ScheduleLifecycleError,
+> {
+    let dsl_state = project_schedule(schedule);
+    let mut dsl_auth = sched_dsl::ScheduleLifecycleMachineAuthority::from_state(dsl_state);
+    let transition = sched_dsl::ScheduleLifecycleMachineMutator::apply(&mut dsl_auth, dsl_input)
+        .map_err(|_| ScheduleLifecycleError::Deleted)?;
+    Ok((transition, dsl_auth.state))
 }
 
 /// Project a domain `Schedule` into the DSL flat state struct.
@@ -724,7 +728,7 @@ fn write_back_schedule(dsl: &sched_dsl::ScheduleLifecycleMachineState, sched: &m
     sched.next_occurrence_ordinal = OccurrenceOrdinal(dsl.next_occurrence_ordinal);
 }
 
-/// Map DSL schedule effect → authority effect.
+/// Map DSL schedule effect → domain effect.
 ///
 /// `planning_cursor_utc` and `next_occurrence_ordinal` are passed in from the
 /// original input since the DSL stores millis, and the PlanningWindowRecorded
@@ -886,7 +890,6 @@ mod tests {
 
     #[test]
     fn claim_rejects_non_pending_occurrences() {
-        let authority = OccurrenceLifecycleAuthority;
         let input = OccurrenceLifecycleInput::Claim {
             owner_id: "owner".into(),
             at_utc: Utc::now(),
@@ -902,7 +905,7 @@ mod tests {
             let mut occurrence = sample_occurrence();
             occurrence.phase = phase;
             assert!(
-                authority.apply(occurrence, input.clone()).is_err(),
+                occurrence.apply(input.clone()).is_err(),
                 "claim should reject occurrences already in phase {phase:?}"
             );
         }
@@ -910,12 +913,9 @@ mod tests {
 
     #[test]
     fn await_completion_requires_dispatching_phase() {
-        let authority = OccurrenceLifecycleAuthority;
         let occurrence = sample_occurrence();
-        let result = authority.apply(
-            occurrence,
-            OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() },
-        );
+        let result =
+            occurrence.apply(OccurrenceLifecycleInput::AwaitCompletion { at_utc: Utc::now() });
         assert!(matches!(
             result,
             Err(OccurrenceLifecycleError::NotDispatching)

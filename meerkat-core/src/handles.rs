@@ -9,15 +9,17 @@
 //! its MobMachine DSL authority in-crate, so it drives DSL transitions via
 //! direct `dsl_authority.apply(...)` calls — no cross-crate trait required.
 //!
-//! Trait methods are named per-DSL input/signal, not per-authority input.
+//! Trait methods are named per-DSL input, not per-authority input.
 //! Parameters use primitive types (`String`, `u64`, `bool`) or core-resident
 //! newtypes ([`InputId`], [`RunId`]). Identifiers that currently live in
-//! downstream crates (e.g., `SurfaceId` in `meerkat-mcp`) are passed as `&str`;
-//! the DSL stores those as opaque string keys already.
+//! downstream crates (for example `SurfaceId` in `meerkat-mcp`) are passed as
+//! strings; the DSL stores those as opaque string keys already.
 //!
 //! Return type is `Result<(), DslTransitionError>`. The DSL decides legality;
 //! phase/field reads happen elsewhere (direct DSL state accessors, not via
 //! these traits).
+
+use std::collections::BTreeSet;
 
 use crate::lifecycle::{InputId, RunId};
 
@@ -50,40 +52,109 @@ impl DslTransitionError {
 // TurnStateHandle
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnStateSnapshot {
+    pub turn_phase: String,
+    pub primitive_kind: Option<String>,
+    pub admitted_content_shape: Option<String>,
+    pub vision_enabled: bool,
+    pub image_tool_results_enabled: bool,
+    pub tool_calls_pending: u64,
+    pub pending_op_refs: BTreeSet<String>,
+    pub barrier_operation_ids: BTreeSet<String>,
+    pub has_barrier_ops: bool,
+    pub barrier_satisfied: bool,
+    pub boundary_count: u64,
+    pub cancel_after_boundary: bool,
+    pub terminal_outcome: Option<String>,
+    pub extraction_attempts: u64,
+    pub max_extraction_retries: u64,
+}
+
 /// Turn-execution DSL handle.
-///
-/// Covers the run-lifecycle signals on the MeerkatMachine DSL: start signals,
-/// LLM call boundary signals, pending-op outcomes, cancellation, and the
-/// Prepare/Commit/Fail input triad that tracks `current_run_id` /
-/// `pre_run_phase`. The DSL uses field storage for run_id already populated
-/// via `prepare(run_id)`; most signals are parameterless because `current_run_id`
-/// is set upstream.
 pub trait TurnStateHandle: Send + Sync {
-    // --- Run-start signals (no params; `current_run_id` set via Prepare) ---
-    fn start_conversation_run(&self) -> Result<(), DslTransitionError>;
-    fn start_immediate_append(&self) -> Result<(), DslTransitionError>;
-    fn start_immediate_context(&self) -> Result<(), DslTransitionError>;
+    fn start_conversation_run(
+        &self,
+        run_id: RunId,
+        primitive_kind: String,
+        admitted_content_shape: String,
+        vision_enabled: bool,
+        image_tool_results_enabled: bool,
+        max_extraction_retries: u64,
+    ) -> Result<(), DslTransitionError>;
 
-    // --- LLM call boundary signals ---
-    fn call_started(&self) -> Result<(), DslTransitionError>;
-    fn call_finished(&self) -> Result<(), DslTransitionError>;
+    fn start_immediate_append(
+        &self,
+        run_id: RunId,
+        admitted_content_shape: String,
+    ) -> Result<(), DslTransitionError>;
 
-    // --- Boundary / pending-op resolution signals ---
-    fn boundary_applied(&self, revision: u64) -> Result<(), DslTransitionError>;
-    fn pending_succeeded(&self) -> Result<(), DslTransitionError>;
-    fn pending_failed(&self) -> Result<(), DslTransitionError>;
+    fn start_immediate_context(
+        &self,
+        run_id: RunId,
+        admitted_content_shape: String,
+    ) -> Result<(), DslTransitionError>;
 
-    // --- Cancellation inputs ---
-    fn interrupt_current_run(&self) -> Result<(), DslTransitionError>;
-    fn cancel_after_boundary(&self) -> Result<(), DslTransitionError>;
+    fn primitive_applied(&self) -> Result<(), DslTransitionError>;
 
-    // --- Run-lifecycle input triad (Prepare/Commit/Fail) ---
-    fn prepare(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
-    fn commit(&self, input_id: &InputId, run_id: &RunId) -> Result<(), DslTransitionError>;
-    fn fail(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
+    fn llm_returned_tool_calls(&self, tool_count: u64) -> Result<(), DslTransitionError>;
 
-    // --- Drain-queued run signal (run_id carried as param per DSL schema) ---
-    fn drain_queued_run(&self, run_id: &RunId) -> Result<(), DslTransitionError>;
+    fn llm_returned_terminal(&self) -> Result<(), DslTransitionError>;
+
+    fn register_pending_ops(
+        &self,
+        op_refs: BTreeSet<String>,
+        barrier_operation_ids: BTreeSet<String>,
+    ) -> Result<(), DslTransitionError>;
+
+    fn tool_calls_resolved(&self) -> Result<(), DslTransitionError>;
+
+    fn ops_barrier_satisfied(
+        &self,
+        operation_ids: BTreeSet<String>,
+    ) -> Result<(), DslTransitionError>;
+
+    fn boundary_continue(&self) -> Result<(), DslTransitionError>;
+
+    fn boundary_complete(&self) -> Result<(), DslTransitionError>;
+
+    fn enter_extraction(&self) -> Result<(), DslTransitionError>;
+
+    fn extraction_start(&self) -> Result<(), DslTransitionError>;
+
+    fn extraction_validation_passed(&self) -> Result<(), DslTransitionError>;
+
+    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
+
+    fn recoverable_failure(&self, error: String) -> Result<(), DslTransitionError>;
+
+    fn fatal_failure(&self, error: String) -> Result<(), DslTransitionError>;
+
+    fn retry_requested(&self) -> Result<(), DslTransitionError>;
+
+    fn cancel_now(&self) -> Result<(), DslTransitionError>;
+
+    fn request_cancel_after_boundary(&self) -> Result<(), DslTransitionError>;
+
+    fn cancellation_observed(&self) -> Result<(), DslTransitionError>;
+
+    fn acknowledge_terminal(&self, outcome: String) -> Result<(), DslTransitionError>;
+
+    fn turn_limit_reached(&self) -> Result<(), DslTransitionError>;
+
+    fn budget_exhausted(&self) -> Result<(), DslTransitionError>;
+
+    fn time_budget_exceeded(&self) -> Result<(), DslTransitionError>;
+
+    fn force_cancel_no_run(&self) -> Result<(), DslTransitionError>;
+
+    fn run_completed(&self, run_id: RunId) -> Result<(), DslTransitionError>;
+
+    fn run_failed(&self, run_id: RunId, error: String) -> Result<(), DslTransitionError>;
+
+    fn run_cancelled(&self, run_id: RunId) -> Result<(), DslTransitionError>;
+
+    fn snapshot(&self) -> TurnStateSnapshot;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,38 +193,91 @@ pub trait CommsDrainHandle: Send + Sync {
 // ExternalToolSurfaceHandle
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceSnapshot {
+    pub surface_id: String,
+    pub base_state: Option<String>,
+    pub pending_op: Option<String>,
+    pub staged_op: Option<String>,
+    pub staged_intent_sequence: Option<u64>,
+    pub pending_task_sequence: Option<u64>,
+    pub pending_lineage_sequence: Option<u64>,
+    pub inflight_calls: u64,
+    pub last_delta_operation: Option<String>,
+    pub last_delta_phase: Option<String>,
+    pub removal_draining_since_ms: Option<u64>,
+    pub removal_timeout_at_ms: Option<u64>,
+    pub removal_applied_at_turn: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceDiagnosticSnapshot {
+    pub surface_phase: String,
+    pub known_surfaces: BTreeSet<String>,
+    pub visible_surfaces: BTreeSet<String>,
+    pub snapshot_epoch: u64,
+    pub snapshot_aligned_epoch: u64,
+    pub has_pending_or_staged: bool,
+    pub entries: Vec<SurfaceSnapshot>,
+}
+
 /// External tool surface lifecycle DSL handle.
-///
-/// Covers the MCP tool-surface signals on the MeerkatMachine DSL: stage add /
-/// remove / reload, boundary apply, pending outcome, call tracking, finalize
-/// clean vs forced, snapshot alignment, and shutdown. All signals are
-/// parameterless — per-surface state is tracked by the DSL's own maps keyed
-/// on `surface_id` (stored upstream via surface registration plumbing).
 pub trait ExternalToolSurfaceHandle: Send + Sync {
-    /// Fire the `StageAdd` signal.
-    fn stage_add(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `StageRemove` signal.
-    fn stage_remove(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `StageReload` signal.
-    fn stage_reload(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `ApplySurfaceBoundary` signal.
-    fn apply_surface_boundary(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `PendingSucceeded` signal for a surface pending task.
-    fn pending_succeeded(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `PendingFailed` signal for a surface pending task.
-    fn pending_failed(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `CallStarted` signal when an in-flight surface call begins.
-    fn call_started(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `CallFinished` signal when an in-flight surface call ends.
-    fn call_finished(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `FinalizeRemovalClean` signal — surface removed without force.
-    fn finalize_removal_clean(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `FinalizeRemovalForced` signal — surface removed after timeout.
-    fn finalize_removal_forced(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `SnapshotAligned` signal — shell rebuilt visible set to epoch.
-    fn snapshot_aligned(&self) -> Result<(), DslTransitionError>;
-    /// Fire the `ShutdownSurface` signal — surface dispatcher is shutting down.
+    fn register(&self, surface_id: String) -> Result<(), DslTransitionError>;
+
+    fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
+
+    fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
+
+    fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
+
+    fn apply_boundary(
+        &self,
+        surface_id: String,
+        now_ms: u64,
+        current_turn: u64,
+    ) -> Result<(), DslTransitionError>;
+
+    fn mark_pending_succeeded(
+        &self,
+        surface_id: String,
+        pending_task_sequence: u64,
+        staged_intent_sequence: u64,
+    ) -> Result<(), DslTransitionError>;
+
+    fn mark_pending_failed(
+        &self,
+        surface_id: String,
+        reason: String,
+    ) -> Result<(), DslTransitionError>;
+
+    fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError>;
+
+    fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError>;
+
+    fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError>;
+
+    fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError>;
+
+    fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError>;
+
     fn shutdown_surface(&self) -> Result<(), DslTransitionError>;
+
+    fn surface_snapshot(&self, surface_id: &str) -> Option<SurfaceSnapshot>;
+
+    fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot;
+
+    fn visible_surfaces(&self) -> BTreeSet<String>;
+
+    fn removing_surfaces(&self) -> BTreeSet<String>;
+
+    fn pending_surfaces(&self) -> BTreeSet<String>;
+
+    fn has_pending_or_staged(&self) -> bool;
+
+    fn snapshot_epoch(&self) -> u64;
+
+    fn snapshot_aligned_epoch(&self) -> u64;
 }
 
 // ---------------------------------------------------------------------------

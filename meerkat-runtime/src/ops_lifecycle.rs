@@ -21,8 +21,8 @@ use meerkat_core::lifecycle::{RunId, WaitRequestId};
 use meerkat_core::ops_lifecycle::{
     DEFAULT_MAX_COMPLETED, OperationCompletionWatch, OperationId, OperationKind,
     OperationLifecycleSnapshot, OperationPeerHandle, OperationProgressUpdate, OperationResult,
-    OperationSpec, OperationTerminalOutcome, OpsLifecycleError, OpsLifecycleRegistry,
-    WaitAllResult, WaitAllSatisfied,
+    OperationSpec, OperationStatus, OperationTerminalOutcome, OpsLifecycleError,
+    OpsLifecycleRegistry, WaitAllResult, WaitAllSatisfied,
 };
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -312,7 +312,8 @@ impl ShellState {
         }
     }
 
-    /// Build a snapshot by combining authority canonical state with shell data.
+    /// Build a snapshot — prefers DSL state for canonical fields, falls back
+    /// to authority for fields the DSL doesn't track yet (progress_count).
     fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
         let canonical = self.authority.operation(id)?;
         let shell = self.records.get(id)?;
@@ -328,15 +329,30 @@ impl ShellState {
                 .as_millis() as u64
         });
 
+        // Prefer DSL state; fall back to authority when DSL has no entry
+        // (legacy operations that haven't flowed through a DSL transition).
+        let kind = self
+            .dsl_operation_kind(id)
+            .unwrap_or_else(|| canonical.kind());
+        let status = self
+            .dsl_operation_status(id)
+            .unwrap_or_else(|| canonical.status());
+        let peer_ready = self
+            .dsl_peer_ready(id)
+            .unwrap_or_else(|| canonical.peer_ready());
+        let terminal_outcome = self
+            .dsl_terminal_outcome(id)
+            .or_else(|| canonical.terminal_outcome().cloned());
+
         Some(OperationLifecycleSnapshot {
             id: shell.spec.id.clone(),
-            kind: canonical.kind(),
+            kind,
             display_name: shell.spec.display_name.clone(),
-            status: canonical.status(),
-            peer_ready: canonical.peer_ready(),
+            status,
+            peer_ready,
             progress_count: canonical.progress_count(),
             watcher_count: shell.watchers.len() as u32,
-            terminal_outcome: canonical.terminal_outcome().cloned(),
+            terminal_outcome,
             child_session_id: shell.spec.child_session_id.clone(),
             peer_handle: shell.peer_handle.clone(),
             created_at_ms,
@@ -553,6 +569,31 @@ impl ShellState {
             return None;
         }
         serde_json::from_str::<OperationKind>(serialized).ok()
+    }
+
+    /// Read the operation status from DSL state and deserialize it to
+    /// `OperationStatus`. Returns `None` if the op is not registered in DSL.
+    fn dsl_operation_status(&self, id: &OperationId) -> Option<OperationStatus> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let status_str = self.dsl_shadow.0.state.op_statuses.get(&id_key)?;
+        match status_str.as_str() {
+            "Provisioning" => Some(OperationStatus::Provisioning),
+            "Running" => Some(OperationStatus::Running),
+            "Retiring" => Some(OperationStatus::Retiring),
+            "Completed" => Some(OperationStatus::Completed),
+            "Failed" => Some(OperationStatus::Failed),
+            "Aborted" => Some(OperationStatus::Aborted),
+            "Cancelled" => Some(OperationStatus::Cancelled),
+            "Retired" => Some(OperationStatus::Retired),
+            "Terminated" => Some(OperationStatus::Terminated),
+            _ => None,
+        }
+    }
+
+    /// Read peer_ready flag from DSL state.
+    fn dsl_peer_ready(&self, id: &OperationId) -> Option<bool> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl_shadow.0.state.op_peer_ready.get(&id_key).copied()
     }
 
     fn shell_record_mut(

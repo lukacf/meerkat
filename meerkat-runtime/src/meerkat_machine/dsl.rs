@@ -510,11 +510,11 @@ machine! {
             RecordTerminalOutcome,
             RecordRunAssociation,
             RecordBoundarySequence,
-            SubmitOpEvent,
-            NotifyOpWatcher,
-            ExposeOperationPeer,
-            RetainTerminalRecord,
-            EvictCompletedRecord,
+            SubmitOpEvent { operation_id: String },
+            NotifyOpWatcher { operation_id: String },
+            ExposeOperationPeer { operation_id: String },
+            RetainTerminalRecord { operation_id: String },
+            EvictCompletedRecord { operation_id: String },
             CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
             WaitAllSatisfied,
             CollectCompletedResult,
@@ -1894,7 +1894,7 @@ machine! {
                 self.active_op_count += 1;
             }
             to Idle
-            emit SubmitOpEvent
+            emit SubmitOpEvent { operation_id: operation_id }
         }
 
         // StartOp: advance to Running
@@ -1906,7 +1906,7 @@ machine! {
                 self.op_statuses.insert(operation_id, "Running");
             }
             to Idle
-            emit SubmitOpEvent
+            emit SubmitOpEvent { operation_id: operation_id }
         }
 
         // CompleteOp: terminal success — record completion sequence
@@ -1921,8 +1921,8 @@ machine! {
                 self.next_completion_seq += 1;
             }
             to Idle
-            emit SubmitOpEvent
-            emit NotifyOpWatcher
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
         }
 
         // FailOp: terminal failure
@@ -1935,8 +1935,8 @@ machine! {
                 self.active_op_count -= 1;
             }
             to Idle
-            emit SubmitOpEvent
-            emit NotifyOpWatcher
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
         }
 
         // CancelOp: terminal cancellation
@@ -1949,8 +1949,8 @@ machine! {
                 self.active_op_count -= 1;
             }
             to Idle
-            emit SubmitOpEvent
-            emit NotifyOpWatcher
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
         }
 
         // AbortOp: terminal abort
@@ -1963,8 +1963,8 @@ machine! {
                 self.active_op_count -= 1;
             }
             to Idle
-            emit SubmitOpEvent
-            emit NotifyOpWatcher
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
         }
 
         // RequestWaitAll: activate wait-all barrier

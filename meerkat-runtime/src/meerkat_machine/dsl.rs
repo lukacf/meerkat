@@ -301,6 +301,8 @@ machine! {
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, String>,
             op_completion_seq: Map<String, u64>,
+            op_terminal_outcomes: Map<String, String>,
+            op_kinds: Map<String, String>,
             active_op_count: u64,
             wait_active: bool,
             wait_operation_ids: Set<String>,
@@ -339,6 +341,8 @@ machine! {
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
+            op_terminal_outcomes = EmptyMap,
+            op_kinds = EmptyMap,
             active_op_count = 0,
             wait_active = false,
             wait_operation_ids = EmptySet,
@@ -1891,6 +1895,7 @@ machine! {
             guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
             update {
                 self.op_statuses.insert(operation_id, "Provisioning");
+                self.op_kinds.insert(operation_id, kind);
                 self.active_op_count += 1;
             }
             to Idle

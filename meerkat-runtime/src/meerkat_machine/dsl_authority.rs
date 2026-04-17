@@ -120,6 +120,8 @@ pub(crate) fn project_state(
         steer_lane: std::collections::BTreeSet::new(),
         op_statuses: std::collections::BTreeMap::new(),
         op_completion_seq: std::collections::BTreeMap::new(),
+        op_terminal_outcomes: std::collections::BTreeMap::new(),
+        op_kinds: std::collections::BTreeMap::new(),
         active_op_count: 0,
         wait_active: false,
         wait_operation_ids: std::collections::BTreeSet::new(),

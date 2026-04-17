@@ -33,6 +33,7 @@ pub mod event_injector;
 pub mod event_tap;
 pub mod gateway;
 pub mod generated;
+pub mod handles;
 pub mod hooks;
 pub mod image_content;
 pub mod interaction;
@@ -127,6 +128,10 @@ pub use event_tap::{
 };
 pub use gateway::{
     Availability, AvailabilityCheck, DynamicToolComposite, ToolGateway, ToolGatewayBuilder,
+};
+pub use handles::{
+    CommsDrainHandle, DslTransitionError, ExternalToolSurfaceHandle, PeerCommsHandle,
+    SessionAdmissionHandle, TurnStateHandle,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,

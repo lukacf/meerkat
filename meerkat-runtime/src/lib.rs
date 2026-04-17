@@ -31,6 +31,7 @@ pub(crate) mod control_plane;
 pub mod detached_wake;
 pub mod driver;
 pub mod durability;
+pub mod handles;
 pub mod identifiers;
 pub mod ingress_types;
 pub mod input;
@@ -62,6 +63,10 @@ pub use coalescing::{
 pub use completion::{CompletionHandle, CompletionOutcome};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
+pub use handles::{
+    RuntimeCommsDrainHandle, RuntimeExternalToolSurfaceHandle, RuntimePeerCommsHandle,
+    RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
+};
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,
     LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,

@@ -853,6 +853,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             tool_visibility_owner: Arc::new(
                                 meerkat_core::LocalToolVisibilityOwner::new(),
                             ),
+                            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::new()),
+                            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::new()),
+                            external_tool_surface: Arc::new(
+                                meerkat_runtime::RuntimeExternalToolSurfaceHandle::new(),
+                            ),
+                            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new()),
+                            session_admission: Arc::new(
+                                meerkat_runtime::RuntimeSessionAdmissionHandle::new(),
+                            ),
                         },
                     )
                 })

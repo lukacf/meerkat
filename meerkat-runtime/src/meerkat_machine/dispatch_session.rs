@@ -271,6 +271,15 @@ impl MeerkatMachine {
                         cursor_state,
                         tool_visibility_owner: tool_visibility_owner
                             as Arc<dyn meerkat_core::ToolVisibilityOwner>,
+                        turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new()),
+                        comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new()),
+                        external_tool_surface: Arc::new(
+                            crate::handles::RuntimeExternalToolSurfaceHandle::new(),
+                        ),
+                        peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new()),
+                        session_admission: Arc::new(
+                            crate::handles::RuntimeSessionAdmissionHandle::new(),
+                        ),
                     },
                 ))
             }

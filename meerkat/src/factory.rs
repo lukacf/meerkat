@@ -967,6 +967,7 @@ impl AgentFactory {
         self
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), test))]
     fn shell_project_root(&self) -> PathBuf {
         self.project_root.clone().unwrap_or_else(|| {
             // `store_path` may point at an uncreated session leaf (for example

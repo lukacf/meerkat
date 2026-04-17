@@ -1,18 +1,25 @@
 //! Runtime-side impls of the cross-crate DSL handle traits defined in
 //! `meerkat_core::handles`.
 //!
-//! Each handle holds a dedicated per-session MeerkatMachine DSL authority
-//! behind a `std::sync::Mutex`. Trait methods are sync (matching the trait
-//! contract in meerkat-core), so tokio-async access to the session's main DSL
-//! is not suitable — instead each handle owns its own DSL substate, following
-//! the [`crate::ops_lifecycle::RuntimeOpsLifecycleRegistry`] precedent.
+//! Each handle holds an `Arc<std::sync::Mutex<mm_dsl::MeerkatMachineAuthority>>`
+//! that points at the **session's real DSL authority** — the same instance
+//! stored on [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`].
+//! All 5 handles for a given session share the same `Arc`, so transitions
+//! fired through any handle land on the session's canonical DSL state.
+//!
+//! Sync `std::sync::Mutex` is used (not tokio's async lock) because the
+//! [`meerkat_core::handles`] trait methods are sync. Shell code that already
+//! mutates the session DSL authority under the `sessions` tokio lock takes the
+//! same inner sync lock via [`HandleDslAuthority::apply_input`] /
+//! [`HandleDslAuthority::apply_signal`]; locks are held briefly across a
+//! single DSL transition, so contention is not a concern.
 //!
 //! Phase 5F/0 is a pure addition commit: these handles are constructed by
 //! [`crate::meerkat_machine::MeerkatMachine::prepare_bindings`] and populated
 //! on [`meerkat_core::SessionRuntimeBindings`], but no existing callsites
 //! dispatch through them yet. Phases 5F/1-5 flip callsites to the new handles.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::meerkat_machine::dsl as mm_dsl;
 use meerkat_core::handles::DslTransitionError;
@@ -29,24 +36,46 @@ pub use peer_comms::RuntimePeerCommsHandle;
 pub use session_admission::RuntimeSessionAdmissionHandle;
 pub use turn_state::RuntimeTurnStateHandle;
 
-/// Shared wrapper around the DSL authority used by all 5 handle impls.
+/// Shared handle over a session's real `MeerkatMachineAuthority`.
 ///
-/// Sync `Mutex` because trait methods are sync; per-handle ownership means
-/// no lock contention with the session's main (tokio-guarded) DSL state.
-pub(crate) struct HandleDslAuthority {
-    inner: Mutex<mm_dsl::MeerkatMachineAuthority>,
+/// Constructed by [`crate::meerkat_machine::MeerkatMachine::prepare_bindings`]
+/// from the session's [`crate::meerkat_machine::RuntimeSessionEntry::dsl_authority`]
+/// `Arc`; cloned into each of the 5 handle impls so all routes mutate the same
+/// underlying authority.
+///
+/// A standalone ephemeral constructor ([`HandleDslAuthority::ephemeral`]) is
+/// also provided for legacy code paths (recovery fallback, test sites) that
+/// do not yet have a session-owned DSL authority to share. Ephemeral
+/// authorities do not synchronize with any other state; transitions land on a
+/// private initial DSL state only.
+pub struct HandleDslAuthority {
+    inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>,
 }
 
 impl HandleDslAuthority {
-    /// Construct a fresh DSL authority at the initial `Initializing` phase.
-    pub(crate) fn new() -> Self {
+    /// Wrap an existing shared DSL authority. The returned handle and the
+    /// caller's `Arc` both point at the same underlying authority instance.
+    pub fn from_shared(inner: Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>) -> Self {
+        Self { inner }
+    }
+
+    /// Construct a handle with its own ephemeral DSL authority at the initial
+    /// state.
+    ///
+    /// Legacy callers without access to a session-owned authority use this for
+    /// compile-time correctness of `SessionRuntimeBindings`. Transitions fired
+    /// through a handle backed by this authority are not visible to any other
+    /// session state.
+    pub fn ephemeral() -> Self {
         let state = mm_dsl::MeerkatMachineState::default();
         Self {
-            inner: Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(state)),
+            inner: Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
+                state,
+            ))),
         }
     }
 
-    /// Apply a DSL input under the handle's local mutex.
+    /// Apply a DSL input under the shared authority's mutex.
     pub(crate) fn apply_input(
         &self,
         input: mm_dsl::MeerkatMachineInput,
@@ -61,7 +90,7 @@ impl HandleDslAuthority {
             .map_err(|err| DslTransitionError::new(context, format!("{err}")))
     }
 
-    /// Apply a DSL signal under the handle's local mutex.
+    /// Apply a DSL signal under the shared authority's mutex.
     pub(crate) fn apply_signal(
         &self,
         signal: mm_dsl::MeerkatMachineSignal,

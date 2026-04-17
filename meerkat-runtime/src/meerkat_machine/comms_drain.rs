@@ -155,8 +155,12 @@ impl MeerkatMachine {
             let mut sessions = self.sessions.write().await;
             if let Some(entry) = sessions.get_mut(session_id) {
                 let mode_str = format!("{mode:?}");
+                let mut authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *entry.dsl_authority,
+                    &mut *authority,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain { mode: mode_str },
                 ) {
                     tracing::warn!(
@@ -257,17 +261,21 @@ impl MeerkatMachine {
                 "DrainExitedClean"
             };
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id)
-                && let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *entry.dsl_authority,
+            if let Some(entry) = sessions.get_mut(session_id) {
+                let mut authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                    &mut *authority,
                     dsl_input,
-                )
-            {
-                tracing::warn!(
-                    %session_id,
-                    error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                    "DSL rejected drain exit notification; proceeding with slot cleanup"
-                );
+                ) {
+                    tracing::warn!(
+                        %session_id,
+                        error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
+                        "DSL rejected drain exit notification; proceeding with slot cleanup"
+                    );
+                }
             }
         }
 

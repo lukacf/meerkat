@@ -236,8 +236,12 @@ impl MeerkatMachine {
         // DSL is the single source of truth. The async runtime-loop stop
         // path fires `RuntimeExecutorExited` through `Weak<MeerkatMachine>`
         // so `lifecycle_phase` is Stopped by the time any observer reads it.
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some(dsl_authority::write_back_phase(
-            entry.dsl_authority.state.lifecycle_phase,
+            authority.state.lifecycle_phase,
         ))
     }
 

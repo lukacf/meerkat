@@ -681,13 +681,13 @@ mod tests {
             ops_lifecycle: expected_registry.clone(),
             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
             tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
-            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::new()),
-            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::new()),
+            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
+            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
             external_tool_surface: Arc::new(
-                meerkat_runtime::RuntimeExternalToolSurfaceHandle::new(),
+                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
             ),
-            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new()),
-            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::new()),
+            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
+            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {
@@ -864,13 +864,13 @@ mod tests {
                 .ok_or_else(|| "missing runtime registry".to_string())?,
             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
             tool_visibility_owner: Arc::new(meerkat_core::LocalToolVisibilityOwner::new()),
-            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::new()),
-            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::new()),
+            turn_state: Arc::new(meerkat_runtime::RuntimeTurnStateHandle::ephemeral()),
+            comms_drain: Arc::new(meerkat_runtime::RuntimeCommsDrainHandle::ephemeral()),
             external_tool_surface: Arc::new(
-                meerkat_runtime::RuntimeExternalToolSurfaceHandle::new(),
+                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
             ),
-            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::new()),
-            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::new()),
+            peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
+            session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {

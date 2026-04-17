@@ -24,8 +24,8 @@ impl MeerkatMachine {
             .silent_comms_intents()
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>();
-        let dsl_authority = Box::new(super::dsl::MeerkatMachineAuthority::from_state(
-            super::dsl_authority::project_state(
+        let dsl_authority = Arc::new(std::sync::Mutex::new(
+            super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
                 &session_id,
                 control_projection
                     .read()
@@ -36,7 +36,7 @@ impl MeerkatMachine {
                 None,
                 driver_silent_intents,
                 None,
-            ),
+            )),
         ));
         let session_entry = RuntimeSessionEntry {
             mutation_gate: Arc::new(Mutex::new(())),
@@ -203,18 +203,20 @@ impl MeerkatMachine {
                     let driver = Arc::new(Mutex::new(recovered_entry));
                     let completions =
                         Arc::new(Mutex::new(crate::completion::CompletionRegistry::new()));
-                    let dsl_authority = Box::new(super::dsl::MeerkatMachineAuthority::from_state(
-                        super::dsl_authority::project_state(
-                            &session_id,
-                            control_projection
-                                .read()
-                                .map(|guard| guard.phase)
-                                .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
-                            Some(&driver_runtime_id),
-                            None,
-                            None,
-                            driver_silent_intents,
-                            None,
+                    let dsl_authority = Arc::new(std::sync::Mutex::new(
+                        super::dsl::MeerkatMachineAuthority::from_state(
+                            super::dsl_authority::project_state(
+                                &session_id,
+                                control_projection
+                                    .read()
+                                    .map(|guard| guard.phase)
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner().phase),
+                                Some(&driver_runtime_id),
+                                None,
+                                None,
+                                driver_silent_intents,
+                                None,
+                            ),
                         ),
                     ));
                     sessions.insert(

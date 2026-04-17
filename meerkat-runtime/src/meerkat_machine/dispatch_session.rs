@@ -234,7 +234,14 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::Destroyed);
                 }
                 self.register_session_inner(session_id.clone()).await;
-                let (driver_handle, epoch_id, ops_lifecycle, cursor_state, tool_visibility_owner) = {
+                let (
+                    driver_handle,
+                    epoch_id,
+                    ops_lifecycle,
+                    cursor_state,
+                    tool_visibility_owner,
+                    dsl_authority_shared,
+                ) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
@@ -247,6 +254,7 @@ impl MeerkatMachine {
                         Arc::clone(&entry.ops_lifecycle),
                         Arc::clone(&entry.cursor_state),
                         Arc::clone(&entry.tool_visibility_owner),
+                        Arc::clone(&entry.dsl_authority),
                     )
                 };
                 let mut driver = driver_handle.lock().await;
@@ -263,6 +271,14 @@ impl MeerkatMachine {
                     .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                // Share ONE HandleDslAuthority across all 5 handles so their
+                // transitions land on the session's real DSL state (same Arc
+                // as RuntimeSessionEntry.dsl_authority). Phase 5F/1-5 callsites
+                // rely on this — parallel private authorities would silently
+                // diverge from the session DSL.
+                let shared_handle_authority = Arc::new(
+                    crate::handles::HandleDslAuthority::from_shared(dsl_authority_shared),
+                );
                 Ok(MeerkatMachineCommandResult::Bindings(
                     meerkat_core::SessionRuntimeBindings {
                         session_id,
@@ -271,14 +287,24 @@ impl MeerkatMachine {
                         cursor_state,
                         tool_visibility_owner: tool_visibility_owner
                             as Arc<dyn meerkat_core::ToolVisibilityOwner>,
-                        turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new()),
-                        comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new()),
+                        turn_state: Arc::new(crate::handles::RuntimeTurnStateHandle::new(
+                            Arc::clone(&shared_handle_authority),
+                        )),
+                        comms_drain: Arc::new(crate::handles::RuntimeCommsDrainHandle::new(
+                            Arc::clone(&shared_handle_authority),
+                        )),
                         external_tool_surface: Arc::new(
-                            crate::handles::RuntimeExternalToolSurfaceHandle::new(),
+                            crate::handles::RuntimeExternalToolSurfaceHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
                         ),
-                        peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new()),
+                        peer_comms: Arc::new(crate::handles::RuntimePeerCommsHandle::new(
+                            Arc::clone(&shared_handle_authority),
+                        )),
                         session_admission: Arc::new(
-                            crate::handles::RuntimeSessionAdmissionHandle::new(),
+                            crate::handles::RuntimeSessionAdmissionHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
                         ),
                     },
                 ))

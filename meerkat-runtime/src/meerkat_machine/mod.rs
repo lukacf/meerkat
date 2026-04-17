@@ -143,10 +143,14 @@ struct RuntimeSessionEntry {
     detached_wake: Option<Arc<crate::detached_wake::DetachedWakeState>>,
     /// DSL authority for coarse lifecycle phase transitions.
     /// Sync field — validates transitions, writes back phase.
-    /// Boxed so the large expanded state (31 fields including several Maps/Sets)
-    /// lives on the heap — otherwise every async function that holds a
-    /// reference to a `RuntimeSessionEntry` bloats its future size by ~15KB.
-    dsl_authority: Box<dsl::MeerkatMachineAuthority>,
+    ///
+    /// `Arc<std::sync::Mutex<_>>` so cross-crate handle impls
+    /// (`meerkat-runtime::handles::*`) can share the same underlying authority
+    /// from a sync context without awaiting the outer `sessions` tokio lock.
+    /// The Arc heap-allocates the authority's large expanded state (31 fields
+    /// including several Maps/Sets) so holding a reference to a
+    /// `RuntimeSessionEntry` does not bloat async future sizes.
+    dsl_authority: Arc<std::sync::Mutex<dsl::MeerkatMachineAuthority>>,
 }
 
 /// Capability bundle for an attached runtime loop.
@@ -287,8 +291,12 @@ impl MeerkatMachine {
             }
             .to_string()
         })?;
-        let previous_state = Box::new(entry.dsl_authority.state.clone());
-        dsl::MeerkatMachineMutator::apply(&mut *entry.dsl_authority, input)
+        let mut authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_state = Box::new(authority.state.clone());
+        dsl::MeerkatMachineMutator::apply(&mut *authority, input)
             .map_err(|err| dsl_authority::map_error(err, context))?;
         Ok(previous_state)
     }
@@ -300,7 +308,11 @@ impl MeerkatMachine {
     ) {
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            *entry.dsl_authority = dsl::MeerkatMachineAuthority::from_state(*state);
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *authority = dsl::MeerkatMachineAuthority::from_state(*state);
         }
     }
 
@@ -309,17 +321,21 @@ impl MeerkatMachine {
     /// projection. Called via `Weak<Self>` from `control_plane`.
     pub(crate) async fn notify_runtime_executor_exited(&self, session_id: &SessionId) {
         let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id)
-            && let Err(err) = dsl::MeerkatMachineMutator::apply(
-                &mut *entry.dsl_authority,
+        if let Some(entry) = sessions.get_mut(session_id) {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(err) = dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
                 dsl::MeerkatMachineInput::RuntimeExecutorExited,
-            )
-        {
-            tracing::debug!(
-                %session_id,
-                error = %dsl_authority::map_error(err, "RuntimeExecutorExited"),
-                "DSL rejected RuntimeExecutorExited (terminal or phase-not-covered)"
-            );
+            ) {
+                tracing::debug!(
+                    %session_id,
+                    error = %dsl_authority::map_error(err, "RuntimeExecutorExited"),
+                    "DSL rejected RuntimeExecutorExited (terminal or phase-not-covered)"
+                );
+            }
         }
     }
 }

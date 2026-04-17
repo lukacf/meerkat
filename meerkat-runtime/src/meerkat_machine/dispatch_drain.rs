@@ -182,17 +182,22 @@ impl MeerkatMachine {
                             "DrainExitedClean(safety)"
                         };
                         let mut sessions = self.sessions.write().await;
-                        if let Some(entry) = sessions.get_mut(&session_id)
-                            && let Err(err) =
+                        if let Some(entry) = sessions.get_mut(&session_id) {
+                            let mut authority = entry
+                                .dsl_authority
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if let Err(err) =
                                 crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                                    &mut *entry.dsl_authority,
+                                    &mut *authority,
                                     dsl_input,
                                 )
-                        {
-                            tracing::warn!(
-                                error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                                "DSL rejected drain exit safety net"
-                            );
+                            {
+                                tracing::warn!(
+                                    error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
+                                    "DSL rejected drain exit safety net"
+                                );
+                            }
                         }
                     }
                     tracing::warn!(
@@ -217,17 +222,21 @@ impl MeerkatMachine {
     /// drain_phase is maintained by DSL transitions; no shell → DSL sync.
     async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) {
         let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id)
-            && let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                &mut *entry.dsl_authority,
+        if let Some(entry) = sessions.get_mut(session_id) {
+            let mut authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *authority,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StopDrain,
-            )
-        {
-            tracing::warn!(
-                %session_id,
-                error = %crate::meerkat_machine::dsl_authority::map_error(err, "StopDrain"),
-                "DSL rejected StopDrain; proceeding with abort"
-            );
+            ) {
+                tracing::warn!(
+                    %session_id,
+                    error = %crate::meerkat_machine::dsl_authority::map_error(err, "StopDrain"),
+                    "DSL rejected StopDrain; proceeding with abort"
+                );
+            }
         }
     }
 }

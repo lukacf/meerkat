@@ -20,17 +20,18 @@ pub struct RuntimeTurnStateHandle {
 }
 
 impl RuntimeTurnStateHandle {
-    /// Construct a handle backed by a fresh DSL authority.
-    pub fn new() -> Self {
-        Self {
-            dsl: Arc::new(HandleDslAuthority::new()),
-        }
+    /// Construct a handle backed by the session's shared DSL authority.
+    pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
+        Self { dsl }
     }
-}
 
-impl Default for RuntimeTurnStateHandle {
-    fn default() -> Self {
-        Self::new()
+    /// Construct a handle backed by an ephemeral DSL authority.
+    ///
+    /// Used by legacy code paths (recovery fallback, standalone tests) that
+    /// do not have access to the session's shared authority. Transitions are
+    /// isolated to this handle's private state.
+    pub fn ephemeral() -> Self {
+        Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 }
 

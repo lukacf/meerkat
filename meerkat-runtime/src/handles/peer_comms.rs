@@ -17,17 +17,16 @@ pub struct RuntimePeerCommsHandle {
 }
 
 impl RuntimePeerCommsHandle {
-    /// Construct a handle backed by a fresh DSL authority.
-    pub fn new() -> Self {
-        Self {
-            dsl: Arc::new(HandleDslAuthority::new()),
-        }
+    /// Construct a handle backed by the session's shared DSL authority.
+    pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
+        Self { dsl }
     }
-}
 
-impl Default for RuntimePeerCommsHandle {
-    fn default() -> Self {
-        Self::new()
+    /// Construct a handle backed by an ephemeral DSL authority.
+    ///
+    /// See [`RuntimeTurnStateHandle::ephemeral`].
+    pub fn ephemeral() -> Self {
+        Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 }
 

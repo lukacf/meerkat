@@ -955,6 +955,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: String::new(),
             },
             "FailOp (provisioning_failed)",
         );
@@ -1045,6 +1046,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::CompleteOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: String::new(),
             },
             "CompleteOp",
         );
@@ -1070,6 +1072,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: String::new(),
             },
             "FailOp",
         );
@@ -1101,6 +1104,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::AbortOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: String::new(),
             },
             "AbortOp",
         );
@@ -1129,6 +1133,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.shadow_validate_dsl(
             mm_dsl::MeerkatMachineInput::CancelOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: String::new(),
             },
             "CancelOp",
         );

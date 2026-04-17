@@ -67,6 +67,9 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/realtime/attach` | Attach realtime (audio) channel intent to a mob member (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/realtime/detach` | Detach realtime channel intent from a mob member (mob feature) |
+| `GET` | `/runtime/{id}/realtime_attachment_status` | Read the runtime-owned realtime attachment status for a session |
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
@@ -845,6 +848,51 @@ List discoverable peers for a session. Requires the `comms` feature.
   ]
 }
 ```
+
+## Realtime attachment
+
+Attach or detach a realtime (audio) channel to a specific mob member, or read the runtime-owned attachment status for a session. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, authority-epoch model, and live-topology reconfigure flow.
+
+### POST /mob/\{id\}/members/\{agent_identity\}/realtime/attach
+
+Stage realtime (audio) intent for a mob member. Durable: intent survives member respawn. Requires the `mob` feature.
+
+```bash Request
+curl -X POST http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/attach
+```
+
+```json Response
+{"attached": true}
+```
+
+### POST /mob/\{id\}/members/\{agent_identity\}/realtime/detach
+
+Clear realtime intent for a mob member. Idempotent. Requires the `mob` feature.
+
+```bash Request
+curl -X POST http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/detach
+```
+
+```json Response
+{"detached": true}
+```
+
+### GET /runtime/\{id\}/realtime_attachment_status
+
+Read the runtime-owned realtime attachment status projection for a session.
+
+<ParamField path="id" type="string" required>
+  Session ID.
+</ParamField>
+
+```json Response
+{
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "status": "binding_ready"
+}
+```
+
+Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime voice guide](/guides/realtime#attachment-states) for the full state table and transition diagram.
 
 ## Error responses
 

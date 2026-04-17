@@ -64,6 +64,9 @@ second surface-local execution loop.
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
 | `meerkat_comms_send` | Send a canonical comms command to a session (comms feature) |
 | `meerkat_comms_peers` | List peers visible to a session (comms feature) |
+| `meerkat_realtime_open_info` | Issue a single-use bootstrap token for opening a realtime channel (realtime feature) |
+| `meerkat_realtime_status` | Read product-layer realtime channel status for a session or mob member (realtime feature) |
+| `meerkat_realtime_capabilities` | Read product-layer realtime capabilities for a target (realtime feature) |
 
 <Note>
 When the `mob` feature is enabled, the public MCP host surface uses typed
@@ -71,6 +74,16 @@ When the `mob` feature is enabled, the public MCP host surface uses typed
 still agent-side and comes from composing `MobMcpDispatcher` into
 `SessionBuildOptions.external_tools`, which provides `mob_*` tools to the
 model. Public host MCP surfaces should not re-export that raw dispatcher.
+</Note>
+
+<Note>
+**Realtime attachment over MCP.** The public MCP tool set exposes only realtime
+bootstrap and status surfaces (`meerkat_realtime_open_info`,
+`meerkat_realtime_status`, `meerkat_realtime_capabilities`). Direct
+attach/detach of a realtime channel to a mob member is not exposed as a public
+MCP tool — use the JSON-RPC `mob/realtime_attach` / `mob/realtime_detach`
+surface for lifecycle control. See the [Realtime voice guide](/guides/realtime)
+for the full attachment state model and authority-epoch contract.
 </Note>
 
 ## Use MCP servers as tools (client)

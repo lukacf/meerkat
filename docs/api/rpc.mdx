@@ -754,6 +754,118 @@ Inspect a skill's full content (body).
   Load from a specific named source, bypassing first-wins resolution. Useful for inspecting shadowed skills.
 </ParamField>
 
+## Realtime attachment methods
+
+Attach, detach, and inspect the runtime-owned realtime (audio) channel bound to a session or mob member. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, the `RealtimeAttachmentSignalAuthority` authority-epoch model, and the `reconfigure_live_topology` flow for swapping provider/model on a realtime-attached session.
+
+### mob/realtime_attach
+
+Stage durable realtime intent for a mob member. Intent is keyed on `AgentIdentity` and survives member respawn; the underlying binding epoch rotates per-runtime.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "mob/realtime_attach",
+  "params": {
+    "mob_id": "release-triage",
+    "agent_identity": "lead-1"
+  }
+}
+```
+
+```json Response
+{"jsonrpc": "2.0", "id": 20, "result": {"attached": true}}
+```
+</CodeGroup>
+
+<ParamField body="mob_id" type="string" required>
+  Mob ID.
+</ParamField>
+
+<ParamField body="agent_identity" type="string" required>
+  Stable per-member identity. Must reference an existing mob member.
+</ParamField>
+
+Typed wire contract: `MobRealtimeAttachParams` / `MobRealtimeAttachResult`.
+
+### mob/realtime_detach
+
+Clear realtime intent for a mob member. Idempotent.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 21,
+  "method": "mob/realtime_detach",
+  "params": {
+    "mob_id": "release-triage",
+    "agent_identity": "lead-1"
+  }
+}
+```
+
+```json Response
+{"jsonrpc": "2.0", "id": 21, "result": {"detached": true}}
+```
+</CodeGroup>
+
+<ParamField body="mob_id" type="string" required>
+  Mob ID.
+</ParamField>
+
+<ParamField body="agent_identity" type="string" required>
+  Stable per-member identity.
+</ParamField>
+
+Typed wire contract: `MobRealtimeDetachParams` / `MobRealtimeDetachResult`.
+
+### runtime/realtime_attachment_status
+
+Read the runtime-owned realtime attachment status projection for a session.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "method": "runtime/realtime_attachment_status",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001"
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 22,
+  "result": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "status": "binding_ready"
+  }
+}
+```
+</CodeGroup>
+
+Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime voice guide](/guides/realtime#attachment-states) for the full state table and mermaid transition diagram.
+
+`mob/member_status` responses include the same value under the `realtime_attachment_status` field for session IDs bound to mob members.
+
+### Realtime bootstrap methods (`realtime/*`)
+
+In addition to the attachment lifecycle above, three product-layer methods handle opening and inspecting realtime WebSocket channels:
+
+| Method | Purpose |
+|--------|---------|
+| `realtime/open_info` | Issue a single-use bootstrap token for opening a realtime channel |
+| `realtime/status` | Read product-layer realtime channel status for a session or mob member |
+| `realtime/capabilities` | Read product-layer realtime capabilities (supported input/output kinds, interrupt/transcript support) |
+
+These are emitted by `rkat-rpc`'s realtime WebSocket listener. The lifecycle methods above (`mob/realtime_attach`, `mob/realtime_detach`, `runtime/realtime_attachment_status`) are the authoritative attachment surface — the `realtime/*` methods are the public product layer built on top.
+
 ## MCP methods
 
 ### mcp/add

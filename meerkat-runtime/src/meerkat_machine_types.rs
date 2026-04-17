@@ -302,11 +302,6 @@ pub(crate) enum MeerkatMachineCommand {
         run_id: LifecycleRunId,
         sequence: u64,
     },
-    #[allow(dead_code)]
-    IngestRealtimeAttachmentSignal {
-        session_id: SessionId,
-        status: RealtimeAttachmentStatus,
-    },
     AcceptWithCompletion {
         session_id: SessionId,
         input: Input,

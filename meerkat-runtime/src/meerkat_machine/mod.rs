@@ -580,6 +580,7 @@ impl MeerkatMachine {
             | MeerkatMachineCommand::Recover { .. }
             | MeerkatMachineCommand::Destroy { .. }
             | MeerkatMachineCommand::RuntimeState { .. }
+            | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
             | MeerkatMachineCommand::LoadBoundaryReceipt { .. } => self
                 .execute_meerkat_machine_control_command(command)
                 .await

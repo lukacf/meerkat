@@ -393,6 +393,22 @@ impl MeerkatMachine {
                     .ok_or(RuntimeControlPlaneError::NotFound(runtime_id))?;
                 Ok(MeerkatMachineCommandResult::RuntimeState(state))
             }
+            MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { session_id } => {
+                let sessions = self.sessions.read().await;
+                let entry = sessions.get(&session_id).ok_or_else(|| {
+                    RuntimeControlPlaneError::NotFound(LogicalRuntimeId::new(
+                        session_id.to_string(),
+                    ))
+                })?;
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let status = project_realtime_attachment_status(&authority.state);
+                Ok(MeerkatMachineCommandResult::RealtimeAttachmentStatus(
+                    status,
+                ))
+            }
             MeerkatMachineCommand::LoadBoundaryReceipt {
                 runtime_id,
                 run_id,
@@ -409,5 +425,31 @@ impl MeerkatMachine {
             }
             _ => unreachable!("non-control command routed to control handler"),
         }
+    }
+}
+
+/// Project the DSL state's realtime-binding fields onto the shell-facing
+/// `RealtimeAttachmentStatus` enum. The DSL owns the canonical fact; this
+/// projection is pure and maintains the dogma's "derived projections are
+/// rebuildable, never authoritative" principle.
+fn project_realtime_attachment_status(
+    state: &super::dsl::MeerkatMachineState,
+) -> crate::meerkat_machine_types::RealtimeAttachmentStatus {
+    use crate::meerkat_machine_types::RealtimeAttachmentStatus;
+    if state.realtime_reattach_required {
+        return RealtimeAttachmentStatus::ReattachRequired;
+    }
+    match state.realtime_binding_state.as_str() {
+        "Unbound" => {
+            if state.realtime_intent_present {
+                RealtimeAttachmentStatus::IntentPresentUnbound
+            } else {
+                RealtimeAttachmentStatus::Unattached
+            }
+        }
+        "BindingNotReady" => RealtimeAttachmentStatus::BindingNotReady,
+        "BindingReady" => RealtimeAttachmentStatus::BindingReady,
+        "ReplacementPending" => RealtimeAttachmentStatus::ReplacementPending,
+        _ => RealtimeAttachmentStatus::Unattached,
     }
 }

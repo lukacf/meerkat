@@ -908,11 +908,9 @@ impl MobActor {
                 "failed cleaning up mcp servers after startup error"
             );
         }
-        if let Err(error) = self.lifecycle_authority.apply_in_phase(
-            self.state(),
-            self.machine_active_run_count(),
-            MobLifecycleInput::Stop,
-        ) {
+        if let Err(error) =
+            self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "stop_after_startup_failure")
+        {
             tracing::warn!(
                 mob_id = %self.definition.id,
                 error = %error,
@@ -2410,19 +2408,25 @@ impl MobActor {
                         continue;
                     }
                     // Reject before side effects like pending-spawn failure if the
-                    // lifecycle authority would not accept Destroy in the current phase.
-                    if !self.lifecycle_authority.can_accept_in_phase(
-                        self.state(),
-                        self.machine_active_run_count(),
-                        MobLifecycleInput::Destroy,
-                    ) {
-                        let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(
-                            MobError::InvalidTransition {
-                                from: self.state(),
-                                to: MobState::Destroyed,
-                            },
-                        )));
-                        continue;
+                    // DSL authority would not accept Destroy in the current phase.
+                    {
+                        let mut probe = mob_dsl::MobMachineAuthority::from_state(
+                            self.dsl_authority.state.clone(),
+                        );
+                        if mob_dsl::MobMachineMutator::apply(
+                            &mut probe,
+                            mob_dsl::MobMachineInput::Destroy,
+                        )
+                        .is_err()
+                        {
+                            let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(
+                                MobError::InvalidTransition {
+                                    from: self.state(),
+                                    to: MobState::Destroyed,
+                                },
+                            )));
+                            continue;
+                        }
                     }
                     self.fail_all_pending_spawns("mob is destroying").await;
                     let result = self.handle_destroy().await;
@@ -5609,7 +5613,10 @@ impl MobActor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    async fn destroy_remote_member_for_destroy(&self, entry: RosterEntry) -> RemoteDestroyOutcome {
+    async fn destroy_remote_member_for_destroy(
+        &mut self,
+        entry: RosterEntry,
+    ) -> RemoteDestroyOutcome {
         let identity = entry.agent_identity.clone();
         let meerkat_id = entry.meerkat_id.clone();
         let mut outcome = RemoteDestroyOutcome {
@@ -5743,7 +5750,7 @@ impl MobActor {
 
     #[cfg(not(target_arch = "wasm32"))]
     async fn destroy_remote_members_for_destroy(
-        &self,
+        &mut self,
         remote_entries: Vec<RosterEntry>,
         report: &mut super::handle::MobDestroyReport,
     ) {
@@ -5751,42 +5758,35 @@ impl MobActor {
             return;
         }
 
+        // Phase 2 sequential expedient: dispose_member currently takes
+        // `&mut self` (via `dispose_stop_host_loop` / `stop_autonomous_member`).
+        // Phase 4 will re-introduce FuturesUnordered parallelism once the
+        // disposal steps are converted to `&self` so a shared actor reference
+        // can be held across concurrent disposal futures.
         let deadline = Self::remote_destroy_cleanup_deadline(remote_entries.len());
         let deadline_at = tokio::time::Instant::now() + deadline;
         let mut remaining = VecDeque::from(remote_entries);
-        let mut in_flight = FuturesUnordered::new();
-        let mut outstanding = HashSet::new();
 
-        for _ in 0..MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS {
-            let Some(entry) = remaining.pop_front() else {
-                break;
-            };
-            outstanding.insert(entry.agent_identity.clone());
-            in_flight.push(self.destroy_remote_member_for_destroy(entry));
-        }
-
-        while !in_flight.is_empty() {
-            let next = tokio::time::timeout_at(deadline_at, in_flight.next()).await;
-            let Some(outcome) = (match next {
+        while let Some(entry) = remaining.pop_front() {
+            let identity = entry.agent_identity.clone();
+            let next =
+                tokio::time::timeout_at(deadline_at, self.destroy_remote_member_for_destroy(entry))
+                    .await;
+            let outcome = match next {
                 Ok(outcome) => outcome,
                 Err(_) => {
                     report.remote_cleanup_deadline_exceeded = true;
-                    for identity in outstanding.drain() {
-                        Self::push_unique_identity(&mut report.orphaned_remote_members, identity);
-                    }
+                    Self::push_unique_identity(&mut report.orphaned_remote_members, identity);
                     for entry in remaining {
                         Self::push_unique_identity(
                             &mut report.orphaned_remote_members,
                             entry.agent_identity.clone(),
                         );
                     }
-                    break;
+                    return;
                 }
-            }) else {
-                break;
             };
 
-            outstanding.remove(&outcome.identity);
             if outcome.force_destroyed {
                 Self::push_unique_identity(
                     &mut report.force_destroyed_members,
@@ -5801,11 +5801,6 @@ impl MobActor {
             }
             for error in outcome.errors {
                 report.push_error(format!("{}: {error}", outcome.identity));
-            }
-
-            if let Some(entry) = remaining.pop_front() {
-                outstanding.insert(entry.agent_identity.clone());
-                in_flight.push(self.destroy_remote_member_for_destroy(entry));
             }
         }
     }
@@ -5836,15 +5831,17 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_destroy preflight")
             .await
             .map_err(MobDestroyError::from)?;
-        if !self.lifecycle_authority.can_accept_in_phase(
-            self.state(),
-            self.machine_active_run_count(),
-            MobLifecycleInput::Destroy,
-        ) {
-            return Err(MobDestroyError::from(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Destroyed,
-            }));
+        {
+            let mut probe =
+                mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+            if mob_dsl::MobMachineMutator::apply(&mut probe, mob_dsl::MobMachineInput::Destroy)
+                .is_err()
+            {
+                return Err(MobDestroyError::from(MobError::InvalidTransition {
+                    from: self.state(),
+                    to: MobState::Destroyed,
+                }));
+            }
         }
         self.cancel_all_flow_tasks()
             .await

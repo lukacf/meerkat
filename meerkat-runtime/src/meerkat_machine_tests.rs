@@ -12242,7 +12242,6 @@ enum RuntimeParityProbeInput {
     AbortAll,
     Abort,
     Wait,
-    IngestRealtimeAttachmentSignal,
     Ingest,
     PublishEvent,
     Recover,
@@ -12410,9 +12409,6 @@ fn runtime_parity_probe_for_input_variant(input_variant: &str) -> Option<Runtime
         "AbortAll" => Some(RuntimeParityProbeInput::AbortAll),
         "Abort" => Some(RuntimeParityProbeInput::Abort),
         "Wait" => Some(RuntimeParityProbeInput::Wait),
-        "IngestRealtimeAttachmentSignal" => {
-            Some(RuntimeParityProbeInput::IngestRealtimeAttachmentSignal)
-        }
         "Ingest" => Some(RuntimeParityProbeInput::Ingest),
         "PublishEvent" => Some(RuntimeParityProbeInput::PublishEvent),
         "Recover" => Some(RuntimeParityProbeInput::Recover),
@@ -12883,7 +12879,6 @@ fn runtime_parity_probe_variant_name(probe: RuntimeParityProbeInput) -> &'static
         RuntimeParityProbeInput::AbortAll => "AbortAll",
         RuntimeParityProbeInput::Abort => "Abort",
         RuntimeParityProbeInput::Wait => "Wait",
-        RuntimeParityProbeInput::IngestRealtimeAttachmentSignal => "IngestRealtimeAttachmentSignal",
         RuntimeParityProbeInput::Ingest => "Ingest",
         RuntimeParityProbeInput::PublishEvent => "PublishEvent",
         RuntimeParityProbeInput::Recover => "Recover",
@@ -14003,12 +13998,6 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::Wait => MeerkatMachineCommand::Wait {
             session_id: fixture.session_id.clone(),
         },
-        RuntimeParityProbeInput::IngestRealtimeAttachmentSignal => {
-            MeerkatMachineCommand::IngestRealtimeAttachmentSignal {
-                session_id: fixture.session_id.clone(),
-                status: crate::RealtimeAttachmentStatus::BindingReady,
-            }
-        }
         RuntimeParityProbeInput::Ingest => MeerkatMachineCommand::Ingest {
             runtime_id: fixture.runtime_id.clone(),
             input: runtime_parity_prompt("runtime parity ingest"),

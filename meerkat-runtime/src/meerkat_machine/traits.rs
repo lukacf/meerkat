@@ -155,6 +155,27 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
             ))),
         }
     }
+
+    async fn realtime_attachment_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentStatus, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::RealtimeAttachmentStatus(status) => Ok(status),
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::realtime_attachment_status: {other:?}"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

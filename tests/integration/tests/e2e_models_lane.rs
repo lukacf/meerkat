@@ -111,9 +111,10 @@ async fn run_chat(
     model: &str,
     prompt: &str,
     provider_params: Option<serde_json::Value>,
+    max_tokens: u32,
 ) -> Result<String, String> {
     let messages = vec![Message::User(UserMessage::text(prompt.to_string()))];
-    let mut request = LlmRequest::new(model, messages).with_max_tokens(256);
+    let mut request = LlmRequest::new(model, messages).with_max_tokens(max_tokens);
     if let Some(params) = provider_params {
         request = request.with_provider_params(params);
     }
@@ -163,6 +164,7 @@ async fn chat_roundtrip_all_models() {
             entry.id,
             "Respond with exactly the word: ready",
             None,
+            256,
         )
         .await
         {
@@ -243,6 +245,7 @@ async fn effort_levels_accepted() {
                 entry.id,
                 "Respond with exactly the word: ready",
                 Some(params),
+                256,
             )
             .await
             {
@@ -319,11 +322,15 @@ async fn thinking_modes_per_capability() {
                 entry.id, entry.provider, mode
             );
             tried += 1;
+            // Thinking requires max_tokens > budget_tokens. The enabled mode
+            // asks for budget_tokens: 2048, so allow some headroom for the
+            // actual response.
             match run_chat(
                 client.as_ref(),
                 entry.id,
                 "Think briefly, then answer 'ready'.",
                 Some(params),
+                4096,
             )
             .await
             {

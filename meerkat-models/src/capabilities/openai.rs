@@ -9,9 +9,12 @@ use crate::catalog::ModelTier;
 
 /// Reasoning-effort levels accepted by GPT-5.4.
 ///
-/// Source: https://developers.openai.com/api/docs/models/gpt-5.4
-/// (default is `none` — opt-in reasoning on 5.4).
-const GPT5_4_EFFORT: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+/// Verified against the live API: `minimal` is rejected with
+/// "Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+/// Earlier docs implying `minimal` support appear to apply only to older
+/// GPT-5.x models, not 5.4.
+/// Default is `none` — opt-in reasoning on 5.4.
+const GPT5_4_EFFORT: &[&str] = &["none", "low", "medium", "high", "xhigh"];
 
 /// Reasoning-effort levels accepted by GPT-5.3 Codex.
 ///

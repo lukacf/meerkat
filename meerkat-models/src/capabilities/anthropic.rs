@@ -52,8 +52,14 @@ const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
 /// Effort tiers accepted by Opus 4.7 only; `xhigh` sits between `high` and `max`.
 const OPUS_47_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-/// Effort tiers shared by Opus 4.6, Opus 4.5, and Sonnet 4.6.
-const CLAUDE_4_EFFORT: &[&str] = &["low", "medium", "high", "max"];
+/// Effort tiers accepted by Opus 4.6 and Sonnet 4.6.
+const CLAUDE_46_EFFORT: &[&str] = &["low", "medium", "high", "max"];
+
+/// Effort tiers accepted by Opus 4.5 (verified against the live API:
+/// "This model does not support effort level 'max'. Supported levels: high,
+/// low, medium." — so `max` is rejected on 4.5 despite the docs listing the
+/// model on the effort page.)
+const OPUS_45_EFFORT: &[&str] = &["low", "medium", "high"];
 
 // ── Catalog rows ─────────────────────────────────────────────────────────
 
@@ -135,7 +141,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_top_k: true,
         thinking: ThinkingSupport::AnthropicAdaptiveAndEnabled,
         supports_reasoning: false,
-        effort_levels: CLAUDE_4_EFFORT,
+        effort_levels: CLAUDE_46_EFFORT,
         supports_web_search: true,
         supports_inference_geo: true,
         supports_compaction: true,
@@ -178,7 +184,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_top_k: true,
         thinking: ThinkingSupport::AnthropicAdaptiveAndEnabled,
         supports_reasoning: false,
-        effort_levels: CLAUDE_4_EFFORT,
+        effort_levels: CLAUDE_46_EFFORT,
         supports_web_search: true,
         supports_inference_geo: true,
         supports_compaction: true,
@@ -269,7 +275,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_top_k: true,
         thinking: ThinkingSupport::AnthropicEnabledOnly,
         supports_reasoning: false,
-        effort_levels: CLAUDE_4_EFFORT,
+        effort_levels: OPUS_45_EFFORT,
         supports_web_search: true,
         supports_inference_geo: true,
         supports_compaction: false,

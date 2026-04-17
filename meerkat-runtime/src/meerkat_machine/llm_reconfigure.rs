@@ -372,20 +372,18 @@ impl MeerkatMachine {
             let sessions = self.sessions.read().await;
             let has_control = sessions
                 .get(&session_id)
-                .and_then(|entry| entry.control_sender())
+                .and_then(super::RuntimeSessionEntry::control_sender)
                 .is_some();
             drop(sessions);
-            if has_control {
-                if let Err(error) = self.cancel_after_boundary_inner(&session_id).await {
-                    let _ = self
-                        .stage_session_dsl_input(
-                            &session_id,
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
-                            "AbortLiveTopologyBeforeDetach:cancel_after_boundary_failed",
-                        )
-                        .await;
-                    return Err(error);
-                }
+            if has_control && let Err(error) = self.cancel_after_boundary_inner(&session_id).await {
+                let _ = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                        "AbortLiveTopologyBeforeDetach:cancel_after_boundary_failed",
+                    )
+                    .await;
+                return Err(error);
             }
         }
 

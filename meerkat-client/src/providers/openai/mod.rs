@@ -2,6 +2,8 @@
 
 pub mod auth;
 pub mod backend;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+pub mod oauth;
 
 use std::sync::Arc;
 
@@ -111,10 +113,80 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
             }
             OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens => {
-                // Phase 2 does not implement ChatGPT OAuth flows — enum
-                // variants exist so Phase 3+ can fill them in without
-                // shape changes.
-                return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+                {
+                    let store = env
+                        .token_store
+                        .as_ref()
+                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                    let realm_id = binding
+                        .backend_profile
+                        .options
+                        .get("realm_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("dev")
+                        .to_string();
+                    let key =
+                        crate::auth_store::TokenKey::new(realm_id, binding.auth_profile.id.clone());
+                    let persisted = store
+                        .load(&key)
+                        .await
+                        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
+                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+
+                    match auth_method {
+                        OpenAiAuthMethod::ExternalChatGptTokens => {
+                            // External tokens are not refreshed by
+                            // meerkat — the host manages the lifecycle.
+                            // We just read the persisted access_token.
+                            let secret = persisted
+                                .primary_secret
+                                .clone()
+                                .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                            ShimCredential::Secret(secret)
+                        }
+                        OpenAiAuthMethod::ManagedChatGptOauth => {
+                            use chrono::{Duration, Utc};
+                            let fresh = persisted
+                                .expires_at
+                                .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
+                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
+                            {
+                                ShimCredential::Secret(access)
+                            } else {
+                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                    Arc::new(crate::auth_store::InMemoryCoordinator::new())
+                                });
+                                let endpoints =
+                                    oauth::chatgpt_endpoints("http://127.0.0.1:0/callback");
+                                let runtime = oauth::OpenAiOAuthRuntime::new(
+                                    store.clone(),
+                                    coord,
+                                    endpoints,
+                                    key,
+                                );
+                                let access = runtime.get_or_refresh_access_token().await.map_err(
+                                    |e| match e {
+                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                            ProviderAuthError::Auth(
+                                                AuthError::InteractiveLoginRequired,
+                                            )
+                                        }
+                                        other => ProviderAuthError::SourceResolutionFailed(
+                                            other.to_string(),
+                                        ),
+                                    },
+                                )?;
+                                ShimCredential::Secret(access)
+                            }
+                        }
+                        _ => unreachable!("arm guarded by outer match"),
+                    }
+                }
+                #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
+                {
+                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                }
             }
         };
 

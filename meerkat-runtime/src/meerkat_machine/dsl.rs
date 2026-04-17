@@ -448,7 +448,7 @@ machine! {
             RetireRequestedOp { operation_id: String },
             RetireCompletedOp { operation_id: String, outcome: String },
             TerminateOp { operation_id: String, outcome: String },
-            RequestWaitAll,
+            RequestWaitAll { operation_ids: Set<String> },
             SatisfyWaitAll,
             // Comms drain inputs
             SpawnDrain { mode: String },
@@ -2111,12 +2111,14 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // RequestWaitAll: activate wait-all barrier
+        // RequestWaitAll: activate wait-all barrier with explicit membership.
+        // `wait_operation_ids` is DSL-owned; shell must not mirror it.
         transition RequestWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestWaitAll
+            on input RequestWaitAll { operation_ids }
             update {
                 self.wait_active = true;
+                self.wait_operation_ids = operation_ids;
             }
             to Idle
         }

@@ -303,10 +303,12 @@ struct ShellState {
     max_completed: usize,
     /// Maximum concurrent non-terminal operations (None = unlimited).
     max_concurrent: Option<usize>,
-    /// Active barrier wait request, if any.
+    /// Oneshot correlation id for the currently-pending `wait_all` future.
+    ///
+    /// Barrier membership (`wait_operation_ids`) and activation (`wait_active`)
+    /// are DSL-owned. This field is pure transport mechanics — the identity
+    /// the oneshot sender is tagged with so `Drop` can correlate cancellation.
     wait_request_id: Option<WaitRequestId>,
-    /// Operation IDs tracked by the active barrier wait.
-    wait_operation_ids: Vec<OperationId>,
     /// Monotonic sequence counter for completion feed entries.
     next_completion_seq: CompletionSeq,
     /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
@@ -360,7 +362,6 @@ impl ShellState {
             max_completed,
             max_concurrent,
             wait_request_id: None,
-            wait_operation_ids: Vec::new(),
             next_completion_seq: 0,
             detached_wake: None,
             // Feed buffer is larger than max_completed to absorb bursts.
@@ -592,26 +593,50 @@ impl ShellState {
         self.maybe_satisfy_wait();
     }
 
-    /// Check whether a pending barrier wait is now satisfied and resolve it.
-    fn maybe_satisfy_wait(&mut self) {
-        let wait_id = match self.wait_request_id.as_ref() {
-            Some(id) => id.clone(),
-            None => return,
-        };
-        let all_terminal = self
+    /// Read barrier membership from DSL state (sole owner).
+    fn wait_operation_ids(&self) -> Vec<OperationId> {
+        self.dsl
+            .0
+            .state
             .wait_operation_ids
+            .iter()
+            .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
+            .collect()
+    }
+
+    /// Whether the DSL has a barrier wait active.
+    fn wait_active(&self) -> bool {
+        self.dsl.0.state.wait_active
+    }
+
+    /// Check whether a pending barrier wait is now satisfied and resolve it.
+    ///
+    /// Barrier membership lives in DSL `wait_operation_ids`; `wait_active`
+    /// signals whether a barrier is pending. `wait_request_id` is the
+    /// shell-owned oneshot correlation id that selects which sender to
+    /// notify; when the DSL barrier satisfies without a live correlation
+    /// (post-recovery, or duplicate resolution), the oneshot simply remains
+    /// pending.
+    fn maybe_satisfy_wait(&mut self) {
+        if !self.wait_active() {
+            return;
+        }
+        let ids = self.wait_operation_ids();
+        let all_terminal = ids
             .iter()
             .all(|id| self.status(id).is_some_and(OperationStatus::is_terminal));
         if !all_terminal {
             return;
         }
-        let ids = std::mem::take(&mut self.wait_operation_ids);
-        self.wait_request_id = None;
-        // Reflect barrier resolution in DSL state.
+        // Reflect barrier resolution in DSL state — clears wait_active + members.
         let _ = self.dsl_apply(
             mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
             "SatisfyWaitAll",
         );
+        let wait_id = match self.wait_request_id.take() {
+            Some(id) => id,
+            None => return,
+        };
         if let Some(pending) = self.pending_wait.take() {
             if pending.wait_request_id == wait_id {
                 let _ = pending.sender.send(WaitAllSatisfied {
@@ -705,7 +730,7 @@ impl ShellState {
             max_concurrent: self.max_concurrent,
             active_count: self.active_count(),
             wait_request_id: self.wait_request_id.clone(),
-            wait_operation_ids: self.wait_operation_ids.clone(),
+            wait_operation_ids: self.wait_operation_ids(),
             next_completion_seq: self.next_completion_seq,
         };
 
@@ -1000,7 +1025,7 @@ impl RuntimeOpsLifecycleRegistry {
                 .pending_wait
                 .as_ref()
                 .map(|pending_wait| pending_wait.wait_request_id.clone()),
-            wait_operation_ids: state.wait_operation_ids.clone(),
+            wait_operation_ids: state.wait_operation_ids(),
             operations,
         }
     }
@@ -1025,9 +1050,10 @@ impl RuntimeOpsLifecycleRegistry {
         match state.wait_request_id.as_ref() {
             Some(active) if active == wait_request_id => {
                 state.wait_request_id = None;
-                state.wait_operation_ids.clear();
                 state.pending_wait = None;
-                // Reflect cancellation in DSL state.
+                // Clear the DSL barrier — SatisfyWaitAll resets wait_active +
+                // wait_operation_ids. The `wait_is_active` guard ensures this
+                // is a no-op if the barrier was already cleared.
                 let _ = state.dsl_apply(
                     mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
                     "SatisfyWaitAll(cancel)",
@@ -1616,8 +1642,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                         });
                     }
                 }
-                // Guard: wait already active.
-                if state.wait_request_id.is_some() {
+                // Guard: wait already active — check DSL, the sole barrier owner.
+                if state.wait_active() {
                     return Box::pin(WaitAllFuture {
                         registry: self,
                         wait_request_id,
@@ -1660,15 +1686,19 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                             });
                     WaitAllFutureState::Ready(Some(outcomes))
                 } else {
-                    // Record barrier and apply DSL transition.
-                    state.wait_request_id = Some(wait_request_id.clone());
-                    state.wait_operation_ids = owned_ids.clone();
+                    // Populate DSL barrier membership via RequestWaitAll.
+                    // Membership is DSL-owned; shell holds only the oneshot
+                    // correlation id for delivering the result to the caller.
+                    let dsl_ids: std::collections::BTreeSet<String> = owned_ids
+                        .iter()
+                        .map(|id| mm_dsl::OperationId::from_domain(id).0)
+                        .collect();
                     if let Err(err) = state.dsl_apply(
-                        mm_dsl::MeerkatMachineInput::RequestWaitAll,
+                        mm_dsl::MeerkatMachineInput::RequestWaitAll {
+                            operation_ids: dsl_ids,
+                        },
                         "RequestWaitAll",
                     ) {
-                        state.wait_request_id = None;
-                        state.wait_operation_ids.clear();
                         return Box::pin(WaitAllFuture {
                             registry: self,
                             wait_request_id,
@@ -1676,10 +1706,17 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                             state: WaitAllFutureState::Ready(Some(Err(err))),
                         });
                     }
+                    state.wait_request_id = Some(wait_request_id.clone());
 
                     if state.pending_wait.is_some() {
+                        // Roll back the DSL barrier we just activated so the
+                        // registry is not stuck in a wait-active state with
+                        // no correlation oneshot to resolve.
                         state.wait_request_id = None;
-                        state.wait_operation_ids.clear();
+                        let _ = state.dsl_apply(
+                            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
+                            "SatisfyWaitAll(rollback)",
+                        );
                         return Box::pin(WaitAllFuture {
                             registry: self,
                             wait_request_id,
@@ -1963,7 +2000,7 @@ mod tests {
                 None => panic!("wait request should be active"),
             };
             assert_eq!(
-                state.wait_operation_ids.as_slice(),
+                state.wait_operation_ids().as_slice(),
                 std::slice::from_ref(&op_id)
             );
             wait_request_id
@@ -2010,7 +2047,8 @@ mod tests {
 
         let state = registry.read_state().unwrap();
         assert!(state.wait_request_id.is_none());
-        assert!(state.wait_operation_ids.is_empty());
+        assert!(state.wait_operation_ids().is_empty());
+        assert!(!state.wait_active());
     }
 
     #[test]

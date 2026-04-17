@@ -2305,17 +2305,24 @@ impl MobActor {
                         for entry in entries {
                             let Some(session_id) = entry.member_ref.bridge_session_id().cloned()
                             else {
+                                // Peer-only members cannot supply an agent event stream;
+                                // skip silently and record the mode so callers who ended
+                                // up with zero streams learn why.
                                 unsupported_mode.get_or_insert(entry.runtime_mode);
                                 continue;
                             };
-                            if let Ok(stream) = crate::runtime::session_service::MobSessionService::subscribe_session_events(
+                            let stream = crate::runtime::session_service::MobSessionService::subscribe_session_events(
                                 self.session_service.as_ref(),
                                 &session_id,
                             )
                             .await
-                            {
-                                streams.push((entry.meerkat_id.clone(), stream));
-                            }
+                            .map_err(|e| {
+                                MobError::Internal(format!(
+                                    "failed to subscribe to agent events for '{}': {e}",
+                                    entry.meerkat_id
+                                ))
+                            })?;
+                            streams.push((entry.meerkat_id.clone(), stream));
                         }
                         if streams.is_empty()
                             && let Some(mode) = unsupported_mode

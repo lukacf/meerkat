@@ -427,6 +427,62 @@ enum AuthorizeSupervisorGate {
     Proceed,
 }
 
+/// Gate decision for `BindMember` when a supervisor is already bound.
+///
+/// Once `supervisor_state` is populated, the only safe outcome is an
+/// idempotent acknowledgement for the exact same supervisor + epoch +
+/// authenticated sender. Anything else is rejected so that a caller who
+/// still knows the bootstrap token cannot seize authority by re-binding
+/// with a different supervisor or lower epoch — rotation must go through
+/// `AuthorizeSupervisor` (which requires the *current* supervisor to
+/// sign).
+#[derive(Debug)]
+enum BindMemberGate {
+    /// No supervisor bound yet — the caller may proceed with the full
+    /// bootstrap validation (`validate_bind_request`).
+    Bootstrap,
+    /// A supervisor is already bound and the request exactly matches it
+    /// (same peer id, same epoch, authenticated sender). Reply with the
+    /// same `BridgeBindResponse` we would have returned originally; do
+    /// not mutate `supervisor_state` or re-trust the peer.
+    IdempotentAck,
+}
+
+fn validate_bind_request_against_state(
+    sender: &str,
+    payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
+    supervisor_state: &Option<AuthorizedSupervisorState>,
+) -> Result<BindMemberGate, String> {
+    if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported bridge protocol version {} (expected {})",
+            payload.protocol_version, SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        ));
+    }
+    let Some(current) = supervisor_state.as_ref() else {
+        return Ok(BindMemberGate::Bootstrap);
+    };
+    if payload.supervisor.peer_id != current.supervisor.peer_id {
+        return Err(format!(
+            "bind member failed: supervisor already bound as '{}'; use authorize_supervisor to rotate",
+            current.supervisor.peer_id
+        ));
+    }
+    if payload.epoch != current.epoch {
+        return Err(format!(
+            "bind member failed: epoch {} does not match bound supervisor epoch {}; use authorize_supervisor to rotate",
+            payload.epoch, current.epoch
+        ));
+    }
+    if !sender_matches_supervisor(sender, &current.supervisor) {
+        return Err(format!(
+            "bind member failed: request sender '{sender}' does not match authorized supervisor '{}'",
+            current.supervisor.peer_id
+        ));
+    }
+    Ok(BindMemberGate::IdempotentAck)
+}
+
 fn validate_authorize_supervisor_request(
     sender: &str,
     payload: &BridgeSupervisorPayload,
@@ -568,6 +624,44 @@ async fn try_handle_supervisor_bridge_command(
 
     match command {
         BridgeCommand::BindMember(payload) => {
+            // Reject rebind attempts once a supervisor is already bound;
+            // only exact-match retries from the authorized sender get an
+            // idempotent ack. This prevents any holder of the bootstrap
+            // token from seizing authority without going through
+            // AuthorizeSupervisor/rotation (which requires the current
+            // supervisor to sign).
+            let gate = match validate_bind_request_against_state(sender, &payload, supervisor_state)
+            {
+                Ok(gate) => gate,
+                Err(error) => {
+                    send_bridge_failure(comms_runtime, candidate, error).await;
+                    return true;
+                }
+            };
+            match gate {
+                BindMemberGate::IdempotentAck => {
+                    let advertised = comms_runtime
+                        .advertised_address()
+                        .unwrap_or_else(|| payload.expected_address.clone());
+                    let response = serde_json::to_value(BridgeBindResponse {
+                        peer_id: comms_runtime
+                            .public_key()
+                            .unwrap_or_else(|| payload.expected_peer_id.clone()),
+                        address: canonicalize_bridge_address(&advertised),
+                        capabilities: bridge_capabilities(),
+                    })
+                    .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        response,
+                    )
+                    .await;
+                    return true;
+                }
+                BindMemberGate::Bootstrap => {}
+            }
             let (supervisor_spec, advertised_address) =
                 match validate_bind_request(comms_runtime, sender, &payload) {
                     Ok(binding) => binding,
@@ -648,28 +742,30 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let response = match comms_runtime.add_trusted_peer(supervisor_spec).await {
+            let response = match comms_runtime
+                .add_trusted_peer(supervisor_spec.clone())
+                .await
+            {
                 Ok(()) => {
                     if let Some(old_supervisor) = old_supervisor
                         && old_supervisor.peer_id != payload.supervisor.peer_id
-                    {
-                        let _ = comms_runtime
+                        && let Err(error) = comms_runtime
                             .remove_trusted_peer(&old_supervisor.peer_id)
-                            .await;
+                            .await
+                    {
+                        // Not a hard failure: the new supervisor is already trusted and
+                        // the state cutover has happened. But leaving the old supervisor
+                        // trusted is a cleanup regression we must surface — otherwise the
+                        // old supervisor can still spend comms bandwidth until the next
+                        // boundary.
+                        tracing::warn!(
+                            old_supervisor = %old_supervisor.peer_id,
+                            error = %error,
+                            "authorize supervisor: failed to remove previous supervisor trust"
+                        );
                     }
                     *supervisor_state = Some(AuthorizedSupervisorState {
-                        supervisor: match TrustedPeerSpec::try_from(payload.supervisor) {
-                            Ok(spec) => spec,
-                            Err(error) => {
-                                send_bridge_failure(
-                                    comms_runtime,
-                                    candidate,
-                                    format!("authorize supervisor failed: invalid supervisor peer spec: {error}"),
-                                )
-                                .await;
-                                return true;
-                            }
-                        },
+                        supervisor: supervisor_spec,
                         epoch: payload.epoch,
                     });
                     serde_json::to_value(BridgeAck { ok: true })
@@ -1446,6 +1542,216 @@ mod tests {
         assert!(
             error.contains("invalid supervisor peer spec"),
             "bind rejection should explain invalid supervisor identity, got: {error}"
+        );
+    }
+
+    fn sample_bind_payload() -> meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+        meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: BridgePeerSpec {
+                name: "mob/__mob_supervisor__".to_string(),
+                peer_id: "ed25519:supervisor".to_string(),
+                address: "inproc://mob/__mob_supervisor__".to_string(),
+            },
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: "inproc://receiver".to_string(),
+            bootstrap_token: "expected-token".to_string(),
+        }
+    }
+
+    fn authorized_state_for(
+        payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
+    ) -> Option<AuthorizedSupervisorState> {
+        Some(AuthorizedSupervisorState {
+            supervisor: TrustedPeerSpec::try_from(payload.supervisor.clone())
+                .expect("valid supervisor spec"),
+            epoch: payload.epoch,
+        })
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_allows_bootstrap_when_unbound() {
+        let payload = sample_bind_payload();
+        let gate =
+            validate_bind_request_against_state(&payload.supervisor.peer_id, &payload, &None)
+                .expect("unbound state should accept bootstrap bind");
+        assert!(matches!(gate, BindMemberGate::Bootstrap));
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_rejects_different_supervisor_takeover() {
+        // Scenario: a stale bootstrap-token holder tries to seize authority
+        // by calling BindMember with a DIFFERENT supervisor peer_id. This is
+        // exactly the review vulnerability and must be rejected.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let mut takeover = sample_bind_payload();
+        takeover.supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:adversary".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let error =
+            validate_bind_request_against_state(&takeover.supervisor.peer_id, &takeover, &state)
+                .expect_err("rebind with a different supervisor must be rejected");
+        assert!(
+            error.contains("supervisor already bound"),
+            "rejection should call out the already-bound supervisor, got: {error}"
+        );
+        assert!(
+            error.contains("authorize_supervisor"),
+            "rejection should direct callers to authorize_supervisor for rotation, got: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_rejects_lower_epoch_replay() {
+        // Scenario: replay an earlier bind with a lower epoch to regress
+        // member state. Must be rejected even when the supervisor peer_id
+        // matches — otherwise an attacker can downgrade the member epoch.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let mut replay = sample_bind_payload();
+        replay.epoch = current_payload.epoch - 1;
+        let error =
+            validate_bind_request_against_state(&replay.supervisor.peer_id, &replay, &state)
+                .expect_err("lower-epoch rebind must be rejected as a stale replay");
+        assert!(
+            error.contains("does not match bound supervisor epoch"),
+            "rejection should explain the epoch mismatch, got: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_rejects_higher_epoch_same_supervisor_rebind() {
+        // Scenario: same supervisor tries to self-bump epoch via BindMember.
+        // Rotation must go through AuthorizeSupervisor — BindMember is only
+        // for initial bootstrap after member restart.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let mut advance = sample_bind_payload();
+        advance.epoch = current_payload.epoch + 5;
+        let error =
+            validate_bind_request_against_state(&advance.supervisor.peer_id, &advance, &state)
+                .expect_err("higher-epoch rebind with same supervisor must be rejected");
+        assert!(
+            error.contains("does not match bound supervisor epoch"),
+            "rejection should explain the epoch mismatch, got: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_rejects_spoofed_sender() {
+        // Scenario: an attacker forges a BindMember that matches the
+        // current supervisor spec but signs it with their own key.
+        // sender != authorized supervisor → must reject.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let retry = sample_bind_payload();
+        let error = validate_bind_request_against_state("ed25519:attacker", &retry, &state)
+            .expect_err("bind from an unauthorized sender must be rejected");
+        assert!(
+            error.contains("request sender"),
+            "rejection should surface the sender mismatch, got: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_idempotently_acks_retry_from_current_supervisor() {
+        // Scenario: the authorized supervisor retries BindMember with the
+        // exact same payload (e.g., transport-level retry). Must return
+        // idempotent ack without mutating state.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let retry = sample_bind_payload();
+        let gate = validate_bind_request_against_state(&retry.supervisor.peer_id, &retry, &state)
+            .expect("exact-match retry should be idempotent");
+        assert!(matches!(gate, BindMemberGate::IdempotentAck));
+    }
+
+    #[test]
+    fn validate_bind_request_against_state_rejects_protocol_version_mismatch_even_when_bound() {
+        // A stale protocol version cannot coast on idempotent-ack — protocol
+        // version is checked before state to surface clear incompatibility.
+        let current_payload = sample_bind_payload();
+        let state = authorized_state_for(&current_payload);
+        let mut stale = sample_bind_payload();
+        stale.protocol_version = SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1;
+        let error = validate_bind_request_against_state(&stale.supervisor.peer_id, &stale, &state)
+            .expect_err("stale protocol version must be rejected");
+        assert!(
+            error.contains("unsupported bridge protocol version"),
+            "rejection should explain the protocol mismatch, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_member_handler_rejects_rebind_after_supervisor_bound() {
+        // End-to-end handler test: drive BridgeCommand::BindMember through the
+        // dispatch and assert that a different supervisor is NOT overwritten
+        // into supervisor_state.
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("bind-rebind-receiver")
+                .expect("receiver runtime"),
+        );
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("mob/__mob_supervisor__")
+                .expect("supervisor runtime"),
+        );
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let current_supervisor = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            supervisor_runtime.public_key().to_peer_id(),
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid supervisor spec");
+        let mut supervisor_state = Some(AuthorizedSupervisorState {
+            supervisor: current_supervisor.clone(),
+            epoch: 1,
+        });
+        let adversary_supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:adversary".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let command = BridgeCommand::BindMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+                supervisor: adversary_supervisor,
+                epoch: 2,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                expected_peer_id: runtime
+                    .public_key()
+                    .unwrap_or_else(|| "ed25519:receiver".to_string()),
+                expected_address: runtime
+                    .advertised_address()
+                    .unwrap_or_else(|| "inproc://bind-rebind-receiver".to_string()),
+                // Even with a *valid* bootstrap token, the rebind must fail.
+                bootstrap_token: runtime.bridge_bootstrap_token().unwrap_or_default(),
+            },
+        );
+        let candidate = bridge_candidate("ed25519:adversary", &command);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &runtime,
+                &candidate,
+                &mut supervisor_state,
+            )
+            .await,
+            "bridge handler must own the BindMember command"
+        );
+        let state = supervisor_state.expect("supervisor state must be preserved");
+        assert_eq!(
+            state.supervisor.peer_id, current_supervisor.peer_id,
+            "rebind attempt must not replace the authorized supervisor"
+        );
+        assert_eq!(
+            state.epoch, 1,
+            "rebind attempt must not advance the authorized epoch"
         );
     }
 

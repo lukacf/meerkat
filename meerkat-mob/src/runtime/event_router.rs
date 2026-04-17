@@ -91,10 +91,16 @@ async fn run_event_router(
     // Bootstrap: subscribe to all current roster members.
     {
         for entry in handle.list_members().await {
-            if tracked_ids.insert(entry.meerkat_id.clone())
-                && let Some(stream) =
-                    subscribe_member(&handle, entry.meerkat_id.clone(), entry.role.clone()).await
+            if tracked_ids.contains(&entry.meerkat_id) {
+                continue;
+            }
+            // Only mark the member tracked once the subscription actually
+            // succeeded. Otherwise a transient subscribe failure would
+            // permanently exclude the member from the event stream.
+            if let Some(stream) =
+                subscribe_member(&handle, entry.meerkat_id.clone(), entry.role.clone()).await
             {
+                tracked_ids.insert(entry.meerkat_id.clone());
                 merged.push(stream);
             }
         }
@@ -152,11 +158,19 @@ async fn run_event_router(
                         crate::event::MobEventKind::MemberSpawned(ref event) => {
                             let meerkat_id =
                                 crate::ids::MeerkatId::from(event.agent_identity.as_str());
-                            if tracked_ids.insert(meerkat_id.clone())
-                                && let Some(stream) =
-                                    subscribe_member(&handle, meerkat_id, event.role.clone())
-                                        .await
+                            // Only mark the member tracked once the subscription
+                            // actually succeeded so a transient failure at spawn
+                            // time doesn't permanently exclude them from the
+                            // merged event stream.
+                            if !tracked_ids.contains(&meerkat_id)
+                                && let Some(stream) = subscribe_member(
+                                    &handle,
+                                    meerkat_id.clone(),
+                                    event.role.clone(),
+                                )
+                                .await
                             {
+                                tracked_ids.insert(meerkat_id);
                                 merged.push(stream);
                             }
                         }
@@ -196,7 +210,20 @@ async fn subscribe_member(
     profile: ProfileName,
 ) -> Option<TaggedStream> {
     let identity = AgentIdentity::from(meerkat_id.as_str());
-    let stream = handle.subscribe_agent_events(&identity).await.ok()?;
+    let stream = match handle.subscribe_agent_events(&identity).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            // Log the failure so callers see why a member is missing from
+            // the merged event stream. The caller is expected to leave
+            // this member out of `tracked_ids` so a later tick can retry.
+            tracing::warn!(
+                meerkat_id = %meerkat_id,
+                error = %error,
+                "mob event router: failed to subscribe to member agent events",
+            );
+            return None;
+        }
+    };
     let mid = meerkat_id;
     let prof = profile;
     Some(stream.map(

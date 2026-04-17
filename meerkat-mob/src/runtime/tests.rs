@@ -381,6 +381,8 @@ struct MockSessionService {
     flow_turn_fail_sessions: RwLock<HashSet<SessionId>>,
     flow_turn_completed_result: RwLock<String>,
     flow_turn_overlays: RwLock<Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)>>,
+    /// Session IDs for which `subscribe_session_events` must return an error.
+    subscribe_fail_sessions: RwLock<HashSet<SessionId>>,
 }
 
 impl MockSessionService {
@@ -421,7 +423,15 @@ impl MockSessionService {
             flow_turn_fail_sessions: RwLock::new(HashSet::new()),
             flow_turn_completed_result: RwLock::new("\"Turn completed\"".to_string()),
             flow_turn_overlays: RwLock::new(Vec::new()),
+            subscribe_fail_sessions: RwLock::new(HashSet::new()),
         }
+    }
+
+    async fn fail_subscribe_for_session(&self, session_id: SessionId) {
+        self.subscribe_fail_sessions
+            .write()
+            .await
+            .insert(session_id);
     }
 
     async fn active_session_count(&self) -> usize {
@@ -1331,6 +1341,16 @@ impl MobSessionService for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_core::EventStream, meerkat_core::StreamError> {
+        if self
+            .subscribe_fail_sessions
+            .read()
+            .await
+            .contains(session_id)
+        {
+            return Err(meerkat_core::StreamError::Internal(format!(
+                "simulated subscribe failure for session {session_id}"
+            )));
+        }
         if !self.sessions.read().await.contains_key(session_id) {
             return Err(meerkat_core::StreamError::NotFound(format!(
                 "session {session_id}"
@@ -12411,6 +12431,45 @@ async fn test_subscribe_all_agent_events_keeps_session_backed_members_in_mixed_r
         .expect("mixed roster should still expose session-backed event streams");
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0].0, AgentIdentity::from("l-local"));
+}
+
+#[tokio::test]
+async fn test_subscribe_all_agent_events_surfaces_session_subscription_failure() {
+    // Regression: a session-backed member whose subscribe_session_events fails
+    // must propagate the error, not be silently dropped. Previously the loop
+    // used `if let Ok(stream) = ...` which turned real subscription errors
+    // into partial/empty lists and masked real regressions.
+    let definition = with_unique_mob_id(sample_definition(), "subscribe-all-failure-propagates");
+    let (handle, service) = create_test_mob(definition).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-local"), None)
+        .await
+        .expect("spawn local lead");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-local"),
+            None,
+        )
+        .await
+        .expect("spawn local worker");
+
+    let broken_session_id = handle
+        .resolve_bridge_session_id(&AgentIdentity::from("w-local"))
+        .await
+        .expect("worker session should have a bridge session id");
+    service.fail_subscribe_for_session(broken_session_id).await;
+
+    match handle.subscribe_all_agent_events().await {
+        Ok(_) => panic!("broken session subscription must surface as an error"),
+        Err(MobError::Internal(message)) => assert!(
+            message.contains("failed to subscribe to agent events") && message.contains("w-local"),
+            "internal error should cite the failing member, got: {message}"
+        ),
+        Err(other) => {
+            panic!("expected MobError::Internal propagating subscribe failure, got: {other:?}")
+        }
+    }
 }
 
 #[tokio::test]

@@ -181,7 +181,6 @@ impl MeerkatMachine {
                         == Some(
                             meerkat_core::comms_drain_lifecycle_authority::CommsDrainMode::PersistentHost,
                         );
-                    let drain_phase_str = format!("{:?}", slot.phase);
                     drop(slots);
                     {
                         let dsl_input = if is_respawnable {
@@ -196,7 +195,6 @@ impl MeerkatMachine {
                         };
                         let mut sessions = self.sessions.write().await;
                         if let Some(entry) = sessions.get_mut(&session_id) {
-                            entry.dsl_authority.state.drain_phase = drain_phase_str;
                             match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                                 &mut *entry.dsl_authority,
                                 dsl_input,
@@ -232,19 +230,10 @@ impl MeerkatMachine {
 
     /// Stage a DSL `StopDrain` input for the given session.
     ///
-    /// Patches the DSL drain_phase from the slot before applying, since
-    /// `sync_session_dsl_projection` does not yet project drain substate.
+    /// drain_phase is maintained by DSL transitions; no shell → DSL sync.
     async fn stage_drain_stop_dsl(&self, session_id: &meerkat_core::types::SessionId) {
-        let drain_phase_str = {
-            let slots = self.comms_drain_slots.read().await;
-            slots
-                .get(session_id)
-                .map(|s| format!("{:?}", s.phase))
-                .unwrap_or_else(|| "Inactive".to_string())
-        };
         let mut sessions = self.sessions.write().await;
         if let Some(entry) = sessions.get_mut(session_id) {
-            entry.dsl_authority.state.drain_phase = drain_phase_str;
             match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut *entry.dsl_authority,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StopDrain,

@@ -424,6 +424,12 @@ enum RealtimeProductSessionCommand {
         error: String,
         respond: oneshot::Sender<Result<(), RealtimeChannelErrorFrame>>,
     },
+    BargeInTruncate {
+        item_id: String,
+        content_index: u32,
+        audio_played_ms: u64,
+        respond: oneshot::Sender<Result<(), RealtimeChannelErrorFrame>>,
+    },
     Close,
 }
 
@@ -1016,6 +1022,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             RealtimeClientFrame::ChannelInput(_)
                                             | RealtimeClientFrame::ChannelCommitTurn
                                             | RealtimeClientFrame::ChannelInterrupt
+                                            | RealtimeClientFrame::ChannelBargeInTruncate(_)
                                                 if matches!(
                                                     role,
                                                     meerkat_contracts::RealtimeChannelRole::Observer
@@ -1048,6 +1055,61 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     "channel.commit_turn is only valid for explicit_commit channels",
                                                 )
                                                 .await;
+                                            }
+                                            RealtimeClientFrame::ChannelBargeInTruncate(frame) => {
+                                                // Barge-in must reach the
+                                                // provider no matter what —
+                                                // if the product session is
+                                                // reconnecting or absent we
+                                                // still acknowledge the client
+                                                // by noting the intent in the
+                                                // pending projection so the
+                                                // canonical session can
+                                                // project the truncation once
+                                                // the session comes back.
+                                                if let Some(product_session) = product_session.as_mut() {
+                                                    let (respond_tx, respond_rx) = oneshot::channel();
+                                                    let _ = product_session
+                                                        .command_tx
+                                                        .send(RealtimeProductSessionCommand::BargeInTruncate {
+                                                            item_id: frame.item_id,
+                                                            content_index: frame.content_index,
+                                                            audio_played_ms: frame.audio_played_ms,
+                                                            respond: respond_tx,
+                                                        })
+                                                        .await;
+                                                    match respond_rx.await {
+                                                        Ok(Ok(())) => {}
+                                                        Ok(Err(error)) => {
+                                                            let _ = send_server_frame(
+                                                                &mut socket,
+                                                                &RealtimeServerFrame::ChannelError(error),
+                                                            )
+                                                            .await;
+                                                        }
+                                                        Err(_) => {
+                                                            let _ = send_protocol_error(
+                                                                &mut socket,
+                                                                RealtimeErrorCode::ProviderSessionClosed,
+                                                                "realtime provider session closed before barge-in truncation completed",
+                                                            )
+                                                            .await;
+                                                        }
+                                                    }
+                                                } else if uses_product_session {
+                                                    let _ = send_protocol_error(
+                                                        &mut socket,
+                                                        RealtimeErrorCode::ChannelReconnecting,
+                                                        "realtime provider session is reconnecting; retry barge-in once ready",
+                                                    )
+                                                    .await;
+                                                }
+                                                // Non-product-session paths
+                                                // (bare session target without
+                                                // an OpenAI session) silently
+                                                // ignore — there is no
+                                                // provider transcript to
+                                                // truncate.
                                             }
                                             RealtimeClientFrame::ChannelInterrupt => {
                                                 if let Some(product_session) = product_session.as_mut() {
@@ -2462,6 +2524,21 @@ async fn run_product_session_actor(
                                 .map_err(|error| realtime_client_error_frame(error, "tool_error"))
                         );
                     }
+                    RealtimeProductSessionCommand::BargeInTruncate {
+                        item_id,
+                        content_index,
+                        audio_played_ms,
+                        respond,
+                    } => {
+                        let _ = respond.send(
+                            session
+                                .truncate_assistant_output(item_id, content_index, audio_played_ms)
+                                .await
+                                .map_err(|error| {
+                                    realtime_client_error_frame(error, "barge_in_truncate")
+                                })
+                        );
+                    }
                     RealtimeProductSessionCommand::Close => {
                         let _ = session.close().await;
                         break;
@@ -2722,6 +2799,7 @@ async fn handle_product_session_event(
             pending_turn.staged_user_text.clear();
             Ok(vec![channel_event(RealtimeEvent::InputTranscriptFinal {
                 text,
+                prosody_hint: None,
             })])
         }
         RealtimeSessionEvent::TurnStarted => Ok(vec![channel_event(RealtimeEvent::TurnStarted)]),
@@ -2796,6 +2874,28 @@ async fn handle_product_session_event(
             call_id,
             tool_name,
         })]),
+        RealtimeSessionEvent::AssistantTranscriptTruncated {
+            item_id,
+            audio_played_ms,
+            truncated_text,
+        } => {
+            // Canonical-history projection: replace the staged assistant text
+            // with the heard prefix so the next turn's projection seeds from
+            // what the user actually heard. If the provider did not supply a
+            // re-projected text, leave existing staging and let the next
+            // TurnCompleted event finalize from whatever the provider
+            // eventually surfaces.
+            if let Some(text) = truncated_text.clone() {
+                pending_turn.staged_assistant_text = text;
+            }
+            Ok(vec![channel_event(
+                RealtimeEvent::AssistantTranscriptTruncated {
+                    item_id,
+                    audio_played_ms,
+                    truncated_text,
+                },
+            )])
+        }
     }
 }
 
@@ -3009,6 +3109,7 @@ async fn commit_runtime_turn_text(
     if emit_transcript_final {
         frames.push(channel_event(RealtimeEvent::InputTranscriptFinal {
             text: text.clone(),
+            prosody_hint: None,
         }));
     }
     frames.push(channel_event(RealtimeEvent::TurnCommitted));
@@ -3059,7 +3160,10 @@ async fn append_external_user_transcript(
 
     let mut frames = Vec::new();
     if emit_transcript_final {
-        frames.push(channel_event(RealtimeEvent::InputTranscriptFinal { text }));
+        frames.push(channel_event(RealtimeEvent::InputTranscriptFinal {
+            text,
+            prosody_hint: None,
+        }));
     }
     frames.push(channel_event(RealtimeEvent::TurnCommitted));
     Ok(frames)

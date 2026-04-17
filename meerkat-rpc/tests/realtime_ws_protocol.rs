@@ -178,6 +178,15 @@ impl RealtimeSession for FakeRealtimeSession {
         Ok(())
     }
 
+    async fn truncate_assistant_output(
+        &mut self,
+        _item_id: String,
+        _content_index: u32,
+        _audio_played_ms: u64,
+    ) -> Result<(), LlmError> {
+        Ok(())
+    }
+
     async fn submit_tool_result(&mut self, result: ToolResult) -> Result<(), LlmError> {
         self.seen_tool_results.lock().await.push(result);
         self.tool_submission_seen.store(true, Ordering::SeqCst);
@@ -807,6 +816,7 @@ async fn provider_managed_text_input_emits_transcript_events_and_commits_history
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "hello from provider managed".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(
@@ -992,6 +1002,7 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "hello world".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(
@@ -1385,6 +1396,7 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "cedar seven".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(
@@ -1554,6 +1566,7 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "cedar seven".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(
@@ -3043,6 +3056,7 @@ async fn member_target_provider_managed_text_input_commits_to_current_bridge_ses
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "hello from member target".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(
@@ -3182,6 +3196,7 @@ async fn member_target_provider_output_commits_canonical_assistant_preview() {
         read_server_frame(&mut ws_stream).await,
         RealtimeEvent::InputTranscriptFinal {
             text: "hello from member provider".to_string(),
+            prosody_hint: None,
         },
     );
     assert_channel_event(

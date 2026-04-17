@@ -65,6 +65,14 @@ pub enum RealtimeSessionEvent {
         tool_name: String,
         arguments: Value,
     },
+    /// The assistant output identified by `item_id` was truncated at
+    /// `audio_played_ms` because the user barged in. `truncated_text` is the
+    /// heard prefix, or `None` if the provider has not yet re-projected it.
+    AssistantTranscriptTruncated {
+        item_id: String,
+        audio_played_ms: u64,
+        truncated_text: Option<String>,
+    },
 }
 
 impl RealtimeSessionEvent {
@@ -75,9 +83,14 @@ impl RealtimeSessionEvent {
             Self::InputTranscriptPartial { text } => {
                 RealtimeEvent::InputTranscriptPartial { text: text.clone() }
             }
-            Self::InputTranscriptFinal { text } => {
-                RealtimeEvent::InputTranscriptFinal { text: text.clone() }
-            }
+            Self::InputTranscriptFinal { text } => RealtimeEvent::InputTranscriptFinal {
+                text: text.clone(),
+                // Provider-layer prosody annotations are not surfaced
+                // through the internal adapter today; when a provider
+                // starts exposing structured prosody, the adapter fills
+                // this field before emitting the public event.
+                prosody_hint: None,
+            },
             Self::TurnStarted => RealtimeEvent::TurnStarted,
             Self::TurnCommitted => RealtimeEvent::TurnCommitted,
             Self::TurnCompleted { .. } => RealtimeEvent::TurnCompleted,
@@ -96,6 +109,15 @@ impl RealtimeSessionEvent {
             } => RealtimeEvent::ToolCallRequested {
                 call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
+            },
+            Self::AssistantTranscriptTruncated {
+                item_id,
+                audio_played_ms,
+                truncated_text,
+            } => RealtimeEvent::AssistantTranscriptTruncated {
+                item_id: item_id.clone(),
+                audio_played_ms: *audio_played_ms,
+                truncated_text: truncated_text.clone(),
             },
         }
     }
@@ -130,6 +152,19 @@ pub trait RealtimeSession: Send {
 
     /// Interrupt the currently active provider response, if any.
     async fn interrupt(&mut self) -> Result<(), LlmError>;
+
+    /// Truncate the assistant output for `item_id` to `audio_played_ms` so the
+    /// canonical session transcript reflects what the user actually heard
+    /// before barging in. The adapter is expected to eventually emit
+    /// [`RealtimeSessionEvent::AssistantTranscriptTruncated`] with the
+    /// re-projected prefix (or a best-effort approximation if the provider
+    /// cannot supply exact text).
+    async fn truncate_assistant_output(
+        &mut self,
+        item_id: String,
+        content_index: u32,
+        audio_played_ms: u64,
+    ) -> Result<(), LlmError>;
 
     /// Submit a completed tool result back into the provider session so its
     /// response can continue.

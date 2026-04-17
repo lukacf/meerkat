@@ -486,6 +486,13 @@ pub enum RealtimeEvent {
     },
     InputTranscriptFinal {
         text: String,
+        /// Opaque, provider-specific prosody annotation (tone / sentiment /
+        /// pitch hints). Additive field. Providers that do not surface
+        /// structured prosody leave it `None`; compactors and downstream
+        /// tools may use this as a hint only — the authoritative transcript
+        /// is still `text`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prosody_hint: Option<String>,
     },
     TurnStarted,
     TurnCommitted,
@@ -517,6 +524,18 @@ pub enum RealtimeEvent {
     ToolCallTimedOut {
         call_id: String,
         elapsed_ms: u64,
+    },
+    /// The assistant output for `item_id` was truncated at
+    /// `audio_played_ms` because the user barged in. `truncated_text` is the
+    /// transcript prefix the user actually heard, as reported by the
+    /// provider; when the provider has not yet supplied a re-projected
+    /// transcript the field is omitted (`None`) and downstream projectors
+    /// should keep the existing transcript until a later emission fills it in.
+    AssistantTranscriptTruncated {
+        item_id: String,
+        audio_played_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncated_text: Option<String>,
     },
     StatusChanged {
         status: RealtimeChannelStatus,
@@ -601,6 +620,26 @@ pub struct RealtimeChannelClosedFrame {
     pub reason: Option<String>,
 }
 
+/// Payload for `channel.barge_in_truncate`.
+///
+/// Sent by the client the moment it detects the user starting to speak over
+/// the assistant's audio, to tell the server what prefix was actually heard.
+/// Field names mirror OpenAI Realtime's `conversation.item.truncate` so the
+/// provider adapter can map straight through without re-encoding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RealtimeBargeInTruncateFrame {
+    /// Assistant item whose output is being truncated. Matches the `item_id`
+    /// emitted in the public `RealtimeEvent::AssistantTranscriptTruncated`.
+    pub item_id: String,
+    /// Content index within the item (0 for the primary audio/text stream).
+    pub content_index: u32,
+    /// Milliseconds of assistant audio the client actually played back
+    /// before the user interrupted. Must not exceed the true elapsed duration
+    /// of the audio content.
+    pub audio_played_ms: u64,
+}
+
 /// Client-to-server realtime frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -614,6 +653,10 @@ pub enum RealtimeClientFrame {
     ChannelCommitTurn,
     #[serde(rename = "channel.interrupt")]
     ChannelInterrupt,
+    /// Report a client-side barge-in with the playback cursor, so the server
+    /// can truncate the canonical transcript to what the user actually heard.
+    #[serde(rename = "channel.barge_in_truncate")]
+    ChannelBargeInTruncate(RealtimeBargeInTruncateFrame),
     #[serde(rename = "channel.close")]
     ChannelClose,
 }

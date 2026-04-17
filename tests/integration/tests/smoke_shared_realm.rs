@@ -389,7 +389,7 @@ fn observe_realtime_server_frame(
                         .push("input_transcript_partial".to_string());
                     capture.input_partials.push(text.clone());
                 }
-                meerkat::contracts::RealtimeEvent::InputTranscriptFinal { text } => {
+                meerkat::contracts::RealtimeEvent::InputTranscriptFinal { text, .. } => {
                     capture
                         .event_kinds
                         .push("input_transcript_final".to_string());
@@ -462,6 +462,11 @@ fn observe_realtime_server_frame(
                             .cloned()
                             .unwrap_or_else(|| call_id.clone()),
                     );
+                }
+                meerkat::contracts::RealtimeEvent::AssistantTranscriptTruncated { .. } => {
+                    capture
+                        .event_kinds
+                        .push("assistant_transcript_truncated".to_string());
                 }
                 meerkat::contracts::RealtimeEvent::StatusChanged { status } => {
                     capture.event_kinds.push("status_changed".to_string());

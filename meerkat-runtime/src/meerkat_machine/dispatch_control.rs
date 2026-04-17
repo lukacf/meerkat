@@ -38,7 +38,10 @@ impl MeerkatMachine {
                 let previous_dsl_state = match previous_dsl_state {
                     Ok(state) => state,
                     Err(_) => {
-                        let state = Self::driver_runtime_state(&driver).await;
+                        let state = self
+                            .existing_session_runtime_state(&session_id)
+                            .await
+                            .unwrap_or(RuntimeState::Destroyed);
                         return Err(RuntimeControlPlaneError::InvalidState { state });
                     }
                 };
@@ -124,7 +127,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = Self::driver_runtime_state(&driver).await;
+                let state = self
+                    .existing_session_runtime_state(&session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
@@ -179,7 +185,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = Self::driver_runtime_state(&driver).await;
+                let state = self
+                    .existing_session_runtime_state(&session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
@@ -235,7 +244,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = Self::driver_runtime_state(&driver).await;
+                let state = self
+                    .existing_session_runtime_state(&session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
@@ -274,7 +286,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = Self::driver_runtime_state(&driver).await;
+                let state = self
+                    .existing_session_runtime_state(&session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
@@ -327,7 +342,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = Self::driver_runtime_state(&driver).await;
+                let state = self
+                    .existing_session_runtime_state(&session_id)
+                    .await
+                    .unwrap_or(RuntimeState::Destroyed);
                 if matches!(state, RuntimeState::Destroyed) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }

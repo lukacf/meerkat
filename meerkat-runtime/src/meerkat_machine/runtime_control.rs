@@ -5,21 +5,21 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, control_tx) = {
+        let control_tx = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 })?;
-            (entry.driver.clone(), entry.control_sender())
+            entry.control_sender()
         };
 
         let Some(control_tx) = control_tx else {
-            let state = {
-                let driver = driver.lock().await;
-                driver.as_driver().runtime_state()
-            };
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
             return Err(RuntimeDriverError::NotReady { state });
         };
         control_tx
@@ -34,21 +34,21 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, control_tx) = {
+        let control_tx = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 })?;
-            (entry.driver.clone(), entry.control_sender())
+            entry.control_sender()
         };
 
         let Some(control_tx) = control_tx else {
-            let state = {
-                let driver = driver.lock().await;
-                driver.as_driver().runtime_state()
-            };
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
             return Err(RuntimeDriverError::NotReady { state });
         };
         control_tx

@@ -385,7 +385,10 @@ impl MeerkatMachine {
                             session_id = %session_id,
                             "DSL rejected Prepare input"
                         );
-                        let state = Self::driver_runtime_state(&driver).await;
+                        let state = self
+                            .existing_session_runtime_state(&session_id)
+                            .await
+                            .unwrap_or(RuntimeState::Destroyed);
                         return Err(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady { state },
                         ));
@@ -399,7 +402,10 @@ impl MeerkatMachine {
                             .await;
                         return Err(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady {
-                                state: driver.as_driver().runtime_state(),
+                                state: self
+                                    .existing_session_runtime_state(&session_id)
+                                    .await
+                                    .unwrap_or(RuntimeState::Destroyed),
                             },
                         ));
                     }
@@ -428,7 +434,10 @@ impl MeerkatMachine {
                         self.restore_session_dsl_state(&session_id, previous_dsl_state)
                             .await;
                         return Err(RuntimeDriverError::NotReady {
-                            state: driver.as_driver().runtime_state(),
+                            state: self
+                                .existing_session_runtime_state(&session_id)
+                                .await
+                                .unwrap_or(RuntimeState::Destroyed),
                         });
                     }
 
@@ -470,7 +479,10 @@ impl MeerkatMachine {
                             .await;
                         return Err(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady {
-                                state: driver.as_driver().runtime_state(),
+                                state: self
+                                    .existing_session_runtime_state(&session_id)
+                                    .await
+                                    .unwrap_or(RuntimeState::Destroyed),
                             },
                         ));
                     }
@@ -490,7 +502,10 @@ impl MeerkatMachine {
                             .await;
                         return Err(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady {
-                                state: driver.as_driver().runtime_state(),
+                                state: self
+                                    .existing_session_runtime_state(&session_id)
+                                    .await
+                                    .unwrap_or(RuntimeState::Destroyed),
                             },
                         ));
                     }

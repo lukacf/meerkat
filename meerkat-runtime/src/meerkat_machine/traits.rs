@@ -241,20 +241,6 @@ impl MeerkatMachine {
         ))
     }
 
-    pub(super) async fn driver_runtime_state(driver: &SharedDriver) -> RuntimeState {
-        let control_handle = {
-            let driver = driver.lock().await;
-            driver.control_projection_handle()
-        };
-        control_handle
-            .read()
-            .map(|guard| guard.phase)
-            .unwrap_or_else(|poisoned| {
-                tracing::error!("runtime control projection lock poisoned");
-                poisoned.into_inner().phase
-            })
-    }
-
     /// Look up the session entry for a runtime ID, returning a control-plane error
     /// if not found.
     pub(super) async fn lookup_entry(

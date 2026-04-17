@@ -34,9 +34,8 @@ impl InitialTurnHandle {
 }
 
 // Sized for real mob-scale startup/shutdown fan-out (50+ members).
-const MAX_PARALLEL_HOST_LOOP_OPS: usize = 64;
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = MAX_PARALLEL_HOST_LOOP_OPS;
+const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
 #[derive(Clone)]
@@ -6245,7 +6244,7 @@ impl MobActor {
     }
 
     /// Retire all roster members in parallel (sliding window of
-    /// `MAX_PARALLEL_HOST_LOOP_OPS`). handle_retire only returns Err on
+    /// `MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS`). handle_retire only returns Err on
     /// event-append failures (pre-cleanup); cleanup errors are best-effort.
     /// If any member fails to retire the operation is aborted — the caller
     /// can retry since already-retired members are idempotent.

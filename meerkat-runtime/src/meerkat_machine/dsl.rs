@@ -3270,6 +3270,15 @@ machine! {
         // DrainingBoundary). A shell retry loop applies this input until the
         // DSL accepts, encoding the "wait for next natural boundary" invariant
         // at the DSL layer rather than in shell polling of current_run_id.
+        //
+        // **Catalog/runtime divergence (intentional):** the catalog DSL
+        // (`meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`) does
+        // not model `turn_phase` and conservatively guards on
+        // `current_run_id == None` instead. That is a strict over-
+        // approximation of this guard: every catalog trace is admissible
+        // here, so invariants proven by TLC against the catalog hold in
+        // production. The runtime can additionally detach at
+        // `DrainingBoundary` mid-run, which TLC does not exercise.
         transition MarkLiveTopologyDetached {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input MarkLiveTopologyDetached

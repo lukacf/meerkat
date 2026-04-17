@@ -1491,11 +1491,19 @@ machine! {
             on input MarkLiveTopologyDetached
             guard "session_registered" { self.session_id != None }
             guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
-            // DSL-native "safe to detach now": no in-flight run boundary. If
-            // the shell retries this input while a run is active, the DSL
-            // rejects until the run completes. This encodes the
-            // detach/boundary sequencing invariant as a first-class machine
-            // fact rather than shell polling.
+            // DSL-native "safe to detach now" guard.
+            //
+            // **Catalog/runtime divergence (intentional):** the runtime DSL
+            // (`meerkat-runtime/src/meerkat_machine/dsl.rs`) guards on the
+            // richer `turn_phase ∈ {Ready, DrainingBoundary, Completed,
+            // Failed, Cancelled}` set, which permits detach at the natural
+            // draining boundary mid-run. The catalog DSL is the TLC-facing
+            // twin and does not model `turn_phase`; it conservatively
+            // approximates "safe to detach" as "no run currently open"
+            // (`current_run_id == None`). This is a strict over-
+            // approximation: any TLC trace that exercises this transition
+            // under the catalog guard is also admissible under the runtime
+            // guard, so invariants proven here hold in production.
             guard "no_active_run" { self.current_run_id == None }
             update {
                 self.live_topology_phase = "Detached";

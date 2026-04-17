@@ -39,6 +39,20 @@ Short version:
 11. Derived projections are rebuildable, never authoritative.
 12. Surfaces are skins, not authorities.
 
+### Realtime attachment vocabulary (public noun)
+
+Public API surfaces describe `realtime`, not `voice`. The converged
+terms across RPC, REST, MCP, and SDKs are:
+
+- `runtime/realtime_attachment_status` — runtime-owned status projection
+- `mob/realtime_attach` / `mob/realtime_detach` — per-member attach/detach
+- `mob/member_status.realtime_attachment_status` — per-member projection
+
+The `realtime_attachment_status` enum is the typed form surfaces present;
+audio-only backend behavior is one provider specialization, not the
+public capability name. Prior `live_*` surfaces have been renamed to
+the `realtime_*` vocabulary across RPC/REST/MCP/SDK catalogs.
+
 ## The 4-machine target
 
 Exactly four canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:

@@ -21257,12 +21257,18 @@ async fn mob_runtime_parity_snapshot_summary(
         .collect::<Vec<_>>();
     formal_unavailable_fields.sort();
 
-    // member_voice_intent mirrors live_intent_identities: both represent
-    // the set of AgentIdentities for which the operator requested live
-    // voice. The catalog DSL models this as a separate Set<AgentIdentity>
-    // field so shell reconcilers can drive runtime realtime-attachment
-    // intent per identity; the runtime projection is derived from the
-    // same roster source.
+    // member_voice_intent is derived from the same roster source as
+    // live_intent_identities (shell `voice_intent_present` bits). The
+    // catalog DSL models this as a separate Set<AgentIdentity> so TLC
+    // can reason about per-member voice intent, but the runtime DSL
+    // field is currently inert: MobActor::handle_realtime_attach/detach
+    // take &self and cannot stage apply_dsl_input (which requires
+    // &mut self in the current MobActor layout). Follow-up work (out of
+    // scope for the realtime-voice-onto-#259 port) must route these
+    // mutations through the DSL once MobActor's dsl_authority is
+    // refactored for interior mutability, at which point this
+    // projection should read directly from
+    // `dsl_authority.state.member_voice_intent` instead of roster.
     let member_voice_intent = live_intent_identities.clone();
 
     Some(MobRuntimeParitySnapshotSummary {

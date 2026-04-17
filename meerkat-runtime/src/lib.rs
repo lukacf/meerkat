@@ -32,6 +32,7 @@ pub mod detached_wake;
 pub mod driver;
 pub mod durability;
 pub mod identifiers;
+pub mod ingress_types;
 pub mod input;
 pub mod input_ledger;
 pub mod input_lifecycle_authority;
@@ -47,7 +48,6 @@ pub mod policy;
 pub mod policy_table;
 pub mod queue;
 pub mod runtime_event;
-pub mod runtime_ingress_authority;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
@@ -68,6 +68,7 @@ pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,
     LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
 };
+pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
     ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
     InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
@@ -108,10 +109,6 @@ pub use queue::InputQueue;
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
-};
-pub use runtime_ingress_authority::{
-    ContentShape, RequestId, ReservationKey, RuntimeIngressAuthority, RuntimeIngressEffect,
-    RuntimeIngressError, RuntimeIngressInput, RuntimeIngressMutator, RuntimeIngressTransition,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};

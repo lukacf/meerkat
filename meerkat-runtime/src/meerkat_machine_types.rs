@@ -28,12 +28,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
+use crate::ingress_types::{ContentShape, RequestId, ReservationKey};
 use crate::input::Input;
 use crate::input_state::InputLifecycleState;
 use crate::input_state::InputState;
 use crate::input_state::InputTerminalOutcome;
 use crate::runtime_event::RuntimeEventEnvelope;
-use crate::runtime_ingress_authority::{ContentShape, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,

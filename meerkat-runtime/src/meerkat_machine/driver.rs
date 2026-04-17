@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use crate::runtime_ingress_authority::RuntimeIngressMutator;
 use meerkat_core::lifecycle::{InputId, RunId};
 
 use crate::driver::ephemeral::EphemeralRuntimeDriver;
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::LogicalRuntimeId;
+use crate::ingress_types::ContentShape;
 use crate::input_lifecycle_authority::InputLifecycleInput;
 use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
@@ -21,6 +21,58 @@ use chrono::Utc;
 
 /// Shared driver handle used by both the adapter and the RuntimeLoop.
 pub(crate) type SharedDriver = Arc<Mutex<DriverEntry>>;
+
+/// Read-only view over driver-local ingress state. The driver itself owns
+/// the DSL and shell metadata; this view just forwards the read accessors
+/// needed by callers that used to inspect the deleted `RuntimeIngressAuthority`.
+pub(crate) struct IngressView<'a> {
+    driver: &'a EphemeralRuntimeDriver,
+}
+
+impl IngressView<'_> {
+    pub(crate) fn queue(&self) -> Vec<InputId> {
+        self.driver.queue_lane()
+    }
+
+    pub(crate) fn steer_queue(&self) -> Vec<InputId> {
+        self.driver.steer_lane()
+    }
+
+    pub(crate) fn admission_order(&self) -> &[InputId] {
+        self.driver.admission_order()
+    }
+
+    pub(crate) fn handling_mode(
+        &self,
+        input_id: &InputId,
+    ) -> Option<meerkat_core::types::HandlingMode> {
+        self.driver.admitted_handling_mode(input_id)
+    }
+
+    pub(crate) fn is_prompt(&self, input_id: &InputId) -> bool {
+        self.driver.admitted_is_prompt(input_id)
+    }
+
+    pub(crate) fn content_shape(&self, input_id: &InputId) -> Option<ContentShape> {
+        self.driver.admitted_content_shape(input_id)
+    }
+
+    pub(crate) fn request_id(&self, input_id: &InputId) -> Option<crate::ingress_types::RequestId> {
+        self.driver.admitted_request_id(input_id)
+    }
+
+    pub(crate) fn reservation_key(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::ingress_types::ReservationKey> {
+        self.driver.admitted_reservation_key(input_id)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn lifecycle_state(&self, input_id: &InputId) -> Option<InputLifecycleState> {
+        self.driver.ingress_lifecycle(input_id)
+    }
+}
 
 /// Per-session runtime driver entry.
 pub(crate) enum DriverEntry {
@@ -126,11 +178,15 @@ impl DriverEntry {
         }
     }
 
-    /// Get a reference to the ingress authority.
-    pub(crate) fn ingress(&self) -> &crate::runtime_ingress_authority::RuntimeIngressAuthority {
+    /// Get access to the driver's ingress state (queue lanes, admission
+    /// metadata) through the concrete driver shell. This is a thin passthrough
+    /// facade — the driver itself owns the DSL and the shell metadata maps.
+    pub(crate) fn driver_ingress(&self) -> IngressView<'_> {
         match self {
-            DriverEntry::Ephemeral(d) => d.ingress(),
-            DriverEntry::Persistent(d) => d.inner_ref().ingress(),
+            DriverEntry::Ephemeral(d) => IngressView { driver: d },
+            DriverEntry::Persistent(d) => IngressView {
+                driver: d.inner_ref(),
+            },
         }
     }
 
@@ -410,7 +466,7 @@ pub(crate) fn machine_input_boundary(
     driver: &DriverEntry,
     work_id: &InputId,
 ) -> meerkat_core::lifecycle::run_primitive::RunApplyBoundary {
-    match driver.ingress().handling_mode(work_id) {
+    match driver.driver_ingress().handling_mode(work_id) {
         Some(meerkat_core::types::HandlingMode::Steer) => {
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
         }
@@ -419,24 +475,23 @@ pub(crate) fn machine_input_boundary(
 }
 
 pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<InputId> {
-    let ingress = driver.ingress();
-    if !ingress.steer_queue().is_empty() {
-        let first = &ingress.steer_queue()[0];
+    let ingress = driver.driver_ingress();
+    let steer = ingress.steer_queue();
+    if let Some(first) = steer.first() {
         let target_boundary = machine_input_boundary(driver, first);
-        return ingress
-            .steer_queue()
+        return steer
             .iter()
             .take_while(|id| machine_input_boundary(driver, id) == target_boundary)
             .cloned()
             .collect();
     }
 
-    if let Some(first) = ingress.queue().first() {
+    let queue = ingress.queue();
+    if let Some(first) = queue.first() {
         if ingress.is_prompt(first) {
             return vec![first.clone()];
         }
-        return ingress
-            .queue()
+        return queue
             .iter()
             .take_while(|id| !ingress.is_prompt(id))
             .cloned()
@@ -468,13 +523,14 @@ pub(crate) fn machine_validate_stage_drain_snapshot(
         }
     }
 
-    let ingress = driver.ingress();
-    let source_queue = if ingress.steer_queue().is_empty() {
+    let ingress = driver.driver_ingress();
+    let steer = ingress.steer_queue();
+    let source_queue: Vec<InputId> = if steer.is_empty() {
         ingress.queue()
     } else {
-        ingress.steer_queue()
+        steer
     };
-    if !slice_starts_with(source_queue, contributing_work_ids) {
+    if !slice_starts_with(&source_queue, contributing_work_ids) {
         return Err(RuntimeDriverError::Internal(
             "stage drain snapshot contributors must match the current drain-source prefix"
                 .to_string(),
@@ -694,7 +750,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 }
 
 pub(crate) struct RecoveredIngressEntry {
-    pub content_shape: crate::runtime_ingress_authority::ContentShape,
+    pub content_shape: crate::ingress_types::ContentShape,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub is_prompt: bool,
     pub lifecycle_state: InputLifecycleState,
@@ -712,8 +768,8 @@ pub(crate) fn machine_build_recovered_ingress_entry(
     let content_shape = state
         .persisted_input
         .as_ref()
-        .map(|input| crate::runtime_ingress_authority::ContentShape(input.kind_id().to_string()))
-        .unwrap_or_else(|| crate::runtime_ingress_authority::ContentShape("unknown".into()));
+        .map(|input| crate::ingress_types::ContentShape(input.kind_id().to_string()))
+        .unwrap_or_else(|| crate::ingress_types::ContentShape("unknown".into()));
     let policy = match state.policy.as_ref() {
         Some(policy) => policy.decision.clone(),
         None => match state.persisted_input.as_ref() {
@@ -780,48 +836,30 @@ pub(crate) fn machine_recover_ephemeral_driver(
         requeued += delta.requeued;
     }
 
-    let mut rebuilt_ingress = crate::runtime_ingress_authority::RuntimeIngressAuthority::new();
-    let recovered_entries: Vec<_> = driver
+    // Re-seed the driver's local ingress state directly from the ledger.
+    // No rebuilt authority — the DSL is the only owner; `admit_recovered_to_ingress`
+    // writes the current phase into `input_phases` and the appropriate lane.
+    let recovered_entries: Vec<(InputId, RecoveredIngressEntry)> = driver
         .ledger()
         .iter()
         .filter_map(|(input_id, state)| {
-            machine_build_recovered_ingress_entry(state).map(|entry| {
-                (
-                    input_id.clone(),
-                    entry.content_shape,
-                    entry.handling_mode,
-                    entry.is_prompt,
-                    entry.lifecycle_state,
-                    entry.policy,
-                )
-            })
+            machine_build_recovered_ingress_entry(state).map(|entry| (input_id.clone(), entry))
         })
         .collect();
 
-    for (input_id, content_shape, handling_mode, is_prompt, lifecycle_state, policy) in
-        recovered_entries
-    {
-        rebuilt_ingress
-            .apply(
-                crate::runtime_ingress_authority::RuntimeIngressInput::AdmitRecovered {
-                    work_id: input_id.clone(),
-                    content_shape,
-                    handling_mode,
-                    is_prompt,
-                    lifecycle_state,
-                    policy,
-                    request_id: None,
-                    reservation_key: None,
-                },
-            )
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!(
-                    "ingress authority rejected rebuilt recovered input '{input_id}': {err}"
-                ))
-            })?;
+    for (input_id, entry) in recovered_entries {
+        driver.admit_recovered_to_ingress(
+            input_id,
+            entry.content_shape,
+            entry.handling_mode,
+            entry.is_prompt,
+            entry.lifecycle_state,
+            entry.policy,
+            None,
+            None,
+        )?;
     }
 
-    driver.replace_ingress(rebuilt_ingress);
     driver.rebuild_queue_projections_after_recovery();
 
     Ok(RecoveryReport {
@@ -918,7 +956,7 @@ pub(crate) fn machine_build_replay_plan(
     let mut queue_work_ids = Vec::new();
     let mut steer_work_ids = Vec::new();
     for work_id in contributing_work_ids {
-        match driver.ingress().handling_mode(work_id) {
+        match driver.driver_ingress().handling_mode(work_id) {
             Some(meerkat_core::types::HandlingMode::Steer) => steer_work_ids.push(work_id.clone()),
             _ => queue_work_ids.push(work_id.clone()),
         }

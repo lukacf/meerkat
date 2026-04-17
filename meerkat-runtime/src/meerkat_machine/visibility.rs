@@ -182,7 +182,7 @@ impl MeerkatMachine {
             DriverEntry::Ephemeral(_) => MeerkatDriverKind::Ephemeral,
             DriverEntry::Persistent(_) => MeerkatDriverKind::Persistent,
         };
-        let ingress = driver.ingress();
+        let ingress = driver.driver_ingress();
 
         let binding = MeerkatBindingSnapshot {
             session_id: session_id.clone(),
@@ -255,8 +255,8 @@ impl MeerkatMachine {
 
         let inputs = MeerkatInputsSnapshot {
             admission_order,
-            queue: ingress.queue().to_vec(),
-            steer_queue: ingress.steer_queue().to_vec(),
+            queue: ingress.queue(),
+            steer_queue: ingress.steer_queue(),
             current_run_id: control.current_run_id.clone(),
             current_run_contributors,
             post_admission_signal: format!("{:?}", driver.post_admission_signal()),

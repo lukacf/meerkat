@@ -85,10 +85,10 @@ fn make_continuation() -> Input {
 }
 
 fn assert_queue_projection_alignment(driver: &EphemeralRuntimeDriver) {
-    assert_eq!(driver.queue().input_ids(), driver.ingress().queue());
+    assert_eq!(driver.queue().input_ids(), driver.queue_lane().as_slice());
     assert_eq!(
         driver.steer_queue().input_ids(),
-        driver.ingress().steer_queue()
+        driver.steer_lane().as_slice()
     );
 }
 

@@ -122,6 +122,8 @@ pub(crate) fn project_state(
         op_completion_seq: std::collections::BTreeMap::new(),
         op_terminal_outcomes: std::collections::BTreeMap::new(),
         op_kinds: std::collections::BTreeMap::new(),
+        op_peer_ready: std::collections::BTreeMap::new(),
+        op_progress_counts: std::collections::BTreeMap::new(),
         active_op_count: 0,
         wait_active: false,
         wait_operation_ids: std::collections::BTreeSet::new(),

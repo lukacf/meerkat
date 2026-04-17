@@ -303,6 +303,8 @@ machine! {
             op_completion_seq: Map<String, u64>,
             op_terminal_outcomes: Map<String, String>,
             op_kinds: Map<String, String>,
+            op_peer_ready: Map<String, bool>,
+            op_progress_counts: Map<String, u64>,
             active_op_count: u64,
             wait_active: bool,
             wait_operation_ids: Set<String>,
@@ -343,6 +345,8 @@ machine! {
             op_completion_seq = EmptyMap,
             op_terminal_outcomes = EmptyMap,
             op_kinds = EmptyMap,
+            op_peer_ready = EmptyMap,
+            op_progress_counts = EmptyMap,
             active_op_count = 0,
             wait_active = false,
             wait_operation_ids = EmptySet,
@@ -438,6 +442,8 @@ machine! {
             FailOp { operation_id: String, outcome: String },
             CancelOp { operation_id: String, outcome: String },
             AbortOp { operation_id: String, outcome: String },
+            PeerReadyOp { operation_id: String },
+            ProgressReportedOp { operation_id: String },
             RequestWaitAll,
             SatisfyWaitAll,
             // Comms drain inputs
@@ -1896,6 +1902,8 @@ machine! {
             update {
                 self.op_statuses.insert(operation_id, "Provisioning");
                 self.op_kinds.insert(operation_id, kind);
+                self.op_peer_ready.insert(operation_id, false);
+                self.op_progress_counts.insert(operation_id, 0);
                 self.active_op_count += 1;
             }
             to Idle
@@ -1974,6 +1982,28 @@ machine! {
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
             emit NotifyOpWatcher { operation_id: operation_id }
+        }
+
+        // PeerReadyOp: mark operation's peer as ready
+        transition PeerReadyOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerReadyOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_peer_ready.insert(operation_id, true);
+            }
+            to Idle
+            emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // ProgressReportedOp: progress tick (shell tracks count via SubmitOpEvent)
+        transition ProgressReportedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProgressReportedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {}
+            to Idle
+            emit SubmitOpEvent { operation_id: operation_id }
         }
 
         // RequestWaitAll: activate wait-all barrier

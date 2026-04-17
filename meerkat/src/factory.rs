@@ -1744,19 +1744,22 @@ impl AgentFactory {
                                 (realm, conn_ref.binding_id.clone())
                             }
                             None => {
-                                // Two equivalent legacy paths:
+                                // Three equivalent legacy paths, all
+                                // routed through the same registry:
                                 //   (a) `config.providers.api_keys[provider]`
                                 //       — TOML config-declared secret.
-                                //       Synthesized with InlineSecret.
-                                //   (b) env var ANTHROPIC_API_KEY etc.
-                                //       — synthesized with Env source.
-                                // Both flow through the same registry path.
-                                let provider_key_name = provider_key(provider);
-                                let inline = config
-                                    .providers
-                                    .api_keys
-                                    .as_ref()
-                                    .and_then(|m| m.get(provider_key_name).cloned());
+                                //   (b) `config.provider` enum with
+                                //       provider-specific api_key
+                                //       (ProviderConfig::{Anthropic,
+                                //        OpenAI, Gemini} legacy block).
+                                //   (c) env var ANTHROPIC_API_KEY etc.
+                                // (a) and (b) synthesize with InlineSecret,
+                                // (c) synthesizes with Env source.
+                                // Precedence: (b) > (a) > (c), matching
+                                // the legacy `resolve_provider_credentials`
+                                // order so surfaces don't regress.
+                                let (inline, _base_url) =
+                                    self.resolve_provider_credentials(provider, config);
                                 let realm = match inline {
                                     Some(secret) => {
                                         meerkat_core::RealmConnectionSet::synthesize_inline_default(

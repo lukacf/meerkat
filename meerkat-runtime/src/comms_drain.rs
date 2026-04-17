@@ -718,13 +718,34 @@ async fn try_handle_supervisor_bridge_command(
             };
             match gate {
                 BindMemberGate::IdempotentAck => {
-                    let advertised = comms_runtime
-                        .advertised_address()
-                        .unwrap_or_else(|| payload.expected_address.clone());
+                    // Idempotent-ack replies use canonical runtime identity,
+                    // never the caller-supplied `payload.expected_*`. If the
+                    // runtime cannot produce its own identity at this point
+                    // something upstream broke our invariant (a prior bind
+                    // would have failed without these): surface an internal
+                    // rejection and do NOT echo attacker-controlled fields.
+                    let Some(advertised) = comms_runtime.advertised_address() else {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            "idempotent ack invariant violated",
+                        )
+                        .await;
+                        return true;
+                    };
+                    let Some(peer_id) = comms_runtime.public_key() else {
+                        send_bridge_failure(
+                            comms_runtime,
+                            candidate,
+                            BridgeRejectionCause::Internal,
+                            "idempotent ack invariant violated",
+                        )
+                        .await;
+                        return true;
+                    };
                     let response = serde_json::to_value(BridgeBindResponse {
-                        peer_id: comms_runtime
-                            .public_key()
-                            .unwrap_or_else(|| payload.expected_peer_id.clone()),
+                        peer_id,
                         address: canonicalize_bridge_address(&advertised),
                         capabilities: bridge_capabilities(),
                     })
@@ -1864,6 +1885,183 @@ mod tests {
         assert_eq!(
             state.epoch, 1,
             "rebind attempt must not advance the authorized epoch"
+        );
+    }
+
+    /// Capturing runtime that lets a test inspect every `CommsCommand` sent
+    /// through the bridge handler. Also deliberately returns `None` for
+    /// `advertised_address` so we can exercise the idempotent-ack invariant
+    /// path without wiring a full inproc transport.
+    struct CapturingRuntime {
+        peer_id: String,
+        advertised_address: Option<String>,
+        bootstrap_token: Option<String>,
+        inbox_notify: Arc<tokio::sync::Notify>,
+        sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for CapturingRuntime {
+        fn public_key(&self) -> Option<String> {
+            Some(self.peer_id.clone())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            self.advertised_address.clone()
+        }
+
+        fn bridge_bootstrap_token(&self) -> Option<String> {
+            self.bootstrap_token.clone()
+        }
+
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            self.inbox_notify.clone()
+        }
+
+        async fn add_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+            Ok(())
+        }
+
+        async fn remove_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+            Ok(true)
+        }
+
+        async fn send(
+            &self,
+            cmd: CommsCommand,
+        ) -> Result<meerkat_core::comms::SendReceipt, SendError> {
+            let receipt = match &cmd {
+                CommsCommand::PeerResponse { in_reply_to, .. } => {
+                    meerkat_core::comms::SendReceipt::PeerResponseSent {
+                        envelope_id: Uuid::new_v4(),
+                        in_reply_to: *in_reply_to,
+                    }
+                }
+                _ => meerkat_core::comms::SendReceipt::PeerMessageSent {
+                    envelope_id: Uuid::new_v4(),
+                    acked: true,
+                },
+            };
+            self.sent.lock().await.push(cmd);
+            Ok(receipt)
+        }
+    }
+
+    #[tokio::test]
+    async fn idempotent_ack_invariant_rejects_without_echoing_attacker_fields() {
+        // Invariant: when the strict BindMember gate hits IdempotentAck we MUST
+        // reply with the runtime's canonical identity. If the runtime cannot
+        // produce it (e.g. advertised_address disappeared under us), the
+        // handler must NOT fall back to payload.expected_* — those are
+        // attacker-controlled. Instead, reply with a typed Internal rejection
+        // whose reason does not include any attacker input.
+        let sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(CapturingRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            // Simulate the invariant violation: no advertised address at the
+            // moment of idempotent ack.
+            advertised_address: None,
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            sent: sent.clone(),
+        });
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let authorized = TrustedPeerSpec::new(
+            "mob/__mob_supervisor__",
+            "ed25519:supervisor",
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid supervisor spec");
+        let mut supervisor_state = Some(AuthorizedSupervisorState {
+            supervisor: authorized.clone(),
+            epoch: 7,
+        });
+        // Attacker sets expected_address/expected_peer_id to unique tokens we
+        // can grep for in the reply to prove they are NOT echoed back.
+        let attacker_address = "inproc://ATTACKER-ADDRESS-DO-NOT-ECHO".to_string();
+        let attacker_peer_id = "ed25519:ATTACKER-PEER-ID-DO-NOT-ECHO".to_string();
+        let command = BridgeCommand::BindMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+                // Sender/supervisor match stored state so validation returns
+                // IdempotentAck; the invariant then fires because the runtime
+                // cannot produce its own canonical identity.
+                supervisor: BridgePeerSpec {
+                    name: authorized.name.clone(),
+                    peer_id: authorized.peer_id.clone(),
+                    address: authorized.address.clone(),
+                },
+                epoch: 7,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                expected_peer_id: attacker_peer_id.clone(),
+                expected_address: attacker_address.clone(),
+                bootstrap_token: "expected-token".to_string(),
+            },
+        );
+        let candidate = bridge_candidate(&authorized.peer_id, &command);
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &runtime,
+                &candidate,
+                &mut supervisor_state,
+            )
+            .await,
+            "bridge handler must own the BindMember command"
+        );
+
+        // The runtime stored state must be preserved — an invariant-violation
+        // reply must not mutate authority.
+        let state = supervisor_state.expect("supervisor state must survive invariant failure");
+        assert_eq!(state.supervisor.peer_id, authorized.peer_id);
+        assert_eq!(state.epoch, 7);
+
+        // Pull the PeerResponse and assert its shape + that attacker fields
+        // are NOT echoed anywhere in the reply.
+        let sent_commands = sent.lock().await.clone();
+        let (result, status) = sent_commands
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { result, status, .. } => Some((result, status)),
+                _ => None,
+            })
+            .expect("handler must send a PeerResponse for the invariant violation");
+        assert!(
+            matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
+            "invariant violation must surface as Failed status"
+        );
+        let reply: BridgeReply =
+            serde_json::from_value(result.clone()).expect("typed bridge reply");
+        assert!(
+            matches!(reply, BridgeReply::Rejected { .. }),
+            "expected Rejected reply for invariant violation, got: {reply:?}"
+        );
+        if let BridgeReply::Rejected { cause, reason } = reply {
+            assert_eq!(cause, BridgeRejectionCause::Internal);
+            assert!(
+                !reason.contains(&attacker_address),
+                "rejection reason must not echo attacker-supplied address: {reason}"
+            );
+            assert!(
+                !reason.contains(&attacker_peer_id),
+                "rejection reason must not echo attacker-supplied peer_id: {reason}"
+            );
+        }
+        let raw = serde_json::to_string(&result).expect("serialize reply for attacker-field check");
+        assert!(
+            !raw.contains(&attacker_address),
+            "reply payload must not contain attacker-supplied address: {raw}"
+        );
+        assert!(
+            !raw.contains(&attacker_peer_id),
+            "reply payload must not contain attacker-supplied peer_id: {raw}"
         );
     }
 

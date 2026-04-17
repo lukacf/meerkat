@@ -307,6 +307,7 @@ async fn issue_open_info_with_policy(
             role,
             turning_mode,
             reconnect_policy,
+            channel_config: None,
         },
         conservative_capabilities(vec![
             RealtimeTurningMode::ProviderManaged,
@@ -333,6 +334,7 @@ async fn issue_member_open_info(
             role,
             turning_mode,
             reconnect_policy: None,
+            channel_config: None,
         },
         conservative_capabilities(vec![
             RealtimeTurningMode::ProviderManaged,
@@ -1038,6 +1040,7 @@ async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ExplicitCommit,
                 reconnect_policy: None,
+                channel_config: None,
             },
             conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
             None,

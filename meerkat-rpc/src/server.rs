@@ -1254,6 +1254,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1372,6 +1373,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1459,6 +1461,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1483,6 +1486,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1596,6 +1600,7 @@ mod tests {
                     role: RealtimeChannelRole::Observer,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1705,6 +1710,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
@@ -1729,6 +1735,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 RealtimeCapabilities {
                     input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],

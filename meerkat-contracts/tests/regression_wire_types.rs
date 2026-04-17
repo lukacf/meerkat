@@ -873,6 +873,7 @@ fn realtime_open_request_roundtrip() {
             max_backoff_ms: 5_000,
             max_total_ms: 30_000,
         }),
+        channel_config: None,
     };
 
     let json = serde_json::to_value(&request).unwrap();

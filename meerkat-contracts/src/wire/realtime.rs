@@ -259,6 +259,40 @@ pub struct RealtimeReconnectPolicy {
     pub max_total_ms: u64,
 }
 
+/// Per-channel runtime knobs negotiated at open time.
+///
+/// Additive fields only — clients that do not carry this struct inherit the
+/// server-default behavior via `#[serde(default)]` on the parent
+/// [`RealtimeOpenRequest`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RealtimeChannelConfig {
+    /// Maximum wall-clock time a tool dispatch may take before the channel
+    /// gives up and injects a synthetic tool-error result. `None` disables the
+    /// deadline (product explicitly opted into unlimited tools); omitting the
+    /// field leaves the server default in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
+}
+
+impl RealtimeChannelConfig {
+    /// Default tool budget when neither the caller nor the server provides
+    /// an override. Keeps the "runtime safe by default" dogma.
+    pub const DEFAULT_TOOL_TIMEOUT_MS: u64 = 15_000;
+
+    /// Resolve the effective tool timeout, substituting the global default
+    /// when the caller did not specify one. `None` means "no deadline" and is
+    /// honored exactly.
+    #[must_use]
+    pub fn tool_timeout_ms_or_default(&self) -> Option<u64> {
+        match self.tool_timeout_ms {
+            Some(0) => None,
+            Some(ms) => Some(ms),
+            None => Some(Self::DEFAULT_TOOL_TIMEOUT_MS),
+        }
+    }
+}
+
 /// Product-facing realtime capability set for one target/provider combination.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -318,6 +352,10 @@ pub struct RealtimeOpenRequest {
     pub turning_mode: RealtimeTurningMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconnect_policy: Option<RealtimeReconnectPolicy>,
+    /// Optional per-channel runtime knobs (tool budget, etc.). Omitted means
+    /// "use server defaults".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_config: Option<RealtimeChannelConfig>,
 }
 
 /// Response payload for `realtime/open_info`.
@@ -436,19 +474,46 @@ pub enum RealtimeOutputChunk {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeEvent {
-    InputTranscriptPartial { text: String },
-    InputTranscriptFinal { text: String },
+    InputTranscriptPartial {
+        text: String,
+    },
+    InputTranscriptFinal {
+        text: String,
+    },
     TurnStarted,
     TurnCommitted,
     TurnCompleted,
-    OutputTextDelta { delta: String },
-    OutputAudioChunk { chunk: RealtimeAudioChunk },
-    OutputVideoChunk { chunk: RealtimeVideoChunk },
+    OutputTextDelta {
+        delta: String,
+    },
+    OutputAudioChunk {
+        chunk: RealtimeAudioChunk,
+    },
+    OutputVideoChunk {
+        chunk: RealtimeVideoChunk,
+    },
     Interrupted,
-    ToolCallRequested { call_id: String, tool_name: String },
-    ToolCallCompleted { call_id: String },
-    ToolCallFailed { call_id: String, error: String },
-    StatusChanged { status: RealtimeChannelStatus },
+    ToolCallRequested {
+        call_id: String,
+        tool_name: String,
+    },
+    ToolCallCompleted {
+        call_id: String,
+    },
+    ToolCallFailed {
+        call_id: String,
+        error: String,
+    },
+    /// The tool dispatch exceeded its configured budget and was aborted;
+    /// a synthetic `ToolResult::Error` was injected back into the provider
+    /// session so the model sees a concrete failure instead of silence.
+    ToolCallTimedOut {
+        call_id: String,
+        elapsed_ms: u64,
+    },
+    StatusChanged {
+        status: RealtimeChannelStatus,
+    },
     NeedsReattach,
 }
 

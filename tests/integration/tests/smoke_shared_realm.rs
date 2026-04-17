@@ -453,6 +453,16 @@ fn observe_realtime_server_frame(
                             .unwrap_or_else(|| call_id.clone()),
                     );
                 }
+                meerkat::contracts::RealtimeEvent::ToolCallTimedOut { call_id, .. } => {
+                    capture.event_kinds.push("tool_call_timed_out".to_string());
+                    capture.tool_call_failures.push(
+                        capture
+                            .tool_call_names_by_id
+                            .get(call_id)
+                            .cloned()
+                            .unwrap_or_else(|| call_id.clone()),
+                    );
+                }
                 meerkat::contracts::RealtimeEvent::StatusChanged { status } => {
                     capture.event_kinds.push("status_changed".to_string());
                     capture.status_states.push(format!("{:?}", status.state));

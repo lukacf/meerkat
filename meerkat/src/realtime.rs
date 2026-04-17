@@ -73,6 +73,7 @@ impl RealtimeChannel {
             role: self.role,
             turning_mode: self.turning_mode,
             reconnect_policy: self.reconnect_policy.clone(),
+            channel_config: None,
         }
     }
 

@@ -812,6 +812,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let _ = send_server_frame(&mut socket, &opened).await;
                     let role = registered.role;
                     let turning_mode = accepted.request.turning_mode;
+                    let tool_timeout_ms = accepted
+                        .request
+                        .channel_config
+                        .clone()
+                        .unwrap_or_default()
+                        .tool_timeout_ms_or_default();
                     let mut observer_fanout_rx = registered.observer_fanout_rx.take();
                     let mut reconnect_overlay = RealtimeReconnectOverlay::new(
                         accepted
@@ -1395,6 +1401,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     call_id,
                                                     tool_name,
                                                     arguments,
+                                                    tool_timeout_ms,
                                                 )
                                                 .await
                                             }
@@ -2411,6 +2418,7 @@ async fn handle_product_session_tool_call(
     call_id: String,
     tool_name: String,
     arguments: serde_json::Value,
+    tool_timeout_ms: Option<u64>,
 ) -> Result<Vec<RealtimeServerFrame>, RealtimeChannelErrorFrame> {
     let mut frames = vec![channel_event(RealtimeEvent::ToolCallRequested {
         call_id: call_id.clone(),
@@ -2432,7 +2440,43 @@ async fn handle_product_session_tool_call(
     };
 
     let call = meerkat_core::ToolCall::new(call_id.clone(), tool_name, arguments);
-    match runtime.dispatch_external_tool_call(&session_id, call).await {
+    let dispatch = runtime.dispatch_external_tool_call(&session_id, call);
+    let started_at = meerkat_core::time_compat::Instant::now();
+    let outcome_result = match tool_timeout_ms {
+        Some(limit_ms) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(limit_ms), dispatch).await {
+                Ok(inner) => inner,
+                Err(_elapsed) => {
+                    // Budget exceeded: inject a synthetic tool-error result so
+                    // the model observes a concrete failure, then emit the
+                    // typed timeout event. Dropping the `dispatch` future
+                    // cancels the underlying task so a late-finishing tool
+                    // does not leak its result onto a cancelled channel.
+                    let actual_elapsed_ms =
+                        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let timeout_message = format!(
+                        "tool exceeded budget after {actual_elapsed_ms}ms, continuing without result",
+                    );
+                    let _ = submit_product_session_tool_error(
+                        runtime,
+                        binding,
+                        product_session,
+                        call_id.clone(),
+                        timeout_message.clone(),
+                    )
+                    .await;
+                    frames.push(channel_event(RealtimeEvent::ToolCallTimedOut {
+                        call_id,
+                        elapsed_ms: actual_elapsed_ms,
+                    }));
+                    return Ok(frames);
+                }
+            }
+        }
+        None => dispatch.await,
+    };
+
+    match outcome_result {
         Ok(outcome) => match submit_product_session_tool_result(
             runtime,
             binding,
@@ -3496,6 +3540,7 @@ mod tests {
             role: RealtimeChannelRole::Primary,
             turning_mode: RealtimeTurningMode::ProviderManaged,
             reconnect_policy: None,
+            channel_config: None,
         };
 
         let info = host
@@ -3552,6 +3597,7 @@ mod tests {
             role: RealtimeChannelRole::Primary,
             turning_mode: RealtimeTurningMode::ProviderManaged,
             reconnect_policy: None,
+            channel_config: None,
         };
         let info = host
             .issue_open_info(request.clone(), conservative_capabilities(), None)
@@ -3641,6 +3687,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 conservative_capabilities(),
                 None,
@@ -3679,6 +3726,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 conservative_capabilities(),
                 None,
@@ -3718,6 +3766,7 @@ mod tests {
                     role: RealtimeChannelRole::Observer,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 conservative_capabilities(),
                 None,
@@ -3756,6 +3805,7 @@ mod tests {
                     role: RealtimeChannelRole::Observer,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 conservative_capabilities(),
                 None,
@@ -3798,6 +3848,7 @@ mod tests {
                     role: RealtimeChannelRole::Primary,
                     turning_mode: RealtimeTurningMode::ProviderManaged,
                     reconnect_policy: None,
+                    channel_config: None,
                 },
                 conservative_capabilities(),
                 None,
@@ -3928,6 +3979,7 @@ mod tests {
             role: RealtimeChannelRole::Primary,
             turning_mode: RealtimeTurningMode::ProviderManaged,
             reconnect_policy: None,
+            channel_config: None,
         }
     }
 

@@ -434,10 +434,10 @@ machine! {
             // Ops lifecycle inputs
             RegisterOp { operation_id: String, kind: String },
             StartOp { operation_id: String },
-            CompleteOp { operation_id: String },
-            FailOp { operation_id: String },
-            CancelOp { operation_id: String },
-            AbortOp { operation_id: String },
+            CompleteOp { operation_id: String, outcome: String },
+            FailOp { operation_id: String, outcome: String },
+            CancelOp { operation_id: String, outcome: String },
+            AbortOp { operation_id: String, outcome: String },
             RequestWaitAll,
             SatisfyWaitAll,
             // Comms drain inputs
@@ -1917,10 +1917,11 @@ machine! {
         // CompleteOp: terminal success — record completion sequence
         transition CompleteOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CompleteOp { operation_id }
+            on input CompleteOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
                 self.op_statuses.insert(operation_id, "Completed");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
                 self.next_completion_seq += 1;
@@ -1933,10 +1934,11 @@ machine! {
         // FailOp: terminal failure
         transition FailOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input FailOp { operation_id }
+            on input FailOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
                 self.op_statuses.insert(operation_id, "Failed");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -1947,10 +1949,11 @@ machine! {
         // CancelOp: terminal cancellation
         transition CancelOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CancelOp { operation_id }
+            on input CancelOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
                 self.op_statuses.insert(operation_id, "Cancelled");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
             to Idle
@@ -1961,10 +1964,11 @@ machine! {
         // AbortOp: terminal abort
         transition AbortOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AbortOp { operation_id }
+            on input AbortOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
                 self.op_statuses.insert(operation_id, "Aborted");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
             to Idle

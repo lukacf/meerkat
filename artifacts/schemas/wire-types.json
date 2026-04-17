@@ -6118,14 +6118,23 @@
     "$defs": {
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
-        "enum": [
-          "generic",
-          "mcp_pending",
-          "background_job",
-          "tool_scope",
-          "tool_scope_warning"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "mcp_pending",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`connection_ref` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.",
@@ -6797,14 +6806,23 @@
     "$defs": {
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
-        "enum": [
-          "generic",
-          "mcp_pending",
-          "background_job",
-          "tool_scope",
-          "tool_scope_warning"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "mcp_pending",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`connection_ref` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.",

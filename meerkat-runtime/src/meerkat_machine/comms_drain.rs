@@ -155,21 +155,16 @@ impl MeerkatMachine {
             let mut sessions = self.sessions.write().await;
             if let Some(entry) = sessions.get_mut(session_id) {
                 let mode_str = format!("{mode:?}");
-                match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *entry.dsl_authority,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain { mode: mode_str },
                 ) {
-                    Ok(transition) => {
-                        entry.dsl_authority.state.lifecycle_phase = transition.to_phase;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            %session_id,
-                            error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
-                            "DSL rejected SpawnDrain; skipping drain spawn"
-                        );
-                        return false;
-                    }
+                    tracing::warn!(
+                        %session_id,
+                        error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
+                        "DSL rejected SpawnDrain; skipping drain spawn"
+                    );
+                    return false;
                 }
             } else {
                 tracing::warn!(
@@ -262,22 +257,17 @@ impl MeerkatMachine {
                 "DrainExitedClean"
             };
             let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id) {
-                match crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            if let Some(entry) = sessions.get_mut(session_id)
+                && let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *entry.dsl_authority,
                     dsl_input,
-                ) {
-                    Ok(transition) => {
-                        entry.dsl_authority.state.lifecycle_phase = transition.to_phase;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            %session_id,
-                            error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
-                            "DSL rejected drain exit notification; proceeding with slot cleanup"
-                        );
-                    }
-                }
+                )
+            {
+                tracing::warn!(
+                    %session_id,
+                    error = %crate::meerkat_machine::dsl_authority::map_error(err, context),
+                    "DSL rejected drain exit notification; proceeding with slot cleanup"
+                );
             }
         }
 

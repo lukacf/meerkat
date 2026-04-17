@@ -356,9 +356,8 @@ impl MeerkatMachine {
             .to_string()
         })?;
         let previous_state = Box::new(entry.dsl_authority.state.clone());
-        let transition = dsl::MeerkatMachineMutator::apply(&mut *entry.dsl_authority, input)
+        dsl::MeerkatMachineMutator::apply(&mut *entry.dsl_authority, input)
             .map_err(|err| dsl_authority::map_error(err, context))?;
-        entry.dsl_authority.state.lifecycle_phase = transition.to_phase;
         Ok(previous_state)
     }
 

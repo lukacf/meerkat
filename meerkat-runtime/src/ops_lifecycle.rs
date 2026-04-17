@@ -1,11 +1,14 @@
 //! In-memory runtime implementation of the shared async-operation lifecycle seam.
 //!
-//! All canonical lifecycle state mutations are delegated to
-//! [`OpsLifecycleAuthority`] via [`OpsLifecycleMutator::apply`]. This shell
-//! layer owns I/O concerns: watcher channels, timestamps, peer handles, and
-//! snapshot assembly.
+//! Per-operation canonical lifecycle state lives in the MeerkatMachine DSL
+//! authority (`op_statuses`, `op_terminal_outcomes`, `op_kinds`,
+//! `op_peer_ready`, `op_progress_counts`, `active_op_count`, `wait_active`,
+//! `wait_operation_ids`). This shell layer owns pure mechanics: watcher
+//! channels, timestamps, peer handles, snapshot assembly, FIFO eviction
+//! bookkeeping, the completion feed buffer, and concurrency-limit / duplicate
+//! / peer-expectation admission checks run BEFORE the DSL apply.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -27,10 +30,56 @@ use meerkat_core::ops_lifecycle::{
 use meerkat_core::time_compat::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::meerkat_machine::dsl as mm_dsl;
-use crate::ops_lifecycle_authority::{
-    OperationCanonicalState, OpsLifecycleAuthority, OpsLifecycleEffect, OpsLifecycleInput,
-    OpsLifecycleMutator,
-};
+
+// ---------------------------------------------------------------------------
+// Serde-only persisted canonical state shells
+// ---------------------------------------------------------------------------
+//
+// These structures preserve the on-disk wire format of `PersistedOpsSnapshot`
+// produced by earlier runtime versions. They are pure serde shells — no
+// methods beyond read-only field accessors, no authority behavior.
+
+/// Canonical per-operation state as captured in persisted snapshots.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OperationCanonicalState {
+    status: OperationStatus,
+    kind: OperationKind,
+    peer_ready: bool,
+    progress_count: u32,
+    watcher_count: u32,
+    terminal_outcome: Option<OperationTerminalOutcome>,
+    terminal_buffered: bool,
+}
+
+/// Canonical registry-level state as captured in persisted snapshots.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RegistryCanonicalState {
+    operations: HashMap<OperationId, OperationCanonicalState>,
+    completed_order: VecDeque<OperationId>,
+    max_completed: usize,
+    max_concurrent: Option<usize>,
+    active_count: usize,
+    wait_request_id: Option<WaitRequestId>,
+    wait_operation_ids: Vec<OperationId>,
+    next_completion_seq: CompletionSeq,
+}
+
+impl RegistryCanonicalState {
+    /// Maximum completed operations retained at capture time.
+    pub fn max_completed(&self) -> usize {
+        self.max_completed
+    }
+
+    /// Maximum concurrent non-terminal operations at capture time.
+    pub fn max_concurrent(&self) -> Option<usize> {
+        self.max_concurrent
+    }
+
+    /// Number of operations captured in the snapshot.
+    pub fn operation_count(&self) -> usize {
+        self.operations.len()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Serializable snapshot for persistence
@@ -39,14 +88,15 @@ use crate::ops_lifecycle_authority::{
 /// Serializable snapshot of the ops lifecycle registry state.
 ///
 /// Captured on terminal transitions for durable persistence. Contains
-/// canonical authority state, operation specs, persisted completion feed
-/// entries, and consumer cursor values.
+/// canonical state, operation specs, persisted completion feed entries, and
+/// consumer cursor values. Wire format preserved verbatim from legacy
+/// runtime versions for backward compatibility.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedOpsSnapshot {
     /// Epoch identity at capture time.
     pub epoch_id: meerkat_core::RuntimeEpochId,
-    /// Canonical machine-owned authority state.
-    pub authority_state: crate::ops_lifecycle_authority::RegistryCanonicalState,
+    /// Canonical machine-owned state at capture time.
+    pub authority_state: RegistryCanonicalState,
     /// Per-operation specs for shell record reconstruction.
     pub operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec>,
     /// Persisted completion feed entries (actual contents, not reconstructed).
@@ -173,7 +223,7 @@ impl CompletionFeed for RuntimeCompletionFeed {
 // ---------------------------------------------------------------------------
 
 /// Shell-owned data for a single operation. Canonical lifecycle state lives in
-/// the authority; this struct holds I/O concerns that the authority has no
+/// the DSL authority; this struct holds I/O concerns that the DSL has no
 /// knowledge of.
 #[derive(Debug)]
 struct ShellRecord {
@@ -236,14 +286,29 @@ impl ShellRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Combined shell state: authority + shell records
+// Combined shell state: DSL authority + shell records
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct ShellState {
-    authority: OpsLifecycleAuthority,
+    /// DSL authority — sole source of truth for per-op canonical state.
+    dsl: DslAuthority,
+    /// Shell-owned per-operation records (specs, watchers, timestamps, peer handles).
     records: HashMap<OperationId, ShellRecord>,
+    /// Pending wait-all coordination (oneshot channel).
     pending_wait: Option<PendingWaitState>,
+    /// FIFO ordering of completed operation IDs for bounded eviction.
+    completed_order: VecDeque<OperationId>,
+    /// Maximum completed operations to retain.
+    max_completed: usize,
+    /// Maximum concurrent non-terminal operations (None = unlimited).
+    max_concurrent: Option<usize>,
+    /// Active barrier wait request, if any.
+    wait_request_id: Option<WaitRequestId>,
+    /// Operation IDs tracked by the active barrier wait.
+    wait_operation_ids: Vec<OperationId>,
+    /// Monotonic sequence counter for completion feed entries.
+    next_completion_seq: CompletionSeq,
     /// Shared detached-op wake state. When a `BackgroundToolOp` reaches terminal,
     /// sets pending and fires the Notify so the waker task can inject a
     /// continuation into the quiescent session.
@@ -256,12 +321,6 @@ struct ShellState {
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
     persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
-    /// DSL shadow authority for ops lifecycle validation.
-    ///
-    /// Tracks ops-related state fields in parallel with the handwritten
-    /// authority. On each successful authority transition, the corresponding
-    /// DSL input is applied here; disagreements are logged as errors.
-    dsl_shadow: DslShadow,
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -269,38 +328,42 @@ struct ShellState {
 /// The generated `MeerkatMachineAuthority` does not derive `Debug`, but
 /// `ShellState` requires it. This wrapper delegates to the inner state's
 /// `Debug` impl.
-struct DslShadow(mm_dsl::MeerkatMachineAuthority);
+struct DslAuthority(mm_dsl::MeerkatMachineAuthority);
 
-impl std::fmt::Debug for DslShadow {
+impl std::fmt::Debug for DslAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DslShadow")
+        f.debug_struct("DslAuthority")
             .field("state", &self.0.state)
             .finish()
     }
 }
 
-/// Create a DSL shadow authority initialized with `lifecycle_phase: Idle`
-/// and all ops-related fields at their defaults.
-///
-/// Ops lifecycle DSL transitions use `per_phase [Idle, Attached, Running, Retired, Stopped]`
-/// and always transition back to `Idle`, so the shadow stays in `Idle` permanently.
-/// Non-ops fields are left at DSL defaults since ops transitions never guard on them.
-fn new_ops_dsl_shadow() -> DslShadow {
+/// Create a DSL authority initialized with `lifecycle_phase: Idle` and all
+/// ops-related fields at their defaults. Per-op transitions guard only on
+/// `op_statuses.contains_key(operation_id)`, so the phase stays in `Idle`
+/// permanently (they all `to Idle`).
+fn new_ops_dsl_authority() -> DslAuthority {
     let state = mm_dsl::MeerkatMachineState {
         lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
         ..mm_dsl::MeerkatMachineState::default()
     };
-    DslShadow(mm_dsl::MeerkatMachineAuthority::from_state(state))
+    DslAuthority(mm_dsl::MeerkatMachineAuthority::from_state(state))
 }
 
 impl ShellState {
     fn new(max_completed: usize, max_concurrent: Option<usize>) -> Self {
         Self {
-            authority: OpsLifecycleAuthority::new(max_completed, max_concurrent),
+            dsl: new_ops_dsl_authority(),
             records: HashMap::new(),
             pending_wait: None,
+            completed_order: VecDeque::new(),
+            max_completed,
+            max_concurrent,
+            wait_request_id: None,
+            wait_operation_ids: Vec::new(),
+            next_completion_seq: 0,
             detached_wake: None,
-            // Feed buffer is larger than authority retention to absorb bursts.
+            // Feed buffer is larger than max_completed to absorb bursts.
             // Entries are only evicted by buffer capacity, not by consumer cursor,
             // so the buffer must be large enough that consumers drain before
             // the oldest entry is evicted.
@@ -308,16 +371,132 @@ impl ShellState {
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
-            dsl_shadow: new_ops_dsl_shadow(),
         }
     }
 
-    /// Build a snapshot — prefers DSL state for canonical fields, falls back
-    /// to authority only for operations that haven't flowed through a DSL
-    /// transition yet (legacy path during migration).
+    /// Apply a DSL input, mapping transition errors into
+    /// [`OpsLifecycleError::Internal`]. Callers are expected to have
+    /// validated preconditions already; a DSL rejection here indicates a
+    /// shell/DSL desync that should surface as an internal error.
+    fn dsl_apply(
+        &mut self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<(), OpsLifecycleError> {
+        match mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input) {
+            Ok(_) => Ok(()),
+            Err(err) => Err(OpsLifecycleError::Internal(format!(
+                "DSL rejected ops transition ({context}): {err:?}"
+            ))),
+        }
+    }
+
+    /// Serialize the provided terminal outcome for DSL storage.
+    ///
+    /// Terminal outcomes carry caller-provided payloads (error strings,
+    /// cancellation reasons, operation results) that the DSL tracks as
+    /// opaque strings. Serialisation is lossless JSON; the shell rehydrates
+    /// typed outcomes via [`Self::terminal_outcome`].
+    fn encode_outcome(outcome: &OperationTerminalOutcome) -> String {
+        serde_json::to_string(outcome).unwrap_or_default()
+    }
+
+    /// Read the DSL operation status for `id`, or `None` if not registered.
+    fn status(&self, id: &OperationId) -> Option<OperationStatus> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let status_str = self.dsl.0.state.op_statuses.get(&id_key)?;
+        match status_str.as_str() {
+            "Provisioning" => Some(OperationStatus::Provisioning),
+            "Running" => Some(OperationStatus::Running),
+            "Retiring" => Some(OperationStatus::Retiring),
+            "Completed" => Some(OperationStatus::Completed),
+            "Failed" => Some(OperationStatus::Failed),
+            "Aborted" => Some(OperationStatus::Aborted),
+            "Cancelled" => Some(OperationStatus::Cancelled),
+            "Retired" => Some(OperationStatus::Retired),
+            "Terminated" => Some(OperationStatus::Terminated),
+            _ => None,
+        }
+    }
+
+    /// Read the DSL operation kind for `id`, or `None` if not registered.
+    fn kind(&self, id: &OperationId) -> Option<OperationKind> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let serialized = self.dsl.0.state.op_kinds.get(&id_key)?;
+        if serialized.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<OperationKind>(serialized).ok()
+    }
+
+    /// Read the peer-ready flag for `id`.
+    fn peer_ready(&self, id: &OperationId) -> Option<bool> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl.0.state.op_peer_ready.get(&id_key).copied()
+    }
+
+    /// Read the progress counter for `id`.
+    fn progress_count(&self, id: &OperationId) -> Option<u32> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl
+            .0
+            .state
+            .op_progress_counts
+            .get(&id_key)
+            .map(|v| (*v).min(u32::MAX as u64) as u32)
+    }
+
+    /// Read the terminal outcome for `id`, deserialising the stored JSON.
+    fn terminal_outcome(&self, id: &OperationId) -> Option<OperationTerminalOutcome> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let serialized = self.dsl.0.state.op_terminal_outcomes.get(&id_key)?;
+        if serialized.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<OperationTerminalOutcome>(serialized).ok()
+    }
+
+    /// Whether the operation is currently tracked in DSL state.
+    fn contains(&self, id: &OperationId) -> bool {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl.0.state.op_statuses.contains_key(&id_key)
+    }
+
+    /// Number of non-terminal operations (derived from DSL state).
+    fn active_count(&self) -> usize {
+        self.dsl.0.state.active_op_count as usize
+    }
+
+    /// Number of operations currently tracked (including terminal).
+    fn operation_count(&self) -> usize {
+        self.dsl.0.state.op_statuses.len()
+    }
+
+    /// Iterate over all tracked operation IDs (DSL keys converted to domain).
+    fn operation_ids(&self) -> Vec<OperationId> {
+        self.dsl
+            .0
+            .state
+            .op_statuses
+            .keys()
+            .filter_map(|k| serde_json::from_str::<OperationId>(k).ok())
+            .collect()
+    }
+
+    /// Assign and return the next completion sequence number.
+    fn next_seq(&mut self) -> CompletionSeq {
+        self.next_completion_seq = self.next_completion_seq.saturating_add(1);
+        self.next_completion_seq
+    }
+
+    /// Build a snapshot from DSL state + shell record.
     fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
-        let canonical = self.authority.operation(id)?;
         let shell = self.records.get(id)?;
+        let kind = self.kind(id)?;
+        let status = self.status(id)?;
+        let peer_ready = self.peer_ready(id).unwrap_or(false);
+        let progress_count = self.progress_count(id).unwrap_or(0);
+        let terminal_outcome = self.terminal_outcome(id);
 
         let created_at_ms = ShellRecord::epoch_millis(&shell.created_at_wall);
         let started_at_ms = shell.started_at.map(|i| shell.epoch_millis_for_instant(i));
@@ -329,25 +508,6 @@ impl ShellState {
                 .saturating_duration_since(shell.created_at)
                 .as_millis() as u64
         });
-
-        // Prefer DSL state; fall back to authority when DSL has no entry
-        // (legacy operations that haven't flowed through a DSL transition).
-        let kind = self
-            .dsl_operation_kind(id)
-            .unwrap_or_else(|| canonical.kind());
-        let status = self
-            .dsl_operation_status(id)
-            .unwrap_or_else(|| canonical.status());
-        let peer_ready = self
-            .dsl_peer_ready(id)
-            .unwrap_or_else(|| canonical.peer_ready());
-        let terminal_outcome = self
-            .dsl_terminal_outcome(id)
-            .or_else(|| canonical.terminal_outcome().cloned());
-
-        let progress_count = self
-            .dsl_progress_count(id)
-            .unwrap_or_else(|| canonical.progress_count());
 
         Some(OperationLifecycleSnapshot {
             id: shell.spec.id.clone(),
@@ -367,126 +527,99 @@ impl ShellState {
         })
     }
 
-    /// Execute authority effects on shell state.
-    ///
-    /// **Important:** callers must patch the real terminal outcome on the
-    /// authority (via `patch_terminal_outcome`) *before* calling this method.
-    /// `NotifyOpWatcher` effects read the patched outcome from the authority
-    /// rather than using the placeholder embedded in the effect.
-    fn execute_effects(&mut self, effects: &[OpsLifecycleEffect]) {
-        for effect in effects {
-            match effect {
-                OpsLifecycleEffect::NotifyOpWatcher { operation_id, .. } => {
-                    // Prefer DSL state (the single source of truth); fall back
-                    // to authority for safety during migration.
-                    let outcome = self.dsl_terminal_outcome(operation_id).or_else(|| {
-                        self.authority
-                            .operation(operation_id)
-                            .and_then(|op| op.terminal_outcome().cloned())
-                    });
-                    if let Some(outcome) = outcome
-                        && let Some(shell) = self.records.get_mut(operation_id)
-                    {
-                        let watcher_count = shell.watchers.len() as u32;
-                        shell.notify_watchers(&outcome);
-                        shell.mark_completed();
-                        self.authority.watchers_drained(operation_id, watcher_count);
-                    }
-                    // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
-                    let auth_kind = self
-                        .authority
-                        .operation(operation_id)
-                        .map(OperationCanonicalState::kind);
-                    let dsl_kind = self.dsl_operation_kind(operation_id);
-                    if let (Some(auth_k), Some(dsl_k)) = (auth_kind, &dsl_kind)
-                        && auth_k != *dsl_k
-                    {
-                        tracing::warn!(
-                            operation_id = %operation_id,
-                            authority_kind = ?auth_k,
-                            dsl_kind = ?dsl_k,
-                            "DSL/authority kind DISAGREEMENT"
-                        );
-                    }
-                    if let Some(ref wake) = self.detached_wake
-                        && auth_kind.is_some_and(|k| k == OperationKind::BackgroundToolOp)
-                    {
-                        wake.pending.store(true, Ordering::Release);
-                        wake.notify.notify_one(); // wake the waker task directly
-                    }
-                }
-                OpsLifecycleEffect::ExposeOperationPeer { .. } => {
-                    // Peer handle is stored in shell record by the calling method
-                    // after authority.apply() succeeds. Nothing else to do here.
-                }
-                OpsLifecycleEffect::RetainTerminalRecord { .. } => {
-                    // The authority handles completed_order tracking internally.
-                    // Shell record stays in place until evicted.
-                }
-                OpsLifecycleEffect::EvictCompletedRecord { operation_id } => {
-                    self.records.remove(operation_id);
-                    self.authority.remove_operation(operation_id);
-                }
-                OpsLifecycleEffect::CompletionProduced {
-                    seq,
-                    operation_id,
-                    kind,
-                } => {
-                    // Build a CompletionEntry. Prefer DSL state for outcome,
-                    // fall back to authority if DSL has no entry.
-                    let outcome = self.dsl_terminal_outcome(operation_id).or_else(|| {
-                        self.authority
-                            .operation(operation_id)
-                            .and_then(|op| op.terminal_outcome().cloned())
-                    });
-                    let (display_name, terminal_outcome, completed_at_ms) =
-                        if let Some(outcome) = outcome {
-                            let completed_ms = self.records.get(operation_id).and_then(|r| {
-                                r.completed_at.map(|i| r.epoch_millis_for_instant(i))
-                            });
-                            let name = self
-                                .records
-                                .get(operation_id)
-                                .map(|r| r.spec.display_name.clone())
-                                .unwrap_or_default();
-                            (name, outcome, completed_ms)
-                        } else {
-                            (
-                                String::new(),
-                                OperationTerminalOutcome::Terminated {
-                                    reason: "unknown operation".into(),
-                                },
-                                None,
-                            )
-                        };
+    /// Emit shell-side mechanics for a terminal transition: notify watchers,
+    /// push CompletionEntry, arm detached wake, retain in FIFO, evict as
+    /// needed. Called AFTER the DSL transition has already persisted the
+    /// terminal status + outcome.
+    fn finalize_terminal(&mut self, id: &OperationId) {
+        let outcome = match self.terminal_outcome(id) {
+            Some(o) => o,
+            None => return,
+        };
+        let kind = self.kind(id);
 
-                    self.feed_buffer.push(CompletionEntry {
-                        seq: *seq,
-                        operation_id: operation_id.clone(),
-                        kind: *kind,
-                        display_name,
-                        terminal_outcome,
-                        completed_at_ms,
-                    });
-                }
-                OpsLifecycleEffect::SubmitOpEvent { .. } => {
-                    // Future: emit observability events. Currently a no-op.
-                }
-                OpsLifecycleEffect::WaitAllSatisfied {
-                    wait_request_id,
-                    operation_ids,
-                } => {
-                    if let Some(pending_wait) = self.pending_wait.take() {
-                        if pending_wait.wait_request_id == *wait_request_id {
-                            let _ = pending_wait.sender.send(WaitAllSatisfied {
-                                wait_request_id: wait_request_id.clone(),
-                                operation_ids: operation_ids.clone(),
-                            });
-                        } else {
-                            self.pending_wait = Some(pending_wait);
-                        }
-                    }
-                }
+        // Notify watchers and mark completion timestamp.
+        if let Some(shell) = self.records.get_mut(id) {
+            shell.notify_watchers(&outcome);
+            shell.mark_completed();
+        }
+
+        // Arm detached wake for BackgroundToolOp terminals.
+        if let (Some(k), Some(wake)) = (kind, self.detached_wake.as_ref())
+            && k == OperationKind::BackgroundToolOp
+        {
+            wake.pending.store(true, Ordering::Release);
+            wake.notify.notify_one();
+        }
+
+        // Push completion feed entry.
+        let seq = self.next_seq();
+        let display_name = self
+            .records
+            .get(id)
+            .map(|r| r.spec.display_name.clone())
+            .unwrap_or_default();
+        let completed_at_ms = self
+            .records
+            .get(id)
+            .and_then(|r| r.completed_at.map(|i| r.epoch_millis_for_instant(i)));
+        let kind_for_entry = kind.unwrap_or(OperationKind::BackgroundToolOp);
+        self.feed_buffer.push(CompletionEntry {
+            seq,
+            operation_id: id.clone(),
+            kind: kind_for_entry,
+            display_name,
+            terminal_outcome: outcome,
+            completed_at_ms,
+        });
+
+        // FIFO retention + eviction.
+        self.completed_order.push_back(id.clone());
+        while self.completed_order.len() > self.max_completed {
+            if let Some(evicted) = self.completed_order.pop_front() {
+                let evicted_key = mm_dsl::OperationId::from_domain(&evicted).0;
+                self.dsl.0.state.op_statuses.remove(&evicted_key);
+                self.dsl.0.state.op_kinds.remove(&evicted_key);
+                self.dsl.0.state.op_peer_ready.remove(&evicted_key);
+                self.dsl.0.state.op_progress_counts.remove(&evicted_key);
+                self.dsl.0.state.op_terminal_outcomes.remove(&evicted_key);
+                self.dsl.0.state.op_completion_seq.remove(&evicted_key);
+                self.records.remove(&evicted);
+            }
+        }
+
+        // Satisfy a pending wait request if all its ops are now terminal.
+        self.maybe_satisfy_wait();
+    }
+
+    /// Check whether a pending barrier wait is now satisfied and resolve it.
+    fn maybe_satisfy_wait(&mut self) {
+        let wait_id = match self.wait_request_id.as_ref() {
+            Some(id) => id.clone(),
+            None => return,
+        };
+        let all_terminal = self
+            .wait_operation_ids
+            .iter()
+            .all(|id| self.status(id).is_some_and(OperationStatus::is_terminal));
+        if !all_terminal {
+            return;
+        }
+        let ids = std::mem::take(&mut self.wait_operation_ids);
+        self.wait_request_id = None;
+        // Reflect barrier resolution in DSL state.
+        let _ = self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
+            "SatisfyWaitAll",
+        );
+        if let Some(pending) = self.pending_wait.take() {
+            if pending.wait_request_id == wait_id {
+                let _ = pending.sender.send(WaitAllSatisfied {
+                    wait_request_id: wait_id,
+                    operation_ids: ids,
+                });
+            } else {
+                self.pending_wait = Some(pending);
             }
         }
     }
@@ -505,11 +638,25 @@ impl ShellState {
             _ => return,
         };
 
-        let operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec> =
-            self.records
-                .iter()
-                .map(|(id, record)| (id.clone(), record.spec.clone()))
-                .collect();
+        let snapshot = self.capture_snapshot(epoch_id.clone(), cursor_state);
+
+        // Non-blocking send — bounded-loss is the acknowledged contract.
+        if tx.try_send(snapshot).is_err() {
+            tracing::warn!("ops lifecycle persistence channel full or closed; snapshot dropped");
+        }
+    }
+
+    /// Capture the full persisted snapshot for the current state.
+    fn capture_snapshot(
+        &self,
+        epoch_id: meerkat_core::RuntimeEpochId,
+        cursor_state: &meerkat_core::EpochCursorState,
+    ) -> PersistedOpsSnapshot {
+        let operation_specs: HashMap<OperationId, OperationSpec> = self
+            .records
+            .iter()
+            .map(|(id, record)| (id.clone(), record.spec.clone()))
+            .collect();
 
         let completion_entries = {
             let inner = self
@@ -520,96 +667,55 @@ impl ShellState {
             inner.entries.iter().cloned().collect()
         };
 
-        let snapshot = PersistedOpsSnapshot {
-            epoch_id: epoch_id.clone(),
-            authority_state: self.authority.canonical_state().clone(),
+        let mut operations: HashMap<OperationId, OperationCanonicalState> = HashMap::new();
+        for op_id in self.operation_ids() {
+            let Some(status) = self.status(&op_id) else {
+                continue;
+            };
+            let Some(kind) = self.kind(&op_id) else {
+                continue;
+            };
+            let peer_ready = self.peer_ready(&op_id).unwrap_or(false);
+            let progress_count = self.progress_count(&op_id).unwrap_or(0);
+            let terminal_outcome = self.terminal_outcome(&op_id);
+            let terminal_buffered = terminal_outcome.is_some();
+            let watcher_count = self
+                .records
+                .get(&op_id)
+                .map(|r| r.watchers.len() as u32)
+                .unwrap_or(0);
+            operations.insert(
+                op_id,
+                OperationCanonicalState {
+                    status,
+                    kind,
+                    peer_ready,
+                    progress_count,
+                    watcher_count,
+                    terminal_outcome,
+                    terminal_buffered,
+                },
+            );
+        }
+
+        let authority_state = RegistryCanonicalState {
+            operations,
+            completed_order: self.completed_order.clone(),
+            max_completed: self.max_completed,
+            max_concurrent: self.max_concurrent,
+            active_count: self.active_count(),
+            wait_request_id: self.wait_request_id.clone(),
+            wait_operation_ids: self.wait_operation_ids.clone(),
+            next_completion_seq: self.next_completion_seq,
+        };
+
+        PersistedOpsSnapshot {
+            epoch_id,
+            authority_state,
             operation_specs,
             completion_entries,
             cursors: cursor_state.snapshot(),
-        };
-
-        // Non-blocking send — bounded-loss is the acknowledged contract.
-        if tx.try_send(snapshot).is_err() {
-            tracing::warn!("ops lifecycle persistence channel full or closed; snapshot dropped");
         }
-    }
-
-    /// Shadow-validate a DSL input against the ops-local DSL authority.
-    ///
-    /// Called after each successful handwritten authority transition.
-    /// On disagreement, logs `tracing::error!` but does NOT fail the
-    /// operation — the handwritten authority remains the real owner.
-    fn shadow_validate_dsl(&mut self, input: mm_dsl::MeerkatMachineInput, context: &str) {
-        match mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl_shadow.0, input) {
-            Ok(transition) => {
-                self.dsl_shadow.0.state.lifecycle_phase = transition.to_phase;
-            }
-            Err(err) => {
-                tracing::error!(
-                    context = context,
-                    error = %err,
-                    "DSL shadow DISAGREEMENT in ops lifecycle: authority accepted but DSL rejected"
-                );
-            }
-        }
-    }
-
-    /// Read the serialized terminal outcome from DSL state and deserialize it
-    /// back into `OperationTerminalOutcome`. Returns `None` if the DSL state
-    /// has no entry for this operation (e.g. pre-terminal or legacy path).
-    fn dsl_terminal_outcome(&self, id: &OperationId) -> Option<OperationTerminalOutcome> {
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let serialized = self.dsl_shadow.0.state.op_terminal_outcomes.get(&id_key)?;
-        if serialized.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<OperationTerminalOutcome>(serialized).ok()
-    }
-
-    /// Read the serialized operation kind from DSL state.
-    fn dsl_operation_kind(&self, id: &OperationId) -> Option<OperationKind> {
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let serialized = self.dsl_shadow.0.state.op_kinds.get(&id_key)?;
-        if serialized.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<OperationKind>(serialized).ok()
-    }
-
-    /// Read the operation status from DSL state and deserialize it to
-    /// `OperationStatus`. Returns `None` if the op is not registered in DSL.
-    fn dsl_operation_status(&self, id: &OperationId) -> Option<OperationStatus> {
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let status_str = self.dsl_shadow.0.state.op_statuses.get(&id_key)?;
-        match status_str.as_str() {
-            "Provisioning" => Some(OperationStatus::Provisioning),
-            "Running" => Some(OperationStatus::Running),
-            "Retiring" => Some(OperationStatus::Retiring),
-            "Completed" => Some(OperationStatus::Completed),
-            "Failed" => Some(OperationStatus::Failed),
-            "Aborted" => Some(OperationStatus::Aborted),
-            "Cancelled" => Some(OperationStatus::Cancelled),
-            "Retired" => Some(OperationStatus::Retired),
-            "Terminated" => Some(OperationStatus::Terminated),
-            _ => None,
-        }
-    }
-
-    /// Read peer_ready flag from DSL state.
-    fn dsl_peer_ready(&self, id: &OperationId) -> Option<bool> {
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl_shadow.0.state.op_peer_ready.get(&id_key).copied()
-    }
-
-    /// Read progress_count from DSL state.
-    fn dsl_progress_count(&self, id: &OperationId) -> Option<u32> {
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        self.dsl_shadow
-            .0
-            .state
-            .op_progress_counts
-            .get(&id_key)
-            .map(|v| (*v).min(u32::MAX as u64) as u32)
     }
 
     fn shell_record_mut(
@@ -628,15 +734,11 @@ impl ShellState {
         operation_ids
             .iter()
             .map(|operation_id| {
-                let outcome = self
-                    .authority
-                    .operation(operation_id)
-                    .and_then(|op| op.terminal_outcome().cloned())
-                    .ok_or_else(|| {
-                        OpsLifecycleError::Internal(format!(
-                            "wait_all completed without terminal outcome for {operation_id}"
-                        ))
-                    })?;
+                let outcome = self.terminal_outcome(operation_id).ok_or_else(|| {
+                    OpsLifecycleError::Internal(format!(
+                        "wait_all completed without terminal outcome for {operation_id}"
+                    ))
+                })?;
                 Ok((operation_id.clone(), outcome))
             })
             .collect()
@@ -673,9 +775,10 @@ impl Default for OpsLifecycleConfig {
 
 /// Per-runtime shared registry for async operation lifecycle truth.
 ///
-/// All canonical lifecycle state mutations are delegated to
-/// [`OpsLifecycleAuthority`]. This shell manages I/O concerns: watcher
-/// channels, timestamps, peer handles, and snapshot assembly.
+/// Per-operation canonical lifecycle state is owned by the DSL authority
+/// embedded in the shell. This struct manages I/O concerns: watcher
+/// channels, timestamps, peer handles, snapshot assembly, FIFO eviction,
+/// and the completion feed buffer.
 #[derive(Debug)]
 pub struct RuntimeOpsLifecycleRegistry {
     state: RwLock<ShellState>,
@@ -730,7 +833,7 @@ impl RuntimeOpsLifecycleRegistry {
         }
     }
 
-    /// Wire the detached-wake state so that `execute_effects` arms pending
+    /// Wire the detached-wake state so that finalize_terminal arms pending
     /// and fires the Notify when a `BackgroundToolOp` reaches terminal.
     pub fn set_detached_wake(&self, wake: Arc<crate::detached_wake::DetachedWakeState>) {
         if let Ok(mut state) = self.state.write() {
@@ -740,33 +843,94 @@ impl RuntimeOpsLifecycleRegistry {
 
     /// Recover from a persisted snapshot.
     ///
-    /// Rebuilds the authority (stripping non-terminal ops), creates fresh
-    /// shell records from specs, and seeds the feed buffer with persisted
-    /// completion entries.
+    /// Rebuilds DSL state (stripping non-terminal ops — only terminals
+    /// survive recovery), creates fresh shell records from specs, and seeds
+    /// the feed buffer with persisted completion entries.
     pub fn from_recovered(snapshot: PersistedOpsSnapshot) -> Self {
-        let authority = OpsLifecycleAuthority::from_recovered(snapshot.authority_state);
+        let mut shell = ShellState::new(
+            snapshot.authority_state.max_completed,
+            snapshot.authority_state.max_concurrent,
+        );
 
-        // Seed the feed buffer from persisted entries
-        let max_retained = authority
-            .canonical_state()
-            .max_completed()
-            .max(256)
-            .saturating_mul(4)
-            .max(1024);
-        let feed_buffer = Arc::new(FeedBuffer::new(max_retained));
+        // Only retain terminal operations in the DSL state.
+        let mut retained_ids: HashSet<OperationId> = HashSet::new();
+        for (op_id, op_state) in snapshot.authority_state.operations {
+            if !op_state.status.is_terminal() {
+                continue;
+            }
+            let id_key = mm_dsl::OperationId::from_domain(&op_id).0;
+            let status_str: &'static str = match op_state.status {
+                OperationStatus::Completed => "Completed",
+                OperationStatus::Failed => "Failed",
+                OperationStatus::Aborted => "Aborted",
+                OperationStatus::Cancelled => "Cancelled",
+                OperationStatus::Retired => "Retired",
+                OperationStatus::Terminated => "Terminated",
+                // Unreachable: filtered by is_terminal() above.
+                OperationStatus::Absent
+                | OperationStatus::Provisioning
+                | OperationStatus::Running
+                | OperationStatus::Retiring => continue,
+            };
+            shell
+                .dsl
+                .0
+                .state
+                .op_statuses
+                .insert(id_key.clone(), status_str.to_string());
+            let kind_str = serde_json::to_string(&op_state.kind).unwrap_or_default();
+            shell.dsl.0.state.op_kinds.insert(id_key.clone(), kind_str);
+            shell
+                .dsl
+                .0
+                .state
+                .op_peer_ready
+                .insert(id_key.clone(), op_state.peer_ready);
+            shell
+                .dsl
+                .0
+                .state
+                .op_progress_counts
+                .insert(id_key.clone(), op_state.progress_count as u64);
+            if let Some(outcome) = op_state.terminal_outcome.as_ref() {
+                let outcome_str = ShellState::encode_outcome(outcome);
+                shell
+                    .dsl
+                    .0
+                    .state
+                    .op_terminal_outcomes
+                    .insert(id_key.clone(), outcome_str);
+            }
+            retained_ids.insert(op_id);
+        }
+        // active_count is 0 — all retained ops are terminal.
+        shell.dsl.0.state.active_op_count = 0;
+
+        // Rebuild completed_order keeping only retained ops.
+        shell.completed_order = snapshot
+            .authority_state
+            .completed_order
+            .into_iter()
+            .filter(|id| retained_ids.contains(id))
+            .collect();
+
+        // Re-seed completion sequence counter so new terminals keep
+        // monotonic order relative to persisted entries.
+        shell.next_completion_seq = snapshot.authority_state.next_completion_seq;
+
+        // Seed the feed buffer from persisted entries.
         for entry in &snapshot.completion_entries {
-            feed_buffer.push(entry.clone());
+            shell.feed_buffer.push(entry.clone());
         }
 
         // Rebuild shell records from specs (fresh timestamps, no watchers)
-        let mut records = HashMap::new();
-        for (op_id, spec) in &snapshot.operation_specs {
-            // Only rebuild records for operations still in the authority
-            if authority.operation(op_id).is_some() {
-                records.insert(
-                    op_id.clone(),
+        // — only for operations still retained in the DSL state.
+        for (op_id, spec) in snapshot.operation_specs {
+            if retained_ids.contains(&op_id) {
+                shell.records.insert(
+                    op_id,
                     ShellRecord {
-                        spec: spec.clone(),
+                        spec,
                         peer_handle: None,
                         watchers: Vec::new(),
                         created_at: Instant::now(),
@@ -778,20 +942,8 @@ impl RuntimeOpsLifecycleRegistry {
             }
         }
 
-        let state = ShellState {
-            authority,
-            records,
-            pending_wait: None,
-            detached_wake: None,
-            feed_buffer,
-            persist_tx: None,
-            persist_epoch_id: None,
-            persist_cursor_state: None,
-            dsl_shadow: new_ops_dsl_shadow(),
-        };
-
         Self {
-            state: RwLock::new(state),
+            state: RwLock::new(shell),
         }
     }
 
@@ -809,32 +961,7 @@ impl RuntimeOpsLifecycleRegistry {
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let operation_specs: HashMap<OperationId, meerkat_core::ops_lifecycle::OperationSpec> =
-            state
-                .records
-                .iter()
-                .map(|(id, record)| (id.clone(), record.spec.clone()))
-                .collect();
-
-        let completion_entries = {
-            let inner = state
-                .feed_buffer
-                .inner
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            inner.entries.iter().cloned().collect()
-        };
-
-        let cursors = cursor_state.snapshot();
-
-        PersistedOpsSnapshot {
-            epoch_id,
-            authority_state: state.authority.canonical_state().clone(),
-            operation_specs,
-            completion_entries,
-            cursors,
-        }
+        state.capture_snapshot(epoch_id, cursor_state)
     }
 
     /// Return a read handle to the completion feed.
@@ -859,21 +986,21 @@ impl RuntimeOpsLifecycleRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut operations = state
-            .authority
-            .operations()
-            .filter_map(|(id, _)| state.snapshot(id))
+            .operation_ids()
+            .into_iter()
+            .filter_map(|id| state.snapshot(&id))
             .collect::<Vec<_>>();
         operations.sort_by(|left, right| left.display_name.cmp(&right.display_name));
         RuntimeOpsDiagnosticSnapshot {
-            operation_count: state.authority.operation_count(),
-            active_count: state.authority.active_count(),
-            wait_request_id: state.authority.wait_request_id().cloned(),
+            operation_count: state.operation_count(),
+            active_count: state.active_count(),
+            wait_request_id: state.wait_request_id.clone(),
             pending_wait_present: state.pending_wait.is_some(),
             pending_wait_request_id: state
                 .pending_wait
                 .as_ref()
                 .map(|pending_wait| pending_wait.wait_request_id.clone()),
-            wait_operation_ids: state.authority.wait_operation_ids().to_vec(),
+            wait_operation_ids: state.wait_operation_ids.clone(),
             operations,
         }
     }
@@ -895,18 +1022,22 @@ impl RuntimeOpsLifecycleRegistry {
         wait_request_id: &WaitRequestId,
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
-        match state.authority.apply(OpsLifecycleInput::CancelWaitAll {
-            wait_request_id: wait_request_id.clone(),
-        }) {
-            Ok(_) => {
+        match state.wait_request_id.as_ref() {
+            Some(active) if active == wait_request_id => {
+                state.wait_request_id = None;
+                state.wait_operation_ids.clear();
+                state.pending_wait = None;
+                // Reflect cancellation in DSL state.
+                let _ = state.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
+                    "SatisfyWaitAll(cancel)",
+                );
+                Ok(())
+            }
+            _ => {
                 state.pending_wait = None;
                 Ok(())
             }
-            Err(OpsLifecycleError::WaitNotActive(_)) => {
-                state.pending_wait = None;
-                Ok(())
-            }
-            Err(err) => Err(err),
         }
     }
 }
@@ -975,60 +1106,98 @@ impl Drop for WaitAllFuture<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers for status-transition legality pre-checks
+// ---------------------------------------------------------------------------
+
+fn terminal_action(status: OperationStatus) -> &'static str {
+    match status {
+        OperationStatus::Completed => "complete_operation",
+        OperationStatus::Failed => "fail_operation",
+        OperationStatus::Aborted => "abort_provisioning",
+        OperationStatus::Cancelled => "cancel_operation",
+        OperationStatus::Retired => "mark_retired",
+        OperationStatus::Terminated => "terminate_owner",
+        _ => "unknown_terminal",
+    }
+}
+
+/// Check that the current status is in `allowed` for the named `action`.
+fn require_status(
+    id: &OperationId,
+    current: OperationStatus,
+    allowed: &[OperationStatus],
+    action: &'static str,
+) -> Result<(), OpsLifecycleError> {
+    if allowed.contains(&current) {
+        Ok(())
+    } else {
+        Err(OpsLifecycleError::InvalidTransition {
+            id: id.clone(),
+            status: current,
+            action,
+        })
+    }
+}
+
 impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
         let operation_id = spec.id.clone();
         let kind = spec.kind;
 
-        // Delegate to authority for guard checks and canonical state insertion.
-        let transition = state
-            .authority
-            .apply(OpsLifecycleInput::RegisterOperation {
-                operation_id: operation_id.clone(),
-                kind,
-            })?;
+        // Pre-check: duplicate.
+        if state.contains(&operation_id) {
+            return Err(OpsLifecycleError::AlreadyRegistered(operation_id));
+        }
+        // Pre-check: concurrency limit.
+        if let Some(limit) = state.max_concurrent
+            && state.active_count() >= limit
+        {
+            return Err(OpsLifecycleError::MaxConcurrentExceeded {
+                limit,
+                active: state.active_count(),
+            });
+        }
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        // DSL apply.
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::RegisterOp {
                 operation_id: mm_dsl::OperationId::from_domain(&operation_id).0,
                 kind: mm_dsl::OperationKind::from_domain(&kind).0,
             },
             "RegisterOp",
-        );
+        )?;
 
         // Insert shell record.
         state.records.insert(operation_id, ShellRecord::new(spec));
-
-        // Execute effects (none expected for register, but be correct).
-        state.execute_effects(&transition.effects);
         Ok(())
     }
 
     fn provisioning_succeeded(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state
-            .authority
-            .apply(OpsLifecycleInput::ProvisioningSucceeded {
-                operation_id: id.clone(),
-            })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Provisioning],
+            "provisioning_succeeded",
+        )?;
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::StartOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
             },
-            "StartOp (provisioning_succeeded)",
-        );
+            "StartOp",
+        )?;
 
         // Shell concern: record the started timestamp.
         if let Some(shell) = state.records.get_mut(id) {
             shell.started_at = Some(Instant::now());
         }
-
-        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -1039,28 +1208,29 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state
-            .authority
-            .apply(OpsLifecycleInput::ProvisioningFailed {
-                operation_id: id.clone(),
-            })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Provisioning],
+            terminal_action(OperationStatus::Failed),
+        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        // DSL shadow validation with real outcome payload.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_serialized,
             },
             "FailOp (provisioning_failed)",
-        );
+        )?;
 
-        // Patch the real terminal outcome (authority uses placeholder).
-        state.authority.patch_terminal_outcome(id, terminal_outcome);
-
-        state.execute_effects(&transition.effects);
+        state.finalize_terminal(id);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -1071,24 +1241,40 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::PeerReady {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        let kind = state
+            .kind(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        // Guard: must be MobMemberChild.
+        if kind != OperationKind::MobMemberChild {
+            return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
+        }
+        // Guard: must not already be peer-ready.
+        if state.peer_ready(id).unwrap_or(false) {
+            return Err(OpsLifecycleError::AlreadyPeerReady(id.clone()));
+        }
+        // Guard: must be Running or Retiring.
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Running, OperationStatus::Retiring],
+            "peer_ready",
+        )?;
+
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::PeerReadyOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
             },
             "PeerReadyOp",
-        );
+        )?;
 
         // Shell concern: store the peer handle.
         if let Some(shell) = state.records.get_mut(id) {
             shell.peer_handle = Some(peer);
         }
-
-        state.execute_effects(&transition.effects);
         Ok(())
     }
 
@@ -1098,29 +1284,16 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<OperationCompletionWatch, OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // Existence check: DSL state is source of truth for which operations
-        // are registered. Fall back to authority for legacy records that
-        // haven't flowed through a DSL transition yet.
-        let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let exists_in_dsl = state.dsl_shadow.0.state.op_statuses.contains_key(&id_key);
-        if !exists_in_dsl && state.authority.operation(id).is_none() {
+        if !state.contains(id) {
             return Err(OpsLifecycleError::NotFound(id.clone()));
         }
 
-        // Terminal outcome — prefer DSL, fall back to authority.
-        let terminal_outcome = state.dsl_terminal_outcome(id).or_else(|| {
-            state
-                .authority
-                .operation(id)
-                .and_then(|op| op.terminal_outcome().cloned())
-        });
-        if let Some(outcome) = terminal_outcome {
+        // If already terminal, return an already-resolved watch.
+        if let Some(outcome) = state.terminal_outcome(id) {
             return Ok(OperationCompletionWatch::already_resolved(outcome));
         }
 
         // Shell concern: create the channel and store the sender.
-        // Watcher tracking lives in shell.watchers Vec — no authority
-        // bookkeeping needed.
         let shell = state.shell_record_mut(id)?;
         let (tx, watch) = OperationCompletionWatch::channel();
         shell.watchers.push(tx);
@@ -1134,19 +1307,22 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::ProgressReported {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Running, OperationStatus::Retiring],
+            "report_progress",
+        )?;
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::ProgressReportedOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
             },
             "ProgressReportedOp",
-        );
-
-        state.execute_effects(&transition.effects);
+        )?;
         Ok(())
     }
 
@@ -1157,28 +1333,28 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state
-            .authority
-            .apply(OpsLifecycleInput::CompleteOperation {
-                operation_id: id.clone(),
-            })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Running, OperationStatus::Retiring],
+            terminal_action(OperationStatus::Completed),
+        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
-        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        // DSL shadow validation with real outcome payload.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::CompleteOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_serialized,
             },
             "CompleteOp",
-        );
+        )?;
 
-        // Patch the real terminal outcome (authority uses placeholder).
-        state.authority.patch_terminal_outcome(id, terminal_outcome);
-
-        state.execute_effects(&transition.effects);
+        state.finalize_terminal(id);
         state.maybe_persist();
         Ok(())
     }
@@ -1186,26 +1362,32 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn fail_operation(&self, id: &OperationId, error: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::FailOperation {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[
+                OperationStatus::Provisioning,
+                OperationStatus::Running,
+                OperationStatus::Retiring,
+            ],
+            terminal_action(OperationStatus::Failed),
+        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::FailOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_serialized,
             },
             "FailOp",
-        );
+        )?;
 
-        // Patch the real terminal outcome.
-        state.authority.patch_terminal_outcome(id, terminal_outcome);
-
-        state.execute_effects(&transition.effects);
+        state.finalize_terminal(id);
         state.maybe_persist();
         Ok(())
     }
@@ -1217,27 +1399,28 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state
-            .authority
-            .apply(OpsLifecycleInput::AbortProvisioning {
-                operation_id: id.clone(),
-            })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Provisioning],
+            terminal_action(OperationStatus::Aborted),
+        )?;
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
-        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::AbortOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_serialized,
             },
             "AbortOp",
-        );
+        )?;
 
-        state.authority.patch_terminal_outcome(id, terminal_outcome);
-
-        state.execute_effects(&transition.effects);
+        state.finalize_terminal(id);
         state.maybe_persist();
         Ok(())
     }
@@ -1249,30 +1432,32 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::CancelOperation {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[
+                OperationStatus::Provisioning,
+                OperationStatus::Running,
+                OperationStatus::Retiring,
+            ],
+            terminal_action(OperationStatus::Cancelled),
+        )?;
 
-        let terminal_outcome = OperationTerminalOutcome::Cancelled {
-            reason: reason.clone(),
-        };
-        let outcome_serialized = serde_json::to_string(&terminal_outcome).unwrap_or_default();
+        let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        // DSL shadow validation.
-        state.shadow_validate_dsl(
+        state.dsl_apply(
             mm_dsl::MeerkatMachineInput::CancelOp {
                 operation_id: mm_dsl::OperationId::from_domain(id).0,
                 outcome: outcome_serialized,
             },
             "CancelOp",
-        );
+        )?;
 
-        // Patch the real terminal outcome.
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Cancelled { reason });
-
-        state.execute_effects(&transition.effects);
+        state.finalize_terminal(id);
         state.maybe_persist();
         Ok(())
     }
@@ -1280,27 +1465,46 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn request_retire(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::RetireRequested {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(id, status, &[OperationStatus::Running], "request_retire")?;
 
-        state.execute_effects(&transition.effects);
+        state.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RetireRequestedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+            },
+            "RetireRequestedOp",
+        )?;
         Ok(())
     }
 
     fn mark_retired(&self, id: &OperationId) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::RetireCompleted {
-            operation_id: id.clone(),
-        })?;
+        let status = state
+            .status(id)
+            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
+        require_status(
+            id,
+            status,
+            &[OperationStatus::Running, OperationStatus::Retiring],
+            terminal_action(OperationStatus::Retired),
+        )?;
 
-        // Patch the real terminal outcome.
-        state
-            .authority
-            .patch_terminal_outcome(id, OperationTerminalOutcome::Retired);
+        let terminal_outcome = OperationTerminalOutcome::Retired;
+        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
 
-        state.execute_effects(&transition.effects);
+        state.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RetireCompletedOp {
+                operation_id: mm_dsl::OperationId::from_domain(id).0,
+                outcome: outcome_serialized,
+            },
+            "RetireCompletedOp",
+        )?;
+
+        state.finalize_terminal(id);
+        state.maybe_persist();
         Ok(())
     }
 
@@ -1313,9 +1517,9 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .read_state()
             .map(|state| {
                 state
-                    .authority
-                    .operations()
-                    .filter_map(|(id, _)| state.snapshot(id))
+                    .operation_ids()
+                    .into_iter()
+                    .filter_map(|id| state.snapshot(&id))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1326,23 +1530,34 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let transition = state.authority.apply(OpsLifecycleInput::OwnerTerminated)?;
+        // Collect non-terminal op IDs — the shell loop mirrors the old
+        // OwnerTerminated cascade; session lock serialises the batch.
+        let to_terminate: Vec<OperationId> = state
+            .operation_ids()
+            .into_iter()
+            .filter(|id| state.status(id).is_some_and(|s| !s.is_terminal()))
+            .collect();
 
-        // Patch all terminal outcomes with the real reason.
-        // The authority set placeholder empty-string reasons; we patch the real
-        // reason into each newly-terminated operation.
-        for effect in &transition.effects {
-            if let OpsLifecycleEffect::NotifyOpWatcher { operation_id, .. } = effect {
-                state.authority.patch_terminal_outcome(
-                    operation_id,
-                    OperationTerminalOutcome::Terminated {
-                        reason: reason.clone(),
-                    },
-                );
-            }
+        for op_id in &to_terminate {
+            let terminal_outcome = OperationTerminalOutcome::Terminated {
+                reason: reason.clone(),
+            };
+            let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+
+            state.dsl_apply(
+                mm_dsl::MeerkatMachineInput::TerminateOp {
+                    operation_id: mm_dsl::OperationId::from_domain(op_id).0,
+                    outcome: outcome_serialized,
+                },
+                "TerminateOp",
+            )?;
+
+            state.finalize_terminal(op_id);
         }
 
-        state.execute_effects(&transition.effects);
+        if !to_terminate.is_empty() {
+            state.maybe_persist();
+        }
         Ok(())
     }
 
@@ -1351,13 +1566,23 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     ) -> Result<Vec<(OperationId, OperationTerminalOutcome)>, OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        let collected = state.authority.drain_completed();
-
-        // Remove corresponding shell records.
-        for (id, _) in &collected {
-            state.records.remove(id);
+        let ids: Vec<OperationId> = state.completed_order.drain(..).collect();
+        let mut collected = Vec::with_capacity(ids.len());
+        for id in ids {
+            let outcome = state.terminal_outcome(&id);
+            // Remove from DSL state and shell record.
+            let id_key = mm_dsl::OperationId::from_domain(&id).0;
+            state.dsl.0.state.op_statuses.remove(&id_key);
+            state.dsl.0.state.op_kinds.remove(&id_key);
+            state.dsl.0.state.op_peer_ready.remove(&id_key);
+            state.dsl.0.state.op_progress_counts.remove(&id_key);
+            state.dsl.0.state.op_terminal_outcomes.remove(&id_key);
+            state.dsl.0.state.op_completion_seq.remove(&id_key);
+            state.records.remove(&id);
+            if let Some(outcome) = outcome {
+                collected.push((id, outcome));
+            }
         }
-
         Ok(collected)
     }
 
@@ -1377,12 +1602,73 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let state = match self.write_state() {
             Ok(mut state) => {
-                let transition = match state.authority.apply(OpsLifecycleInput::BeginWaitAll {
-                    wait_request_id: wait_request_id.clone(),
-                    operation_ids: owned_ids.clone(),
-                }) {
-                    Ok(transition) => transition,
-                    Err(err) => {
+                // Guard: duplicate ids.
+                let mut seen = HashSet::new();
+                for op_id in &owned_ids {
+                    if !seen.insert(op_id.clone()) {
+                        return Box::pin(WaitAllFuture {
+                            registry: self,
+                            wait_request_id,
+                            operation_ids: owned_ids.clone(),
+                            state: WaitAllFutureState::Ready(Some(Err(
+                                OpsLifecycleError::DuplicateWaitOperation(op_id.clone()),
+                            ))),
+                        });
+                    }
+                }
+                // Guard: wait already active.
+                if state.wait_request_id.is_some() {
+                    return Box::pin(WaitAllFuture {
+                        registry: self,
+                        wait_request_id,
+                        operation_ids: owned_ids,
+                        state: WaitAllFutureState::Ready(Some(Err(
+                            OpsLifecycleError::WaitAlreadyActive,
+                        ))),
+                    });
+                }
+                // Guard: all ops known.
+                for op_id in &owned_ids {
+                    if !state.contains(op_id) {
+                        return Box::pin(WaitAllFuture {
+                            registry: self,
+                            wait_request_id,
+                            operation_ids: owned_ids.clone(),
+                            state: WaitAllFutureState::Ready(Some(Err(
+                                OpsLifecycleError::NotFound(op_id.clone()),
+                            ))),
+                        });
+                    }
+                }
+
+                // Short-circuit when every target op is already terminal.
+                let all_terminal = owned_ids.iter().all(|op_id| {
+                    state
+                        .status(op_id)
+                        .is_some_and(OperationStatus::is_terminal)
+                });
+                if all_terminal {
+                    let outcomes =
+                        state
+                            .collect_wait_outcomes(&owned_ids)
+                            .map(|outcomes| WaitAllResult {
+                                outcomes,
+                                satisfied: WaitAllSatisfied {
+                                    wait_request_id: wait_request_id.clone(),
+                                    operation_ids: owned_ids.clone(),
+                                },
+                            });
+                    WaitAllFutureState::Ready(Some(outcomes))
+                } else {
+                    // Record barrier and apply DSL transition.
+                    state.wait_request_id = Some(wait_request_id.clone());
+                    state.wait_operation_ids = owned_ids.clone();
+                    if let Err(err) = state.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::RequestWaitAll,
+                        "RequestWaitAll",
+                    ) {
+                        state.wait_request_id = None;
+                        state.wait_operation_ids.clear();
                         return Box::pin(WaitAllFuture {
                             registry: self,
                             wait_request_id,
@@ -1390,30 +1676,10 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                             state: WaitAllFutureState::Ready(Some(Err(err))),
                         });
                     }
-                };
 
-                let satisfied = transition.effects.iter().find_map(|effect| match effect {
-                    OpsLifecycleEffect::WaitAllSatisfied {
-                        wait_request_id,
-                        operation_ids,
-                    } => Some(WaitAllSatisfied {
-                        wait_request_id: wait_request_id.clone(),
-                        operation_ids: operation_ids.clone(),
-                    }),
-                    _ => None,
-                });
-
-                state.execute_effects(&transition.effects);
-
-                if let Some(satisfied) = satisfied {
-                    WaitAllFutureState::Ready(Some(state.collect_wait_outcomes(&owned_ids).map(
-                        |outcomes| WaitAllResult {
-                            outcomes,
-                            satisfied,
-                        },
-                    )))
-                } else {
                     if state.pending_wait.is_some() {
+                        state.wait_request_id = None;
+                        state.wait_operation_ids.clear();
                         return Box::pin(WaitAllFuture {
                             registry: self,
                             wait_request_id,
@@ -1629,13 +1895,13 @@ mod tests {
             wait_result.outcomes[1].1,
             OperationTerminalOutcome::Failed { .. }
         ));
-        // Authority-derived obligation carries the awaited IDs
+        // Obligation carries the awaited IDs
         assert_eq!(wait_result.satisfied.operation_ids.len(), 2);
         assert_ne!(wait_result.satisfied.wait_request_id.to_string(), "");
     }
 
     /// Exercises the trait `wait_all` path (via `dyn OpsLifecycleRegistry`)
-    /// which must submit WaitAll through the authority for cross-machine handoff.
+    /// which must submit WaitAll through the DSL for cross-machine handoff.
     #[tokio::test]
     async fn wait_all_trait_path_submits_through_authority() {
         let registry = RuntimeOpsLifecycleRegistry::new();
@@ -1692,12 +1958,12 @@ mod tests {
 
         let active_wait_request_id = {
             let state = registry.read_state().unwrap();
-            let wait_request_id = match state.authority.wait_request_id().cloned() {
+            let wait_request_id = match state.wait_request_id.clone() {
                 Some(wait_request_id) => wait_request_id,
                 None => panic!("wait request should be active"),
             };
             assert_eq!(
-                state.authority.wait_operation_ids(),
+                state.wait_operation_ids.as_slice(),
                 std::slice::from_ref(&op_id)
             );
             wait_request_id
@@ -1726,14 +1992,7 @@ mod tests {
             wait_result.outcomes.as_slice(),
             [(returned_id, OperationTerminalOutcome::Completed(_))] if *returned_id == op_id
         ));
-        assert!(
-            registry
-                .read_state()
-                .unwrap()
-                .authority
-                .wait_request_id()
-                .is_none()
-        );
+        assert!(registry.read_state().unwrap().wait_request_id.is_none());
     }
 
     #[tokio::test]
@@ -1750,8 +2009,8 @@ mod tests {
         drop(wait_fut);
 
         let state = registry.read_state().unwrap();
-        assert!(state.authority.wait_request_id().is_none());
-        assert!(state.authority.wait_operation_ids().is_empty());
+        assert!(state.wait_request_id.is_none());
+        assert!(state.wait_operation_ids.is_empty());
     }
 
     #[test]

@@ -445,6 +445,9 @@ machine! {
             AbortOp { operation_id: String, outcome: String },
             PeerReadyOp { operation_id: String },
             ProgressReportedOp { operation_id: String },
+            RetireRequestedOp { operation_id: String },
+            RetireCompletedOp { operation_id: String, outcome: String },
+            TerminateOp { operation_id: String, outcome: String },
             RequestWaitAll,
             SatisfyWaitAll,
             // Comms drain inputs
@@ -2061,6 +2064,51 @@ machine! {
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // RetireRequestedOp: advance Running -> Retiring (non-terminal).
+        // Shell enforces Running pre-state; DSL records the status transition.
+        transition RetireRequestedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RetireRequestedOp { operation_id }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Retiring");
+            }
+            to Idle
+            emit SubmitOpEvent { operation_id: operation_id }
+        }
+
+        // RetireCompletedOp: terminal retirement (Running|Retiring -> Retired).
+        transition RetireCompletedOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RetireCompletedOp { operation_id, outcome }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Retired");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
+        }
+
+        // TerminateOp: bulk-terminate variant used by owner-terminated cascade.
+        // Shell loops across non-terminal ops and issues one TerminateOp each;
+        // the session lock provides cascade atomicity.
+        transition TerminateOp {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input TerminateOp { operation_id, outcome }
+            guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            update {
+                self.op_statuses.insert(operation_id, "Terminated");
+                self.op_terminal_outcomes.insert(operation_id, outcome);
+                self.active_op_count -= 1;
+            }
+            to Idle
+            emit SubmitOpEvent { operation_id: operation_id }
+            emit NotifyOpWatcher { operation_id: operation_id }
         }
 
         // RequestWaitAll: activate wait-all barrier

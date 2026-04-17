@@ -355,25 +355,13 @@ impl ShellState {
         for effect in effects {
             match effect {
                 OpsLifecycleEffect::NotifyOpWatcher { operation_id, .. } => {
-                    // Read the real (patched) outcome from the authority.
-                    let outcome = self
-                        .authority
-                        .operation(operation_id)
-                        .and_then(|op| op.terminal_outcome().cloned());
-                    // Cross-check: DSL state should hold the same outcome.
-                    // Emit tracing at warn level if they disagree so we can
-                    // catch divergence as the DSL migration progresses.
-                    if let Some(ref auth_outcome) = outcome
-                        && let Some(dsl_outcome) = self.dsl_terminal_outcome(operation_id)
-                        && &dsl_outcome != auth_outcome
-                    {
-                        tracing::warn!(
-                            operation_id = %operation_id,
-                            authority_outcome = ?auth_outcome,
-                            dsl_outcome = ?dsl_outcome,
-                            "DSL/authority terminal_outcome DISAGREEMENT"
-                        );
-                    }
+                    // Prefer DSL state (the single source of truth); fall back
+                    // to authority for safety during migration.
+                    let outcome = self.dsl_terminal_outcome(operation_id).or_else(|| {
+                        self.authority
+                            .operation(operation_id)
+                            .and_then(|op| op.terminal_outcome().cloned())
+                    });
                     if let Some(outcome) = outcome
                         && let Some(shell) = self.records.get_mut(operation_id)
                     {
@@ -383,11 +371,20 @@ impl ShellState {
                         self.authority.watchers_drained(operation_id, watcher_count);
                     }
                     // Arm + signal detached-op wake if this is a BackgroundToolOp terminal.
+                    let auth_kind = self.authority.operation(operation_id).map(|op| op.kind());
+                    let dsl_kind = self.dsl_operation_kind(operation_id);
+                    if let (Some(auth_k), Some(dsl_k)) = (auth_kind, &dsl_kind)
+                        && auth_k != *dsl_k
+                    {
+                        tracing::warn!(
+                            operation_id = %operation_id,
+                            authority_kind = ?auth_k,
+                            dsl_kind = ?dsl_k,
+                            "DSL/authority kind DISAGREEMENT"
+                        );
+                    }
                     if let Some(ref wake) = self.detached_wake
-                        && self
-                            .authority
-                            .operation(operation_id)
-                            .is_some_and(|op| op.kind() == OperationKind::BackgroundToolOp)
+                        && auth_kind.is_some_and(|k| k == OperationKind::BackgroundToolOp)
                     {
                         wake.pending.store(true, Ordering::Release);
                         wake.notify.notify_one(); // wake the waker task directly
@@ -542,6 +539,16 @@ impl ShellState {
             return None;
         }
         serde_json::from_str::<OperationTerminalOutcome>(serialized).ok()
+    }
+
+    /// Read the serialized operation kind from DSL state.
+    fn dsl_operation_kind(&self, id: &OperationId) -> Option<OperationKind> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let serialized = self.dsl_shadow.0.state.op_kinds.get(&id_key)?;
+        if serialized.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<OperationKind>(serialized).ok()
     }
 
     fn shell_record_mut(

@@ -115,6 +115,8 @@ async fn realtime_channel_connects_and_exchanges_frames()
                             transcript_supported: true,
                             tool_lifecycle_events_supported: false,
                             video_supported: false,
+                            audio_input_format: None,
+                            audio_output_format: None,
                         },
                         role: RealtimeChannelRole::Primary,
                     },
@@ -222,6 +224,8 @@ async fn realtime_channel_connects_and_exchanges_frames()
             transcript_supported: true,
             tool_lifecycle_events_supported: false,
             video_supported: false,
+            audio_input_format: None,
+            audio_output_format: None,
         },
     };
 

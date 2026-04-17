@@ -10,8 +10,8 @@ use crate::realtime_session::{
 };
 use async_trait::async_trait;
 use meerkat_contracts::{
-    RealtimeAudioChunk, RealtimeCapabilities, RealtimeInputChunk, RealtimeInputKind,
-    RealtimeOutputKind, RealtimeTurningMode,
+    RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
+    RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
 use meerkat_core::{Message, ToolDef, ToolResult};
 use meerkat_core::{StopReason, types::Usage};
@@ -656,6 +656,10 @@ fn openai_output_audio_transcript_key(item_id: &str, content_index: u32) -> Stri
 }
 
 const OPENAI_REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
+/// Sample rate OpenAI Realtime negotiates for PCM audio on both input and output.
+pub(crate) const OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
+/// Channel count OpenAI Realtime negotiates for PCM audio (mono).
+pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
 const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
@@ -715,6 +719,14 @@ fn openai_realtime_capabilities() -> RealtimeCapabilities {
         transcript_supported: true,
         tool_lifecycle_events_supported: true,
         video_supported: false,
+        audio_input_format: Some(RealtimeAudioFormat::pcm(
+            OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+            OPENAI_REALTIME_AUDIO_CHANNELS,
+        )),
+        audio_output_format: Some(RealtimeAudioFormat::pcm(
+            OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+            OPENAI_REALTIME_AUDIO_CHANNELS,
+        )),
     }
 }
 
@@ -1146,6 +1158,8 @@ impl OpenAiRealtimeSession {
                 Some(RealtimeSessionEvent::OutputAudioChunk {
                     chunk: RealtimeAudioChunk {
                         mime_type: OPENAI_REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                        channels: OPENAI_REALTIME_AUDIO_CHANNELS,
                         data: delta,
                     },
                 })
@@ -2418,6 +2432,8 @@ mod tests {
         session
             .send_input(RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                 mime_type: "audio/pcm".to_string(),
+                sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                channels: OPENAI_REALTIME_AUDIO_CHANNELS,
                 data: "AQID".to_string(),
             }))
             .await

@@ -672,6 +672,8 @@ where
             .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
                 meerkat::contracts::RealtimeAudioChunk {
                     mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                    sample_rate_hz: 24_000,
+                    channels: 1,
                     data: BASE64_STANDARD.encode(&barge_in_chunks[next_barge_in_chunk]),
                 },
             ))
@@ -691,6 +693,8 @@ where
                 .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
                     meerkat::contracts::RealtimeAudioChunk {
                         mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: BASE64_STANDARD.encode(&barge_in_chunks[next_barge_in_chunk]),
                     },
                 ))
@@ -762,6 +766,8 @@ async fn stream_realtime_audio(
             .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
                 meerkat::contracts::RealtimeAudioChunk {
                     mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                    sample_rate_hz: 24_000,
+                    channels: 1,
                     data: BASE64_STANDARD.encode(chunk),
                 },
             ))
@@ -1069,6 +1075,8 @@ fn realtime_audio_observer_collects_audio_chunks_and_text() {
                 event: meerkat::contracts::RealtimeEvent::OutputAudioChunk {
                     chunk: meerkat::contracts::RealtimeAudioChunk {
                         mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: BASE64_STANDARD.encode([1_u8, 0, 2, 0]),
                     },
                 },

@@ -23,11 +23,12 @@ use meerkat_client::{
     RealtimeSessionEvent, RealtimeSessionFactory, realtime_session::RealtimeSessionOpenConfig,
 };
 use meerkat_contracts::{
-    RealtimeCapabilities, RealtimeChannelClosedFrame, RealtimeChannelErrorFrame,
-    RealtimeChannelEventFrame, RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeClientFrame,
-    RealtimeEvent, RealtimeInputChunk, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeReconnectPolicy, RealtimeServerFrame,
+    AudioFormatMismatchContext, RealtimeAudioFormat, RealtimeCapabilities,
+    RealtimeChannelClosedFrame, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
+    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelState,
+    RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeClientFrame, RealtimeErrorCode,
+    RealtimeErrorDetails, RealtimeEvent, RealtimeInputChunk, RealtimeOpenInfo, RealtimeOpenRequest,
+    RealtimeProtocolVersion, RealtimeReconnectPolicy, RealtimeServerFrame,
 };
 use meerkat_core::{ConfigStore, SessionId};
 use meerkat_runtime::{
@@ -42,7 +43,6 @@ use crate::session_runtime::SessionRuntime;
 
 /// Canonical websocket path for realtime channels hosted by `rkat-rpc`.
 pub const REALTIME_WS_PATH: &str = "/realtime/ws";
-const DEFAULT_PROTOCOL_VERSION: &str = "1";
 const DEFAULT_OPEN_TOKEN_TTL: Duration = Duration::from_secs(60);
 const RECONNECT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -265,8 +265,9 @@ impl RealtimeReconnectOverlay {
                     reason: Some("realtime reconnect attempts exhausted".to_string()),
                 },
                 error: RealtimeChannelErrorFrame {
-                    code: "reconnect_exhausted".to_string(),
+                    code: RealtimeErrorCode::ReconnectExhausted,
                     message: format!("realtime reconnect attempts exhausted: {message}"),
+                    details: None,
                 },
                 close_reason: "reconnect_exhausted".to_string(),
             };
@@ -397,23 +398,39 @@ pub enum RealtimeOpenError {
 }
 
 impl RealtimeOpenError {
-    /// Stable product-layer error code for websocket `channel.error`.
-    pub fn code(&self) -> &'static str {
+    /// Typed product-layer error code for websocket `channel.error`.
+    #[must_use]
+    pub fn code(&self) -> RealtimeErrorCode {
         match self {
-            Self::InvalidOpenToken => "invalid_open_token",
-            Self::OpenTokenExpired => "open_token_expired",
-            Self::RoleMismatch => "role_mismatch",
-            Self::TurningModeMismatch => "turning_mode_mismatch",
-            Self::UnsupportedTurningMode => "unsupported_turning_mode",
-            Self::TargetBusy => "target_busy",
-            Self::UnsupportedProtocolVersion { .. } => "unsupported_protocol_version",
+            Self::InvalidOpenToken => RealtimeErrorCode::InvalidOpenToken,
+            Self::OpenTokenExpired => RealtimeErrorCode::OpenTokenExpired,
+            Self::RoleMismatch => RealtimeErrorCode::RoleMismatch,
+            Self::TurningModeMismatch => RealtimeErrorCode::TurningModeMismatch,
+            Self::UnsupportedTurningMode => RealtimeErrorCode::UnsupportedTurningMode,
+            Self::TargetBusy => RealtimeErrorCode::TargetBusy,
+            Self::UnsupportedProtocolVersion { .. } => {
+                RealtimeErrorCode::UnsupportedProtocolVersion
+            }
         }
     }
 
     fn into_error_frame(self) -> RealtimeChannelErrorFrame {
+        let code = self.code();
+        let message = self.to_string();
+        let details = match &self {
+            Self::UnsupportedProtocolVersion {
+                requested,
+                supported,
+            } => Some(RealtimeErrorDetails::UnsupportedProtocolVersion {
+                requested: requested.clone(),
+                supported: supported.clone(),
+            }),
+            _ => None,
+        };
         RealtimeChannelErrorFrame {
-            code: self.code().to_string(),
-            message: self.to_string(),
+            code,
+            message,
+            details,
         }
     }
 }
@@ -421,10 +438,14 @@ impl RealtimeOpenError {
 impl RealtimeWsHost {
     /// Create a new shared websocket bootstrap host for one websocket URL.
     pub fn new(ws_url: impl Into<String>) -> Self {
+        let supported = RealtimeProtocolVersion::SUPPORTED
+            .iter()
+            .map(|version| version.as_str().to_string())
+            .collect();
         Self {
             ws_url: ws_url.into(),
-            supported_protocol_versions: vec![DEFAULT_PROTOCOL_VERSION.to_string()],
-            default_protocol_version: DEFAULT_PROTOCOL_VERSION.to_string(),
+            supported_protocol_versions: supported,
+            default_protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
             token_ttl: DEFAULT_OPEN_TOKEN_TTL,
             session_factory: None,
             pending_opens: Mutex::new(HashMap::new()),
@@ -679,8 +700,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let _ = send_error_and_close(
                         &mut socket,
                         RealtimeChannelErrorFrame {
-                            code: "invalid_frame".to_string(),
+                            code: RealtimeErrorCode::InvalidFrame,
                             message: format!("failed to parse realtime frame: {error}"),
+                            details: None,
                         },
                     )
                     .await;
@@ -692,8 +714,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                 let _ = send_error_and_close(
                     &mut socket,
                     RealtimeChannelErrorFrame {
-                        code: "expected_channel_open".to_string(),
+                        code: RealtimeErrorCode::ExpectedChannelOpen,
                         message: "first realtime websocket frame must be channel.open".to_string(),
+                        details: None,
                     },
                 )
                 .await;
@@ -725,6 +748,8 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         }
                     };
                     let uses_product_session = product_session.is_some();
+                    let expected_audio_input_format =
+                        accepted.capabilities.audio_input_format.clone();
                     let opened = RealtimeServerFrame::ChannelOpened(RealtimeChannelOpenedFrame {
                         protocol_version: accepted.protocol_version,
                         status: opened_status.clone(),
@@ -791,10 +816,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     &mut socket,
                                                     &RealtimeServerFrame::ChannelError(
                                                         RealtimeChannelErrorFrame {
-                                                            code: "invalid_frame".to_string(),
+                                                            code: RealtimeErrorCode::InvalidFrame,
                                                             message: format!(
                                                                 "failed to parse realtime frame: {error}"
                                                             ),
+                                                            details: None,
                                                         },
                                                     ),
                                                 )
@@ -855,7 +881,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             {
                                                 let _ = send_protocol_error(
                                                     &mut socket,
-                                                    "observer_read_only",
+                                                    RealtimeErrorCode::ObserverReadOnly,
                                                     "observer channels may not send input or control frames",
                                                 )
                                                 .await;
@@ -863,7 +889,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             RealtimeClientFrame::ChannelOpen(_) => {
                                                 let _ = send_protocol_error(
                                                     &mut socket,
-                                                    "unexpected_channel_open",
+                                                    RealtimeErrorCode::UnexpectedChannelOpen,
                                                     "channel.open is only valid as the first realtime websocket frame",
                                                 )
                                                 .await;
@@ -876,7 +902,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             {
                                                 let _ = send_protocol_error(
                                                     &mut socket,
-                                                    "commit_turn_unavailable",
+                                                    RealtimeErrorCode::CommitTurnUnavailable,
                                                     "channel.commit_turn is only valid for explicit_commit channels",
                                                 )
                                                 .await;
@@ -902,7 +928,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         Err(_) => {
                                                             let _ = send_protocol_error(
                                                                 &mut socket,
-                                                                "provider_session_closed",
+                                                                RealtimeErrorCode::ProviderSessionClosed,
                                                                 "realtime provider session closed before interrupt completed",
                                                             )
                                                             .await;
@@ -911,7 +937,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 } else if uses_product_session {
                                                     let _ = send_protocol_error(
                                                         &mut socket,
-                                                        "channel_reconnecting",
+                                                        RealtimeErrorCode::ChannelReconnecting,
                                                         "realtime provider session is reconnecting; wait for the channel to become ready",
                                                     )
                                                     .await;
@@ -954,13 +980,24 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 } else {
                                                     let _ = send_protocol_error(
                                                         &mut socket,
-                                                        "channel_not_bound",
+                                                        RealtimeErrorCode::ChannelNotBound,
                                                         "realtime frame routing is not wired to the substrate yet",
                                                     )
                                                     .await;
                                                 }
                                             }
                                             RealtimeClientFrame::ChannelInput(input_frame) => {
+                                                if let Err(error) = validate_input_chunk_audio_format(
+                                                    &input_frame.chunk,
+                                                    &expected_audio_input_format,
+                                                ) {
+                                                    let _ = send_server_frame(
+                                                        &mut socket,
+                                                        &RealtimeServerFrame::ChannelError(error),
+                                                    )
+                                                    .await;
+                                                    continue;
+                                                }
                                                 if let Some(product_session) = product_session.as_mut() {
                                                     let preempt = should_preempt_product_turn_on_input(
                                                         product_turn_in_flight,
@@ -1009,7 +1046,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             Err(_) => {
                                                                 let _ = send_protocol_error(
                                                                     &mut socket,
-                                                                    "provider_session_closed",
+                                                                    RealtimeErrorCode::ProviderSessionClosed,
                                                                     "realtime provider session closed before turn preemption completed",
                                                                 )
                                                                 .await;
@@ -1091,7 +1128,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         Err(_) => {
                                                             let _ = send_protocol_error(
                                                                 &mut socket,
-                                                                "provider_session_closed",
+                                                                RealtimeErrorCode::ProviderSessionClosed,
                                                                 "realtime provider session closed before input was accepted",
                                                             )
                                                             .await;
@@ -1100,7 +1137,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 } else if uses_product_session {
                                                     let _ = send_protocol_error(
                                                         &mut socket,
-                                                        "channel_reconnecting",
+                                                        RealtimeErrorCode::ChannelReconnecting,
                                                         "realtime provider session is reconnecting; wait for the channel to become ready",
                                                     )
                                                     .await;
@@ -1155,7 +1192,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         Err(_) => {
                                                             let _ = send_protocol_error(
                                                                 &mut socket,
-                                                                "provider_session_closed",
+                                                                RealtimeErrorCode::ProviderSessionClosed,
                                                                 "realtime provider session closed before commit_turn completed",
                                                             )
                                                             .await;
@@ -1164,7 +1201,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 } else if uses_product_session {
                                                     let _ = send_protocol_error(
                                                         &mut socket,
-                                                        "channel_reconnecting",
+                                                        RealtimeErrorCode::ChannelReconnecting,
                                                         "realtime provider session is reconnecting; wait for the channel to become ready",
                                                     )
                                                     .await;
@@ -1426,7 +1463,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 &RealtimeServerFrame::ChannelClosed(
                                                     RealtimeChannelClosedFrame {
                                                         reason: Some(
-                                                            "provider_session_closed".to_string(),
+                                                            RealtimeErrorCode::ProviderSessionClosed.to_string(),
                                                         ),
                                                     },
                                                 ),
@@ -1470,7 +1507,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 break;
                                             }
                                         } else {
-                                            let close_reason = error.code.clone();
+                                            let close_reason = error.code.as_str().to_string();
                                             let _ = send_server_frame(
                                                 &mut socket,
                                                 &RealtimeServerFrame::ChannelError(error),
@@ -1704,8 +1741,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
             let _ = send_error_and_close(
                 &mut socket,
                 RealtimeChannelErrorFrame {
-                    code: "expected_channel_open".to_string(),
+                    code: RealtimeErrorCode::ExpectedChannelOpen,
                     message: "first realtime websocket frame must be channel.open".to_string(),
+                    details: None,
                 },
             )
             .await;
@@ -1737,12 +1775,58 @@ async fn send_server_frame_with_fanout(
     Ok(())
 }
 
-async fn send_protocol_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {
+/// Validate an incoming realtime input chunk against the channel's negotiated
+/// audio format, if any. Returns `Ok(())` when the chunk is non-audio or
+/// matches; returns a typed channel error frame for any mismatch.
+fn validate_input_chunk_audio_format(
+    chunk: &RealtimeInputChunk,
+    expected: &Option<RealtimeAudioFormat>,
+) -> Result<(), RealtimeChannelErrorFrame> {
+    let RealtimeInputChunk::AudioChunk(audio) = chunk else {
+        return Ok(());
+    };
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = audio.format();
+    if actual.mime_type == expected.mime_type
+        && actual.sample_rate_hz == expected.sample_rate_hz
+        && actual.channels == expected.channels
+    {
+        return Ok(());
+    }
+    Err(RealtimeChannelErrorFrame {
+        code: RealtimeErrorCode::AudioFormatMismatch,
+        message: format!(
+            "audio input format does not match provider negotiated format: \
+             expected {} @ {} Hz / {} ch, got {} @ {} Hz / {} ch",
+            expected.mime_type,
+            expected.sample_rate_hz,
+            expected.channels,
+            actual.mime_type,
+            actual.sample_rate_hz,
+            actual.channels,
+        ),
+        details: Some(RealtimeErrorDetails::AudioFormatMismatch(
+            AudioFormatMismatchContext {
+                expected: expected.clone(),
+                actual,
+            },
+        )),
+    })
+}
+
+async fn send_protocol_error(
+    socket: &mut WebSocket,
+    code: RealtimeErrorCode,
+    message: &str,
+) -> Result<(), ()> {
     send_server_frame(
         socket,
         &RealtimeServerFrame::ChannelError(RealtimeChannelErrorFrame {
-            code: code.to_string(),
+            code,
             message: message.to_string(),
+            details: None,
         }),
     )
     .await
@@ -1764,8 +1848,9 @@ async fn bind_realtime_target(
         meerkat_contracts::RealtimeChannelTarget::SessionTarget { session_id } => {
             let session_id =
                 SessionId::parse(session_id).map_err(|err| RealtimeChannelErrorFrame {
-                    code: "invalid_target".to_string(),
+                    code: RealtimeErrorCode::InvalidTarget,
                     message: format!("invalid session target: {err}"),
+                    details: None,
                 })?;
             if matches!(
                 accepted.request.role,
@@ -1968,8 +2053,9 @@ async fn current_binding_projection(
             },
         ) => member_binding_projection(runtime, mob_id, agent_identity).await,
         None => Err(RealtimeChannelErrorFrame {
-            code: "channel_not_bound".to_string(),
+            code: RealtimeErrorCode::ChannelNotBound,
             message: "realtime frame routing is not wired to the substrate yet".to_string(),
+            details: None,
         }),
     }
 }
@@ -2010,8 +2096,9 @@ fn member_projection_from_status_str(
         "replacement_pending" => Ok(RealtimeBindingProjection::ReplacementPending),
         "reattach_required" => Ok(RealtimeBindingProjection::ReattachRequired),
         other => Err(RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: format!("unsupported mob live attachment status '{other}'"),
+            details: None,
         }),
     }
 }
@@ -2098,8 +2185,9 @@ async fn attempt_realtime_reconnect(
             | RealtimeSocketBinding::MemberObserver { .. },
         )
         | None => Err(RealtimeChannelErrorFrame {
-            code: "channel_not_bound".to_string(),
+            code: RealtimeErrorCode::ChannelNotBound,
             message: "observer channels do not own realtime reconnect attempts".to_string(),
+            details: None,
         }),
     }
 }
@@ -2283,9 +2371,10 @@ async fn handle_product_session_tool_call(
     .await?;
     let Some(product_session) = product_session else {
         return Err(RealtimeChannelErrorFrame {
-            code: "provider_session_closed".to_string(),
+            code: RealtimeErrorCode::ProviderSessionClosed,
             message: "realtime provider session closed before tool continuation could run"
                 .to_string(),
+            details: None,
         });
     };
 
@@ -2346,9 +2435,10 @@ async fn submit_product_session_tool_result(
         })
         .await
         .map_err(|_| RealtimeChannelErrorFrame {
-            code: "provider_session_closed".to_string(),
+            code: RealtimeErrorCode::ProviderSessionClosed,
             message: "realtime provider session closed before the tool result could be submitted"
                 .to_string(),
+            details: None,
         })?;
     match respond_rx.await {
         Ok(Ok(())) => Ok(()),
@@ -2359,9 +2449,10 @@ async fn submit_product_session_tool_result(
         Err(_) => {
             let _ = require_product_session_reattach(runtime, binding).await;
             Err(RealtimeChannelErrorFrame {
-                code: "provider_session_closed".to_string(),
+                code: RealtimeErrorCode::ProviderSessionClosed,
                 message: "realtime provider session closed before the tool result was accepted"
                     .to_string(),
+                details: None,
             })
         }
     }
@@ -2384,9 +2475,10 @@ async fn submit_product_session_tool_error(
         })
         .await
         .map_err(|_| RealtimeChannelErrorFrame {
-            code: "provider_session_closed".to_string(),
+            code: RealtimeErrorCode::ProviderSessionClosed,
             message: "realtime provider session closed before the tool failure could be submitted"
                 .to_string(),
+            details: None,
         })?;
     match respond_rx.await {
         Ok(Ok(())) => Ok(()),
@@ -2397,9 +2489,10 @@ async fn submit_product_session_tool_error(
         Err(_) => {
             let _ = require_product_session_reattach(runtime, binding).await;
             Err(RealtimeChannelErrorFrame {
-                code: "provider_session_closed".to_string(),
+                code: RealtimeErrorCode::ProviderSessionClosed,
                 message: "realtime provider session closed before the tool failure was accepted"
                     .to_string(),
+                details: None,
             })
         }
     }
@@ -2533,8 +2626,9 @@ async fn resolve_primary_session_id(
             agent_identity,
         }) => resolve_member_primary_session_id(runtime, mob_id, agent_identity).await,
         _ => Err(RealtimeChannelErrorFrame {
-            code: "channel_not_bound".to_string(),
+            code: RealtimeErrorCode::ChannelNotBound,
             message: not_bound_message.to_string(),
+            details: None,
         }),
     }
 }
@@ -2554,10 +2648,11 @@ async fn current_projection_updated_at(
         .await
         .map(|session| session.state.updated_at)
         .map_err(|error| RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: format!(
                 "failed to read canonical session state for realtime projection: {error:?}"
             ),
+            details: None,
         })
 }
 
@@ -2569,9 +2664,10 @@ async fn refresh_product_session_projection(
     product_session: &mut RealtimeProductSessionBridge,
 ) -> Result<(), RealtimeChannelErrorFrame> {
     let session_factory = session_factory.ok_or_else(|| RealtimeChannelErrorFrame {
-        code: "provider_session_unavailable".to_string(),
+        code: RealtimeErrorCode::ProviderSessionUnavailable,
         message: "realtime provider session factory is not available for projection reconstruction"
             .to_string(),
+        details: None,
     })?;
     let session_id = resolve_primary_session_id(
         runtime,
@@ -2676,9 +2772,10 @@ async fn handle_channel_input(
         }
         RealtimeInputChunk::AudioChunk(_) | RealtimeInputChunk::VideoChunk(_) => {
             Err(RealtimeChannelErrorFrame {
-                code: "unsupported_input_kind".to_string(),
+                code: RealtimeErrorCode::UnsupportedInputKind,
                 message: "realtime media chunk routing is not wired to the substrate yet"
                     .to_string(),
+                details: None,
             })
         }
     }
@@ -2698,8 +2795,9 @@ async fn commit_pending_turn(
 
     if pending_turn.staged_user_text.is_empty() {
         return Err(RealtimeChannelErrorFrame {
-            code: "no_pending_turn".to_string(),
+            code: RealtimeErrorCode::NoPendingTurn,
             message: "channel.commit_turn requires staged realtime input".to_string(),
+            details: None,
         });
     }
 
@@ -2744,10 +2842,11 @@ async fn commit_runtime_turn_text(
                     ..
                 } => {
                     return Err(RealtimeChannelErrorFrame {
-                        code: "runtime_internal".to_string(),
+                        code: RealtimeErrorCode::RuntimeInternal,
                         message: format!(
                             "realtime websocket tool callback sequencing is not wired yet for '{tool_name}'"
                         ),
+                        details: None,
                     });
                 }
             }
@@ -2809,9 +2908,10 @@ async fn resolve_member_primary_session_id(
 ) -> Result<SessionId, RealtimeChannelErrorFrame> {
     let Some(mob_state) = runtime.mob_state() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "mob-backed realtime targets are unavailable on this surface build"
                 .to_string(),
+            details: None,
         });
     };
     let bridge_session_id = mob_state
@@ -2822,10 +2922,11 @@ async fn resolve_member_primary_session_id(
         .await
         .map_err(|err| mob_error_frame(err, "resolve_current_session"))?;
     bridge_session_id.ok_or_else(|| RealtimeChannelErrorFrame {
-        code: "runtime_not_ready".to_string(),
+        code: RealtimeErrorCode::RuntimeNotReady,
         message: format!(
             "realtime member target '{mob_id}/{agent_identity}' has no current bridge session"
         ),
+        details: None,
     })
 }
 
@@ -2836,8 +2937,9 @@ async fn resolve_member_primary_session_id(
     _agent_identity: &str,
 ) -> Result<SessionId, RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -2847,24 +2949,29 @@ fn runtime_error_frame(err: RuntimeDriverError, action: &str) -> RealtimeChannel
             state: RuntimeState::Destroyed,
         }
         | RuntimeDriverError::Destroyed => RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: format!("realtime {action} target is unavailable"),
+            details: None,
         },
         RuntimeDriverError::NotReady { state } => RealtimeChannelErrorFrame {
-            code: "runtime_not_ready".to_string(),
+            code: RealtimeErrorCode::RuntimeNotReady,
             message: format!("realtime {action} requires a ready runtime: {state}"),
+            details: None,
         },
         RuntimeDriverError::ValidationFailed { reason } => RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: reason,
+            details: None,
         },
         RuntimeDriverError::Internal(message) => RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message,
+            details: None,
         },
         other => RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: other.to_string(),
+            details: None,
         },
     }
 }
@@ -2872,12 +2979,14 @@ fn runtime_error_frame(err: RuntimeDriverError, action: &str) -> RealtimeChannel
 fn session_error_frame(err: meerkat_core::service::SessionError) -> RealtimeChannelErrorFrame {
     match err {
         meerkat_core::service::SessionError::NotFound { .. } => RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "realtime session target is unavailable".to_string(),
+            details: None,
         },
         other => RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: other.to_string(),
+            details: None,
         },
     }
 }
@@ -2891,18 +3000,21 @@ fn realtime_client_error_frame(
         | meerkat_client::LlmError::AuthenticationFailed { message }
         | meerkat_client::LlmError::ContentFiltered { reason: message }
         | meerkat_client::LlmError::ModelNotFound { model: message } => RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: format!("realtime {action} failed: {message}"),
+            details: None,
         },
         other => RealtimeChannelErrorFrame {
-            code: "provider_session_failed".to_string(),
+            code: RealtimeErrorCode::ProviderSessionFailed,
             message: format!("realtime {action} failed: {other}"),
+            details: None,
         },
     }
 }
 
 fn preemptive_interrupt_can_be_ignored(error: &RealtimeChannelErrorFrame) -> bool {
-    error.code == "invalid_target" && error.message.contains("realtime interrupt failed")
+    error.code == RealtimeErrorCode::InvalidTarget
+        && error.message.contains("realtime interrupt failed")
 }
 
 #[cfg(feature = "mob")]
@@ -2913,9 +3025,10 @@ async fn member_binding_projection(
 ) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
     let Some(mob_state) = runtime.mob_state() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "mob-backed realtime targets are unavailable on this surface build"
                 .to_string(),
+            details: None,
         });
     };
 
@@ -2928,14 +3041,16 @@ async fn member_binding_projection(
         .map_err(|err| mob_error_frame(err, "status"))?;
     let serialized = serde_json::to_value(snapshot.realtime_attachment_status).map_err(|err| {
         RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: format!("failed to serialize member realtime status: {err}"),
+            details: None,
         }
     })?;
     let Some(status) = serialized.as_str() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: "mob member live attachment status should serialize as a string".to_string(),
+            details: None,
         });
     };
     member_projection_from_status_str(status)
@@ -2948,8 +3063,9 @@ async fn member_binding_projection(
     _agent_identity: &str,
 ) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -2971,8 +3087,9 @@ async fn member_channel_status(
     _agent_identity: &str,
 ) -> Result<RealtimeChannelStatus, RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -2984,9 +3101,10 @@ async fn attach_member_target(
 ) -> Result<(), RealtimeChannelErrorFrame> {
     let Some(mob_state) = runtime.mob_state() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "mob-backed realtime targets are unavailable on this surface build"
                 .to_string(),
+            details: None,
         });
     };
 
@@ -3007,8 +3125,9 @@ async fn attach_member_target(
     _agent_identity: &str,
 ) -> Result<(), RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -3020,9 +3139,10 @@ async fn detach_member_target(
 ) -> Result<(), RealtimeChannelErrorFrame> {
     let Some(mob_state) = runtime.mob_state() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "mob-backed realtime targets are unavailable on this surface build"
                 .to_string(),
+            details: None,
         });
     };
 
@@ -3043,8 +3163,9 @@ async fn detach_member_target(
     _agent_identity: &str,
 ) -> Result<(), RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -3142,9 +3263,10 @@ async fn interrupt_member_target(
 ) -> Result<(), RealtimeChannelErrorFrame> {
     let Some(mob_state) = runtime.mob_state() else {
         return Err(RealtimeChannelErrorFrame {
-            code: "invalid_target".to_string(),
+            code: RealtimeErrorCode::InvalidTarget,
             message: "mob-backed realtime targets are unavailable on this surface build"
                 .to_string(),
+            details: None,
         });
     };
     mob_state
@@ -3163,8 +3285,9 @@ async fn interrupt_member_target(
     _agent_identity: &str,
 ) -> Result<(), RealtimeChannelErrorFrame> {
     Err(RealtimeChannelErrorFrame {
-        code: "invalid_target".to_string(),
+        code: RealtimeErrorCode::InvalidTarget,
         message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
+        details: None,
     })
 }
 
@@ -3173,18 +3296,21 @@ fn mob_error_frame(err: meerkat_mob::MobError, action: &str) -> RealtimeChannelE
     match err {
         meerkat_mob::MobError::MeerkatNotFound(_) | meerkat_mob::MobError::ProfileNotFound(_) => {
             RealtimeChannelErrorFrame {
-                code: "invalid_target".to_string(),
+                code: RealtimeErrorCode::InvalidTarget,
                 message: format!("realtime {action} target is unavailable"),
+                details: None,
             }
         }
         meerkat_mob::MobError::MemberRestoreFailed { reason, .. }
         | meerkat_mob::MobError::UnsupportedForMode { reason, .. } => RealtimeChannelErrorFrame {
-            code: "runtime_not_ready".to_string(),
+            code: RealtimeErrorCode::RuntimeNotReady,
             message: format!("realtime {action} requires a ready member runtime: {reason}"),
+            details: None,
         },
         other => RealtimeChannelErrorFrame {
-            code: "runtime_internal".to_string(),
+            code: RealtimeErrorCode::RuntimeInternal,
             message: other.to_string(),
+            details: None,
         },
     }
 }
@@ -3193,7 +3319,7 @@ async fn send_error_and_close(
     socket: &mut WebSocket,
     error: RealtimeChannelErrorFrame,
 ) -> Result<(), ()> {
-    let close_reason = error.code.clone();
+    let close_reason = error.code.as_str().to_string();
     send_server_frame(socket, &RealtimeServerFrame::ChannelError(error)).await?;
     send_server_frame(
         socket,
@@ -3226,9 +3352,10 @@ mod tests {
     use meerkat_core::types::StopReason;
 
     use super::{
-        RealtimeOpenError, RealtimeReconnectFailure, RealtimeReconnectOverlay,
-        RealtimeTurnCompletionDisposition, RealtimeWsHost, product_turn_completion_disposition,
-        product_turn_completion_is_logically_terminal, should_preempt_product_turn_on_input,
+        RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion, RealtimeReconnectFailure,
+        RealtimeReconnectOverlay, RealtimeTurnCompletionDisposition, RealtimeWsHost,
+        product_turn_completion_disposition, product_turn_completion_is_logically_terminal,
+        should_preempt_product_turn_on_input,
     };
     use tokio::time::Instant;
 
@@ -3241,6 +3368,8 @@ mod tests {
             transcript_supported: true,
             tool_lifecycle_events_supported: false,
             video_supported: false,
+            audio_input_format: None,
+            audio_output_format: None,
         }
     }
 
@@ -3356,7 +3485,7 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(reused, RealtimeOpenError::InvalidOpenToken);
-        assert_eq!(reused.code(), "invalid_open_token");
+        assert_eq!(reused.code(), RealtimeErrorCode::InvalidOpenToken);
     }
 
     #[tokio::test]
@@ -3377,7 +3506,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let expired_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: "1".to_string(),
+                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
                 open_token: info.open_token.clone(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -3392,14 +3521,14 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(expired, RealtimeOpenError::OpenTokenExpired);
-        assert_eq!(expired.code(), "open_token_expired");
+        assert_eq!(expired.code(), RealtimeErrorCode::OpenTokenExpired);
 
         let fresh_info = host
             .issue_open_info(request, conservative_capabilities())
             .await;
         let role_error_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
-                protocol_version: "1".to_string(),
+                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
                 open_token: fresh_info.open_token.clone(),
                 role: RealtimeChannelRole::Observer,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -3414,7 +3543,7 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(role_error, RealtimeOpenError::RoleMismatch);
-        assert_eq!(role_error.code(), "role_mismatch");
+        assert_eq!(role_error.code(), RealtimeErrorCode::RoleMismatch);
 
         let protocol_error_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
@@ -3436,10 +3565,13 @@ mod tests {
             protocol_error,
             RealtimeOpenError::UnsupportedProtocolVersion {
                 requested: "999".to_string(),
-                supported: vec!["1".to_string()],
+                supported: vec![RealtimeProtocolVersion::CURRENT.as_str().to_string()],
             }
         );
-        assert_eq!(protocol_error.code(), "unsupported_protocol_version");
+        assert_eq!(
+            protocol_error.code(),
+            RealtimeErrorCode::UnsupportedProtocolVersion
+        );
     }
 
     #[tokio::test]
@@ -3719,7 +3851,7 @@ mod tests {
                 close_reason,
             } => {
                 assert_eq!(status.state, RealtimeChannelState::Error);
-                assert_eq!(error.code, "reconnect_exhausted");
+                assert_eq!(error.code, RealtimeErrorCode::ReconnectExhausted);
                 assert_eq!(close_reason, "reconnect_exhausted");
             }
             other => panic!("expected reconnect exhaustion, got {other:?}"),

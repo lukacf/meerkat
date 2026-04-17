@@ -2,6 +2,201 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical wire protocol version for realtime channels.
+///
+/// The version is bumped every time the on-the-wire shape of
+/// [`RealtimeAudioChunk`], frame enums, or other load-bearing realtime
+/// contracts changes in an incompatible way. Clients and servers handshake on
+/// the string form; this enum is the single typed owner of the set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum RealtimeProtocolVersion {
+    /// v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and
+    /// typed [`RealtimeErrorCode`] on channel errors.
+    #[serde(rename = "2")]
+    V2,
+}
+
+impl RealtimeProtocolVersion {
+    /// The current wire protocol version shipped by this build.
+    pub const CURRENT: Self = Self::V2;
+
+    /// Every version this build is willing to accept on handshake.
+    pub const SUPPORTED: &'static [Self] = &[Self::V2];
+
+    /// Returns true when this version is one of `SUPPORTED`. Convenience
+    /// wrapper for handshake helpers and tests.
+    #[must_use]
+    pub fn is_supported(self) -> bool {
+        Self::SUPPORTED.contains(&self)
+    }
+
+    /// Render the protocol version to its stable string form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V2 => "2",
+        }
+    }
+
+    /// Parse a protocol version string, returning `None` for unknown values.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::SUPPORTED
+            .iter()
+            .copied()
+            .find(|version| version.as_str() == raw)
+    }
+}
+
+/// Typed realtime channel error code. Replaces the prior freeform `String` on
+/// [`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick
+/// exactly one variant so downstream SDKs can match without string folklore.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeErrorCode {
+    /// Incoming frame could not be parsed.
+    InvalidFrame,
+    /// The first frame on a new socket was not `channel.open`.
+    ExpectedChannelOpen,
+    /// The open token did not match any pending reservation.
+    InvalidOpenToken,
+    /// The open token was valid but its TTL elapsed before use.
+    OpenTokenExpired,
+    /// The client-requested role does not match the reservation.
+    RoleMismatch,
+    /// The client-requested turning mode does not match the reservation.
+    TurningModeMismatch,
+    /// The reservation requested a turning mode this host does not support.
+    UnsupportedTurningMode,
+    /// The target already has an active primary channel.
+    TargetBusy,
+    /// The client handshake requested a protocol version this host cannot serve.
+    UnsupportedProtocolVersion,
+    /// An input audio chunk's sample rate or channel count did not match the
+    /// format the provider session is negotiated for.
+    AudioFormatMismatch,
+    /// The open token was minted for a different realm than the one the
+    /// websocket session currently resolves to. Enforced server-side.
+    UnauthorizedRealm,
+    /// A tool dispatch exceeded its configured budget.
+    ToolCallTimeout,
+    /// Generic internal runtime error (fallback when no better code fits).
+    InternalError,
+    /// Reconnect budget exhausted; channel is closing.
+    ReconnectExhausted,
+    /// Realtime target did not parse or resolve.
+    InvalidTarget,
+    /// No realtime binding exists for this channel (driver not ready).
+    ChannelNotBound,
+    /// Runtime layer returned an internal error that has no more-specific code.
+    RuntimeInternal,
+    /// Runtime driver is not in a state that can accept this operation.
+    RuntimeNotReady,
+    /// Upstream provider session is closed.
+    ProviderSessionClosed,
+    /// Upstream provider session failed to open or progressed fatally.
+    ProviderSessionFailed,
+    /// Upstream provider session is temporarily unavailable.
+    ProviderSessionUnavailable,
+    /// Input modality is not supported by the negotiated capabilities.
+    UnsupportedInputKind,
+    /// No pending turn on this channel to commit or interrupt.
+    NoPendingTurn,
+    /// Observer channels may not send input or control frames.
+    ObserverReadOnly,
+    /// `channel.open` is valid only as the first frame on a new socket.
+    UnexpectedChannelOpen,
+    /// `channel.commit_turn` is only valid for explicit-commit turning mode.
+    CommitTurnUnavailable,
+    /// Channel is reconnecting; the caller must wait for a ready state.
+    ChannelReconnecting,
+}
+
+impl RealtimeErrorCode {
+    /// Stable string form; also the JSON discriminant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidFrame => "invalid_frame",
+            Self::ExpectedChannelOpen => "expected_channel_open",
+            Self::InvalidOpenToken => "invalid_open_token",
+            Self::OpenTokenExpired => "open_token_expired",
+            Self::RoleMismatch => "role_mismatch",
+            Self::TurningModeMismatch => "turning_mode_mismatch",
+            Self::UnsupportedTurningMode => "unsupported_turning_mode",
+            Self::TargetBusy => "target_busy",
+            Self::UnsupportedProtocolVersion => "unsupported_protocol_version",
+            Self::AudioFormatMismatch => "audio_format_mismatch",
+            Self::UnauthorizedRealm => "unauthorized_realm",
+            Self::ToolCallTimeout => "tool_call_timeout",
+            Self::InternalError => "internal_error",
+            Self::ReconnectExhausted => "reconnect_exhausted",
+            Self::InvalidTarget => "invalid_target",
+            Self::ChannelNotBound => "channel_not_bound",
+            Self::RuntimeInternal => "runtime_internal",
+            Self::RuntimeNotReady => "runtime_not_ready",
+            Self::ProviderSessionClosed => "provider_session_closed",
+            Self::ProviderSessionFailed => "provider_session_failed",
+            Self::ProviderSessionUnavailable => "provider_session_unavailable",
+            Self::UnsupportedInputKind => "unsupported_input_kind",
+            Self::NoPendingTurn => "no_pending_turn",
+            Self::ObserverReadOnly => "observer_read_only",
+            Self::UnexpectedChannelOpen => "unexpected_channel_open",
+            Self::CommitTurnUnavailable => "commit_turn_unavailable",
+            Self::ChannelReconnecting => "channel_reconnecting",
+        }
+    }
+}
+
+impl std::fmt::Display for RealtimeErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Descriptor for an expected or actual realtime audio format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RealtimeAudioFormat {
+    /// IANA-style MIME type, e.g. `audio/pcm`.
+    pub mime_type: String,
+    /// Sample rate in hertz, e.g. `24000`.
+    pub sample_rate_hz: u32,
+    /// Channel count; `1` for mono.
+    pub channels: u8,
+}
+
+impl RealtimeAudioFormat {
+    /// Construct an `audio/pcm` format descriptor.
+    #[must_use]
+    pub fn pcm(sample_rate_hz: u32, channels: u8) -> Self {
+        Self {
+            mime_type: "audio/pcm".to_string(),
+            sample_rate_hz,
+            channels,
+        }
+    }
+}
+
+/// Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AudioFormatMismatchContext {
+    pub expected: RealtimeAudioFormat,
+    pub actual: RealtimeAudioFormat,
+}
+
+/// Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ToolCallTimeoutContext {
+    pub call_id: String,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
+}
+
 /// Target for a public realtime channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -65,7 +260,7 @@ pub struct RealtimeReconnectPolicy {
 }
 
 /// Product-facing realtime capability set for one target/provider combination.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeCapabilities {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -78,6 +273,14 @@ pub struct RealtimeCapabilities {
     pub transcript_supported: bool,
     pub tool_lifecycle_events_supported: bool,
     pub video_supported: bool,
+    /// Audio format the provider session accepts for client audio input.
+    /// Clients MUST stamp incoming [`RealtimeAudioChunk`]s with the same
+    /// `sample_rate_hz` and `channels`; mismatches are rejected server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_input_format: Option<RealtimeAudioFormat>,
+    /// Audio format the provider session emits for output audio chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_output_format: Option<RealtimeAudioFormat>,
 }
 
 /// Lifecycle state for a realtime channel.
@@ -173,12 +376,31 @@ pub struct RealtimeTextDelta {
     pub delta: String,
 }
 
-/// An opaque realtime audio chunk with MIME metadata.
+/// An opaque realtime audio chunk with MIME + format metadata.
+///
+/// Both sender and receiver MUST stamp `sample_rate_hz` and `channels` so the
+/// transport layer can validate against the provider session's negotiated
+/// format instead of silently producing garbled audio when an ESP32 or browser
+/// client ships the wrong rate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeAudioChunk {
     pub mime_type: String,
+    pub sample_rate_hz: u32,
+    pub channels: u8,
     pub data: String,
+}
+
+impl RealtimeAudioChunk {
+    /// Extract the structured format descriptor for validation comparisons.
+    #[must_use]
+    pub fn format(&self) -> RealtimeAudioFormat {
+        RealtimeAudioFormat {
+            mime_type: self.mime_type.clone(),
+            sample_rate_hz: self.sample_rate_hz,
+            channels: self.channels,
+        }
+    }
 }
 
 /// An opaque realtime video chunk with MIME metadata.
@@ -271,12 +493,32 @@ pub struct RealtimeChannelEventFrame {
     pub event: RealtimeEvent,
 }
 
+/// Structured typed context carried on a channel error frame. Each variant
+/// corresponds to a specific [`RealtimeErrorCode`] and lets clients match
+/// the reason without parsing the message string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RealtimeErrorDetails {
+    AudioFormatMismatch(AudioFormatMismatchContext),
+    ToolCallTimeout(ToolCallTimeoutContext),
+    UnsupportedProtocolVersion {
+        requested: String,
+        supported: Vec<String>,
+    },
+}
+
 /// Payload for `channel.error`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeChannelErrorFrame {
-    pub code: String,
+    /// Typed error code. Single source of truth for branching in SDKs.
+    pub code: RealtimeErrorCode,
+    /// Human-readable message suitable for logs and operator surfaces.
     pub message: String,
+    /// Structured context keyed to the code, when additional fields are useful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<RealtimeErrorDetails>,
 }
 
 /// Payload for `channel.closed`.

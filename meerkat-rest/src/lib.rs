@@ -1277,6 +1277,8 @@ fn conservative_phase_one_realtime_capabilities() -> RealtimeCapabilities {
         transcript_supported: true,
         tool_lifecycle_events_supported: false,
         video_supported: false,
+        audio_input_format: None,
+        audio_output_format: None,
     }
 }
 

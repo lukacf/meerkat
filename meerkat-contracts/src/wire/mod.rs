@@ -39,15 +39,16 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    RealtimeAudioChunk, RealtimeCapabilities, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelErrorFrame,
-    RealtimeChannelEventFrame, RealtimeChannelInputFrame, RealtimeChannelOpenFrame,
-    RealtimeChannelOpenedFrame, RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus,
-    RealtimeChannelStatusFrame, RealtimeChannelTarget, RealtimeClientFrame, RealtimeEvent,
+    AudioFormatMismatchContext, RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities,
+    RealtimeCapabilitiesParams, RealtimeCapabilitiesResult, RealtimeChannelClosedFrame,
+    RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,
+    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelRole,
+    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeChannelTarget,
+    RealtimeClientFrame, RealtimeErrorCode, RealtimeErrorDetails, RealtimeEvent,
     RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeServerFrame,
-    RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk, RealtimeTextDelta,
-    RealtimeTurningMode, RealtimeVideoChunk,
+    RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion, RealtimeReconnectPolicy,
+    RealtimeServerFrame, RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk,
+    RealtimeTextDelta, RealtimeTurningMode, RealtimeVideoChunk, ToolCallTimeoutContext,
 };
 pub use result::WireRunResult;
 pub use runtime::{

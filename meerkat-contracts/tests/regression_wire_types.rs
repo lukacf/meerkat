@@ -833,6 +833,8 @@ fn realtime_open_info_required_fields() {
             transcript_supported: true,
             tool_lifecycle_events_supported: true,
             video_supported: true,
+            audio_input_format: None,
+            audio_output_format: None,
         },
     };
     let value = serde_json::to_value(&info).unwrap();
@@ -937,6 +939,8 @@ fn realtime_client_open_frame_pins_protocol_version_field() {
 fn realtime_chunks_and_events_roundtrip() {
     let input_chunk = RealtimeInputChunk::AudioChunk(meerkat_contracts::RealtimeAudioChunk {
         mime_type: "audio/pcm".to_string(),
+        sample_rate_hz: 24_000,
+        channels: 1,
         data: "AQID".to_string(),
     });
     let output_chunk = RealtimeOutputChunk::VideoChunk(meerkat_contracts::RealtimeVideoChunk {

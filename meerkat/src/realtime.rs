@@ -133,8 +133,11 @@ pub enum RealtimeConnectionError {
         requested: String,
         supported: Vec<String>,
     },
-    #[error("realtime websocket rejected channel open with {code}: {message}")]
-    OpenRejected { code: String, message: String },
+    #[error("realtime websocket rejected channel open with {code:?}: {message}")]
+    OpenRejected {
+        code: meerkat_contracts::RealtimeErrorCode,
+        message: String,
+    },
     #[error("realtime websocket returned unexpected open frame '{frame_type}'")]
     UnexpectedOpenFrame { frame_type: String },
     #[error("realtime websocket transport closed")]

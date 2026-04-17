@@ -29,8 +29,8 @@ use meerkat_client::{
 use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeCapabilities, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
     RealtimeChannelInputFrame, RealtimeChannelOpenFrame, RealtimeChannelRole, RealtimeChannelState,
-    RealtimeChannelStatus, RealtimeChannelTarget, RealtimeClientFrame, RealtimeEvent,
-    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
+    RealtimeChannelStatus, RealtimeChannelTarget, RealtimeClientFrame, RealtimeErrorCode,
+    RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
     RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTextChunk,
     RealtimeTurningMode, WireContentInput, WireSessionMessage,
 };
@@ -70,6 +70,8 @@ fn conservative_capabilities(turning_modes: Vec<RealtimeTurningMode>) -> Realtim
         transcript_supported: true,
         tool_lifecycle_events_supported: false,
         video_supported: false,
+        audio_input_format: None,
+        audio_output_format: None,
     }
 }
 
@@ -594,7 +596,10 @@ fn assert_channel_event(frame: RealtimeServerFrame, expected: RealtimeEvent) {
     }
 }
 
-fn assert_error_frame(frame: RealtimeServerFrame, code: &str) -> RealtimeChannelErrorFrame {
+fn assert_error_frame(
+    frame: RealtimeServerFrame,
+    code: RealtimeErrorCode,
+) -> RealtimeChannelErrorFrame {
     match frame {
         RealtimeServerFrame::ChannelError(error) => {
             assert_eq!(error.code, code);
@@ -869,7 +874,7 @@ async fn channel_commit_turn_is_rejected_for_provider_managed_channels() {
         .expect("channel.commit_turn should send");
     assert_error_frame(
         read_server_frame(&mut ws_stream).await,
-        "commit_turn_unavailable",
+        RealtimeErrorCode::CommitTurnUnavailable,
     );
 
     let _ = ws_stream.close(None).await;
@@ -1058,7 +1063,7 @@ async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
         .expect("channel.open should send");
     assert_error_frame(
         read_server_frame(&mut ws_stream).await,
-        "unsupported_turning_mode",
+        RealtimeErrorCode::UnsupportedTurningMode,
     );
 
     let _ = ws_stream.close(None).await;
@@ -1169,7 +1174,7 @@ async fn observer_channels_receive_primary_events_and_remain_read_only() {
         .expect("observer channel.input should send");
     assert_error_frame(
         read_server_frame(&mut observer_ws).await,
-        "observer_read_only",
+        RealtimeErrorCode::ObserverReadOnly,
     );
 
     let _ = primary_ws.close(None).await;
@@ -1284,6 +1289,8 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                     Ok(Some(RealtimeSessionEvent::OutputAudioChunk {
                         chunk: RealtimeAudioChunk {
                             mime_type: "audio/pcm".to_string(),
+                            sample_rate_hz: 24_000,
+                            channels: 1,
                             data: "AAEC".to_string(),
                         },
                     })),
@@ -1345,6 +1352,8 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -1386,6 +1395,8 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
         RealtimeEvent::OutputAudioChunk {
             chunk: RealtimeAudioChunk {
                 mime_type: "audio/pcm".to_string(),
+                sample_rate_hz: 24_000,
+                channels: 1,
                 data: "AAEC".to_string(),
             },
         },
@@ -1516,6 +1527,8 @@ async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_fl
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -1606,6 +1619,8 @@ async fn provider_interrupted_event_is_forwarded_as_public_channel_event() {
                     Ok(Some(RealtimeSessionEvent::OutputAudioChunk {
                         chunk: RealtimeAudioChunk {
                             mime_type: "audio/pcm".to_string(),
+                            sample_rate_hz: 24_000,
+                            channels: 1,
                             data: "AAEC".to_string(),
                         },
                     })),
@@ -1668,6 +1683,8 @@ async fn provider_interrupted_event_is_forwarded_as_public_channel_event() {
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -1793,6 +1810,8 @@ async fn cancelled_provider_turn_does_not_surface_public_completion_or_commit_pa
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -1963,6 +1982,8 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -2193,6 +2214,8 @@ async fn product_session_disconnect_reopens_via_session_factory() {
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },
@@ -2245,6 +2268,8 @@ async fn product_session_disconnect_reopens_via_session_factory() {
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "BAUG".to_string(),
                     }),
                 },
@@ -2525,7 +2550,10 @@ async fn client_cannot_submit_tool_results_directly_over_realtime_protocol() {
         ))
         .await
         .expect("raw client frame should send");
-    assert_error_frame(read_server_frame(&mut ws_stream).await, "invalid_frame");
+    assert_error_frame(
+        read_server_frame(&mut ws_stream).await,
+        RealtimeErrorCode::InvalidFrame,
+    );
 
     let _ = ws_stream.close(None).await;
     server.abort();
@@ -2808,7 +2836,7 @@ async fn second_channel_open_frame_yields_unexpected_channel_open() {
         .expect("second channel.open should send");
     assert_error_frame(
         read_server_frame(&mut ws_stream).await,
-        "unexpected_channel_open",
+        RealtimeErrorCode::UnexpectedChannelOpen,
     );
 
     let _ = ws_stream.close(None).await;
@@ -3294,6 +3322,8 @@ async fn member_target_interrupted_provider_turn_followed_by_new_commit_appends_
                 RealtimeChannelInputFrame {
                     chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
                         data: "AQID".to_string(),
                     }),
                 },

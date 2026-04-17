@@ -1263,6 +1263,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1378,6 +1380,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1420,7 +1424,10 @@ mod tests {
         };
         match error_payload {
             RealtimeServerFrame::ChannelError(frame) => {
-                assert_eq!(frame.code, "unsupported_protocol_version");
+                assert_eq!(
+                    frame.code,
+                    meerkat_contracts::RealtimeErrorCode::UnsupportedProtocolVersion
+                );
             }
             other => panic!("expected channel.error, got {other:?}"),
         }
@@ -1459,6 +1466,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1480,6 +1489,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1550,7 +1561,7 @@ mod tests {
         };
         match second_payload {
             RealtimeServerFrame::ChannelError(frame) => {
-                assert_eq!(frame.code, "target_busy");
+                assert_eq!(frame.code, meerkat_contracts::RealtimeErrorCode::TargetBusy);
             }
             other => panic!("expected channel.error, got {other:?}"),
         }
@@ -1590,6 +1601,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1654,7 +1667,10 @@ mod tests {
         };
         match error_payload {
             RealtimeServerFrame::ChannelError(frame) => {
-                assert_eq!(frame.code, "observer_read_only");
+                assert_eq!(
+                    frame.code,
+                    meerkat_contracts::RealtimeErrorCode::ObserverReadOnly
+                );
             }
             other => panic!("expected channel.error, got {other:?}"),
         }
@@ -1693,6 +1709,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;
@@ -1714,6 +1732,8 @@ mod tests {
                     transcript_supported: true,
                     tool_lifecycle_events_supported: false,
                     video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
                 },
             )
             .await;

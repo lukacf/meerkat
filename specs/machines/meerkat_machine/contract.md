@@ -51,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: String)
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
+- `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
@@ -80,6 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputState`
 - `ListActiveInputs`
 - `RuntimeState`
+- `RuntimeRealtimeAttachmentStatus`
 - `LoadBoundaryReceipt`
 - `Recover`
 

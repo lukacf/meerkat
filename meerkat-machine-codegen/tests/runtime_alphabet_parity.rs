@@ -39,18 +39,12 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "AbortLiveTopologyBeforeDetach",
         "FailLiveTopologyAfterDetach",
     ];
-    // RuntimeRealtimeAttachmentStatus is a read-only projection command
-    // with no DSL input counterpart — the DSL owns the binding state
-    // fields and the command projects them into the
-    // RealtimeAttachmentStatus enum.
-    const READ_ONLY_COMMANDS: &[&str] = &["RuntimeRealtimeAttachmentStatus"];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()
         .filter(|name| !DSL_INTERNAL_INPUTS.contains(name))
         .collect();
     let expected: BTreeSet<&str> = canonical_meerkat_machine_command_manifest()
         .into_iter()
-        .filter(|name| !READ_ONLY_COMMANDS.contains(name))
         .collect();
 
     assert_eq!(actual, expected);

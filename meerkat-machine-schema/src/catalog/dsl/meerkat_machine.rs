@@ -105,6 +105,7 @@ machine! {
             Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: String },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
+            RuntimeRealtimeAttachmentStatus { session_id: SessionId },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, run_id: RunId },
             AcceptWithoutWake { input_id: InputId },
@@ -137,6 +138,7 @@ machine! {
             InputState,
             ListActiveInputs,
             RuntimeState,
+            RuntimeRealtimeAttachmentStatus,
             LoadBoundaryReceipt,
             Recover
         ]

@@ -603,7 +603,6 @@ fn every_mutating_meerkat_runtime_command_has_transition_coverage() {
         "Retire",
         "Recycle",
         "Reset",
-        "Recover",
         "Destroy",
         "AcceptWithCompletion",
         "AcceptWithoutWake",

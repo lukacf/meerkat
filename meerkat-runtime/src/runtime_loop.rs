@@ -318,6 +318,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     detached_wake: Option<std::sync::Arc<crate::detached_wake::DetachedWakeState>>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
+    machine_weak: std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: meerkat_core::types::SessionId,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Feed-based idle wake state (local to this loop).
@@ -373,6 +375,8 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 completions.as_ref(),
                                 &mut *executor,
                                 command,
+                                &machine_weak,
+                                &session_id,
                             )
                             .await
                             {
@@ -390,7 +394,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 &mut *executor,
                                 &mut control_rx,
                                 completions.as_ref(),
-                            )
+                            &machine_weak, &session_id,)
                             .await
                             {
                                 break;
@@ -412,7 +416,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     &mut *executor,
                                     &mut control_rx,
                                     completions.as_ref(),
-                                )
+                                &machine_weak, &session_id,)
                                 .await
                             {
                                 break;
@@ -464,7 +468,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                     &mut *executor,
                                     &mut control_rx,
                                     completions.as_ref(),
-                                )
+                                &machine_weak, &session_id,)
                                 .await
                                 {
                                     break;
@@ -498,7 +502,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             &mut *executor,
                             &mut control_rx,
                             completions.as_ref(),
-                        )
+                        &machine_weak, &session_id,)
                         .await
                         {
                             break;
@@ -613,6 +617,7 @@ fn clear_legacy_detached_wake_signal(state: &crate::detached_wake::DetachedWakeS
 }
 
 /// Process all queued inputs until the queue is empty.
+#[allow(clippy::too_many_arguments)]
 async fn process_queue(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -620,6 +625,8 @@ async fn process_queue(
         meerkat_core::lifecycle::run_control::RunControlCommand,
     >,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    machine_weak: &std::sync::Weak<crate::meerkat_machine::MeerkatMachine>,
+    session_id: &meerkat_core::types::SessionId,
 ) -> bool {
     loop {
         if crate::control_plane::drain_ready_executor_controls(
@@ -627,6 +634,8 @@ async fn process_queue(
             completions,
             executor,
             control_rx,
+            machine_weak,
+            session_id,
         )
         .await
         {

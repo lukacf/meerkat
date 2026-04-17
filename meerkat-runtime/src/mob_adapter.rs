@@ -94,10 +94,11 @@ pub async fn retire_mob_member(
 mod tests {
     use super::*;
     use crate::policy_table::DefaultPolicyTable;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn spawn_creates_runtime_driver_session() {
-        let adapter = MeerkatMachine::ephemeral();
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
 
         register_mob_member(&adapter, sid.clone()).await;
@@ -109,7 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn flow_step_delivered_as_input() {
-        let adapter = MeerkatMachine::ephemeral();
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -128,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn retire_without_runtime_loop_abandons_pending_inputs() {
-        let adapter = MeerkatMachine::ephemeral();
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -173,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_removes_driver() {
-        let adapter = MeerkatMachine::ephemeral();
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 
@@ -189,7 +190,7 @@ mod tests {
         // When a mob member spawns and registers, the driver is created.
         // The topology event would be emitted by the RuntimeControlPlane
         // (not yet implemented). For now, verify the driver exists.
-        let adapter = MeerkatMachine::ephemeral();
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
         let sid = SessionId::new();
         register_mob_member(&adapter, sid.clone()).await;
 

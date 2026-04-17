@@ -275,6 +275,9 @@ pub fn build_recovered_session(
         instance_id: metadata.instance_id.clone().or(context.instance_id),
         backend: metadata.backend.clone().or(context.backend),
         config_generation: metadata.config_generation.or(context.config_generation),
+        // Phase 3: persisted connection_ref re-entered at resume time so
+        // the binding re-resolves through the same realm entry.
+        connection_ref: metadata.connection_ref.clone(),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -355,6 +358,7 @@ mod tests {
                 instance_id: Some("instance-a".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
+                connection_ref: None,
             })
             .expect("session metadata");
         session

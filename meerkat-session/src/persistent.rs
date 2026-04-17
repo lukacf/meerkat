@@ -1916,6 +1916,7 @@ mod tests {
                         instance_id: None,
                         backend: None,
                         config_generation: None,
+                        connection_ref: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -2186,6 +2187,7 @@ mod tests {
                         instance_id: None,
                         backend: None,
                         config_generation: None,
+                        connection_ref: None,
                     });
             metadata.apply_llm_identity(&identity);
             session.set_session_metadata(metadata).map_err(|err| {
@@ -3486,6 +3488,7 @@ mod tests {
                 instance_id: Some("instance-test".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
+                connection_ref: None,
             })
             .expect("session metadata should serialize");
         session
@@ -3647,6 +3650,7 @@ mod tests {
                 instance_id: Some("instance-test".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
+                connection_ref: None,
             })
             .expect("session metadata should serialize");
         store
@@ -3729,6 +3733,7 @@ mod tests {
                 instance_id: Some("instance-test".to_string()),
                 backend: Some("sqlite".to_string()),
                 config_generation: Some(7),
+                connection_ref: None,
             })
             .expect("session metadata should serialize");
         let expected_authority = meerkat_core::service::MobToolAuthorityContext::new(
@@ -3877,6 +3882,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         };
         session.set_session_metadata(metadata).unwrap();
         let mut req = create_request(prompt, initial_turn);

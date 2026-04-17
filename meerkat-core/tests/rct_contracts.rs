@@ -104,6 +104,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
 
     let json = serde_json::to_value(&metadata)?;
@@ -266,6 +267,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
 
     let encoded = serde_json::to_value(&metadata)?;

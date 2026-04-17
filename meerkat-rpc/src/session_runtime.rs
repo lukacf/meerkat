@@ -2050,6 +2050,9 @@ impl SessionRuntime {
                 .as_ref()
                 .and_then(|meta| meta.config_generation)
                 .or(current_generation),
+            connection_ref: stored_metadata
+                .as_ref()
+                .and_then(|meta| meta.connection_ref.clone()),
             keep_alive: stored_metadata
                 .as_ref()
                 .map(|meta| meta.keep_alive)

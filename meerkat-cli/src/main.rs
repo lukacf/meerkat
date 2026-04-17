@@ -3692,6 +3692,7 @@ async fn run_agent(
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             config_generation: None,
+            connection_ref: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
@@ -4253,6 +4254,7 @@ async fn resume_session_with_llm_override(
                 .and_then(|m| m.backend.clone())
                 .or_else(|| Some(manifest.backend.as_str().to_string())),
             config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
+            connection_ref: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

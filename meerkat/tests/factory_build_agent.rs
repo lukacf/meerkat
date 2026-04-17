@@ -677,6 +677,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 
@@ -752,6 +753,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -829,6 +831,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -881,6 +884,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -933,6 +937,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1010,6 +1015,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1334,6 +1340,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .expect("resume metadata");
 
@@ -1473,6 +1480,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1524,6 +1532,7 @@ async fn resume_with_disable_mob_stays_disabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1573,6 +1582,7 @@ async fn resume_with_enable_mob_stays_enabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1644,6 +1654,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1718,6 +1729,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1810,6 +1822,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
     session

@@ -3312,6 +3312,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         });
         svc.insert_persisted_session(spoofed).await;
 
@@ -3352,6 +3353,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         });
         svc.insert_persisted_session(persisted).await;
 
@@ -3392,6 +3394,7 @@ mod tests {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         });
         svc.insert_persisted_session(persisted).await;
 

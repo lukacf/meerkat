@@ -2580,6 +2580,7 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        connection_ref: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -2869,6 +2870,7 @@ async fn handle_meerkat_resume(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(state.backend.clone())),
         config_generation: current_generation,
+        connection_ref: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),

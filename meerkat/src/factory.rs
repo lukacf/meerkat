@@ -265,6 +265,14 @@ pub struct AgentBuildConfig {
     pub backend: Option<String>,
     /// Config generation used when this session was created/resumed.
     pub config_generation: Option<u64>,
+    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
+    ///
+    /// When `Some`, `build_agent()` routes provider/auth resolution through
+    /// `meerkat-client::runtime::ProviderRuntimeRegistry` against the
+    /// realm-scoped `Config.realm[realm_id]` definitions. When `None`, the
+    /// legacy flat `(provider, api_key, base_url)` path runs (removed in
+    /// Phase 6). `llm_client_override` beats both paths.
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn.
     pub silent_comms_intents: Vec<String>,
@@ -433,6 +441,7 @@ impl AgentBuildConfig {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             tool_dispatcher_override: None,
@@ -524,6 +533,9 @@ impl AgentBuildConfig {
         self.instance_id = build.instance_id.clone();
         self.backend = build.backend.clone();
         self.config_generation = build.config_generation;
+        // Phase 3: connection_ref flows from SessionBuildOptions into
+        // AgentBuildConfig so surfaces can drive binding selection per-request.
+        self.connection_ref = build.connection_ref.clone();
         self.keep_alive = build.keep_alive;
         self.silent_comms_intents
             .clone_from(&build.silent_comms_intents);
@@ -570,6 +582,7 @@ impl AgentBuildConfig {
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_generation: self.config_generation,
+            connection_ref: self.connection_ref.clone(),
             keep_alive: self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
@@ -594,6 +607,14 @@ pub enum BuildAgentError {
     /// API key is not set for the resolved provider.
     #[error("API key not set for provider '{provider}'")]
     MissingApiKey { provider: String },
+
+    /// Realm-scoped connection binding failed to resolve into a client.
+    ///
+    /// Produced by the Phase 3 `ProviderRuntimeRegistry` dispatch path
+    /// when `AgentBuildConfig.connection_ref` is set. Wraps the
+    /// underlying provider-runtime error as a stringified message.
+    #[error("Connection resolution failed: {0}")]
+    ConnectionResolution(String),
 
     /// LLM client creation failed.
     #[error("LLM client creation failed: {0}")]
@@ -1018,6 +1039,12 @@ impl AgentFactory {
         }
         if !mask.provider_params {
             build_config.provider_params = metadata.provider_params.clone();
+        }
+        // Phase 3: propagate persisted connection_ref so resume re-resolves
+        // through the same realm binding. The caller keeps precedence —
+        // if build_config already carries a connection_ref, leave it.
+        if build_config.connection_ref.is_none() {
+            build_config.connection_ref = metadata.connection_ref.clone();
         }
         if !mask.override_builtins {
             build_config.override_builtins = metadata.tooling.builtins;
@@ -1595,33 +1622,68 @@ impl AgentFactory {
         let provider_tool_defaults =
             Self::resolve_provider_tool_defaults(&registry, provider, &build_config.model, config);
 
-        // 3. Create LLM client
+        // 3. Create LLM client. Precedence: llm_client_override > connection_ref
+        //    (Phase 3 ProviderRuntimeRegistry) > flat resolve_provider_credentials
+        //    (removed in Phase 6). The model-inferred `provider` from step 2
+        //    stays authoritative for SessionMetadata except when connection_ref
+        //    resolves through the registry — that returns a different provider
+        //    (which is the whole point of the binding indirection).
+        let mut provider = provider;
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
             Some(client) => Arc::clone(client),
-            None => {
-                if matches!(provider, Provider::SelfHosted) {
-                    self.build_self_hosted_client_from_registry(
-                        &registry,
-                        &SessionLlmIdentity {
-                            model: build_config.model.clone(),
-                            provider,
-                            self_hosted_server_id: self_hosted_server_id.clone(),
-                            provider_params: build_config.provider_params.clone(),
-                        },
-                    )
-                    .map_err(BuildAgentError::LlmClient)?
-                } else {
-                    let (api_key, base_url) = self.resolve_provider_credentials(provider, config);
-                    if api_key.is_none() {
-                        return Err(BuildAgentError::MissingApiKey {
-                            provider: provider_key(provider).to_string(),
-                        });
-                    }
-                    self.build_llm_client(provider, api_key, base_url)
+            None => match &build_config.connection_ref {
+                Some(conn_ref) => {
+                    // Phase 3 realm-scoped binding resolution.
+                    let section = config.realm.get(&conn_ref.realm_id).ok_or_else(|| {
+                        BuildAgentError::ConnectionResolution(format!(
+                            "realm '{}' not found in config.realm",
+                            conn_ref.realm_id
+                        ))
+                    })?;
+                    let realm =
+                        meerkat_core::RealmConnectionSet::from_config(&conn_ref.realm_id, section)
+                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    let env = meerkat_client::ResolverEnvironment::with_process_env();
+                    let registry = meerkat_client::ProviderRuntimeRegistry::default();
+                    let connection = registry
+                        .resolve(&realm, &conn_ref.binding_id, &env)
                         .await
-                        .map_err(BuildAgentError::LlmClient)?
+                        .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                    // The binding's provider is authoritative for downstream
+                    // SessionMetadata — overrides the model-inferred provider
+                    // when they disagree.
+                    provider = connection.provider;
+                    registry
+                        .build_client(connection)
+                        .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
                 }
-            }
+                None => {
+                    // Legacy flat path — removed in Phase 6.
+                    if matches!(provider, Provider::SelfHosted) {
+                        self.build_self_hosted_client_from_registry(
+                            &registry,
+                            &SessionLlmIdentity {
+                                model: build_config.model.clone(),
+                                provider,
+                                self_hosted_server_id: self_hosted_server_id.clone(),
+                                provider_params: build_config.provider_params.clone(),
+                            },
+                        )
+                        .map_err(BuildAgentError::LlmClient)?
+                    } else {
+                        let (api_key, base_url) =
+                            self.resolve_provider_credentials(provider, config);
+                        if api_key.is_none() {
+                            return Err(BuildAgentError::MissingApiKey {
+                                provider: provider_key(provider).to_string(),
+                            });
+                        }
+                        self.build_llm_client(provider, api_key, base_url)
+                            .await
+                            .map_err(BuildAgentError::LlmClient)?
+                    }
+                }
+            },
         };
 
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
@@ -2511,6 +2573,7 @@ impl AgentFactory {
                 instance_id: build_config.instance_id,
                 backend: build_config.backend,
                 config_generation: build_config.config_generation,
+                connection_ref: build_config.connection_ref.clone(),
             }
         };
         if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
@@ -2586,6 +2649,7 @@ mod tests {
                 instance_id: None,
                 backend: None,
                 config_generation: None,
+                connection_ref: None,
             })
             .expect("resume metadata");
 

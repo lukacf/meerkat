@@ -850,6 +850,17 @@ pub struct SessionMetadata {
     /// Config generation used when this session was created/resumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_generation: Option<u64>,
+    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
+    ///
+    /// Persisted intent for the auth/backend binding this session resolved
+    /// through. On resume, `apply_resumed_session_metadata` writes this
+    /// back into `AgentBuildConfig.connection_ref` so the same realm
+    /// binding is re-resolved. Never carries secret material — leases
+    /// are rebuilt from the active realm connection set at resume time.
+    /// Older persisted sessions without the field deserialize as `None`
+    /// (backward compatible via `#[serde(default)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<crate::ConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {

@@ -33,6 +33,28 @@ pub async fn resolve_simple_secret(
             let envelope = resolver.resolve(binding).await?;
             extract_secret_from_envelope(envelope)
         }
+        CredentialSourceSpec::Command { .. } => {
+            // Command-backed credentials are resolved by
+            // `CommandCredentialRunner` under the provider runtime; they
+            // don't resolve through the simple-secret path. Provider
+            // runtimes that want command bearer tokens should construct
+            // the runner themselves and feed the result into the lease.
+            Err(ProviderAuthError::SourceResolutionFailed(
+                "CredentialSourceSpec::Command requires a provider-specific runner; \
+                 not reachable from the simple-secret resolver"
+                    .into(),
+            ))
+        }
+        CredentialSourceSpec::FileDescriptor { .. } => {
+            // File-descriptor credentials are a host-scoped concern
+            // (inherit an FD from the launching process). Provider
+            // runtimes that want fd-delivered tokens read them directly.
+            Err(ProviderAuthError::SourceResolutionFailed(
+                "CredentialSourceSpec::FileDescriptor requires a host-scoped reader; \
+                 not reachable from the simple-secret resolver"
+                    .into(),
+            ))
+        }
         CredentialSourceSpec::ManagedStore { .. } | CredentialSourceSpec::PlatformDefault => {
             Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))
         }

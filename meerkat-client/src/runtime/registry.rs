@@ -38,10 +38,19 @@ pub type NowFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// stack reads env only through this closure. Tests seed a closure that
 /// returns programmed values; production wiring uses
 /// [`ResolverEnvironment::with_process_env`].
+///
+/// `token_store` + `refresh_coord` are consulted by OAuth-backed auth
+/// methods (Claude.ai, ChatGPT, Google OAuth-personal) to find a
+/// persisted access/refresh token. Absent store → OAuth paths return
+/// `AuthError::InteractiveLoginRequired`.
 pub struct ResolverEnvironment {
     pub env_lookup: EnvLookup,
     pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,
     pub now: NowFn,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub token_store: Option<Arc<dyn crate::auth_store::TokenStore>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub refresh_coord: Option<Arc<dyn crate::auth_store::RefreshCoordinator>>,
 }
 
 impl ResolverEnvironment {
@@ -52,6 +61,10 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|_| None),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            #[cfg(not(target_arch = "wasm32"))]
+            token_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            refresh_coord: None,
         }
     }
 
@@ -62,7 +75,29 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|key| std::env::var(key).ok()),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            #[cfg(not(target_arch = "wasm32"))]
+            token_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            refresh_coord: None,
         }
+    }
+
+    /// Attach a token store for OAuth-backed auth methods.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_token_store(mut self, store: Arc<dyn crate::auth_store::TokenStore>) -> Self {
+        self.token_store = Some(store);
+        self
+    }
+
+    /// Attach a refresh coordinator. If `with_token_store` is set but no
+    /// coordinator is, callers fall back to `InMemoryCoordinator::new()`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_refresh_coordinator(
+        mut self,
+        coord: Arc<dyn crate::auth_store::RefreshCoordinator>,
+    ) -> Self {
+        self.refresh_coord = Some(coord);
+        self
     }
 
     /// Register an external auth resolver under a handle name.

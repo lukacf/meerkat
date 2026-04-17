@@ -2,6 +2,8 @@
 
 pub mod auth;
 pub mod backend;
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+pub mod oauth;
 
 use std::sync::Arc;
 
@@ -114,7 +116,89 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
             }
             AnthropicAuthMethod::ClaudeAiOauth | AnthropicAuthMethod::OauthToApiKey => {
-                return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+                {
+                    // Read persisted tokens from the token store (if one is
+                    // wired into the env). The interactive login flow runs
+                    // in the CLI/surface layer (Phase 4d); this path only
+                    // retrieves + refreshes the persisted credential.
+                    let store = env
+                        .token_store
+                        .as_ref()
+                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+                    let realm_id = binding
+                        .backend_profile
+                        .options
+                        .get("realm_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("dev")
+                        .to_string();
+                    let key =
+                        crate::auth_store::TokenKey::new(realm_id, binding.auth_profile.id.clone());
+                    let persisted = store
+                        .load(&key)
+                        .await
+                        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
+                        .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
+
+                    match auth_method {
+                        AnthropicAuthMethod::OauthToApiKey => {
+                            // The OAuth→API-key provisioning flow converts
+                            // the OAuth token into a long-lived API key at
+                            // login time. Here we just read the stored key.
+                            let secret = persisted
+                                .primary_secret
+                                .clone()
+                                .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                            ShimCredential::Secret(secret)
+                        }
+                        AnthropicAuthMethod::ClaudeAiOauth => {
+                            // For claude_ai_oauth, the persisted bundle
+                            // carries an access_token + refresh_token. If
+                            // the access_token is still fresh, use it
+                            // directly; otherwise refresh.
+                            use chrono::{Duration, Utc};
+                            let fresh = persisted
+                                .expires_at
+                                .is_none_or(|exp| exp - Utc::now() > Duration::seconds(60));
+                            if let (true, Some(access)) = (fresh, persisted.primary_secret.clone())
+                            {
+                                ShimCredential::Secret(access)
+                            } else {
+                                // Need refresh — drive through OAuth runtime.
+                                let coord = env.refresh_coord.clone().unwrap_or_else(|| {
+                                    Arc::new(crate::auth_store::InMemoryCoordinator::new())
+                                });
+                                let endpoints =
+                                    oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
+                                let runtime = oauth::AnthropicOAuthRuntime::new(
+                                    store.clone(),
+                                    coord,
+                                    endpoints,
+                                    key,
+                                );
+                                let access = runtime.get_or_refresh_access_token().await.map_err(
+                                    |e| match e {
+                                        oauth::AnthropicOAuthError::InteractiveLoginRequired => {
+                                            ProviderAuthError::Auth(
+                                                AuthError::InteractiveLoginRequired,
+                                            )
+                                        }
+                                        other => ProviderAuthError::SourceResolutionFailed(
+                                            other.to_string(),
+                                        ),
+                                    },
+                                )?;
+                                ShimCredential::Secret(access)
+                            }
+                        }
+                        _ => unreachable!("arm guarded by outer match"),
+                    }
+                }
+                #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
+                {
+                    return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+                }
             }
         };
 

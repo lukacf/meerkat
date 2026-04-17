@@ -83,11 +83,48 @@ pub struct AuthProfile {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CredentialSourceSpec {
-    InlineSecret { secret: String },
-    Env { env: String },
-    ManagedStore { profile: String },
-    ExternalResolver { handle: String },
+    InlineSecret {
+        secret: String,
+    },
+    Env {
+        env: String,
+    },
+    ManagedStore {
+        profile: String,
+    },
+    ExternalResolver {
+        handle: String,
+    },
     PlatformDefault,
+    /// External command that prints a bearer token on stdout. Reference:
+    /// Codex `external_bearer.rs:17-157`. The runner lives in
+    /// `meerkat-client/src/auth_store/command.rs`.
+    Command {
+        program: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<PathBuf>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        /// Timeout for the subprocess in milliseconds.
+        #[serde(default = "default_command_timeout_ms")]
+        timeout_ms: u64,
+        /// Optional cached-token lifetime. `None` disables caching.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh_interval_ms: Option<u64>,
+    },
+    /// Read credentials from an inherited file descriptor (Claude Code
+    /// pattern for sandboxed host-injected tokens).
+    FileDescriptor {
+        fd: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope_override: Option<String>,
+    },
+}
+
+fn default_command_timeout_ms() -> u64 {
+    30_000
 }
 
 /// How credentials are stored by the host.

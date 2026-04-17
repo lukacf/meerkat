@@ -17,8 +17,6 @@ pub enum ProviderBindingError {
     ProviderMismatch,
     #[error("binding missing required default: {0}")]
     MissingRequiredDefault(&'static str),
-    #[error("scaffolding stub — replace with real impl")]
-    ScaffoldingStub,
 }
 
 /// Resolution-phase errors (fetching credentials, invoking external resolvers,
@@ -27,21 +25,24 @@ pub enum ProviderBindingError {
 pub enum ProviderAuthError {
     #[error("auth error: {0}")]
     Auth(#[from] meerkat_core::AuthError),
+    #[error("binding validation failed: {0}")]
+    Binding(ProviderBindingError),
     #[error("source resolution failed: {0}")]
     SourceResolutionFailed(String),
     #[error("external resolver not registered: {0}")]
     ExternalResolverMissing(String),
-    #[error("scaffolding stub — replace with real impl")]
-    ScaffoldingStub,
+    #[error("no runtime registered for provider: {0:?}")]
+    NoRuntimeRegistered(meerkat_core::Provider),
 }
 
 impl PartialEq for ProviderAuthError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Auth(a), Self::Auth(b)) => a == b,
+            (Self::Binding(a), Self::Binding(b)) => a == b,
             (Self::SourceResolutionFailed(a), Self::SourceResolutionFailed(b)) => a == b,
             (Self::ExternalResolverMissing(a), Self::ExternalResolverMissing(b)) => a == b,
-            (Self::ScaffoldingStub, Self::ScaffoldingStub) => true,
+            (Self::NoRuntimeRegistered(a), Self::NoRuntimeRegistered(b)) => a == b,
             _ => false,
         }
     }
@@ -59,8 +60,6 @@ pub enum ProviderClientError {
     NoCredentialMaterial,
     #[error("dynamic authorizer requires Phase 3 owned HTTP path")]
     DynamicAuthorizerNotYetSupportedInShimMode,
-    #[error("scaffolding stub — replace with real impl")]
-    ScaffoldingStub,
 }
 
 #[cfg(test)]
@@ -79,7 +78,6 @@ mod tests {
             ProviderBindingError::UnknownAuthMethod("y".into()),
             ProviderBindingError::ProviderMismatch,
             ProviderBindingError::MissingRequiredDefault("base_url"),
-            ProviderBindingError::ScaffoldingStub,
         ] {
             assert!(!err.to_string().is_empty(), "{err:?}");
         }

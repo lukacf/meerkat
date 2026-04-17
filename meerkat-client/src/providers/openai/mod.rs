@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthProfile, BackendProfile, Provider};
+use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, Provider};
 
-use crate::runtime::binding::{ResolvedConnection, ValidatedBinding};
+use crate::runtime::binding::{
+    NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ShimCredential, StaticLease,
+    ValidatedBinding,
+};
 use crate::runtime::errors::{ProviderAuthError, ProviderBindingError, ProviderClientError};
 use crate::runtime::provider_runtime::ProviderRuntime;
 use crate::runtime::registry::ResolverEnvironment;
+use crate::runtime::resolver::{resolve_external_authorizer, resolve_simple_secret};
 use crate::types::LlmClient;
 
 pub use auth::OpenAiAuthMethod;
@@ -48,34 +52,120 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         Provider::OpenAI
     }
 
-    /// **Scaffolding stub.** Returns `ProviderBindingError::ScaffoldingStub`
-    /// until L2.8 lands. The T2 integration test fails at the assertion
-    /// (not at a panic).
     fn validate_binding(
         &self,
-        _backend: &BackendProfile,
-        _auth: &AuthProfile,
+        backend: &BackendProfile,
+        auth: &AuthProfile,
     ) -> Result<ValidatedBinding, ProviderBindingError> {
-        Err(ProviderBindingError::ScaffoldingStub)
+        if backend.provider != Provider::OpenAI || auth.provider != Provider::OpenAI {
+            return Err(ProviderBindingError::ProviderMismatch);
+        }
+        let backend_kind = OpenAiBackendKind::parse(&backend.backend_kind).ok_or_else(|| {
+            ProviderBindingError::UnknownBackendKind(backend.backend_kind.clone())
+        })?;
+        let auth_method = OpenAiAuthMethod::parse(&auth.auth_method)
+            .ok_or_else(|| ProviderBindingError::UnknownAuthMethod(auth.auth_method.clone()))?;
+        if !ALLOWED_BINDINGS.contains(&(backend_kind, auth_method)) {
+            return Err(ProviderBindingError::UnsupportedCombination {
+                backend: backend.backend_kind.clone(),
+                auth: auth.auth_method.clone(),
+            });
+        }
+        Ok(ValidatedBinding {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(backend_kind),
+            auth: NormalizedAuthMethod::OpenAi(auth_method),
+            backend_profile: Arc::new(backend.clone()),
+            auth_profile: Arc::new(auth.clone()),
+            policy: Default::default(),
+        })
     }
 
-    /// **Scaffolding stub.** Returns `ProviderAuthError::ScaffoldingStub`
-    /// until L2.7/L2.9.
     async fn resolve_binding(
         &self,
-        _binding: &ValidatedBinding,
-        _env: &ResolverEnvironment,
+        binding: &ValidatedBinding,
+        env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        Err(ProviderAuthError::ScaffoldingStub)
+        let auth_method = match binding.auth {
+            NormalizedAuthMethod::OpenAi(m) => m,
+            _ => {
+                return Err(ProviderAuthError::Binding(
+                    ProviderBindingError::ProviderMismatch,
+                ));
+            }
+        };
+        let backend_kind = match binding.backend {
+            NormalizedBackendKind::OpenAi(k) => k,
+            _ => {
+                return Err(ProviderAuthError::Binding(
+                    ProviderBindingError::ProviderMismatch,
+                ));
+            }
+        };
+
+        let shim_credential = match auth_method {
+            OpenAiAuthMethod::ApiKey | OpenAiAuthMethod::StaticBearer => {
+                resolve_simple_secret(&binding.auth_profile.source, env, binding).await?
+            }
+            OpenAiAuthMethod::ExternalAuthorizer => {
+                resolve_external_authorizer(&binding.auth_profile.source, env, binding).await?
+            }
+            OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens => {
+                // Phase 2 does not implement ChatGPT OAuth flows — enum
+                // variants exist so Phase 3+ can fill them in without
+                // shape changes.
+                return Err(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired));
+            }
+        };
+
+        let lease: Arc<dyn meerkat_core::AuthLease> = Arc::new(StaticLease::empty(
+            AuthMetadata::default(),
+            format!("openai:{}", binding.auth_profile.id),
+        ));
+
+        Ok(ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(backend_kind),
+            backend_profile: binding.backend_profile.clone(),
+            auth_lease: lease,
+            shim_credential,
+        })
     }
 
-    /// **Scaffolding stub.** Returns `ProviderClientError::ScaffoldingStub`
-    /// until L2.9.
     fn build_client(
         &self,
-        _connection: ResolvedConnection,
+        connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        Err(ProviderClientError::ScaffoldingStub)
+        let backend_kind = match connection.backend {
+            NormalizedBackendKind::OpenAi(k) => k,
+            _ => {
+                return Err(ProviderClientError::MissingFeature(
+                    "openai-provider-mismatch",
+                ));
+            }
+        };
+        let secret = match connection.shim_credential {
+            ShimCredential::Secret(s) => s,
+            ShimCredential::Authorizer => {
+                return Err(ProviderClientError::DynamicAuthorizerNotYetSupportedInShimMode);
+            }
+            ShimCredential::None => return Err(ProviderClientError::NoCredentialMaterial),
+        };
+        match backend_kind {
+            OpenAiBackendKind::OpenAiApi => {
+                // S1-verified: OpenAiClient::new returns Self (infallible).
+                let client = match &connection.backend_profile.base_url {
+                    Some(url) => {
+                        crate::openai::OpenAiClient::new_with_base_url(secret, url.clone())
+                    }
+                    None => crate::openai::OpenAiClient::new(secret),
+                };
+                Ok(Arc::new(client))
+            }
+            OpenAiBackendKind::ChatGptBackend => {
+                Err(ProviderClientError::MissingFeature("openai-chatgpt-auth"))
+            }
+        }
     }
 }
 
@@ -98,5 +188,69 @@ mod tests {
     #[test]
     fn provider_id_is_openai() {
         assert_eq!(OpenAiProviderRuntime.provider_id(), Provider::OpenAI);
+    }
+
+    fn backend(kind: &str) -> BackendProfile {
+        BackendProfile {
+            id: "b".into(),
+            provider: Provider::OpenAI,
+            backend_kind: kind.into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        }
+    }
+
+    fn auth(method: &str) -> AuthProfile {
+        AuthProfile {
+            id: "a".into(),
+            provider: Provider::OpenAI,
+            auth_method: method.into(),
+            source: meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: "sk-x".into(),
+            },
+            storage: Default::default(),
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_allowed_combination() {
+        let rt = OpenAiProviderRuntime;
+        let vb = rt
+            .validate_binding(&backend("openai_api"), &auth("api_key"))
+            .expect("allowed combination");
+        assert_eq!(vb.provider, Provider::OpenAI);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_backend_kind() {
+        let rt = OpenAiProviderRuntime;
+        let err = rt
+            .validate_binding(&backend("bogus_backend"), &auth("api_key"))
+            .unwrap_err();
+        assert!(matches!(err, ProviderBindingError::UnknownBackendKind(_)));
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_combo() {
+        // openai_api + managed_chatgpt_oauth is NOT in ALLOWED_BINDINGS.
+        let rt = OpenAiProviderRuntime;
+        let err = rt
+            .validate_binding(&backend("openai_api"), &auth("managed_chatgpt_oauth"))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderBindingError::UnsupportedCombination { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_provider_mismatch() {
+        let rt = OpenAiProviderRuntime;
+        let mut wrong = backend("openai_api");
+        wrong.provider = Provider::Anthropic;
+        let err = rt.validate_binding(&wrong, &auth("api_key")).unwrap_err();
+        assert!(matches!(err, ProviderBindingError::ProviderMismatch));
     }
 }

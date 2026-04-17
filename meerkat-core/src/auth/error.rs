@@ -41,10 +41,6 @@ pub enum AuthError {
     /// Low-level I/O or parsing failure during resolution.
     #[error("auth I/O failure: {0}")]
     Io(String),
-    /// Phase-2 scaffolding marker — real logic not yet landed.
-    /// Must produce zero grep hits by end of Phase 2.
-    #[error("auth scaffolding stub — replace with real impl")]
-    ScaffoldingStub,
     /// Catch-all for provider-specific diagnostic messages that don't map
     /// to another variant.
     #[error("auth error: {0}")]
@@ -64,7 +60,6 @@ impl AuthError {
             Self::InteractiveLoginRequired => AuthErrorKind::InteractiveLoginRequired,
             Self::HostOwnedUnavailable => AuthErrorKind::HostOwnedUnavailable,
             Self::Io(_) => AuthErrorKind::Io,
-            Self::ScaffoldingStub => AuthErrorKind::ScaffoldingStub,
             Self::Other(_) => AuthErrorKind::Other,
         }
     }
@@ -85,7 +80,6 @@ pub enum AuthErrorKind {
     InteractiveLoginRequired,
     HostOwnedUnavailable,
     Io,
-    ScaffoldingStub,
     Other,
 }
 
@@ -113,10 +107,6 @@ mod tests {
             AuthError::InteractiveLoginRequired.kind(),
             AuthErrorKind::InteractiveLoginRequired,
         );
-        assert_eq!(
-            AuthError::ScaffoldingStub.kind(),
-            AuthErrorKind::ScaffoldingStub
-        );
     }
 
     #[test]
@@ -134,7 +124,6 @@ mod tests {
             AuthError::InteractiveLoginRequired,
             AuthError::HostOwnedUnavailable,
             AuthError::Io("file missing".into()),
-            AuthError::ScaffoldingStub,
             AuthError::Other("x".into()),
         ] {
             assert!(!err.to_string().is_empty(), "{err:?}");

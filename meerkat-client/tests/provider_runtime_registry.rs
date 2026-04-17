@@ -4,10 +4,10 @@
 //!
 //! Exercises the full resolution chain per provider: `RealmConnectionSet`
 //! in memory → `ProviderRuntimeRegistry::default().resolve(...)` →
-//! `build_client(...)` → `.provider()`. Phase 2 scaffolding returns
-//! `Err(ProviderAuthError::ScaffoldingStub)` / `Err(ProviderClientError::ScaffoldingStub)`
-//! from the registry; this test fails at the assertion point (not at a
-//! panic). L2.13 flips it green.
+//! `build_client(...)` → `.provider()`. Originally written during the
+//! T1+T2 scaffolding phase with red-at-assertion reds; flipped green once
+//! Phase 2 leaf slices landed the per-provider runtimes and the registry
+//! dispatch.
 //!
 //! See /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md.
 
@@ -95,9 +95,6 @@ fn fixture_realm() -> RealmConnectionSet {
 #[tokio::test]
 async fn openai_api_key_roundtrip_resolves_and_builds_client() {
     // T2 happy path: resolve → shim_credential::Secret → build_client → .provider().
-    // Phase 2 scaffolding returns ProviderAuthError::ScaffoldingStub from the
-    // registry's resolve(). This test fails at the assertion comparing Ok(_)
-    // vs Err(ScaffoldingStub) — real red at the real boundary. L2.12 flips green.
     let registry = ProviderRuntimeRegistry::default();
     let realm = fixture_realm();
     let env = ResolverEnvironment::testing();
@@ -240,12 +237,14 @@ fn unsupported_combination_surfaces_typed_error() {
     })
     .expect_err("mismatched provider between backend and auth must fail");
 
-    // Accept either the wrapped core ProviderMismatch (via AuthError path)
-    // or a provider-runtime level mismatch — Phase 2 L2.12 will nail down
-    // which surface carries this. Must not remain ScaffoldingStub.
+    // Phase 2 L2.12 surfaces provider-mismatch via the binding-validation
+    // path, which the registry wraps into ProviderAuthError::Binding.
     assert!(
-        !matches!(err, ProviderAuthError::ScaffoldingStub),
-        "expected a typed binding/auth error, got {err:?}",
+        matches!(
+            err,
+            ProviderAuthError::Binding(meerkat_client::ProviderBindingError::ProviderMismatch)
+        ),
+        "expected ProviderAuthError::Binding(ProviderMismatch), got {err:?}",
     );
 }
 

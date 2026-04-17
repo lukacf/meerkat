@@ -4,10 +4,9 @@
 //!
 //! Exercises the full ingestion chain: canonical TOML → `Config` serde →
 //! `Config.realm["dev"]` → `RealmConnectionSet::from_config` →
-//! `RealmConnectionSet::lookup_binding`. While Phase 1 leaf slices are
-//! outstanding, `from_config` returns `ProviderBindingError::ScaffoldingStub`
-//! and the happy-path assertions in this file fail at the assertion point
-//! (not at a panic). L1.12 flips these tests green.
+//! `RealmConnectionSet::lookup_binding`. Originally written during the
+//! T1+T2 scaffolding phase with red-at-assertion reds; flipped green once
+//! Phase 1 leaf slices (from_config + lookup_binding) landed.
 //!
 //! See /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md.
 
@@ -128,10 +127,7 @@ fn canonical_toml_populates_config_realm_without_regressing_flat_provider() {
 
 #[test]
 fn from_config_happy_path_resolves_binding() {
-    // T1 top-down happy-path assertion. Phase 1 scaffolding returns
-    // ProviderBindingError::ScaffoldingStub; this test fails at the
-    // assertion below (compare expected Ok(resolved) vs actual Err).
-    // After L1.10 + L1.9 land, this flips green without modification.
+    // T1 top-down happy-path assertion.
     let config = load_config();
     let section = dev_section(&config);
 

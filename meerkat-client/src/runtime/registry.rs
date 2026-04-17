@@ -145,30 +145,41 @@ impl ProviderRuntimeRegistry {
     }
 
     /// Resolve a binding from a realm connection set through the matching
-    /// provider runtime.
-    ///
-    /// **Scaffolding stub.** Returns `ProviderAuthError::ScaffoldingStub`
-    /// until L2.12 lands the real dispatch. Until then, the T2 integration
-    /// test fails at its assertion (not at a panic).
+    /// provider runtime. Dispatches to `validate_binding` then
+    /// `resolve_binding` on the runtime registered for the backend's
+    /// provider.
     pub async fn resolve(
         &self,
-        _realm: &RealmConnectionSet,
-        _binding_id: &str,
-        _env: &ResolverEnvironment,
+        realm: &RealmConnectionSet,
+        binding_id: &str,
+        env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        Err(ProviderAuthError::ScaffoldingStub)
+        let (_binding, backend, auth) = realm
+            .lookup_binding(binding_id)
+            .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+        let runtime = self
+            .runtimes
+            .get(&backend.provider)
+            .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
+        let validated = runtime
+            .validate_binding(backend, auth)
+            .map_err(ProviderAuthError::Binding)?;
+        runtime.resolve_binding(&validated, env).await
     }
 
     /// Build a client from a resolved connection through the matching
     /// provider runtime.
-    ///
-    /// **Scaffolding stub.** Returns `ProviderClientError::ScaffoldingStub`
-    /// until L2.12.
     pub fn build_client(
         &self,
-        _connection: ResolvedConnection,
+        connection: ResolvedConnection,
     ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-        Err(ProviderClientError::ScaffoldingStub)
+        let runtime =
+            self.runtimes
+                .get(&connection.provider)
+                .ok_or(ProviderClientError::MissingFeature(
+                    "runtime-not-registered",
+                ))?;
+        runtime.build_client(connection)
     }
 }
 
@@ -244,6 +255,12 @@ mod tests {
         };
         let env = ResolverEnvironment::testing();
         let result = futures::executor::block_on(r.resolve(&realm, "x", &env));
-        assert!(matches!(result, Err(ProviderAuthError::ScaffoldingStub)));
+        // Empty realm has no bindings — lookup_binding surfaces
+        // UnknownBinding which the registry stringifies into
+        // SourceResolutionFailed.
+        assert!(matches!(
+            result,
+            Err(ProviderAuthError::SourceResolutionFailed(_))
+        ));
     }
 }

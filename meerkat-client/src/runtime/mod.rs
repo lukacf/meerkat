@@ -5,6 +5,7 @@ pub mod binding;
 pub mod errors;
 pub mod provider_runtime;
 pub mod registry;
+pub mod resolver;
 
 pub use binding::{
     DynamicLease, NormalizedAuthMethod, NormalizedBackendKind, ResolvedConnection, ShimCredential,

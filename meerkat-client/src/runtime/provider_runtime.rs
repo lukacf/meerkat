@@ -56,7 +56,7 @@ mod tests {
     use crate::runtime::binding::{NormalizedAuthMethod, NormalizedBackendKind, ShimCredential};
     use meerkat_core::{AuthMetadata, BindingPolicy, ResolvedAuthKind};
 
-    // Minimal MockRuntime stub to exercise object safety and trait wiring.
+    // Minimal MockRuntime to exercise object safety and trait wiring.
     struct MockRuntime;
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -70,20 +70,22 @@ mod tests {
             _backend: &BackendProfile,
             _auth: &AuthProfile,
         ) -> Result<ValidatedBinding, ProviderBindingError> {
-            Err(ProviderBindingError::ScaffoldingStub)
+            Err(ProviderBindingError::ProviderMismatch)
         }
         async fn resolve_binding(
             &self,
             _binding: &ValidatedBinding,
             _env: &ResolverEnvironment,
         ) -> Result<ResolvedConnection, ProviderAuthError> {
-            Err(ProviderAuthError::ScaffoldingStub)
+            Err(ProviderAuthError::Auth(
+                meerkat_core::AuthError::InteractiveLoginRequired,
+            ))
         }
         fn build_client(
             &self,
             _connection: ResolvedConnection,
         ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
-            Err(ProviderClientError::ScaffoldingStub)
+            Err(ProviderClientError::MissingFeature("mock"))
         }
     }
 

@@ -58,6 +58,11 @@ struct PendingOpenEntry {
     request: RealtimeOpenRequest,
     capabilities: RealtimeCapabilities,
     expires_at: DateTime<Utc>,
+    /// Realm scope captured when the open_info was minted. The websocket
+    /// accept path re-observes the current realm and must match this value;
+    /// mismatches are rejected with `RealtimeErrorCode::UnauthorizedRealm` so a
+    /// token minted in realm X cannot be redeemed inside realm Y.
+    realm_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -395,6 +400,11 @@ pub enum RealtimeOpenError {
         requested: String,
         supported: Vec<String>,
     },
+    /// The open_token was minted under one realm and redeemed under another.
+    /// Binding is resolved server-side; the token itself carries no realm
+    /// claim, so a mismatch here is always a cross-realm attempt.
+    #[error("open token belongs to a different realm and cannot be redeemed here")]
+    UnauthorizedRealm,
 }
 
 impl RealtimeOpenError {
@@ -411,6 +421,7 @@ impl RealtimeOpenError {
             Self::UnsupportedProtocolVersion { .. } => {
                 RealtimeErrorCode::UnsupportedProtocolVersion
             }
+            Self::UnauthorizedRealm => RealtimeErrorCode::UnauthorizedRealm,
         }
     }
 
@@ -480,10 +491,18 @@ impl RealtimeWsHost {
     }
 
     /// Issue bootstrap info for a validated realtime target.
+    ///
+    /// `realm_id` captures the realm scope at mint time. It is NOT encoded in
+    /// the returned token (the token stays opaque); it is stored alongside the
+    /// pending entry and compared to the realm observed at
+    /// `accept_open_frame_with_realm` time. Pass `None` when the deployment
+    /// does not carry a realm context — the token then accepts any realm, a
+    /// single-tenant fallback.
     pub async fn issue_open_info(
         &self,
         request: RealtimeOpenRequest,
         capabilities: RealtimeCapabilities,
+        realm_id: Option<String>,
     ) -> RealtimeOpenInfo {
         let open_token = Uuid::new_v4().to_string();
         let expires_at = Utc::now()
@@ -496,6 +515,7 @@ impl RealtimeWsHost {
                 request,
                 capabilities: capabilities.clone(),
                 expires_at,
+                realm_id,
             },
         );
 
@@ -511,9 +531,29 @@ impl RealtimeWsHost {
     }
 
     /// Validate and consume a `channel.open` frame.
+    ///
+    /// Shorthand for [`accept_open_frame_with_realm`] without any realm check.
+    /// Callers in multi-realm deployments should prefer the `with_realm`
+    /// variant so a token minted under realm X cannot be redeemed under Y.
     pub async fn accept_open_frame(
         &self,
         frame: &RealtimeChannelOpenFrame,
+    ) -> Result<AcceptedRealtimeOpen, RealtimeOpenError> {
+        self.accept_open_frame_with_realm(frame, None).await
+    }
+
+    /// Validate and consume a `channel.open` frame, enforcing realm scope.
+    ///
+    /// `observed_realm_id` is the realm the websocket accept path currently
+    /// resolves to. When the pending entry was minted under a specific realm
+    /// and the observed realm differs, the entry is discarded and
+    /// `UnauthorizedRealm` is returned — the opaque token is treated as
+    /// cross-realm and cannot be retried. Passing `None` for the observed
+    /// realm reduces the check to the legacy single-tenant shape.
+    pub async fn accept_open_frame_with_realm(
+        &self,
+        frame: &RealtimeChannelOpenFrame,
+        observed_realm_id: Option<&str>,
     ) -> Result<AcceptedRealtimeOpen, RealtimeOpenError> {
         if !self
             .supported_protocol_versions
@@ -547,6 +587,14 @@ impl RealtimeWsHost {
             .contains(&frame.turning_mode)
         {
             return Err(RealtimeOpenError::UnsupportedTurningMode);
+        }
+
+        // Realm scope: a token minted in realm X cannot be redeemed in realm
+        // Y. Drop the pending entry on mismatch so replaying the token does
+        // nothing.
+        if entry.realm_id.as_deref() != observed_realm_id {
+            pending.remove(&frame.open_token);
+            return Err(RealtimeOpenError::UnauthorizedRealm);
         }
 
         let Some(entry) = pending.remove(&frame.open_token) else {
@@ -723,7 +771,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                 return;
             };
 
-            match state.host.accept_open_frame(&open_frame).await {
+            let observed_realm_id = state.runtime.realm_id().map(str::to_string);
+            match state
+                .host
+                .accept_open_frame_with_realm(&open_frame, observed_realm_id.as_deref())
+                .await
+            {
                 Ok(accepted) => {
                     let mut registered = match state.host.register_open(&accepted).await {
                         Ok(registered) => registered,
@@ -3346,8 +3399,8 @@ mod tests {
     use chrono::Utc;
     use meerkat_contracts::{
         RealtimeCapabilities, RealtimeChannelOpenFrame, RealtimeChannelRole, RealtimeChannelState,
-        RealtimeChannelTarget, RealtimeInputKind, RealtimeOpenRequest, RealtimeOutputKind,
-        RealtimeReconnectPolicy, RealtimeTurningMode,
+        RealtimeChannelTarget, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
+        RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeTurningMode,
     };
     use meerkat_core::types::StopReason;
 
@@ -3446,7 +3499,7 @@ mod tests {
         };
 
         let info = host
-            .issue_open_info(request.clone(), conservative_capabilities())
+            .issue_open_info(request.clone(), conservative_capabilities(), None)
             .await;
         assert_eq!(info.target, request.target);
         let accepted_result = host
@@ -3501,7 +3554,7 @@ mod tests {
             reconnect_policy: None,
         };
         let info = host
-            .issue_open_info(request.clone(), conservative_capabilities())
+            .issue_open_info(request.clone(), conservative_capabilities(), None)
             .await;
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let expired_result = host
@@ -3524,7 +3577,7 @@ mod tests {
         assert_eq!(expired.code(), RealtimeErrorCode::OpenTokenExpired);
 
         let fresh_info = host
-            .issue_open_info(request, conservative_capabilities())
+            .issue_open_info(request, conservative_capabilities(), None)
             .await;
         let role_error_result = host
             .accept_open_frame(&RealtimeChannelOpenFrame {
@@ -3590,6 +3643,7 @@ mod tests {
                     reconnect_policy: None,
                 },
                 conservative_capabilities(),
+                None,
             )
             .await;
         let primary_result = host
@@ -3627,6 +3681,7 @@ mod tests {
                     reconnect_policy: None,
                 },
                 conservative_capabilities(),
+                None,
             )
             .await;
         let second_primary_result = host
@@ -3665,6 +3720,7 @@ mod tests {
                     reconnect_policy: None,
                 },
                 conservative_capabilities(),
+                None,
             )
             .await;
         let observer_one_result = host
@@ -3702,6 +3758,7 @@ mod tests {
                     reconnect_policy: None,
                 },
                 conservative_capabilities(),
+                None,
             )
             .await;
         let observer_two_result = host
@@ -3743,6 +3800,7 @@ mod tests {
                     reconnect_policy: None,
                 },
                 conservative_capabilities(),
+                None,
             )
             .await;
         let replacement_primary_result = host
@@ -3860,5 +3918,129 @@ mod tests {
             !overlay.is_active(),
             "exhaustion should clear reconnect state"
         );
+    }
+
+    fn realm_request(session_id: &str) -> RealtimeOpenRequest {
+        RealtimeOpenRequest {
+            target: RealtimeChannelTarget::SessionTarget {
+                session_id: session_id.to_string(),
+            },
+            role: RealtimeChannelRole::Primary,
+            turning_mode: RealtimeTurningMode::ProviderManaged,
+            reconnect_policy: None,
+        }
+    }
+
+    fn realm_open_frame(info: &RealtimeOpenInfo) -> RealtimeChannelOpenFrame {
+        RealtimeChannelOpenFrame {
+            protocol_version: info.default_protocol_version.clone(),
+            open_token: info.open_token.clone(),
+            role: RealtimeChannelRole::Primary,
+            turning_mode: RealtimeTurningMode::ProviderManaged,
+        }
+    }
+
+    #[tokio::test]
+    async fn token_for_session_a_cannot_open_session_b_across_realms() {
+        // Mint a token under realm X for session A, then try to redeem the
+        // same token against session B while the host observes realm Y. The
+        // accept path must reject with UnauthorizedRealm and drop the
+        // pending entry so replays also fail.
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        let info_x = host
+            .issue_open_info(
+                realm_request("11111111-2222-3333-4444-555555555555"),
+                conservative_capabilities(),
+                Some("realm-x".to_string()),
+            )
+            .await;
+
+        let cross_realm_result = host
+            .accept_open_frame_with_realm(&realm_open_frame(&info_x), Some("realm-y"))
+            .await;
+        let error = match cross_realm_result {
+            Ok(_) => unreachable!("cross-realm redemption must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(error, RealtimeOpenError::UnauthorizedRealm);
+        assert_eq!(error.code(), RealtimeErrorCode::UnauthorizedRealm);
+
+        // Pending entry must be discarded — a second attempt in the right
+        // realm should now fall through to InvalidOpenToken (one-shot).
+        let replay_result = host
+            .accept_open_frame_with_realm(&realm_open_frame(&info_x), Some("realm-x"))
+            .await;
+        assert_eq!(
+            replay_result.expect_err("pending entry must be discarded on realm mismatch"),
+            RealtimeOpenError::InvalidOpenToken,
+        );
+    }
+
+    #[tokio::test]
+    async fn token_for_session_a_in_own_realm_opens() {
+        // Regression guard: same-realm tokens keep working after the
+        // realm-scoping check lands.
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        let info = host
+            .issue_open_info(
+                realm_request("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                conservative_capabilities(),
+                Some("realm-x".to_string()),
+            )
+            .await;
+
+        let accepted = host
+            .accept_open_frame_with_realm(&realm_open_frame(&info), Some("realm-x"))
+            .await
+            .expect("same-realm token must succeed");
+        assert_eq!(
+            accepted.request.target,
+            RealtimeChannelTarget::SessionTarget {
+                session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn token_without_realm_still_accepts_when_observed_realm_is_none() {
+        // Single-tenant fallback: when the mint side did not carry a realm
+        // and the accept side observes no realm either, the token opens.
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        let info = host
+            .issue_open_info(
+                realm_request("00000000-0000-0000-0000-000000000001"),
+                conservative_capabilities(),
+                None,
+            )
+            .await;
+        let accepted = host
+            .accept_open_frame_with_realm(&realm_open_frame(&info), None)
+            .await
+            .expect("none/none should open cleanly");
+        assert_eq!(
+            accepted.request.target,
+            RealtimeChannelTarget::SessionTarget {
+                session_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn token_minted_without_realm_rejects_observed_realm() {
+        // A token minted in a pre-multitenant deployment must not become
+        // accepted when the server is later upgraded to observe a realm.
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        let info = host
+            .issue_open_info(
+                realm_request("00000000-0000-0000-0000-000000000002"),
+                conservative_capabilities(),
+                None,
+            )
+            .await;
+        let error = host
+            .accept_open_frame_with_realm(&realm_open_frame(&info), Some("realm-x"))
+            .await
+            .expect_err("realmless token must not open inside a realm");
+        assert_eq!(error, RealtimeOpenError::UnauthorizedRealm);
     }
 }

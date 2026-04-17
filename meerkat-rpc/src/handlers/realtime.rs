@@ -274,6 +274,7 @@ pub async fn handle_realtime_open_info(
     adapter: &dyn SessionServiceRuntimeExt,
     mob_inspector: Option<&dyn RealtimeMobInspector>,
     realtime_ws_host: Option<&crate::realtime_ws::RealtimeWsHost>,
+    realm_id: Option<&str>,
 ) -> RpcResponse {
     let params: RealtimeOpenRequest = match parse_params(params) {
         Ok(params) => params,
@@ -338,6 +339,8 @@ pub async fn handle_realtime_open_info(
         );
     };
 
-    let open_info = realtime_ws_host.issue_open_info(params, capabilities).await;
+    let open_info = realtime_ws_host
+        .issue_open_info(params, capabilities, realm_id.map(str::to_string))
+        .await;
     RpcResponse::success(id, open_info)
 }

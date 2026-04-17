@@ -1266,6 +1266,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
 
@@ -1383,6 +1384,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
 
@@ -1469,6 +1471,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
         let second_open_info = host
@@ -1492,6 +1495,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
 
@@ -1604,6 +1608,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
 
@@ -1712,6 +1717,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
         let second_open_info = host
@@ -1735,6 +1741,7 @@ mod tests {
                     audio_input_format: None,
                     audio_output_format: None,
                 },
+                None,
             )
             .await;
 

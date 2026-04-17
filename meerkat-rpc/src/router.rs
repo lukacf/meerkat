@@ -1019,6 +1019,7 @@ impl MethodRouter {
                         self.runtime_adapter.as_ref(),
                         mob_inspector,
                         self.realtime_ws_host.as_deref(),
+                        self.runtime.realm_id(),
                     )
                     .await
                 }
@@ -4817,9 +4818,9 @@ mod tests {
         assert!(result["open_token"].as_str().is_some());
         assert_eq!(
             result["supported_protocol_versions"],
-            serde_json::json!(["1"])
+            serde_json::json!(["2"])
         );
-        assert_eq!(result["default_protocol_version"], serde_json::json!("1"));
+        assert_eq!(result["default_protocol_version"], serde_json::json!("2"));
     }
 
     /// 5. `session/list` returns the list of sessions after creating one.

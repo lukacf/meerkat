@@ -312,6 +312,7 @@ async fn issue_open_info_with_policy(
             RealtimeTurningMode::ProviderManaged,
             RealtimeTurningMode::ExplicitCommit,
         ]),
+        None,
     )
     .await
 }
@@ -337,6 +338,7 @@ async fn issue_member_open_info(
             RealtimeTurningMode::ProviderManaged,
             RealtimeTurningMode::ExplicitCommit,
         ]),
+        None,
     )
     .await
 }
@@ -1038,6 +1040,7 @@ async fn channel_open_rejects_unsupported_explicit_commit_turning_mode() {
                 reconnect_policy: None,
             },
             conservative_capabilities(vec![RealtimeTurningMode::ProviderManaged]),
+            None,
         )
         .await;
     let server_host = Arc::clone(&host);

@@ -360,6 +360,20 @@ impl ShellState {
                         .authority
                         .operation(operation_id)
                         .and_then(|op| op.terminal_outcome().cloned());
+                    // Cross-check: DSL state should hold the same outcome.
+                    // Emit tracing at warn level if they disagree so we can
+                    // catch divergence as the DSL migration progresses.
+                    if let Some(ref auth_outcome) = outcome
+                        && let Some(dsl_outcome) = self.dsl_terminal_outcome(operation_id)
+                        && &dsl_outcome != auth_outcome
+                    {
+                        tracing::warn!(
+                            operation_id = %operation_id,
+                            authority_outcome = ?auth_outcome,
+                            dsl_outcome = ?dsl_outcome,
+                            "DSL/authority terminal_outcome DISAGREEMENT"
+                        );
+                    }
                     if let Some(outcome) = outcome
                         && let Some(shell) = self.records.get_mut(operation_id)
                     {
@@ -516,6 +530,18 @@ impl ShellState {
                 );
             }
         }
+    }
+
+    /// Read the serialized terminal outcome from DSL state and deserialize it
+    /// back into `OperationTerminalOutcome`. Returns `None` if the DSL state
+    /// has no entry for this operation (e.g. pre-terminal or legacy path).
+    fn dsl_terminal_outcome(&self, id: &OperationId) -> Option<OperationTerminalOutcome> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        let serialized = self.dsl_shadow.0.state.op_terminal_outcomes.get(&id_key)?;
+        if serialized.is_empty() {
+            return None;
+        }
+        serde_json::from_str::<OperationTerminalOutcome>(serialized).ok()
     }
 
     fn shell_record_mut(

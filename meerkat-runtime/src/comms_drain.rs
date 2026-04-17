@@ -607,8 +607,20 @@ async fn send_bridge_response(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
     status: meerkat_core::interaction::ResponseStatus,
-    result: serde_json::Value,
+    reply: BridgeReply,
 ) {
+    let result = serde_json::to_value(&reply).unwrap_or_else(|error| {
+        tracing::error!(
+            interaction_id = %candidate.interaction.id,
+            error = %error,
+            "comms_drain: BridgeReply serialization failed; falling back to minimal rejection"
+        );
+        serde_json::json!({
+            "result": "rejected",
+            "cause": "internal",
+            "reason": "bridge reply serialization failed",
+        })
+    });
     let to = match PeerName::new(candidate.interaction.from.clone()) {
         Ok(name) => name,
         Err(error) => {
@@ -649,16 +661,14 @@ async fn send_bridge_failure(
     cause: BridgeRejectionCause,
     message: impl Into<String>,
 ) {
-    let rejection = serde_json::to_value(BridgeReply::Rejected {
-        cause,
-        reason: message.into(),
-    })
-    .unwrap_or_else(|_| serde_json::Value::String("bridge command rejected".to_string()));
     send_bridge_response(
         comms_runtime,
         candidate,
         meerkat_core::interaction::ResponseStatus::Failed,
-        rejection,
+        BridgeReply::Rejected {
+            cause,
+            reason: message.into(),
+        },
     )
     .await;
 }
@@ -744,17 +754,15 @@ async fn try_handle_supervisor_bridge_command(
                         .await;
                         return true;
                     };
-                    let response = serde_json::to_value(BridgeBindResponse {
-                        peer_id,
-                        address: canonicalize_bridge_address(&advertised),
-                        capabilities: bridge_capabilities(),
-                    })
-                    .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::BindMember(BridgeBindResponse {
+                            peer_id,
+                            address: canonicalize_bridge_address(&advertised),
+                            capabilities: bridge_capabilities(),
+                        }),
                     )
                     .await;
                     return true;
@@ -778,19 +786,17 @@ async fn try_handle_supervisor_bridge_command(
                         supervisor: supervisor_spec.clone(),
                         epoch: payload.epoch,
                     });
-                    let response = serde_json::to_value(BridgeBindResponse {
-                        peer_id: comms_runtime
-                            .public_key()
-                            .unwrap_or(payload.expected_peer_id),
-                        address: canonicalize_bridge_address(&advertised_address),
-                        capabilities: bridge_capabilities(),
-                    })
-                    .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::BindMember(BridgeBindResponse {
+                            peer_id: comms_runtime
+                                .public_key()
+                                .unwrap_or(payload.expected_peer_id),
+                            address: canonicalize_bridge_address(&advertised_address),
+                            capabilities: bridge_capabilities(),
+                        }),
                     )
                     .await;
                 }
@@ -809,13 +815,11 @@ async fn try_handle_supervisor_bridge_command(
         BridgeCommand::AuthorizeSupervisor(payload) => {
             match validate_authorize_supervisor_request(sender, &payload, supervisor_state) {
                 Ok(AuthorizeSupervisorGate::IdempotentAck) => {
-                    let response = serde_json::to_value(BridgeAck { ok: true })
-                        .unwrap_or(serde_json::Value::Bool(true));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
                     )
                     .await;
                     return true;
@@ -843,7 +847,7 @@ async fn try_handle_supervisor_bridge_command(
                     return true;
                 }
             };
-            let response = match comms_runtime
+            match comms_runtime
                 .add_trusted_peer(supervisor_spec.clone())
                 .await
             {
@@ -869,8 +873,6 @@ async fn try_handle_supervisor_bridge_command(
                         supervisor: supervisor_spec,
                         epoch: payload.epoch,
                     });
-                    serde_json::to_value(BridgeAck { ok: true })
-                        .unwrap_or(serde_json::Value::Bool(true))
                 }
                 Err(error) => {
                     send_bridge_failure(
@@ -882,12 +884,12 @@ async fn try_handle_supervisor_bridge_command(
                     .await;
                     return true;
                 }
-            };
+            }
             send_bridge_response(
                 comms_runtime,
                 candidate,
                 meerkat_core::interaction::ResponseStatus::Completed,
-                response,
+                BridgeReply::Ack(BridgeAck { ok: true }),
             )
             .await;
             true
@@ -913,13 +915,11 @@ async fn try_handle_supervisor_bridge_command(
                 return true;
             }
             *supervisor_state = None;
-            let response = serde_json::to_value(BridgeAck { ok: true })
-                .unwrap_or(serde_json::Value::Bool(true));
             send_bridge_response(
                 comms_runtime,
                 candidate,
                 meerkat_core::interaction::ResponseStatus::Completed,
-                response,
+                BridgeReply::Ack(BridgeAck { ok: true }),
             )
             .await;
             true
@@ -973,13 +973,11 @@ async fn try_handle_supervisor_bridge_command(
                             }
                         }
                     };
-                    let response = serde_json::to_value(response)
-                        .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Delivery(response),
                     )
                     .await;
                 }
@@ -1004,13 +1002,11 @@ async fn try_handle_supervisor_bridge_command(
             }
             match adapter.interrupt_current_run(session_id).await {
                 Ok(()) => {
-                    let response = serde_json::to_value(BridgeAck { ok: true })
-                        .unwrap_or(serde_json::Value::Bool(true));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
                     )
                     .await;
                 }
@@ -1035,16 +1031,14 @@ async fn try_handle_supervisor_bridge_command(
             }
             match adapter.retire_runtime(session_id).await {
                 Ok(report) => {
-                    let response = serde_json::to_value(BridgeRetireResponse {
-                        inputs_abandoned: report.inputs_abandoned,
-                        inputs_pending_drain: report.inputs_pending_drain,
-                    })
-                    .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Retire(BridgeRetireResponse {
+                            inputs_abandoned: report.inputs_abandoned,
+                            inputs_pending_drain: report.inputs_pending_drain,
+                        }),
                     )
                     .await;
                 }
@@ -1070,15 +1064,13 @@ async fn try_handle_supervisor_bridge_command(
             let runtime_id = LogicalRuntimeId::new(session_id.to_string());
             match RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id).await {
                 Ok(report) => {
-                    let response = serde_json::to_value(BridgeDestroyResponse {
-                        inputs_abandoned: report.inputs_abandoned,
-                    })
-                    .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Destroy(BridgeDestroyResponse {
+                            inputs_abandoned: report.inputs_abandoned,
+                        }),
                     )
                     .await;
                 }
@@ -1118,20 +1110,18 @@ async fn try_handle_supervisor_bridge_command(
                                 .map(|run_id| run_id.to_string())
                         });
                     let bridge_state = runtime_state_to_bridge(state);
-                    let response = serde_json::to_value(BridgeObservationResponse::new(
-                        bridge_state,
-                        Some(state.can_accept_input()),
-                        current_run_id,
-                        Some(BridgePeerConnectivity::Reachable),
-                        None,
-                        chrono::Utc::now().to_rfc3339(),
-                    ))
-                    .unwrap_or_else(|_| serde_json::json!({ "state": bridge_state.to_string() }));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Observation(BridgeObservationResponse::new(
+                            bridge_state,
+                            Some(state.can_accept_input()),
+                            current_run_id,
+                            Some(BridgePeerConnectivity::Reachable),
+                            None,
+                            chrono::Utc::now().to_rfc3339(),
+                        )),
                     )
                     .await;
                 }
@@ -1174,13 +1164,11 @@ async fn try_handle_supervisor_bridge_command(
             };
             match comms_runtime.add_trusted_peer(peer_spec).await {
                 Ok(()) => {
-                    let response = serde_json::to_value(BridgeAck { ok: true })
-                        .unwrap_or(serde_json::Value::Bool(true));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
                     )
                     .await;
                 }
@@ -1213,13 +1201,11 @@ async fn try_handle_supervisor_bridge_command(
                 .await
             {
                 Ok(_) => {
-                    let response = serde_json::to_value(BridgeAck { ok: true })
-                        .unwrap_or(serde_json::Value::Bool(true));
                     send_bridge_response(
                         comms_runtime,
                         candidate,
                         meerkat_core::interaction::ResponseStatus::Completed,
-                        response,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
                     )
                     .await;
                 }
@@ -1500,7 +1486,7 @@ mod tests {
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
             bootstrap_token: "wrong-token".to_string(),
@@ -1532,7 +1518,7 @@ mod tests {
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
             bootstrap_token: "expected-token".to_string(),
@@ -1564,7 +1550,7 @@ mod tests {
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: "inproc://receiver-real".to_string(),
             bootstrap_token: "expected-token".to_string(),
@@ -1593,7 +1579,7 @@ mod tests {
         let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
             supervisor: supervisor.clone(),
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: "inproc://receiver-stale".to_string(),
             bootstrap_token: "expected-token".to_string(),
@@ -1641,6 +1627,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_bind_request_rejects_explicit_v1_protocol_under_v2() {
+        // Pin the v1→v2 upgrade contract: a v1 payload MUST be rejected by a
+        // v2 runtime at the protocol-version gate, *not* proceed with defaulted
+        // fields. Uses the literal `1` (not `SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        // - 1`) so that a future v3 bump re-confirms v1 stays rejected.
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
+            peer_id: "ed25519:receiver".to_string(),
+            address: "inproc://receiver".to_string(),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            remove_trusted_peer_error: None,
+        });
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: "ed25519:supervisor".to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+        };
+        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+            supervisor: supervisor.clone(),
+            epoch: 0,
+            protocol_version: 1,
+            expected_peer_id: "ed25519:receiver".to_string(),
+            expected_address: runtime.advertised_address().unwrap(),
+            bootstrap_token: "expected-token".to_string(),
+        };
+
+        let (cause, _error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            .expect_err("v1 bind must be rejected under v2+");
+        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
+    }
+
+    #[test]
     fn validate_bind_request_rejects_invalid_supervisor_peer_name() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(BootstrapRuntime {
             peer_id: "ed25519:receiver".to_string(),
@@ -1656,7 +1674,7 @@ mod tests {
                 address: "inproc://mob/__mob_supervisor__".to_string(),
             },
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             expected_peer_id: "ed25519:receiver".to_string(),
             expected_address: runtime.advertised_address().unwrap(),
             bootstrap_token: "expected-token".to_string(),
@@ -2074,7 +2092,7 @@ mod tests {
                 address: "inproc://mob/__mob_supervisor__".to_string(),
             },
             epoch: 0,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         };
 
         let (cause, error) =
@@ -2146,7 +2164,7 @@ mod tests {
         let payload = BridgeSupervisorPayload {
             supervisor: supervisor.clone(),
             epoch: 1,
-            protocol_version: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         };
         let candidate = bridge_candidate(
             &supervisor.peer_id,
@@ -2200,7 +2218,7 @@ mod tests {
             &BridgeCommand::WireMember(BridgePeerWiringPayload {
                 supervisor: supervisor.clone().into(),
                 epoch: 1,
-                protocol_version: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
                 peer_spec: BridgePeerSpec {
                     name: "".to_string(),
                     peer_id: "ed25519:peer".to_string(),

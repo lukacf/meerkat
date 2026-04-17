@@ -15,7 +15,13 @@ pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 /// Address query parameter carrying the one-time bind bootstrap token.
 pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootstrap_token";
 /// Current supervisor bridge wire protocol version.
-pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 1;
+///
+/// Version history:
+/// - `1`: initial protocol with untyped `BridgeReply::Rejected { reason: String }`.
+/// - `2`: `BridgeReply::Rejected { cause: BridgeRejectionCause, reason: String }`
+///   so callers branch on typed cause; runtime-side emitters pass typed
+///   `BridgeReply` values through to the transport.
+pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 2;
 
 /// Remove the one-time bind bootstrap token from an advertised bridge address.
 pub fn canonicalize_bridge_address(address: &str) -> String {

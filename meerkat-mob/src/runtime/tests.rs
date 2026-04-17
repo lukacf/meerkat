@@ -13935,7 +13935,8 @@ fn test_bridge_protocol_types_live_in_contracts_not_runtime() {
                 address: "inproc://test".into(),
             },
             epoch: 1,
-            protocol_version: 1,
+            protocol_version:
+                meerkat_contracts::wire::supervisor_bridge::SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         },
     );
 }

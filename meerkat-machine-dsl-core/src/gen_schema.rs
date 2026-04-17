@@ -594,6 +594,24 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                     let k = gen_schema_expr(key);
                     quote! { Update::MapRemove { field: #f.into(), key: #k } }
                 }
+                UpdateDef::MapIncrement { field, key, amount } => {
+                    let f = field.to_string();
+                    let k = gen_schema_expr(key);
+                    let a = match amount {
+                        crate::ast::ExprDef::U64(v) => *v,
+                        _ => 1,
+                    };
+                    quote! { Update::MapIncrement { field: #f.into(), key: #k, amount: #a } }
+                }
+                UpdateDef::MapDecrement { field, key, amount } => {
+                    let f = field.to_string();
+                    let k = gen_schema_expr(key);
+                    let a = match amount {
+                        crate::ast::ExprDef::U64(v) => *v,
+                        _ => 1,
+                    };
+                    quote! { Update::MapDecrement { field: #f.into(), key: #k, amount: #a } }
+                }
                 UpdateDef::Conditional {
                     condition,
                     then_updates,

@@ -1466,6 +1466,18 @@ fn collect_named_literals_from_update(
                 );
             }
         }
+        Update::MapIncrement { field, key, .. } | Update::MapDecrement { field, key, .. } => {
+            if let Some(TypeRef::Map(key_ty, _)) = field_types.get(field) {
+                collect_named_literals_from_expr(
+                    samples,
+                    key,
+                    Some(key_ty),
+                    field_types,
+                    helper_returns,
+                    binding_types,
+                );
+            }
+        }
         Update::SetInsert { field, value } | Update::SetRemove { field, value } => {
             if let Some(TypeRef::Set(inner_ty)) = field_types.get(field) {
                 collect_named_literals_from_expr(
@@ -5245,6 +5257,22 @@ impl<'a> MachineTlaCompiler<'a> {
                 let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
                 env.insert(field.clone(), format!("MapRemove({current}, {key_expr})"));
             }
+            Update::MapIncrement { field, key, amount } => {
+                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.clone(),
+                    format!("MapIncrement({current}, {key_expr}, {amount})"),
+                );
+            }
+            Update::MapDecrement { field, key, amount } => {
+                let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
+                let key_expr = self.render_expr_with_types(key, env, binding_env, binding_types);
+                env.insert(
+                    field.clone(),
+                    format!("MapDecrement({current}, {key_expr}, {amount})"),
+                );
+            }
             Update::SetInsert { field, value } => {
                 let current = env.get(field).cloned().unwrap_or_else(|| field.clone());
                 let value_expr =
@@ -6004,6 +6032,8 @@ fn collect_update_fields(updates: &[Update]) -> BTreeSet<String> {
             | Update::Increment { field, .. }
             | Update::Decrement { field, .. }
             | Update::MapInsert { field, .. }
+            | Update::MapIncrement { field, .. }
+            | Update::MapDecrement { field, .. }
             | Update::MapRemove { field, .. }
             | Update::SetInsert { field, .. }
             | Update::SetRemove { field, .. }
@@ -6040,6 +6070,9 @@ fn collect_update_bindings(updates: &[Update]) -> BTreeSet<String> {
                 collect_expr_bindings(value, &mut bindings);
             }
             Update::MapRemove { key, .. } => {
+                collect_expr_bindings(key, &mut bindings);
+            }
+            Update::MapIncrement { key, .. } | Update::MapDecrement { key, .. } => {
                 collect_expr_bindings(key, &mut bindings);
             }
             Update::SetInsert { value, .. }
@@ -6084,6 +6117,9 @@ fn collect_update_fields_exprs(updates: &[Update]) -> BTreeSet<String> {
                 collect_expr_fields(value, &mut fields);
             }
             Update::MapRemove { key, .. } => {
+                collect_expr_fields(key, &mut fields);
+            }
+            Update::MapIncrement { key, .. } | Update::MapDecrement { key, .. } => {
                 collect_expr_fields(key, &mut fields);
             }
             Update::SetInsert { value, .. }

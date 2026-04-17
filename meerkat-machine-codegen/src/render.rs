@@ -651,6 +651,18 @@ fn render_update(update: &Update) -> String {
         Update::MapRemove { field, key } => {
             format!("{field}' = MapRemove({field}, {})", render_expr(key))
         }
+        Update::MapIncrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ + {amount} ]",
+                render_expr(key)
+            )
+        }
+        Update::MapDecrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ - {amount} ]",
+                render_expr(key)
+            )
+        }
         Update::SetInsert { field, value } => {
             format!("{field}' = {field} \\cup {{ {} }}", render_expr(value))
         }

@@ -922,6 +922,18 @@ fn parse_single_update(input: ParseStream) -> Result<UpdateDef> {
                 // a single key.
                 Ok(UpdateDef::MapRemove { field, key: arg })
             }
+            "increment" => {
+                let key = parse_expr(&paren)?;
+                let _: Token![,] = paren.parse()?;
+                let amount = parse_expr(&paren)?;
+                Ok(UpdateDef::MapIncrement { field, key, amount })
+            }
+            "decrement" => {
+                let key = parse_expr(&paren)?;
+                let _: Token![,] = paren.parse()?;
+                let amount = parse_expr(&paren)?;
+                Ok(UpdateDef::MapDecrement { field, key, amount })
+            }
             _ => Err(syn::Error::new(
                 method.span(),
                 format!("unknown update method `{method}`"),

@@ -1996,12 +1996,14 @@ machine! {
             emit SubmitOpEvent { operation_id: operation_id }
         }
 
-        // ProgressReportedOp: progress tick (shell tracks count via SubmitOpEvent)
+        // ProgressReportedOp: progress tick (increments per-op counter)
         transition ProgressReportedOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ProgressReportedOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
-            update {}
+            update {
+                self.op_progress_counts.increment(operation_id, 1);
+            }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
         }

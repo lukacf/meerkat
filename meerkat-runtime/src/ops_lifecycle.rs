@@ -313,7 +313,8 @@ impl ShellState {
     }
 
     /// Build a snapshot — prefers DSL state for canonical fields, falls back
-    /// to authority for fields the DSL doesn't track yet (progress_count).
+    /// to authority only for operations that haven't flowed through a DSL
+    /// transition yet (legacy path during migration).
     fn snapshot(&self, id: &OperationId) -> Option<OperationLifecycleSnapshot> {
         let canonical = self.authority.operation(id)?;
         let shell = self.records.get(id)?;
@@ -344,13 +345,17 @@ impl ShellState {
             .dsl_terminal_outcome(id)
             .or_else(|| canonical.terminal_outcome().cloned());
 
+        let progress_count = self
+            .dsl_progress_count(id)
+            .unwrap_or_else(|| canonical.progress_count());
+
         Some(OperationLifecycleSnapshot {
             id: shell.spec.id.clone(),
             kind,
             display_name: shell.spec.display_name.clone(),
             status,
             peer_ready,
-            progress_count: canonical.progress_count(),
+            progress_count,
             watcher_count: shell.watchers.len() as u32,
             terminal_outcome,
             child_session_id: shell.spec.child_session_id.clone(),
@@ -594,6 +599,17 @@ impl ShellState {
     fn dsl_peer_ready(&self, id: &OperationId) -> Option<bool> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
         self.dsl_shadow.0.state.op_peer_ready.get(&id_key).copied()
+    }
+
+    /// Read progress_count from DSL state.
+    fn dsl_progress_count(&self, id: &OperationId) -> Option<u32> {
+        let id_key = mm_dsl::OperationId::from_domain(id).0;
+        self.dsl_shadow
+            .0
+            .state
+            .op_progress_counts
+            .get(&id_key)
+            .map(|v| (*v).min(u32::MAX as u64) as u32)
     }
 
     fn shell_record_mut(

@@ -337,6 +337,16 @@ pub enum UpdateDef {
         key: ExprDef,
         value: ExprDef,
     },
+    MapIncrement {
+        field: Ident,
+        key: ExprDef,
+        amount: ExprDef,
+    },
+    MapDecrement {
+        field: Ident,
+        key: ExprDef,
+        amount: ExprDef,
+    },
     MapRemove {
         field: Ident,
         key: ExprDef,

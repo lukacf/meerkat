@@ -429,6 +429,17 @@ fn validate_update(
             }
             validate_expr(key, fields, bindings, helpers, errors);
         }
+        UpdateDef::MapIncrement { field, key, amount }
+        | UpdateDef::MapDecrement { field, key, amount } => {
+            if !fields.contains(&field.to_string()) {
+                errors.push(Error::new(
+                    field.span(),
+                    format!("unknown state field `{field}`"),
+                ));
+            }
+            validate_expr(key, fields, bindings, helpers, errors);
+            validate_expr(amount, fields, bindings, helpers, errors);
+        }
         UpdateDef::Conditional {
             condition,
             then_updates,

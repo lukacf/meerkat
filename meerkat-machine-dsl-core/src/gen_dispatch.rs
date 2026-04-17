@@ -513,6 +513,42 @@ fn gen_update(update: &UpdateDef, prefix: FieldPrefix) -> TokenStream {
                 FieldPrefix::DirectSelf => quote! { self.#field.remove(&#k); },
             }
         }
+        UpdateDef::MapIncrement { field, key, amount } => {
+            let k = gen_expr(key, prefix);
+            let amt = gen_expr(amount, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! {
+                    {
+                        let entry = self.state.#field.entry(#k).or_insert(0);
+                        *entry = entry.saturating_add(#amt);
+                    }
+                },
+                FieldPrefix::DirectSelf => quote! {
+                    {
+                        let entry = self.#field.entry(#k).or_insert(0);
+                        *entry = entry.saturating_add(#amt);
+                    }
+                },
+            }
+        }
+        UpdateDef::MapDecrement { field, key, amount } => {
+            let k = gen_expr(key, prefix);
+            let amt = gen_expr(amount, prefix);
+            match prefix {
+                FieldPrefix::AuthorityState => quote! {
+                    {
+                        let entry = self.state.#field.entry(#k).or_insert(0);
+                        *entry = entry.saturating_sub(#amt);
+                    }
+                },
+                FieldPrefix::DirectSelf => quote! {
+                    {
+                        let entry = self.#field.entry(#k).or_insert(0);
+                        *entry = entry.saturating_sub(#amt);
+                    }
+                },
+            }
+        }
         UpdateDef::Conditional {
             condition,
             then_updates,

@@ -157,6 +157,13 @@ pub struct RealtimeSessionOpenConfig {
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
     pub seed_messages: Vec<Message>,
+    /// Per-channel override for the "nudge the provider" timeout the OpenAI
+    /// adapter uses while waiting for the first real delta after a turn is
+    /// admitted. `None` inherits the adapter's compile-time default.
+    pub response_nudge_timeout_ms: Option<u64>,
+    /// Per-channel override for the maximum number of nudge attempts before
+    /// the adapter gives up. `None` inherits the adapter default.
+    pub response_nudge_max_attempts: Option<u8>,
 }
 
 impl RealtimeSessionOpenConfig {
@@ -172,7 +179,23 @@ impl RealtimeSessionOpenConfig {
             llm_identity,
             visible_tools,
             seed_messages,
+            response_nudge_timeout_ms: None,
+            response_nudge_max_attempts: None,
         }
+    }
+
+    /// Builder-style override for the per-channel nudge timeout.
+    #[must_use]
+    pub fn with_response_nudge_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.response_nudge_timeout_ms = timeout_ms;
+        self
+    }
+
+    /// Builder-style override for the per-channel nudge max attempts.
+    #[must_use]
+    pub fn with_response_nudge_max_attempts(mut self, max_attempts: Option<u8>) -> Self {
+        self.response_nudge_max_attempts = max_attempts;
+        self
     }
 }
 

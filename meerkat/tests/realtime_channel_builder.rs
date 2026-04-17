@@ -105,6 +105,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
                             state: RealtimeChannelState::Ready,
                             attempt_count: 0,
                             next_retry_at: None,
+                            deadline_at: None,
                             reason: None,
                         },
                         capabilities: RealtimeCapabilities {

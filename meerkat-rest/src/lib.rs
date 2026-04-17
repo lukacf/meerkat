@@ -1365,6 +1365,7 @@ fn realtime_channel_status(
         state,
         attempt_count,
         next_retry_at: None,
+        deadline_at: None,
         reason: reason.map(str::to_string),
     }
 }

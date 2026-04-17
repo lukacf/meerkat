@@ -9709,6 +9709,7 @@ mod tests {
                                 state: meerkat_contracts::RealtimeChannelState::Ready,
                                 attempt_count: 0,
                                 next_retry_at: None,
+                                deadline_at: None,
                                 reason: None,
                             },
                             capabilities: meerkat_contracts::RealtimeCapabilities {

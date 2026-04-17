@@ -724,6 +724,7 @@ async fn channel_open_attaches_runtime_and_reports_opening_status() {
                     state: RealtimeChannelState::Opening,
                     attempt_count: 0,
                     next_retry_at: None,
+                    deadline_at: None,
                     reason: Some("realtime attachment is pending".to_string()),
                 }
             );
@@ -2953,6 +2954,7 @@ async fn member_target_channel_open_sets_durable_intent_and_reports_runtime_back
                     state: RealtimeChannelState::Opening,
                     attempt_count: 0,
                     next_retry_at: None,
+                    deadline_at: None,
                     reason: Some("realtime attachment is pending".to_string()),
                 }
             );

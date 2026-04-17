@@ -952,6 +952,7 @@ fn realtime_chunks_and_events_roundtrip() {
         state: RealtimeChannelState::Reconnecting,
         attempt_count: 2,
         next_retry_at: Some("2026-04-15T12:00:01Z".to_string()),
+        deadline_at: None,
         reason: None,
     };
     let event = RealtimeEvent::StatusChanged {

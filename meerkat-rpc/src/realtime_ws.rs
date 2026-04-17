@@ -162,13 +162,56 @@ enum RealtimeBindingProjection {
     ReattachRequired,
 }
 
+/// Tiny splitmix64 PRNG. Used to produce a per-channel full-jitter stream for
+/// reconnect backoff without pulling a crate-level `rand` dependency into the
+/// realtime hot path. Deterministic per-overlay: tests can seed it by
+/// constructing the overlay with a fixed seed.
+#[derive(Debug, Clone)]
+struct BackoffJitterRng {
+    state: u64,
+}
+
+impl BackoffJitterRng {
+    const fn new(seed: u64) -> Self {
+        // splitmix64 refuses all-zero seeds; fall back to a fixed golden ratio.
+        let effective = if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        };
+        Self { state: effective }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        // splitmix64 — a single well-known cycle that is cheap and has good
+        // output distribution for deterministic jitter.
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Return a random value in `[0, ceiling_ms]` inclusive. When `ceiling_ms`
+    /// is zero, returns zero.
+    fn draw_ms(&mut self, ceiling_ms: u64) -> u64 {
+        if ceiling_ms == 0 {
+            0
+        } else {
+            self.next_u64() % (ceiling_ms + 1)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RealtimeReconnectOverlay {
     policy: RealtimeReconnectPolicy,
     cycle_started_at: Option<Instant>,
+    cycle_started_at_utc: Option<DateTime<Utc>>,
     attempt_count: u32,
     next_retry_deadline: Option<Instant>,
     next_retry_at: Option<DateTime<Utc>>,
+    jitter: BackoffJitterRng,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +226,23 @@ enum RealtimeReconnectFailure {
 
 impl RealtimeReconnectOverlay {
     fn new(policy: RealtimeReconnectPolicy) -> Self {
+        // Per-channel seed derived from the wall-clock plus an incrementing
+        // counter. Tests use `new_with_seed` for determinism.
+        let seed = {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|dur| dur.as_nanos() as u64)
+                .unwrap_or(0);
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let ticker = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            now_ns
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(ticker)
+        };
+        Self::new_with_seed(policy, seed)
+    }
+
+    fn new_with_seed(policy: RealtimeReconnectPolicy, jitter_seed: u64) -> Self {
         Self {
             policy: RealtimeReconnectPolicy {
                 max_attempts: policy.max_attempts.max(1),
@@ -191,9 +251,11 @@ impl RealtimeReconnectOverlay {
                 max_total_ms: policy.max_total_ms,
             },
             cycle_started_at: None,
+            cycle_started_at_utc: None,
             attempt_count: 0,
             next_retry_deadline: None,
             next_retry_at: None,
+            jitter: BackoffJitterRng::new(jitter_seed),
         }
     }
 
@@ -210,11 +272,23 @@ impl RealtimeReconnectOverlay {
         self.cycle_started_at.is_some()
     }
 
+    fn deadline_at(&self) -> Option<String> {
+        let started = self.cycle_started_at_utc?;
+        if self.policy.max_total_ms == 0 {
+            return None;
+        }
+        let max_total =
+            chrono::TimeDelta::from_std(Duration::from_millis(self.policy.max_total_ms))
+                .unwrap_or_else(|_| chrono::TimeDelta::zero());
+        Some((started + max_total).to_rfc3339())
+    }
+
     fn current_status(&self) -> Option<RealtimeChannelStatus> {
         self.is_active().then(|| RealtimeChannelStatus {
             state: RealtimeChannelState::Reconnecting,
             attempt_count: self.attempt_count,
             next_retry_at: self.next_retry_at.map(|deadline| deadline.to_rfc3339()),
+            deadline_at: self.deadline_at(),
             reason: Some("realtime attachment requires reattach".to_string()),
         })
     }
@@ -228,6 +302,7 @@ impl RealtimeReconnectOverlay {
             return None;
         }
         self.cycle_started_at = Some(now);
+        self.cycle_started_at_utc = Some(now_utc);
         self.attempt_count = 1;
         self.schedule_next_retry(now, now_utc);
         self.current_status()
@@ -235,6 +310,7 @@ impl RealtimeReconnectOverlay {
 
     fn clear(&mut self) {
         self.cycle_started_at = None;
+        self.cycle_started_at_utc = None;
         self.attempt_count = 0;
         self.next_retry_deadline = None;
         self.next_retry_at = None;
@@ -267,6 +343,7 @@ impl RealtimeReconnectOverlay {
                     state: RealtimeChannelState::Error,
                     attempt_count: 0,
                     next_retry_at: None,
+                    deadline_at: None,
                     reason: Some("realtime reconnect attempts exhausted".to_string()),
                 },
                 error: RealtimeChannelErrorFrame {
@@ -284,6 +361,7 @@ impl RealtimeReconnectOverlay {
             state: RealtimeChannelState::Reconnecting,
             attempt_count: self.attempt_count,
             next_retry_at: self.next_retry_at.map(|deadline| deadline.to_rfc3339()),
+            deadline_at: self.deadline_at(),
             reason: Some("realtime attachment requires reattach".to_string()),
         })
     }
@@ -298,14 +376,19 @@ impl RealtimeReconnectOverlay {
         );
     }
 
-    fn backoff_for_attempt(&self, attempt_count: u32) -> Duration {
+    /// Exponential full-jitter backoff: each attempt picks a uniform random
+    /// value in `[0, capped_exponential]` so retries from many hosts do not
+    /// synchronise on the same moment. Seeded per-channel (deterministic for
+    /// tests via `new_with_seed`), drawn fresh on every attempt.
+    fn backoff_for_attempt(&mut self, attempt_count: u32) -> Duration {
         let factor = 1u64 << attempt_count.saturating_sub(1).min(20);
         let capped_ms = self
             .policy
             .initial_backoff_ms
             .saturating_mul(factor)
             .min(self.policy.max_backoff_ms);
-        Duration::from_millis(capped_ms)
+        let jittered_ms = self.jitter.draw_ms(capped_ms);
+        Duration::from_millis(jittered_ms)
     }
 }
 
@@ -2058,6 +2141,7 @@ fn projection_to_channel_status(projection: RealtimeBindingProjection) -> Realti
             state: RealtimeChannelState::Closed,
             attempt_count: 0,
             next_retry_at: None,
+            deadline_at: None,
             reason: Some("no realtime channel is open for this target".to_string()),
         },
         RealtimeBindingProjection::IntentPresentUnbound
@@ -2065,24 +2149,28 @@ fn projection_to_channel_status(projection: RealtimeBindingProjection) -> Realti
             state: RealtimeChannelState::Opening,
             attempt_count: 0,
             next_retry_at: None,
+            deadline_at: None,
             reason: Some("realtime attachment is pending".to_string()),
         },
         RealtimeBindingProjection::BindingReady => RealtimeChannelStatus {
             state: RealtimeChannelState::Ready,
             attempt_count: 0,
             next_retry_at: None,
+            deadline_at: None,
             reason: None,
         },
         RealtimeBindingProjection::ReplacementPending => RealtimeChannelStatus {
             state: RealtimeChannelState::Reconnecting,
             attempt_count: 0,
             next_retry_at: None,
+            deadline_at: None,
             reason: Some("realtime attachment replacement is pending".to_string()),
         },
         RealtimeBindingProjection::ReattachRequired => RealtimeChannelStatus {
             state: RealtimeChannelState::Reconnecting,
             attempt_count: 0,
             next_retry_at: None,
+            deadline_at: None,
             reason: Some("realtime attachment requires reattach".to_string()),
         },
     }
@@ -3884,31 +3972,35 @@ mod tests {
 
     #[test]
     fn reconnect_overlay_schedules_exponential_backoff() {
-        let mut overlay = RealtimeReconnectOverlay::new(RealtimeReconnectPolicy {
+        // Full-jitter backoff draws in `[0, capped_exponential]`; the pre-jitter
+        // test pinned exact durations. After Item 4 we only check that each
+        // draw is bounded by the exponential cap for that attempt.
+        let policy = RealtimeReconnectPolicy {
             max_attempts: 3,
             initial_backoff_ms: 50,
             max_backoff_ms: 200,
             max_total_ms: 1_000,
-        });
+        };
+        let mut overlay = RealtimeReconnectOverlay::new_with_seed(policy, 0x5eed_face);
         let started_at = Instant::now();
         let started_status = overlay
             .begin_if_needed(started_at, Utc::now())
             .expect("initial reattach should start reconnect tracking");
         assert_eq!(started_status.state, RealtimeChannelState::Reconnecting);
         assert_eq!(started_status.attempt_count, 1);
-        assert_eq!(
-            overlay
-                .next_retry_deadline
-                .expect("first reconnect should have a retry deadline")
-                .duration_since(started_at),
-            Duration::from_millis(50)
+        let first_deadline = overlay
+            .next_retry_deadline
+            .expect("first reconnect should have a retry deadline");
+        let first_backoff = first_deadline.duration_since(started_at);
+        // attempt=1 cap = initial_backoff_ms * 2^0 = 50ms
+        assert!(
+            first_backoff <= Duration::from_millis(50),
+            "attempt=1 full-jitter draw must be in [0, 50ms], got {first_backoff:?}",
         );
 
-        let first_failure = overlay.on_attempt_failure(
-            started_at + Duration::from_millis(50),
-            Utc::now(),
-            "transient failure",
-        );
+        let first_failure_at = started_at + Duration::from_millis(60);
+        let first_failure =
+            overlay.on_attempt_failure(first_failure_at, Utc::now(), "transient failure");
         match first_failure {
             RealtimeReconnectFailure::RetryScheduled(status) => {
                 assert_eq!(status.state, RealtimeChannelState::Reconnecting);
@@ -3916,12 +4008,14 @@ mod tests {
             }
             other => panic!("expected retry scheduling after first failure, got {other:?}"),
         }
-        assert_eq!(
-            overlay
-                .next_retry_deadline
-                .expect("second reconnect should have a retry deadline")
-                .duration_since(started_at + Duration::from_millis(50)),
-            Duration::from_millis(100)
+        let second_deadline = overlay
+            .next_retry_deadline
+            .expect("second reconnect should have a retry deadline");
+        let second_backoff = second_deadline.duration_since(first_failure_at);
+        // attempt=2 cap = min(initial*2, max) = min(100, 200) = 100ms
+        assert!(
+            second_backoff <= Duration::from_millis(100),
+            "attempt=2 full-jitter draw must be in [0, 100ms], got {second_backoff:?}",
         );
     }
 
@@ -4094,5 +4188,112 @@ mod tests {
             .await
             .expect_err("realmless token must not open inside a realm");
         assert_eq!(error, RealtimeOpenError::UnauthorizedRealm);
+    }
+
+    #[test]
+    fn reconnect_backoff_draws_distinct_jittered_values() {
+        // Exponential full-jitter must not collapse to a single value across
+        // attempts. Seed deterministically so the test is repeatable.
+        let policy = RealtimeReconnectPolicy {
+            max_attempts: 10_000,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 5_000,
+            max_total_ms: 0, // disable exhaustion budget so we can sample freely
+        };
+        let mut overlay =
+            super::RealtimeReconnectOverlay::new_with_seed(policy, 0xfeed_d00d_f00d_beef);
+
+        let mut draws = std::collections::BTreeSet::new();
+        // Saturate the exponent quickly so later draws all share the same cap.
+        let attempts: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        for _ in 0..1_000 {
+            for &attempt in &attempts {
+                let backoff = overlay.backoff_for_attempt(attempt);
+                draws.insert(backoff.as_millis() as u64);
+            }
+        }
+        assert!(
+            draws.len() > 500,
+            "expected >500 distinct jittered backoff draws, got {}",
+            draws.len(),
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_is_deterministic_for_same_seed() {
+        // Regression guard: tests that rely on the jitter draws must be
+        // reproducible given a fixed seed, so the policy layer can be verified
+        // without hiding flakes behind randomness.
+        let policy = RealtimeReconnectPolicy {
+            max_attempts: 10,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 5_000,
+            max_total_ms: 0,
+        };
+        let seed = 0x1234_5678_9abc_def0;
+        let mut a = super::RealtimeReconnectOverlay::new_with_seed(policy.clone(), seed);
+        let mut b = super::RealtimeReconnectOverlay::new_with_seed(policy, seed);
+        for attempt in 1..=8u32 {
+            assert_eq!(
+                a.backoff_for_attempt(attempt),
+                b.backoff_for_attempt(attempt),
+                "same-seed overlays must draw identical backoff for attempt {attempt}",
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_status_emits_deadline_at_while_cycle_is_active() {
+        // The status frame must surface the derived cycle deadline whenever a
+        // reconnect budget is configured; clients use this to decide whether
+        // it is worth waiting for the next retry.
+        let policy = RealtimeReconnectPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 50,
+            max_backoff_ms: 200,
+            max_total_ms: 1_000,
+        };
+        let mut overlay = super::RealtimeReconnectOverlay::new_with_seed(policy, 0);
+        let started_at = Instant::now();
+        let started_utc = Utc::now();
+        let status = overlay
+            .begin_if_needed(started_at, started_utc)
+            .expect("initial reattach should start reconnect tracking");
+        assert_eq!(status.state, RealtimeChannelState::Reconnecting);
+        assert!(
+            status.deadline_at.is_some(),
+            "reconnect status with a max_total_ms budget must carry a deadline_at",
+        );
+
+        let on_failure = overlay.on_attempt_failure(
+            started_at + Duration::from_millis(25),
+            started_utc,
+            "transient failure",
+        );
+        match on_failure {
+            super::RealtimeReconnectFailure::RetryScheduled(status) => {
+                assert!(
+                    status.deadline_at.is_some(),
+                    "retry-scheduled status must carry deadline_at",
+                );
+                assert_eq!(status.deadline_at, overlay.deadline_at());
+            }
+            other => panic!("expected retry to be scheduled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_status_omits_deadline_at_when_budget_is_unset() {
+        let policy = RealtimeReconnectPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 50,
+            max_backoff_ms: 200,
+            max_total_ms: 0,
+        };
+        let mut overlay = super::RealtimeReconnectOverlay::new_with_seed(policy, 0);
+        let status = overlay
+            .begin_if_needed(Instant::now(), Utc::now())
+            .expect("reattach should start");
+        assert_eq!(status.deadline_at, None);
     }
 }

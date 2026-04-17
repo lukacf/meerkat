@@ -339,6 +339,13 @@ pub struct RealtimeChannelStatus {
     pub attempt_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_retry_at: Option<String>,
+    /// Wall-clock deadline after which the reconnect cycle will be abandoned
+    /// and the channel will close with `ReconnectExhausted`. Derived from the
+    /// reconnect policy's `max_total_ms` on top of the cycle's start time. RFC
+    /// 3339 encoded, matches `next_retry_at`. Present only while the channel
+    /// is actively reconnecting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

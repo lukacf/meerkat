@@ -748,6 +748,12 @@ pub struct OpenAiRealtimeSession {
     provider_response_acknowledged_without_progress: bool,
     provider_response_nudge_attempts: u8,
     provider_response_nudge_inflight: bool,
+    /// Per-session override for the provider-nudge timeout (milliseconds).
+    /// None falls back to `OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS`.
+    response_nudge_timeout_ms: Option<u64>,
+    /// Per-session override for the provider-nudge max attempts. None falls
+    /// back to `OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS`.
+    response_nudge_max_attempts: Option<u8>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -777,7 +783,26 @@ impl OpenAiRealtimeSession {
             provider_response_acknowledged_without_progress: false,
             provider_response_nudge_attempts: 0,
             provider_response_nudge_inflight: false,
+            response_nudge_timeout_ms: None,
+            response_nudge_max_attempts: None,
         }
+    }
+
+    /// Apply per-session overrides for the provider nudge timings. `None`
+    /// values inherit the adapter's compile-time defaults.
+    pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
+        self.response_nudge_timeout_ms = timeout_ms;
+        self.response_nudge_max_attempts = max_attempts;
+    }
+
+    fn effective_nudge_timeout_ms(&self) -> u64 {
+        self.response_nudge_timeout_ms
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
+    }
+
+    fn effective_nudge_max_attempts(&self) -> u8 {
+        self.response_nudge_max_attempts
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS)
     }
 
     fn raw_mut(&mut self) -> Result<&mut (dyn OpenAiLiveSession + '_), LlmError> {
@@ -1396,8 +1421,10 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // owns this one-shot recovery nudge rather than exposing a new
                 // product semantic. Keep this narrow and easy to delete once
                 // the upstream/provider session behavior is fully understood.
+                let nudge_timeout_ms = self.effective_nudge_timeout_ms();
+                let nudge_max_attempts = self.effective_nudge_max_attempts();
                 match tokio::time::timeout(
-                    Duration::from_millis(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS),
+                    Duration::from_millis(nudge_timeout_ms),
                     self.raw_mut()?.next_event(),
                 )
                 .await
@@ -1432,16 +1459,13 @@ impl RealtimeSession for OpenAiRealtimeSession {
                     },
                     Err(_) => {
                         if self.provider_response_acknowledged_without_progress {
-                            if self.provider_response_nudge_attempts
-                                >= OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS
-                            {
+                            if self.provider_response_nudge_attempts >= nudge_max_attempts {
                                 trace_openai_realtime_lifecycle(format!(
                                     "provider response acknowledged but stalled after {} wait windows",
                                     self.provider_response_nudge_attempts
                                 ));
                                 return Err(LlmError::NetworkTimeout {
-                                    duration_ms: OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS
-                                        * u64::from(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS),
+                                    duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                                 });
                             }
                             self.provider_response_nudge_attempts += 1;
@@ -1451,16 +1475,13 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             ));
                             continue;
                         }
-                        if self.provider_response_nudge_attempts
-                            >= OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS
-                        {
+                        if self.provider_response_nudge_attempts >= nudge_max_attempts {
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response nudge budget exhausted after {} attempts",
                                 self.provider_response_nudge_attempts
                             ));
                             return Err(LlmError::NetworkTimeout {
-                                duration_ms: OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS
-                                    * u64::from(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS),
+                                duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
                             });
                         }
                         trace_openai_realtime_lifecycle(
@@ -1643,6 +1664,10 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
     ) -> Result<Box<dyn RealtimeSession>, LlmError> {
         let raw = self.raw_factory.open_session(open_config).await?;
         let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
+        session.set_response_nudge_config(
+            open_config.response_nudge_timeout_ms,
+            open_config.response_nudge_max_attempts,
+        );
         session
             .seed_history_projection(&open_config.seed_messages)
             .await?;

@@ -2671,42 +2671,101 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         )
                                         .expect("bind rejection")
                                     } else {
-                                    responder_bind_count.fetch_add(1, Ordering::Relaxed);
-                                    let supervisor_spec =
-                                        meerkat_core::comms::TrustedPeerSpec::try_from(
-                                            payload.supervisor.clone(),
-                                        )
-                                        .expect("valid supervisor spec");
-                                    responder_runtime
-                                        .add_trusted_peer(supervisor_spec)
-                                        .await
-                                        .expect("bind supervisor");
-                                    *responder_supervisor_state.write().await =
-                                        Some(HarnessSupervisorState {
-                                            supervisor:
-                                                meerkat_core::comms::TrustedPeerSpec::try_from(
-                                                    payload.supervisor.clone(),
+                                        // Mirror the production strict gate in
+                                        // `validate_bind_request_against_state`: unbound state
+                                        // allows bootstrap; bound state only accepts an exact
+                                        // idempotent retry from the same supervisor at the same
+                                        // epoch from the same sender. Anything else is a typed
+                                        // rejection — mob-level tests must see the same rejection
+                                        // vocabulary as production or the gate is invisible.
+                                        let sender = candidate.interaction.from.clone();
+                                        let mut state_guard =
+                                            responder_supervisor_state.write().await;
+                                        let gate_result: Result<bool, (super::bridge_protocol::BridgeRejectionCause, String)> = match state_guard.as_ref() {
+                                            None => Ok(true), // bootstrap: bind fresh
+                                            Some(current) => {
+                                                if payload.supervisor.peer_id
+                                                    != current.supervisor.peer_id
+                                                {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::AlreadyBound,
+                                                        format!(
+                                                            "bind member failed: supervisor already bound as '{}'; use authorize_supervisor to rotate",
+                                                            current.supervisor.peer_id
+                                                        ),
+                                                    ))
+                                                } else if payload.epoch != current.epoch {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::AlreadyBound,
+                                                        format!(
+                                                            "bind member failed: epoch {} does not match bound supervisor epoch {}; use authorize_supervisor to rotate",
+                                                            payload.epoch, current.epoch
+                                                        ),
+                                                    ))
+                                                } else if sender != current.supervisor.name
+                                                    && sender != current.supervisor.peer_id
+                                                {
+                                                    Err((
+                                                        super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
+                                                        format!(
+                                                            "bind member failed: request sender '{sender}' does not match authorized supervisor '{}'",
+                                                            current.supervisor.peer_id
+                                                        ),
+                                                    ))
+                                                } else {
+                                                    Ok(false) // idempotent ack, no mutation
+                                                }
+                                            }
+                                        };
+                                        match gate_result {
+                                            Err((cause, reason)) => serde_json::to_value(
+                                                super::bridge_protocol::BridgeReply::Rejected {
+                                                    cause,
+                                                    reason,
+                                                },
+                                            )
+                                            .expect("bind rejection"),
+                                            Ok(mutate) => {
+                                                if mutate {
+                                                    responder_bind_count
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    let supervisor_spec =
+                                                        meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                            payload.supervisor.clone(),
+                                                        )
+                                                        .expect("valid supervisor spec");
+                                                    responder_runtime
+                                                        .add_trusted_peer(supervisor_spec)
+                                                        .await
+                                                        .expect("bind supervisor");
+                                                    *state_guard = Some(HarnessSupervisorState {
+                                                        supervisor:
+                                                            meerkat_core::comms::TrustedPeerSpec::try_from(
+                                                                payload.supervisor.clone(),
+                                                            )
+                                                            .expect("valid supervisor spec"),
+                                                        epoch: payload.epoch,
+                                                    });
+                                                }
+                                                serde_json::to_value(
+                                                    super::bridge_protocol::BridgeBindResponse {
+                                                        peer_id: responder_runtime.public_key().to_peer_id(),
+                                                        address: format!("inproc://{peer_name}"),
+                                                        capabilities:
+                                                            super::bridge_protocol::BridgeCapabilities {
+                                                                deliver_member_input: true,
+                                                                observe_member: true,
+                                                                interrupt_member: true,
+                                                                retire_member: true,
+                                                                destroy_member: true,
+                                                                wire_member: true,
+                                                                unwire_member: true,
+                                                        },
+                                                    },
                                                 )
-                                                .expect("valid supervisor spec"),
-                                            epoch: payload.epoch,
-                                        });
-                                    serde_json::to_value(
-                                        super::bridge_protocol::BridgeBindResponse {
-                                            peer_id: responder_runtime.public_key().to_peer_id(),
-                                            address: format!("inproc://{peer_name}"),
-                                            capabilities:
-                                                super::bridge_protocol::BridgeCapabilities {
-                                                    deliver_member_input: true,
-                                                    observe_member: true,
-                                                    interrupt_member: true,
-                                                    retire_member: true,
-                                                    destroy_member: true,
-                                                    wire_member: true,
-                                                    unwire_member: true,
-                                            },
-                                        },
-                                    )
-                                    .expect("bind response")
+                                                .expect("bind response")
+                                            }
+                                        }
                                     }
                                 }
                                 super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(
@@ -4620,84 +4679,18 @@ async fn test_rotate_supervisor_bind_fallback_binds_next_authority() {
     );
 }
 
-#[tokio::test]
-async fn test_rotate_supervisor_rolls_back_remote_authorization_on_partial_failure() {
-    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
-    let definition = with_unique_mob_id(
-        sample_definition_with_external_backend(),
-        "rotate-supervisor-rollback",
-    );
-    let mob_id = definition.id.clone();
-    let storage = MobStorage::in_memory();
-    let runtime_metadata = storage.runtime_metadata.clone();
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let handle = MobBuilder::new(definition, storage)
-        .with_session_service(service)
-        .create()
-        .await
-        .expect("create mob");
-    let external_a = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-a")).await;
-    let external_b = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-b")).await;
-    handle
-        .spawn_with_binding(
-            ProfileName::from("worker"),
-            MeerkatId::from("w-a"),
-            None,
-            external_a.binding(),
-        )
-        .await
-        .expect("spawn first live external worker");
-    handle
-        .spawn_with_binding(
-            ProfileName::from("worker"),
-            MeerkatId::from("w-b"),
-            None,
-            external_b.binding(),
-        )
-        .await
-        .expect("spawn second live external worker");
-
-    let original = runtime_metadata
-        .load_supervisor_authority(&mob_id)
-        .await
-        .expect("load original authority")
-        .expect("original authority record");
-    external_b.fail_next_authorize();
-
-    let error = handle
-        .rotate_supervisor()
-        .await
-        .expect_err("partial authorize failure should abort rotation");
-    assert!(
-        error
-            .to_string()
-            .contains("failed to rotate supervisor authority"),
-        "rotation failure should surface rollback context, got: {error}"
-    );
-    let current = runtime_metadata
-        .load_supervisor_authority(&mob_id)
-        .await
-        .expect("load authority after failed rotation")
-        .expect("authority after failed rotation");
-    assert_eq!(
-        current.public_peer_id, original.public_peer_id,
-        "failed rotation must keep the original supervisor authority active locally"
-    );
-
-    handle
-        .internal_turn(
-            AgentIdentity::from("w-a"),
-            ContentInput::from("after-failed-rotation".to_string()),
-        )
-        .await
-        .expect("rolled-back remote should still accept commands from the original supervisor");
-    assert_eq!(
-        external_a.delivered_input_ids().await.len(),
-        1,
-        "good peer should remain controllable after rollback"
-    );
-}
+// `test_rotate_supervisor_rolls_back_remote_authorization_on_partial_failure`
+// was removed in the c8 commit of the bridge review fixes. The test asserted
+// that on a partial-authorize failure during rotation the mob would roll the
+// LOCAL authority back to the pre-rotation supervisor. That expectation is
+// incompatible with the strict `BindMember` gate introduced in the same
+// review: once any remote has rotated forward, a rollback is rejected with
+// `BridgeRejectionCause::AlreadyBound` and the documented recovery is to
+// advance local authority to match the partially-applied remote state —
+// which is exactly what the following test
+// `test_rotate_supervisor_advances_local_authority_when_rollback_fails`
+// verifies. See `CLAUDE.md` > "Mob Orchestration" and
+// `MobActor::handle_rotate_supervisor` for the authoritative behavior.
 
 #[tokio::test]
 async fn test_rotate_supervisor_advances_local_authority_when_rollback_fails() {

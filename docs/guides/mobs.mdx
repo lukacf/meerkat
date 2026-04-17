@@ -300,8 +300,13 @@ Wildcard `"*"` matches any role.
 
 ---
 
+## Realtime attachment
+
+Any mob member can be attached to a live OpenAI Realtime audio channel by its `AgentIdentity`. Attach/detach keys on stable identity (`mob/realtime_attach`, `mob/realtime_detach`) so intent survives respawn; the underlying binding and its authority epoch are session-scoped and rotate per-runtime. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, authority token model, and live-topology reconfigure flow.
+
 ## See also
 
+- [Realtime voice guide](/guides/realtime) — per-member realtime audio attachment
 - [Examples: Mobs](/examples/mobs) — code examples across all surfaces
 - [Examples: Mobpack](/examples/mobpack) — portable deployment
 - [Examples: WASM](/examples/wasm) — browser deployment

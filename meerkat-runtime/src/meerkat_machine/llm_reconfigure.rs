@@ -361,6 +361,34 @@ impl MeerkatMachine {
         .await
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
+        // 1b. Drive any in-flight turn into DrainingBoundary via the control
+        // plane. Do this eagerly, before host hydration, so the executor's
+        // cancel-after-boundary control command is observed even when
+        // hydration is fast relative to run completion. cancel_after_boundary
+        // is a no-op when the runtime loop has no control channel (Idle /
+        // disattached), so we call it unconditionally when a control channel
+        // is live; its send is idempotent.
+        {
+            let sessions = self.sessions.read().await;
+            let has_control = sessions
+                .get(&session_id)
+                .and_then(|entry| entry.control_sender())
+                .is_some();
+            drop(sessions);
+            if has_control {
+                if let Err(error) = self.cancel_after_boundary_inner(&session_id).await {
+                    let _ = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                            "AbortLiveTopologyBeforeDetach:cancel_after_boundary_failed",
+                        )
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
+
         // 2. Prepare: may fail (host hydrate / resolve); if so, abort cleanly.
         let prepared = match self
             .prepare_reconfigure_session_llm_command(&session_id, request)
@@ -401,6 +429,7 @@ impl MeerkatMachine {
         // 3. Mark detached: retry loop until DSL accepts. The DSL guard
         // `turn_at_safe_boundary` enforces "wait for next natural boundary";
         // the shell's only job here is retry mechanics, not semantic waiting.
+        // Step 1b already drove any Running turn toward DrainingBoundary.
         let detach_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             match self

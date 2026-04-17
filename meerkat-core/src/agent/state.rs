@@ -425,7 +425,9 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
-        let runtime_backed = self.turn_state_handle.is_some() && self.turn_state.can_accept(&input);
+        let runtime_backed = self.turn_state_handle.is_some()
+            && self.runtime_execution_kind.is_some()
+            && self.turn_state.can_accept(&input);
         if runtime_backed {
             self.apply_turn_input_via_runtime_handle(&input)?;
         }

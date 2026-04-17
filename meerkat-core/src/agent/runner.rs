@@ -290,6 +290,13 @@ where
         Ok(())
     }
 
+    pub fn set_runtime_execution_kind(
+        &mut self,
+        execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
+    ) {
+        self.runtime_execution_kind = execution_kind;
+    }
+
     /// Apply accumulated session effects from tool dispatch.
     ///
     /// Called by the agent loop after each parallel tool batch completes,
@@ -906,6 +913,7 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
         self.turn_state = super::turn_state::LocalTurnExecutionState::new();
+        self.runtime_execution_kind = None;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;
@@ -995,6 +1003,7 @@ where
         // Reset state for new run (allows multi-turn on same agent)
         self.state = LoopState::CallingLlm;
         self.turn_state = super::turn_state::LocalTurnExecutionState::new();
+        self.runtime_execution_kind = None;
         self.extraction_result = None;
         self.extraction_last_error = None;
         self.extraction_schema_warnings = None;

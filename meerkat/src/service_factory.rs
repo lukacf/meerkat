@@ -81,6 +81,7 @@ impl SessionAgent for FactoryAgent {
         prompt: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
+        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         // handling_mode and render_metadata are runtime-owned semantics.
@@ -98,13 +99,16 @@ impl SessionAgent for FactoryAgent {
                 "render_metadata requires a runtime-backed surface; direct session-service path does not support it".to_string(),
             ));
         }
+        self.agent.set_runtime_execution_kind(execution_kind);
         self.agent.run_with_events(prompt, event_tx).await
     }
 
     async fn run_pending_with_events(
         &mut self,
+        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        self.agent.set_runtime_execution_kind(execution_kind);
         self.agent.run_pending_with_events(event_tx).await
     }
 

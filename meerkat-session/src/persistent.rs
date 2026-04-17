@@ -322,6 +322,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 bundle.seed.last_run_id = Some(run_id.clone());
                 bundle.seed.last_boundary_sequence = Some(sequence);
                 bundle.seed.phase = InputLifecycleState::Consumed;
+                bundle.seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 bundle.state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 Some(bundle)
             })

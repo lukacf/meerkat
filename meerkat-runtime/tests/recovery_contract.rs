@@ -119,6 +119,8 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
             phase: InputLifecycleState::AppliedPendingConsumption,
             last_run_id: Some(run_id.clone()),
             last_boundary_sequence: Some(sequence),
+            terminal_outcome: None,
+            attempt_count: 1,
         },
     }
 }

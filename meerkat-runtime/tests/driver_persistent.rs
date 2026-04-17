@@ -574,6 +574,8 @@ async fn recover_consumes_committed_applied_pending_inputs() {
             phase: InputLifecycleState::AppliedPendingConsumption,
             last_run_id: Some(run_id.clone()),
             last_boundary_sequence: Some(0),
+            terminal_outcome: None,
+            attempt_count: 1,
         },
     };
     store.persist_input_state(&rid, &stored).await.unwrap();

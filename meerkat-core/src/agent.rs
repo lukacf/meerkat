@@ -819,6 +819,9 @@ where
     pub(crate) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     /// Standalone local owner for turn-execution state when no runtime handle exists.
     pub(crate) turn_state: turn_state::LocalTurnExecutionState,
+    /// Typed execution intent for the current run, when this turn is owned by
+    /// the runtime control plane rather than a direct surface call.
+    pub(crate) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,

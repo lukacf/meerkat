@@ -214,21 +214,17 @@ impl MeerkatMachine {
             .admission_order()
             .iter()
             .cloned()
-            .map(|input_id| {
-                let ledger_state = driver.ledger().get(&input_id);
-                MeerkatAdmittedInputSnapshot {
-                    content_shape: ingress.content_shape(&input_id),
-                    request_id: ingress.request_id(&input_id),
-                    reservation_key: ingress.reservation_key(&input_id),
-                    handling_mode: ingress.handling_mode(&input_id),
-                    lifecycle: driver.input_phase(&input_id),
-                    terminal_outcome: ledger_state
-                        .and_then(|state| state.terminal_outcome().cloned()),
-                    last_run_id: driver.input_last_run_id(&input_id),
-                    last_boundary_sequence: driver.input_last_boundary_sequence(&input_id),
-                    is_prompt: ingress.is_prompt(&input_id),
-                    input_id,
-                }
+            .map(|input_id| MeerkatAdmittedInputSnapshot {
+                content_shape: ingress.content_shape(&input_id),
+                request_id: ingress.request_id(&input_id),
+                reservation_key: ingress.reservation_key(&input_id),
+                handling_mode: ingress.handling_mode(&input_id),
+                lifecycle: driver.input_phase(&input_id),
+                terminal_outcome: driver.input_terminal_outcome(&input_id),
+                last_run_id: driver.input_last_run_id(&input_id),
+                last_boundary_sequence: driver.input_last_boundary_sequence(&input_id),
+                is_prompt: ingress.is_prompt(&input_id),
+                input_id,
             })
             .collect();
 

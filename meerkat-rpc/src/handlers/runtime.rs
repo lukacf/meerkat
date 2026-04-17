@@ -118,6 +118,8 @@ pub(crate) fn to_wire_accept_result(
                     phase: meerkat_runtime::InputLifecycleState::Queued,
                     last_run_id: None,
                     last_boundary_sequence: None,
+                    terminal_outcome: None,
+                    attempt_count: 0,
                 },
             };
             RuntimeAcceptResult {

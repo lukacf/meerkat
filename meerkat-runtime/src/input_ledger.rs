@@ -87,10 +87,12 @@ impl InputLedger {
 
     /// Iterate over all non-terminal input states.
     pub fn iter_non_terminal(&self) -> impl Iterator<Item = (&InputId, &InputState)> {
-        self.states.iter().filter(|(_, s)| !s.is_terminal())
+        self.states.iter().filter(|(_, state)| !state.is_terminal())
     }
 
-    /// Iterate over all input states.
+    /// Iterate over all input states. "Active" (non-terminal) filtering must
+    /// happen at the driver level, which has DSL access; the ledger by itself
+    /// carries only shell metadata.
     pub fn iter(&self) -> impl Iterator<Item = (&InputId, &InputState)> {
         self.states.iter()
     }

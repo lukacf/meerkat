@@ -119,25 +119,33 @@ pub const MAX_STAGE_ATTEMPTS: u32 = 3;
 
 /// DSL-owned lifecycle projection for an input.
 ///
-/// Carries the three fields that are authoritative in the MeerkatMachine DSL
-/// (`input_phases`, `input_run_associations`, `input_boundary_sequences`) so
-/// they can travel alongside a persisted [`InputState`] at the store boundary,
-/// where no live DSL is available to query. Inside a running driver, these
-/// values are always read from the DSL directly, never from the seed.
+/// Carries the fields that are authoritative in the MeerkatMachine DSL
+/// (`input_phases`, `input_run_associations`, `input_boundary_sequences`,
+/// `input_terminal_kind` + `input_superseded_by` / `input_aggregate_id` /
+/// `input_abandon_reason` / `input_abandon_attempt_count`, and
+/// `input_attempt_counts`) so they can travel alongside a persisted
+/// [`InputState`] at the store boundary, where no live DSL is available to
+/// query. Inside a running driver, these values are always read from the DSL
+/// directly, never from the seed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputStateSeed {
     pub phase: InputLifecycleState,
     pub last_run_id: Option<RunId>,
     pub last_boundary_sequence: Option<u64>,
+    pub terminal_outcome: Option<InputTerminalOutcome>,
+    pub attempt_count: u32,
 }
 
 impl InputStateSeed {
-    /// Freshly-accepted input: no run association, no boundary sequence yet.
+    /// Freshly-accepted input: no run association, no boundary sequence,
+    /// no terminal outcome, zero attempts.
     pub fn new_accepted() -> Self {
         Self {
             phase: InputLifecycleState::Accepted,
             last_run_id: None,
             last_boundary_sequence: None,
+            terminal_outcome: None,
+            attempt_count: 0,
         }
     }
 }
@@ -166,17 +174,19 @@ impl StoredInputState {
 
 /// Per-input shell data. Plain fields, no hidden state machine.
 ///
-/// The DSL owns the `phase`, `last_run_id`, and `last_boundary_sequence`
-/// fields formerly mirrored here. Live code reads them from the DSL via the
-/// driver; persistence callsites serialize them via [`InputStateSeed`].
+/// All DSL-owned lifecycle fields (`phase`, `last_run_id`,
+/// `last_boundary_sequence`, `terminal_outcome`, `attempt_count`) are
+/// authoritative in the DSL. Live code reads them via
+/// `EphemeralRuntimeDriver::input_phase` / `input_last_run_id` /
+/// `input_last_boundary_sequence` / `input_terminal_outcome` /
+/// `input_attempt_count`. Persistence callsites serialize them via
+/// [`InputStateSeed`] bundled on [`StoredInputState`].
 #[derive(Debug, Clone)]
 pub struct InputState {
     pub input_id: InputId,
-    /// Compatibility cache of the DSL's typed terminal metadata maps:
-    /// `input_terminal_kind`, `input_superseded_by`, `input_aggregate_id`,
-    /// `input_abandon_reason`, and `input_abandon_attempt_count`.
+    /// Compatibility cache of the DSL-owned terminal outcome metadata.
     pub terminal_outcome: Option<InputTerminalOutcome>,
-    /// Compatibility cache of the DSL's `input_attempt_counts` map.
+    /// Compatibility cache of the DSL-owned attempt count.
     pub attempt_count: u32,
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
@@ -211,16 +221,10 @@ impl InputState {
         }
     }
 
-    /// Whether this input has reached a terminal outcome.
-    ///
-    /// Invariant (held by every writer in the tree): `terminal_outcome` is
-    /// kept in sync with the DSL's typed terminal metadata for persistence and
-    /// compatibility consumers.
     pub fn is_terminal(&self) -> bool {
         self.terminal_outcome.is_some()
     }
 
-    /// Compatibility cache of the DSL terminal outcome metadata.
     pub fn terminal_outcome(&self) -> Option<&InputTerminalOutcome> {
         self.terminal_outcome.as_ref()
     }
@@ -286,10 +290,10 @@ impl Serialize for StoredInputState {
             input_id: self.state.input_id.clone(),
             current_state: self.seed.phase,
             policy: self.state.policy.clone(),
-            terminal_outcome: self.state.terminal_outcome.clone(),
+            terminal_outcome: self.seed.terminal_outcome.clone(),
             durability: self.state.durability,
             idempotency_key: self.state.idempotency_key.clone(),
-            attempt_count: self.state.attempt_count,
+            attempt_count: self.seed.attempt_count,
             recovery_count: self.state.recovery_count,
             history: self.state.history.clone(),
             reconstruction_source: self.state.reconstruction_source.clone(),
@@ -308,7 +312,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
         let helper = InputStateSerde::deserialize(deserializer)?;
         let state = InputState {
             input_id: helper.input_id,
-            terminal_outcome: helper.terminal_outcome,
+            terminal_outcome: helper.terminal_outcome.clone(),
             attempt_count: helper.attempt_count,
             history: helper.history,
             updated_at: helper.updated_at,
@@ -324,6 +328,8 @@ impl<'de> Deserialize<'de> for StoredInputState {
             phase: helper.current_state,
             last_run_id: helper.last_run_id,
             last_boundary_sequence: helper.last_boundary_sequence,
+            terminal_outcome: helper.terminal_outcome,
+            attempt_count: helper.attempt_count,
         };
         Ok(StoredInputState { state, seed })
     }
@@ -339,14 +345,11 @@ mod tests {
     use meerkat_core::ops::{OpEvent, OperationId};
 
     #[test]
-    fn new_accepted_starts_with_no_terminal_outcome() {
+    fn new_accepted_starts_with_no_shell_history() {
         let id = InputId::new();
         let state = InputState::new_accepted(id.clone());
         assert_eq!(state.input_id, id);
-        assert!(!state.is_terminal());
-        assert_eq!(state.attempt_count, 0);
         assert!(state.history.is_empty());
-        assert!(state.terminal_outcome.is_none());
     }
 
     #[test]
@@ -355,6 +358,8 @@ mod tests {
         assert_eq!(seed.phase, InputLifecycleState::Accepted);
         assert!(seed.last_run_id.is_none());
         assert!(seed.last_boundary_sequence.is_none());
+        assert!(seed.terminal_outcome.is_none());
+        assert_eq!(seed.attempt_count, 0);
     }
 
     #[test]
@@ -419,6 +424,8 @@ mod tests {
                 phase: InputLifecycleState::Queued,
                 last_run_id: None,
                 last_boundary_sequence: None,
+                terminal_outcome: None,
+                attempt_count: 0,
             },
         };
 

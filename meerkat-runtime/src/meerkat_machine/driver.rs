@@ -114,6 +114,16 @@ impl DriverEntry {
         self.as_driver().input_last_boundary_sequence(input_id)
     }
 
+    pub(crate) fn input_terminal_outcome(
+        &self,
+        input_id: &InputId,
+    ) -> Option<crate::input_state::InputTerminalOutcome> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.input_terminal_outcome(input_id),
+            DriverEntry::Persistent(d) => d.inner_ref().input_terminal_outcome(input_id),
+        }
+    }
+
     /// Set the silent comms intents for the underlying driver.
     pub(crate) fn set_silent_comms_intents(&mut self, intents: Vec<String>) {
         match self {
@@ -691,6 +701,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                     reason: Some("recovery: ConsumeOnAccept (Ignore+OnAccept policy)".into()),
                 });
                 seed.phase = InputLifecycleState::Consumed;
+                seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
                 state.updated_at = now;
                 delta.abandoned += 1;
@@ -747,11 +758,13 @@ pub(crate) fn machine_apply_recovered_input_normalization(
                     }),
                 });
                 seed.phase = to;
-                state.terminal_outcome = if has_receipt {
+                let terminal = if has_receipt {
                     Some(InputTerminalOutcome::Consumed)
                 } else {
                     None
                 };
+                seed.terminal_outcome = terminal.clone();
+                state.terminal_outcome = terminal;
                 state.updated_at = now;
             }
             delta.recovered += 1;
@@ -841,11 +854,7 @@ pub(crate) fn machine_recover_ephemeral_driver(
     // (ledger + DSL) so the normalization can read/rewrite the seed, then
     // push the normalized bundle back through `admit_recovered_to_ingress`
     // to re-seed the DSL maps.
-    let active_ids: Vec<InputId> = driver
-        .ledger()
-        .iter_non_terminal()
-        .map(|(input_id, _)| input_id.clone())
-        .collect();
+    let active_ids: Vec<InputId> = driver.active_input_ids();
 
     let mut normalized: Vec<(InputId, StoredInputState)> = Vec::with_capacity(active_ids.len());
     for input_id in &active_ids {

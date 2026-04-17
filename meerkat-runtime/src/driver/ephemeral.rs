@@ -312,6 +312,62 @@ impl EphemeralRuntimeDriver {
         self.dsl.0.state.input_boundary_sequences.get(&key).copied()
     }
 
+    /// Read the typed terminal outcome for an input, reconstructed from the
+    /// DSL's typed terminal metadata maps.
+    pub fn input_terminal_outcome(&self, input_id: &InputId) -> Option<InputTerminalOutcome> {
+        let key = Self::dsl_key(input_id);
+        let kind = self.dsl.0.state.input_terminal_kind.get(&key)?;
+        match kind.as_str() {
+            "Consumed" => Some(InputTerminalOutcome::Consumed),
+            "Superseded" => {
+                let raw = self.dsl.0.state.input_superseded_by.get(&key)?;
+                let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
+                Some(InputTerminalOutcome::Superseded { superseded_by: id })
+            }
+            "Coalesced" => {
+                let raw = self.dsl.0.state.input_aggregate_id.get(&key)?;
+                let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
+                Some(InputTerminalOutcome::Coalesced { aggregate_id: id })
+            }
+            "Abandoned" => {
+                let reason_str = self.dsl.0.state.input_abandon_reason.get(&key)?;
+                let reason = match reason_str.as_str() {
+                    "Retired" => InputAbandonReason::Retired,
+                    "Reset" => InputAbandonReason::Reset,
+                    "Stopped" => InputAbandonReason::Stopped,
+                    "Destroyed" => InputAbandonReason::Destroyed,
+                    "Cancelled" => InputAbandonReason::Cancelled,
+                    "MaxAttemptsExhausted" => {
+                        let attempts = self
+                            .dsl
+                            .0
+                            .state
+                            .input_abandon_attempt_count
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(0) as u32;
+                        InputAbandonReason::MaxAttemptsExhausted { attempts }
+                    }
+                    _ => return None,
+                };
+                Some(InputTerminalOutcome::Abandoned { reason })
+            }
+            _ => None,
+        }
+    }
+
+    /// Read the attempt count for an input from the DSL.
+    pub fn input_attempt_count(&self, input_id: &InputId) -> u32 {
+        let key = Self::dsl_key(input_id);
+        self.dsl
+            .0
+            .state
+            .input_attempt_counts
+            .get(&key)
+            .copied()
+            .unwrap_or(0) as u32
+    }
+
     // ---- Admission metadata accessors (read-only) ----
 
     /// The admission order (insertion order of persisted-queue admissions).
@@ -497,7 +553,7 @@ impl EphemeralRuntimeDriver {
         content_shape: &ContentShape,
         handling_mode: HandlingMode,
         is_prompt: bool,
-        recovered_state: &InputState,
+        _recovered_state: &InputState,
         recovered_seed: &InputStateSeed,
         policy: &PolicyDecision,
         request_id: Option<&RequestId>,
@@ -518,7 +574,7 @@ impl EphemeralRuntimeDriver {
             key.clone(),
             Self::phase_str_for(lifecycle_state).to_string(),
         );
-        match recovered_state.terminal_outcome().cloned() {
+        match recovered_seed.terminal_outcome.clone() {
             Some(InputTerminalOutcome::Consumed) => {
                 self.dsl
                     .0
@@ -575,7 +631,7 @@ impl EphemeralRuntimeDriver {
                     .0
                     .state
                     .input_abandon_attempt_count
-                    .insert(key.clone(), u64::from(recovered_state.attempt_count()));
+                    .insert(key.clone(), u64::from(recovered_seed.attempt_count));
                 self.dsl.0.state.input_superseded_by.remove(&key);
                 self.dsl.0.state.input_aggregate_id.remove(&key);
             }
@@ -591,7 +647,7 @@ impl EphemeralRuntimeDriver {
             .0
             .state
             .input_attempt_counts
-            .insert(key.clone(), u64::from(recovered_state.attempt_count()));
+            .insert(key.clone(), u64::from(recovered_seed.attempt_count));
         match recovered_seed.last_run_id.clone() {
             Some(run_id) => {
                 self.dsl
@@ -1020,6 +1076,8 @@ impl EphemeralRuntimeDriver {
             phase,
             last_run_id: self.input_last_run_id(input_id),
             last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+            terminal_outcome: self.input_terminal_outcome(input_id),
+            attempt_count: self.input_attempt_count(input_id),
         };
         Some(StoredInputState { state, seed })
     }
@@ -1036,6 +1094,8 @@ impl EphemeralRuntimeDriver {
                     phase,
                     last_run_id: self.input_last_run_id(input_id),
                     last_boundary_sequence: self.input_last_boundary_sequence(input_id),
+                    terminal_outcome: self.input_terminal_outcome(input_id),
+                    attempt_count: self.input_attempt_count(input_id),
                 };
                 StoredInputState {
                     state: state.clone(),
@@ -1233,11 +1293,11 @@ impl EphemeralRuntimeDriver {
             if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
                 continue;
             }
-            let Some(state) = self.ledger.get(input_id) else {
+            let Some(_state) = self.ledger.get(input_id) else {
                 continue;
             };
 
-            let attempts = state.attempt_count;
+            let attempts = self.input_attempt_count(input_id);
             let key = Self::dsl_key(input_id);
 
             if attempts >= MAX_STAGE_ATTEMPTS {
@@ -1326,7 +1386,15 @@ impl EphemeralRuntimeDriver {
     }
 
     pub(crate) fn finalize_retire(&mut self) -> RetireReport {
-        let inputs_pending_drain = self.ledger.iter().filter(|(_, s)| !s.is_terminal()).count();
+        let inputs_pending_drain = self
+            .ledger
+            .iter()
+            .filter(|(id, _)| {
+                self.input_phase(id)
+                    .map(|phase| !phase.is_terminal())
+                    .unwrap_or(false)
+            })
+            .count();
         RetireReport {
             inputs_abandoned: 0,
             inputs_pending_drain,
@@ -1402,7 +1470,15 @@ impl EphemeralRuntimeDriver {
     }
 
     pub fn recycle_preserving_work(&mut self) -> Result<usize, RuntimeDriverError> {
-        let transferred = self.ledger.active_input_ids().len();
+        let transferred = self
+            .ledger
+            .iter()
+            .filter(|(id, _)| {
+                self.input_phase(id)
+                    .map(|phase| !phase.is_terminal())
+                    .unwrap_or(false)
+            })
+            .count();
         let runtime_id = self.runtime_id.clone();
         let silent_comms_intents = self.silent_comms_intents.clone();
         let ledger = self.ledger.clone();
@@ -1453,17 +1529,22 @@ impl EphemeralRuntimeDriver {
         let non_terminal_ids: Vec<InputId> = self
             .ledger
             .iter()
-            .filter(|(_, s)| !s.is_terminal())
-            .map(|(id, _)| id.clone())
+            .filter_map(|(id, _)| {
+                if self
+                    .input_phase(id)
+                    .map(|phase| !phase.is_terminal())
+                    .unwrap_or(false)
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         let mut count = 0;
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
-            let attempt_count = self
-                .ledger
-                .get(id)
-                .map(|state| u64::from(state.attempt_count))
-                .unwrap_or(0);
+            let attempt_count = u64::from(self.input_attempt_count(id));
             let from_phase = self
                 .input_phase(id)
                 .unwrap_or(InputLifecycleState::Accepted);
@@ -1849,6 +1930,12 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         EphemeralRuntimeDriver::stored_input_state(self, input_id)
     }
     fn active_input_ids(&self) -> Vec<InputId> {
-        self.ledger.active_input_ids()
+        self.ledger
+            .iter()
+            .filter_map(|(id, _)| match self.input_phase(id) {
+                Some(phase) if !phase.is_terminal() => Some(id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

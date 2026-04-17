@@ -242,6 +242,7 @@ pub trait SessionAgent: Send {
         prompt: meerkat_core::types::ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         if handling_mode != meerkat_core::types::HandlingMode::Queue {
@@ -262,6 +263,7 @@ pub trait SessionAgent: Send {
     /// tool-result continuations.
     async fn run_pending_with_events(
         &mut self,
+        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Err(meerkat_core::error::AgentError::ConfigError(
@@ -2219,12 +2221,13 @@ async fn session_task<A: SessionAgent>(
                                 prompt,
                                 handling_mode,
                                 render_metadata,
+                                execution_kind,
                                 agent_event_tx.clone(),
                             ))
                         }
-                        StartTurnDisposition::RunPending => {
-                            Box::pin(agent.run_pending_with_events(agent_event_tx.clone()))
-                        }
+                        StartTurnDisposition::RunPending => Box::pin(
+                            agent.run_pending_with_events(execution_kind, agent_event_tx.clone()),
+                        ),
                         StartTurnDisposition::NoPendingBoundary => {
                             // Already handled above — unreachable here.
                             unreachable!("NoPendingBoundary handled before Running state")

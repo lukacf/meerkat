@@ -1744,10 +1744,31 @@ impl AgentFactory {
                                 (realm, conn_ref.binding_id.clone())
                             }
                             None => {
-                                let realm =
-                                    meerkat_core::RealmConnectionSet::synthesize_env_default(
-                                        provider,
-                                    );
+                                // Two equivalent legacy paths:
+                                //   (a) `config.providers.api_keys[provider]`
+                                //       — TOML config-declared secret.
+                                //       Synthesized with InlineSecret.
+                                //   (b) env var ANTHROPIC_API_KEY etc.
+                                //       — synthesized with Env source.
+                                // Both flow through the same registry path.
+                                let provider_key_name = provider_key(provider);
+                                let inline = config
+                                    .providers
+                                    .api_keys
+                                    .as_ref()
+                                    .and_then(|m| m.get(provider_key_name).cloned());
+                                let realm = match inline {
+                                    Some(secret) => {
+                                        meerkat_core::RealmConnectionSet::synthesize_inline_default(
+                                            provider, secret,
+                                        )
+                                    }
+                                    None => {
+                                        meerkat_core::RealmConnectionSet::synthesize_env_default(
+                                            provider,
+                                        )
+                                    }
+                                };
                                 (realm, "default".to_string())
                             }
                         };

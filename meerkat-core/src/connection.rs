@@ -282,6 +282,17 @@ impl RealmConnectionSet {
     /// `ResolverEnvironment::with_process_env()`; that lookup is applied
     /// inside the registry's resolve path when it reads the env source.
     pub fn synthesize_env_default(provider: Provider) -> Self {
+        Self::synthesize_default(provider, None)
+    }
+
+    /// Synthesize a default realm with an inline secret instead of an env
+    /// lookup. Used when callers have already read the api key from a
+    /// config file (legacy `config.providers.api_keys` path).
+    pub fn synthesize_inline_default(provider: Provider, secret: String) -> Self {
+        Self::synthesize_default(provider, Some(secret))
+    }
+
+    fn synthesize_default(provider: Provider, inline_secret: Option<String>) -> Self {
         let (backend_kind, env_var) = match provider {
             Provider::Anthropic => ("anthropic_api", "ANTHROPIC_API_KEY"),
             Provider::OpenAI => ("openai_api", "OPENAI_API_KEY"),
@@ -296,13 +307,17 @@ impl RealmConnectionSet {
             base_url: None,
             options: serde_json::Value::Null,
         };
+        let source = match inline_secret {
+            Some(secret) => CredentialSourceSpec::InlineSecret { secret },
+            None => CredentialSourceSpec::Env {
+                env: env_var.to_string(),
+            },
+        };
         let auth = AuthProfile {
             id: "default".to_string(),
             provider,
             auth_method: "api_key".to_string(),
-            source: CredentialSourceSpec::Env {
-                env: env_var.to_string(),
-            },
+            source,
             storage: CredentialStorageSpec::Ephemeral,
             constraints: AuthConstraints::default(),
             metadata_defaults: AuthMetadataDefaults::default(),

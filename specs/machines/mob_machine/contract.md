@@ -13,6 +13,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_run_count`: `u64`
 - `pending_spawn_count`: `u64`
 - `coordinator_bound`: `Bool`
+- `member_voice_intent`: `Set<AgentIdentity>`
 
 ## Inputs
 - `RunFlow`
@@ -54,6 +55,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
+- `SetMemberVoiceIntent`(agent_identity: AgentIdentity)
+- `ClearMemberVoiceIntent`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -117,6 +120,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
+- `MemberVoiceIntentSet`(agent_identity: AgentIdentity)
+- `MemberVoiceIntentCleared`(agent_identity: AgentIdentity)
 
 ## Invariants
 
@@ -640,6 +645,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `active_members_present`
   - `current_binding_matches`
 - Emits: `FlowTerminalized`
+- To: `Running`
+
+### `SetMemberVoiceIntent`
+- From: `Running`
+- On: `SetMemberVoiceIntent`(agent_identity)
+- Emits: `MemberVoiceIntentSet`
+- To: `Running`
+
+### `ClearMemberVoiceIntent`
+- From: `Running`
+- On: `ClearMemberVoiceIntent`(agent_identity)
+- Emits: `MemberVoiceIntentCleared`
 - To: `Running`
 
 ## Coverage

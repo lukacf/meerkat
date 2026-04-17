@@ -751,11 +751,13 @@ pub struct AgentFactory {
     /// `AuthError::InteractiveLoginRequired` — CLI / REST / RPC surfaces
     /// set this to an `AutoTokenStore` during construction so the whole
     /// stack reads the same persisted credentials.
+    #[cfg(not(target_arch = "wasm32"))]
     pub token_store: Option<Arc<dyn meerkat_client::auth_store::TokenStore>>,
     /// Refresh coordinator for OAuth token lifecycle. When `None`, a
     /// fresh `InMemoryCoordinator` is created per build; callers that
     /// need cross-process refresh dedup (e.g. concurrent CLI runs) set
     /// a `FileLockCoordinator` here.
+    #[cfg(not(target_arch = "wasm32"))]
     pub refresh_coord: Option<Arc<dyn meerkat_client::auth_store::RefreshCoordinator>>,
 }
 
@@ -810,7 +812,9 @@ impl AgentFactory {
             mob_tools: None,
             #[cfg(feature = "comms")]
             comms_runtime: None,
+            #[cfg(not(target_arch = "wasm32"))]
             token_store: None,
+            #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
         }
     }
@@ -824,6 +828,7 @@ impl AgentFactory {
     /// no `$XDG_CONFIG_HOME`), the field stays `None` and OAuth
     /// bindings surface `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let token_store = meerkat_client::auth_store::TokenStoreBackend::default_auto()
             .and_then(meerkat_client::auth_store::TokenStoreBackend::open)
             .ok();
@@ -846,7 +851,9 @@ impl AgentFactory {
             mob_tools: None,
             #[cfg(feature = "comms")]
             comms_runtime: None,
+            #[cfg(not(target_arch = "wasm32"))]
             token_store,
+            #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
         }
     }
@@ -854,6 +861,7 @@ impl AgentFactory {
     /// Attach a persistent `TokenStore` for OAuth-backed bindings. When
     /// set, the provider-runtime registry reads persisted tokens from
     /// this store during `resolve_binding`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_token_store(
         mut self,
         store: Arc<dyn meerkat_client::auth_store::TokenStore>,
@@ -863,6 +871,7 @@ impl AgentFactory {
     }
 
     /// Attach a refresh coordinator (cross-process dedup via file lock).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_refresh_coordinator(
         mut self,
         coord: Arc<dyn meerkat_client::auth_store::RefreshCoordinator>,
@@ -874,6 +883,7 @@ impl AgentFactory {
     /// Convenience: attach an auto-detecting `TokenStore` at the user's
     /// default credential directory ($XDG_CONFIG_HOME/meerkat/credentials).
     /// Surfaces (CLI / REST / RPC) call this during factory construction.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_default_token_store(
         mut self,
     ) -> Result<Self, meerkat_client::auth_store::TokenStoreError> {
@@ -1704,12 +1714,16 @@ impl AgentFactory {
                     // TokenStore attached so persisted tokens (written by
                     // `rkat auth login`, server-side OAuth completion, etc.)
                     // are read during resolve_binding.
+                    #[allow(unused_mut)]
                     let mut env = meerkat_client::ResolverEnvironment::with_process_env();
-                    if let Some(store) = self.token_store.clone() {
-                        env = env.with_token_store(store);
-                    }
-                    if let Some(coord) = self.refresh_coord.clone() {
-                        env = env.with_refresh_coordinator(coord);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Some(store) = self.token_store.clone() {
+                            env = env.with_token_store(store);
+                        }
+                        if let Some(coord) = self.refresh_coord.clone() {
+                            env = env.with_refresh_coordinator(coord);
+                        }
                     }
                     let registry = meerkat_client::ProviderRuntimeRegistry::default();
                     let connection = registry

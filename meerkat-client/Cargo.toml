@@ -34,7 +34,17 @@ dirs = { workspace = true }
 base64 = { workspace = true }
 
 # Phase 4a optional deps (feature-gated, non-wasm only).
-keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+# keyring backends:
+#   - apple-native: macOS Keychain
+#   - windows-native: Windows Credential Manager
+#   - linux-native: Linux kernel keyutils (no libdbus dependency; reboots
+#     lose the keyring. The AutoTokenStore falls back to FileTokenStore on
+#     read failures, so persistent tokens survive via $XDG_CONFIG_HOME.)
+#   We deliberately avoid linux-native-sync-persistent because its
+#   dbus-secret-service transitive pulls in libdbus-1-dev system headers,
+#   which CI runners don't install by default. The file fallback provides
+#   equivalent persistence without external system-library dependencies.
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
 fs4 = { version = "0.12", optional = true }
 oauth2 = { version = "5", optional = true }
 jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }

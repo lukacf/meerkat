@@ -423,7 +423,7 @@ async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
 
 #[tokio::test]
 async fn realtime_attachment_status_defaults_to_unattached() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -440,7 +440,7 @@ async fn realtime_attachment_status_defaults_to_unattached() {
 
 #[tokio::test]
 async fn realtime_attachment_status_reports_intent_present_unbound() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -464,7 +464,7 @@ async fn realtime_attachment_status_reports_intent_present_unbound() {
 
 #[tokio::test]
 async fn realtime_attachment_status_reports_binding_not_ready_and_ready() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -511,7 +511,7 @@ async fn realtime_attachment_status_reports_binding_not_ready_and_ready() {
 
 #[tokio::test]
 async fn realtime_attachment_status_reports_replacement_pending_and_reattach_required() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -587,7 +587,7 @@ async fn realtime_attachment_status_reports_replacement_pending_and_reattach_req
 
 #[tokio::test]
 async fn realtime_attachment_signal_rejects_stale_authority() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -623,7 +623,7 @@ async fn realtime_attachment_signal_rejects_stale_authority() {
 
 #[tokio::test]
 async fn attach_live_rejects_sessions_without_executor_and_preserves_unbound_status() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
@@ -669,7 +669,7 @@ async fn attach_live_rejects_sessions_without_executor_and_preserves_unbound_sta
 
 #[tokio::test]
 async fn detach_live_clears_binding_but_preserves_intent_projection() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter
@@ -11763,7 +11763,7 @@ async fn reconfigure_live_topology_failure_before_detach_restores_prior_binding(
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
@@ -11895,7 +11895,7 @@ async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_re
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))

@@ -620,7 +620,7 @@ mod tests {
                 &self,
                 _session_id: &SessionId,
                 _input_id: &InputId,
-            ) -> Result<Option<InputState>, RuntimeDriverError> {
+            ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
                 Ok(None)
             }
 

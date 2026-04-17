@@ -7068,7 +7068,7 @@ async fn test_turn_driven_realtime_attach_keeps_peer_ingress_drain_alive_until_d
             .meerkat_machine_spine_snapshot(&sid)
             .await
             .expect("runtime snapshot after realtime attach");
-        if snapshot.drain.phase == Some(meerkat_core::CommsDrainPhase::Running) {
+        if snapshot.drain.phase == Some(meerkat_runtime::CommsDrainPhase::Running) {
             break;
         }
         assert!(
@@ -7091,8 +7091,10 @@ async fn test_turn_driven_realtime_attach_keeps_peer_ingress_drain_alive_until_d
             .expect("runtime snapshot after realtime detach");
         if matches!(
             snapshot.drain.phase,
-            Some(meerkat_core::CommsDrainPhase::Stopped | meerkat_core::CommsDrainPhase::Inactive)
-                | None
+            Some(
+                meerkat_runtime::CommsDrainPhase::Stopped
+                    | meerkat_runtime::CommsDrainPhase::Inactive
+            ) | None
         ) {
             break;
         }
@@ -17231,7 +17233,7 @@ async fn test_turn_driven_realtime_attached_member_applies_terminal_peer_respons
             .meerkat_machine_spine_snapshot(&sid_operator)
             .await
             .expect("runtime snapshot after realtime attach");
-        if snapshot.drain.phase == Some(meerkat_core::CommsDrainPhase::Running) {
+        if snapshot.drain.phase == Some(meerkat_runtime::CommsDrainPhase::Running) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

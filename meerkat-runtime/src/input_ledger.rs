@@ -273,7 +273,10 @@ mod tests {
                 IdempotencyKey::new(format!("terminal-key-{index}"))
             };
             let mut state = InputState::new_accepted(InputId::new());
-            state.apply(InputLifecycleInput::ConsumeOnAccept).unwrap();
+            // InputLifecycle was absorbed into MeerkatMachine DSL; tests
+            // construct terminal state directly instead of simulating the
+            // authority apply that used to live in a standalone machine.
+            state.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
             let duplicate = ledger.accept_with_idempotency(state, key);
             assert!(duplicate.is_none(), "fresh terminal key should insert");
         }

@@ -279,6 +279,15 @@ machine! {
             || self.lifecycle_phase == Phase::Retired
         }
 
+        // Realtime binding state + authority epoch must stay in lockstep.
+        // Unbound iff no epoch; any active binding phase must carry Some(epoch).
+        // Prevents Unbound+Some(epoch) and BindingReady+None from being
+        // representable as a derived TLC fact.
+        invariant realtime_binding_epoch_consistency {
+            (self.realtime_binding_state == "Unbound")
+            == (self.realtime_binding_authority_epoch == None)
+        }
+
         // =====================================================================
         // Direct transitions
         // =====================================================================
@@ -1482,6 +1491,12 @@ machine! {
             on input MarkLiveTopologyDetached
             guard "session_registered" { self.session_id != None }
             guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            // DSL-native "safe to detach now": no in-flight run boundary. If
+            // the shell retries this input while a run is active, the DSL
+            // rejects until the run completes. This encodes the
+            // detach/boundary sequencing invariant as a first-class machine
+            // fact rather than shell polling.
+            guard "no_active_run" { self.current_run_id == None }
             update {
                 self.live_topology_phase = "Detached";
                 // Compose the detach into the binding authority.

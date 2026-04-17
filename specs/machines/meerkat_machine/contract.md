@@ -154,6 +154,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `fence_requires_bound_runtime`
 - `running_has_current_run`
 - `current_run_only_while_running_or_retired`
+- `realtime_binding_epoch_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -1504,6 +1505,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `topology_reconfiguring`
+  - `no_active_run`
 - Emits: `LiveTopologyPhaseChanged`
 - To: `Idle`
 
@@ -1513,6 +1515,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `topology_reconfiguring`
+  - `no_active_run`
 - Emits: `LiveTopologyPhaseChanged`
 - To: `Attached`
 
@@ -1522,6 +1525,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `topology_reconfiguring`
+  - `no_active_run`
 - Emits: `LiveTopologyPhaseChanged`
 - To: `Running`
 
@@ -1531,6 +1535,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `topology_reconfiguring`
+  - `no_active_run`
 - Emits: `LiveTopologyPhaseChanged`
 - To: `Retired`
 
@@ -1540,6 +1545,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
   - `topology_reconfiguring`
+  - `no_active_run`
 - Emits: `LiveTopologyPhaseChanged`
 - To: `Stopped`
 

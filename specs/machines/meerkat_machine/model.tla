@@ -1687,6 +1687,7 @@ MarkLiveTopologyDetachedIdle ==
     /\ phase = "Idle"
     /\ (session_id # None)
     /\ (live_topology_phase = "Reconfiguring")
+    /\ (current_run_id = None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -1701,6 +1702,7 @@ MarkLiveTopologyDetachedAttached ==
     /\ phase = "Attached"
     /\ (session_id # None)
     /\ (live_topology_phase = "Reconfiguring")
+    /\ (current_run_id = None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -1715,6 +1717,7 @@ MarkLiveTopologyDetachedRunning ==
     /\ phase = "Running"
     /\ (session_id # None)
     /\ (live_topology_phase = "Reconfiguring")
+    /\ (current_run_id = None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -1729,6 +1732,7 @@ MarkLiveTopologyDetachedRetired ==
     /\ phase = "Retired"
     /\ (session_id # None)
     /\ (live_topology_phase = "Reconfiguring")
+    /\ (current_run_id = None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -1743,6 +1747,7 @@ MarkLiveTopologyDetachedStopped ==
     /\ phase = "Stopped"
     /\ (session_id # None)
     /\ (live_topology_phase = "Reconfiguring")
+    /\ (current_run_id = None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = "Unbound"
@@ -2236,6 +2241,7 @@ Next ==
 fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))
 running_has_current_run == ((phase # "Running") \/ (current_run_id # None))
 current_run_only_while_running_or_retired == ((current_run_id = None) \/ (phase = "Running") \/ (phase = "Retired"))
+realtime_binding_epoch_consistency == ((realtime_binding_state = "Unbound") = (realtime_binding_authority_epoch = None))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(silent_intent_overrides) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 2
@@ -2245,5 +2251,6 @@ Spec == Init /\ [][Next]_vars
 THEOREM Spec => []fence_requires_bound_runtime
 THEOREM Spec => []running_has_current_run
 THEOREM Spec => []current_run_only_while_running_or_retired
+THEOREM Spec => []realtime_binding_epoch_consistency
 
 =============================================================================

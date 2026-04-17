@@ -3807,6 +3807,7 @@ meerkat_MarkLiveTopologyDetachedIdle ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
        /\ meerkat_phase' = "Idle"
        /\ meerkat_realtime_binding_state' = "Unbound"
        /\ meerkat_realtime_binding_authority_epoch' = None
@@ -3831,6 +3832,7 @@ meerkat_MarkLiveTopologyDetachedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
        /\ meerkat_phase' = "Attached"
        /\ meerkat_realtime_binding_state' = "Unbound"
        /\ meerkat_realtime_binding_authority_epoch' = None
@@ -3855,6 +3857,7 @@ meerkat_MarkLiveTopologyDetachedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
        /\ meerkat_phase' = "Running"
        /\ meerkat_realtime_binding_state' = "Unbound"
        /\ meerkat_realtime_binding_authority_epoch' = None
@@ -3879,6 +3882,7 @@ meerkat_MarkLiveTopologyDetachedRetired ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
        /\ meerkat_phase' = "Retired"
        /\ meerkat_realtime_binding_state' = "Unbound"
        /\ meerkat_realtime_binding_authority_epoch' = None
@@ -3903,6 +3907,7 @@ meerkat_MarkLiveTopologyDetachedStopped ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_realtime_binding_state' = "Unbound"
        /\ meerkat_realtime_binding_authority_epoch' = None
@@ -4442,6 +4447,7 @@ meerkat_FailLiveTopologyAfterDetachStopped ==
 meerkat_fence_requires_bound_runtime == ((meerkat_active_fence_token = None) \/ (meerkat_active_runtime_id # None))
 meerkat_running_has_current_run == ((meerkat_phase # "Running") \/ (meerkat_current_run_id # None))
 meerkat_current_run_only_while_running_or_retired == ((meerkat_current_run_id = None) \/ (meerkat_phase = "Running") \/ (meerkat_phase = "Retired"))
+meerkat_realtime_binding_epoch_consistency == ((meerkat_realtime_binding_state = "Unbound") = (meerkat_realtime_binding_authority_epoch = None))
 
 mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable) ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -6161,11 +6167,11 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
     \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
     \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
-    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
-    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
-    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
-    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
-    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
     \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
     \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
     \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
@@ -6674,5 +6680,6 @@ WitnessRouteObserved_destroy_runtime_path_runtime_destroyed_reaches_mob == <> Ro
 THEOREM Spec => []meerkat_fence_requires_bound_runtime
 THEOREM Spec => []meerkat_running_has_current_run
 THEOREM Spec => []meerkat_current_run_only_while_running_or_retired
+THEOREM Spec => []meerkat_realtime_binding_epoch_consistency
 
 =============================================================================

@@ -72,6 +72,12 @@ pub struct MobMemberSnapshot {
     pub is_final: bool,
     /// Canonical live attachment status for the member.
     pub realtime_attachment_status: MobRealtimeAttachmentStatus,
+    /// Whether the operator has expressed durable intent for this member to
+    /// carry a realtime attachment. `true` here plus a non-`BindingReady`
+    /// `realtime_attachment_status` means the intent is pending transport
+    /// bring-up. Distinguishes "no intent" from "intent but transport not
+    /// yet bound".
+    pub voice_intent_present: bool,
     /// Bridge-internal session binding — compatibility alias for the current bridge session.
     #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
@@ -99,6 +105,14 @@ impl MobMemberSnapshot {
     pub(crate) fn current_bridge_session_id(&self) -> Option<&SessionId> {
         self.current_bridge_session_id.as_ref()
     }
+
+    /// Convenience accessor for the canonical member identity. Equivalent to
+    /// `&self.agent_runtime_id.identity` but saves every consumer from
+    /// reaching through the runtime-id wrapper.
+    #[must_use]
+    pub fn agent_identity(&self) -> &AgentIdentity {
+        &self.agent_runtime_id.identity
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +136,14 @@ pub struct MobMemberListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub is_final: bool,
+    /// Canonical live attachment status for the member. Roster-view
+    /// equivalent of `MobMemberSnapshot::realtime_attachment_status` so
+    /// consumers can surface voice state in a single list pass.
+    pub realtime_attachment_status: MobRealtimeAttachmentStatus,
+    /// Whether the operator has expressed durable intent for this member to
+    /// carry a realtime attachment. Distinguishes "no intent" from "intent
+    /// but transport binding not yet ready".
+    pub voice_intent_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
     // --- Bridge internals (pub(crate)) ---
@@ -1471,6 +1493,8 @@ impl MobHandle {
                     status: snapshot.status,
                     error: snapshot.error,
                     is_final: snapshot.is_final,
+                    realtime_attachment_status: snapshot.realtime_attachment_status,
+                    voice_intent_present: snapshot.voice_intent_present,
                     current_session_id: None,
                     current_bridge_session_id: None,
                     kickoff: snapshot.kickoff,
@@ -1591,6 +1615,9 @@ impl MobHandle {
                 realtime_attachment_status: Self::missing_session_realtime_attachment_status(
                     roster_entry.as_ref(),
                 ),
+                voice_intent_present: roster_entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.voice_intent_present),
             });
         }
 
@@ -1608,6 +1635,7 @@ impl MobHandle {
                 peer_connectivity: None,
                 kickoff: None,
                 realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+                voice_intent_present: false,
             }),
             (Some(roster_state), None) => {
                 let session_observation = match roster_entry.as_ref().map(|entry| &entry.member_ref)
@@ -1642,6 +1670,9 @@ impl MobHandle {
                     realtime_attachment_status: Self::missing_session_realtime_attachment_status(
                         roster_entry.as_ref(),
                     ),
+                    voice_intent_present: roster_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.voice_intent_present),
                 })
             }
             (Some(roster_state), Some(bridge_session_id)) => {
@@ -1707,6 +1738,9 @@ impl MobHandle {
                         .unwrap_or(FenceToken::new(0)),
                     current_bridge_session_id: Some(bridge_session_id),
                     peer_connectivity,
+                    voice_intent_present: roster_entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.voice_intent_present),
                     kickoff: roster_entry.and_then(|entry| entry.kickoff),
                     realtime_attachment_status,
                 })
@@ -2985,6 +3019,7 @@ mod tests {
             tokens_used: 0,
             is_final: false,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -2998,6 +3033,43 @@ mod tests {
         // Identity-native fields must be present
         assert!(!snapshot_value["agent_runtime_id"].is_null());
         assert!(!snapshot_value["fence_token"].is_null());
+    }
+
+    #[test]
+    fn mob_member_snapshot_exposes_agent_identity_convenience_and_voice_intent() {
+        // Regression for DELETE_ME C9 + B2/C8: every consumer used to reach
+        // through `snapshot.agent_runtime_id.identity` and had no direct
+        // signal for durable voice intent. The snapshot now exposes both.
+        let snapshot = MobMemberSnapshot {
+            status: MobMemberStatus::Active,
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("singer")),
+            fence_token: FenceToken::new(0),
+            output_preview: None,
+            error: None,
+            tokens_used: 0,
+            is_final: false,
+            realtime_attachment_status: MobRealtimeAttachmentStatus::IntentPresentUnbound,
+            voice_intent_present: true,
+            current_session_id: None,
+            current_bridge_session_id: None,
+            peer_connectivity: None,
+            kickoff: None,
+        };
+        assert_eq!(
+            snapshot.agent_identity(),
+            &AgentIdentity::from("singer"),
+            "agent_identity() must return the canonical identity without requiring callers to reach through agent_runtime_id",
+        );
+        assert!(
+            snapshot.voice_intent_present,
+            "voice_intent_present must reflect the caller-supplied durable intent",
+        );
+        let value = serde_json::to_value(&snapshot).expect("snapshot should serialize to json");
+        assert_eq!(value["voice_intent_present"], true);
+        assert_eq!(
+            value["realtime_attachment_status"],
+            "intent_present_unbound"
+        );
     }
 
     #[test]
@@ -3016,6 +3088,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
         }
         .to_snapshot();
 

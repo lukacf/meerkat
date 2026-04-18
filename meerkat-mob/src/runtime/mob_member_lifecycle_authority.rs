@@ -45,6 +45,10 @@ pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
     pub(super) realtime_attachment_status: MobRealtimeAttachmentStatus,
+    /// Canonical durable voice intent carried on the roster. Surfaced as
+    /// `MobMemberSnapshot::voice_intent_present` so consumers can
+    /// distinguish "no intent" from "intent but binding not yet ready".
+    pub(super) voice_intent_present: bool,
 }
 
 impl CanonicalMemberSnapshotMaterial {
@@ -66,6 +70,7 @@ impl CanonicalMemberSnapshotMaterial {
             tokens_used: self.tokens_used,
             is_final,
             realtime_attachment_status: self.realtime_attachment_status,
+            voice_intent_present: self.voice_intent_present,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: self.peer_connectivity.clone(),
@@ -99,6 +104,7 @@ pub(super) struct MobMemberLifecycleInput {
     pub(super) peer_connectivity: Option<MobPeerConnectivitySnapshot>,
     pub(super) kickoff: Option<MobMemberKickoffSnapshot>,
     pub(super) realtime_attachment_status: MobRealtimeAttachmentStatus,
+    pub(super) voice_intent_present: bool,
 }
 
 pub(super) struct MobMemberLifecycleAuthority;
@@ -123,6 +129,7 @@ impl MobMemberLifecycleAuthority {
                 peer_connectivity: None,
                 kickoff: input.kickoff,
                 realtime_attachment_status: input.realtime_attachment_status,
+                voice_intent_present: input.voice_intent_present,
             };
         }
 
@@ -153,6 +160,7 @@ impl MobMemberLifecycleAuthority {
             peer_connectivity: input.peer_connectivity,
             kickoff: input.kickoff,
             realtime_attachment_status: input.realtime_attachment_status,
+            voice_intent_present: input.voice_intent_present,
         }
     }
 
@@ -204,6 +212,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
         assert_eq!(material.error.as_deref(), Some("restore mismatch"));
@@ -224,6 +233,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
         assert!(MobMemberLifecycleAuthority::is_terminal(&material));
@@ -244,6 +254,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Active);
         assert!(!MobMemberLifecycleAuthority::is_terminal(&material));
@@ -264,6 +275,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             realtime_attachment_status: MobRealtimeAttachmentStatus::Unattached,
+            voice_intent_present: false,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
         assert!(!MobMemberLifecycleAuthority::is_terminal(&material));

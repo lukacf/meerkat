@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-providers"
-description = "Provider-runtime registry, OAuth/auth primitives, and per-provider runtimes for Meerkat"
+description = "Shim re-export crate — delegates to meerkat-auth-core and meerkat-llm-core provider_runtime (B2 split). Provider-specific verticals live in meerkat-anthropic, meerkat-openai, meerkat-gemini."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,92 +14,31 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-contracts = { workspace = true }
-meerkat-client = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-chrono = { workspace = true }
-tracing = { workspace = true }
-indexmap = "2"
-parking_lot = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
-reqwest = { workspace = true }
-dirs = { workspace = true }
-base64 = { workspace = true }
-
-# Auth primitives (Phase 4a) — deps moved here from meerkat-client along
-# with the providers + runtime + auth_store + auth_oauth + authorizers
-# modules (deferral §3 extraction).
-keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
-fs4 = { version = "0.12", optional = true }
-oauth2 = { version = "5", optional = true }
-jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
-axum = { workspace = true, optional = true }
-
-aws-sigv4 = { version = "1", optional = true, features = ["http1"] }
-aws-credential-types = { version = "1", optional = true }
-aws-config = { version = "1", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "credentials-process", "sso"] }
-aws-types = { version = "1", optional = true }
-aws-smithy-runtime-api = { version = "1", optional = true }
-aws-smithy-eventstream = { version = "0.60", optional = true }
-aws-smithy-types = { version = "1", optional = true }
-http = { version = "1", optional = true }
-sha2 = { workspace = true, optional = true }
-hex = { version = "0.4", optional = true }
-urlencoding = { version = "2", optional = true }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-tokio_with_wasm = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+meerkat-llm-core = { workspace = true }
+meerkat-auth-core = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-tempfile = { workspace = true }
-schemars = { workspace = true }
-axum = { workspace = true }
-meerkat-models = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini"]
-anthropic = ["meerkat-client/anthropic"]
-openai = ["meerkat-client/openai"]
-gemini = ["meerkat-client/gemini"]
+default = ["oauth"]
 
-native-keyring = ["dep:keyring"]
-refresh-file-lock = ["dep:fs4"]
-oauth = ["dep:oauth2", "dep:jsonwebtoken", "dep:urlencoding", "dep:axum"]
-aws-auth = [
-    "dep:aws-sigv4",
-    "dep:aws-credential-types",
-    "dep:aws-config",
-    "dep:aws-types",
-    "dep:aws-smithy-runtime-api",
-    "dep:aws-smithy-eventstream",
-    "dep:aws-smithy-types",
-    "dep:http",
-    "dep:sha2",
-    "dep:hex",
-]
-google-oauth = ["dep:jsonwebtoken", "dep:urlencoding"]
-azure-auth = ["dep:urlencoding"]
+# Legacy feature aliases forwarded to meerkat-auth-core. Per-provider
+# features (bedrock/vertex/foundry/adc/code-assist) live on the
+# corresponding per-provider crate.
+native-keyring = ["meerkat-auth-core/keyring"]
+refresh-file-lock = ["meerkat-auth-core/file-lock"]
+oauth = ["meerkat-auth-core/oauth"]
+aws-auth = ["meerkat-auth-core/aws-sigv4"]
+google-oauth = ["meerkat-auth-core/gcp-auth"]
+azure-auth = ["meerkat-auth-core/azure-ad"]
 
-[package.metadata.cargo-machete]
-ignored = [
-    "aws-config",
-    "aws-smithy-eventstream",
-    "aws-smithy-runtime-api",
-    "aws-smithy-types",
-    "aws-types",
-    "hex",
-    "sha2",
-    "getrandom",
-]
+# Legacy feature aliases that used to select provider clients.
+# Retained as no-ops for backwards compat — downstream callers should
+# feature-gate on the per-provider crate's features directly.
+anthropic = []
+openai = []
+gemini = []
 
 [lints]
 workspace = true

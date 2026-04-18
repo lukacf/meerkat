@@ -41,6 +41,9 @@ meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "json
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
+meerkat-anthropic = { workspace = true, features = ["oauth"] }
+meerkat-openai = { workspace = true, features = ["oauth"] }
+meerkat-gemini = { workspace = true, features = ["oauth"] }
 meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
 meerkat-store = { workspace = true }
 meerkat-tools = { workspace = true }

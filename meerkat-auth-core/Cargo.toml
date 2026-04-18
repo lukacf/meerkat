@@ -1,0 +1,99 @@
+[package]
+name = "meerkat-auth-core"
+description = "Shared auth primitives for Meerkat: TokenStore backends, RefreshCoordinator impls, OAuth2 helpers, generic cloud-IAM authorizers (AWS SigV4, Google ADC, Azure AD)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+meerkat-llm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+indexmap = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+
+# Optional: OS keychain TokenStore.
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
+# Optional: cross-process refresh lockfile.
+fs4 = { version = "0.12", optional = true }
+# Optional: generic OAuth2 helpers (PKCE / callback / device-code / token-exchange).
+oauth2 = { version = "5", optional = true }
+jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
+axum = { workspace = true, optional = true }
+urlencoding = { version = "2", optional = true }
+# Optional: AWS SigV4 for Bedrock-style backends. Provider crates activate this via their own features.
+aws-sigv4 = { version = "1", optional = true, features = ["http1"] }
+aws-credential-types = { version = "1", optional = true }
+aws-config = { version = "1", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "credentials-process", "sso"] }
+aws-types = { version = "1", optional = true }
+aws-smithy-runtime-api = { version = "1", optional = true }
+aws-smithy-eventstream = { version = "0.60", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+http = { version = "1", optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { version = "0.4", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+schemars = { workspace = true }
+axum = { workspace = true }
+
+[features]
+default = ["oauth", "keyring", "file-lock"]
+keyring = ["dep:keyring"]
+file-lock = ["dep:fs4"]
+oauth = ["dep:oauth2", "dep:jsonwebtoken", "dep:urlencoding", "dep:axum"]
+aws-sigv4 = [
+    "dep:aws-sigv4",
+    "dep:aws-credential-types",
+    "dep:aws-config",
+    "dep:aws-types",
+    "dep:aws-smithy-runtime-api",
+    "dep:aws-smithy-eventstream",
+    "dep:aws-smithy-types",
+    "dep:http",
+    "dep:sha2",
+    "dep:hex",
+]
+gcp-auth = ["dep:jsonwebtoken", "dep:urlencoding"]
+azure-ad = ["dep:urlencoding"]
+
+[package.metadata.cargo-machete]
+ignored = [
+    "aws-config",
+    "aws-smithy-eventstream",
+    "aws-smithy-runtime-api",
+    "aws-smithy-types",
+    "aws-types",
+    "hex",
+    "sha2",
+    "getrandom",
+]
+
+[lints]
+workspace = true

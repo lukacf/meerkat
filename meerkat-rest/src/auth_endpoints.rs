@@ -17,18 +17,18 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::RealmConnectionSet;
+use meerkat_gemini::runtime::oauth as g_oauth;
+use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
     DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
     poll_device_code, request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
-use meerkat_providers::providers::anthropic::oauth as a_oauth;
-use meerkat_providers::providers::google::oauth as g_oauth;
-use meerkat_providers::providers::openai::oauth as o_oauth;
 
 use crate::AppState;
 

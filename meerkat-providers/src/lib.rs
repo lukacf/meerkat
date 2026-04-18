@@ -1,49 +1,40 @@
-//! meerkat-providers — provider-runtime registry, OAuth/auth primitives,
-//! and per-provider runtimes (OpenAI, Anthropic, Google) for Meerkat.
+//! meerkat-providers — shim re-exports of generic provider-runtime +
+//! auth primitives.
 //!
-//! Deferral §3 extraction (2026-04-18): this crate hosts the typed
-//! backend + auth-method matrix (previously `meerkat_client::providers`)
-//! plus the resolver/binding/registry runtime (`meerkat_client::runtime`)
-//! and the OAuth + TokenStore + authorizer primitives
-//! (`meerkat_client::{auth_oauth, auth_store, authorizers}`). Splitting
-//! it out of `meerkat-client` keeps the LLM-wire client surface small and
-//! gives the auth subsystem a distinct publish unit.
+//! Runtime traits + registry come from `meerkat-llm-core::provider_runtime`.
+//! Auth primitives (TokenStore, RefreshCoordinator, OAuth helpers,
+//! cloud-IAM authorizers) come from `meerkat-auth-core`.
 //!
-//! `meerkat-client` re-exports the public surface so downstream code that
-//! previously imported these types from `meerkat_client::*` continues to
-//! work without changes.
+//! Per-provider types (AnthropicProviderRuntime, OpenAiProviderRuntime,
+//! GoogleProviderRuntime, per-provider `oauth` modules) now live in the
+//! corresponding provider crates (`meerkat-anthropic`, `meerkat-openai`,
+//! `meerkat-gemini`) and are NOT re-exported here — depending on a
+//! provider's vertical requires a direct dep on that crate. B2 split
+//! (2026-04-18).
 
-#[cfg(target_arch = "wasm32")]
-pub mod tokio {
-    pub use tokio_with_wasm::alias::*;
+pub mod runtime {
+    pub use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+    pub use meerkat_llm_core::provider_runtime::{
+        AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
+        NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,
+        ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment,
+        StaticLease, ValidatedBinding,
+    };
 }
 
-pub mod providers;
-pub mod runtime;
-
-// Token storage + refresh coordination + OAuth helpers + cloud
-// authorizers. Non-wasm by construction: filesystem, keyring, and OS
-// lockfile primitives are not available in the browser.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod auth_oauth;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod auth_store;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod authorizers;
-
-// Provider-runtime re-exports (Phase 2).
-pub use runtime::{
-    DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod, NormalizedBackendKind,
-    ProviderAuthError, ProviderBindingError, ProviderClientError, ProviderRuntime,
-    ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, StaticLease,
+pub use meerkat_llm_core::provider_runtime::{
+    AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
+    NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,
+    ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, StaticLease,
     ValidatedBinding,
 };
 
-#[cfg(feature = "anthropic")]
-pub use providers::anthropic::{
-    AnthropicAuthMethod, AnthropicBackendKind, AnthropicProviderRuntime,
-};
-#[cfg(feature = "gemini")]
-pub use providers::google::{GoogleAuthMethod, GoogleBackendKind, GoogleProviderRuntime};
-#[cfg(feature = "openai")]
-pub use providers::openai::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};
+pub mod auth_oauth {
+    pub use meerkat_auth_core::auth_oauth::*;
+}
+pub mod auth_store {
+    pub use meerkat_auth_core::auth_store::*;
+}
+pub mod authorizers {
+    pub use meerkat_auth_core::authorizers::*;
+}

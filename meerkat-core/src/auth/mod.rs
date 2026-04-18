@@ -9,6 +9,7 @@ pub mod error;
 pub mod lease;
 pub mod metadata;
 pub mod status;
+pub mod token_store;
 
 pub use error::{AuthError, AuthErrorKind};
 pub use lease::{
@@ -21,3 +22,7 @@ pub use metadata::{
     ProviderAuthMetadata,
 };
 pub use status::{AuthErrorSummary, AuthStatus};
+pub use token_store::{
+    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
+    TokenStore, TokenStoreError,
+};

@@ -718,7 +718,7 @@ pub async fn resolve_provider_api_key(config: &Config, provider: Provider) -> Op
     let realm = synthesize_realm_from_config(config, provider);
     let binding_id = realm.default_binding.clone()?;
     let env = meerkat_providers::ResolverEnvironment::with_process_env();
-    let registry = meerkat_providers::ProviderRuntimeRegistry::default_registry();
+    let registry = crate::default_provider_registry();
     registry
         .resolve(&realm, &binding_id, &env)
         .await
@@ -1317,7 +1317,7 @@ impl AgentFactory {
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        let provider_registry = meerkat_providers::ProviderRuntimeRegistry::default();
+        let provider_registry = crate::default_provider_registry();
         let connection = provider_registry
             .resolve(&realm, &binding_id, &env)
             .await
@@ -1856,7 +1856,7 @@ impl AgentFactory {
                     for (handle, resolver) in &self.external_auth_resolvers {
                         env = env.with_external_resolver(handle.clone(), resolver.clone());
                     }
-                    let provider_registry = meerkat_providers::ProviderRuntimeRegistry::default();
+                    let provider_registry = crate::default_provider_registry();
                     let is_env_default = build_config.connection_ref.is_none();
                     let connection = provider_registry
                         .resolve(&realm, &binding_id, &env)

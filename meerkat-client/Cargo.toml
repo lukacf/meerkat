@@ -1,6 +1,6 @@
 [package]
 name = "meerkat-client"
-description = "LLM provider abstraction for Meerkat"
+description = "Shim re-export crate — delegates to meerkat-llm-core and per-provider crates (B2 split)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,69 +14,37 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
-meerkat-contracts = { workspace = true }
-meerkat-models = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-async-stream = { workspace = true }
-chrono = { workspace = true }
-tracing = { workspace = true }
-slab = "0.4"
-indexmap = "2"
-parking_lot = { workspace = true }
+meerkat-llm-core = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true }
-reqwest = { workspace = true }
-dirs = { workspace = true }
-base64 = { workspace = true }
-oai-rt-rs = { workspace = true }
-meerkat-runtime = { workspace = true, default-features = false }
-
-# Phase 4a auth-primitive deps moved to meerkat-providers (deferral §3).
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-tokio_with_wasm = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+# Feature-gated re-exports to per-provider crates.
+meerkat-anthropic = { workspace = true, optional = true, default-features = false }
+meerkat-openai = { workspace = true, optional = true, default-features = false }
+meerkat-gemini = { workspace = true, optional = true, default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-schemars = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
 axum = { workspace = true }
-tempfile = { workspace = true }
+schemars = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini"]
-anthropic = []
-openai = []
-gemini = []
+anthropic = ["dep:meerkat-anthropic"]
+openai = ["dep:meerkat-openai"]
+gemini = ["dep:meerkat-gemini"]
+openai-realtime = ["meerkat-openai/realtime"]
 integration-real-tests = []
 
-# Phase 4a feature flags. Auth primitives now live in the
-# `meerkat-providers` crate (deferral §3); callers that need the
-# keyring/OAuth/aws-auth/etc. code paths should enable those features
-# on `meerkat-providers` directly.
+# Legacy feature aliases kept as empty no-ops (shimmed in the new per-provider crates).
 native-keyring = []
 refresh-file-lock = []
 oauth = []
 aws-auth = []
 google-oauth = []
 azure-auth = []
-
-[package.metadata.cargo-machete]
-ignored = [
-    "getrandom",  # cfg(target_arch = "wasm32")
-    "slab",       # used in streaming block assembly
-]
-
-[[test]]
-name = "system_client_proxy"
-path = "tests/system_client_proxy.rs"
-required-features = ["integration-real-tests"]
 
 [[test]]
 name = "live_client_provider_matrix"

@@ -4,7 +4,7 @@ use crate::Provider;
 use crate::config::{
     Config, ConfigError, SelfHostedApiStyle, SelfHostedConfig, SelfHostedTransport,
 };
-use meerkat_models::{ModelProfile, ModelTier};
+use crate::model_profile::{ModelProfile, catalog::ModelTier};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,23 +51,24 @@ impl ModelRegistry {
         let mut entries = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
-        for provider_name in meerkat_models::provider_names() {
+        for provider_name in crate::model_profile::catalog::provider_names() {
             let provider = Provider::parse_strict(provider_name).ok_or_else(|| {
                 ConfigError::InternalError(format!("unknown built-in provider '{provider_name}'"))
             })?;
-            let default_model = meerkat_models::default_model(provider_name).ok_or_else(|| {
-                ConfigError::InternalError(format!(
-                    "missing built-in default for '{provider_name}'"
-                ))
-            })?;
+            let default_model = crate::model_profile::catalog::default_model(provider_name)
+                .ok_or_else(|| {
+                    ConfigError::InternalError(format!(
+                        "missing built-in default for '{provider_name}'"
+                    ))
+                })?;
             defaults.insert(provider, default_model.to_string());
 
-            for entry in meerkat_models::catalog()
+            for entry in crate::model_profile::catalog::catalog()
                 .iter()
                 .filter(|entry| entry.provider == *provider_name)
             {
-                let profile =
-                    meerkat_models::profile_for(entry.provider, entry.id).ok_or_else(|| {
+                let profile = crate::model_profile::profile_for(entry.provider, entry.id)
+                    .ok_or_else(|| {
                         ConfigError::InternalError(format!(
                             "missing built-in profile for {}:{}",
                             entry.provider, entry.id
@@ -126,7 +127,7 @@ impl ModelRegistry {
 
 fn inferred_builtin_profile(model_id: &str) -> Option<ModelProfile> {
     let provider = Provider::infer_from_model(model_id)?;
-    meerkat_models::profile_for(provider.as_str(), model_id)
+    crate::model_profile::profile_for(provider.as_str(), model_id)
 }
 
 fn append_self_hosted(

@@ -3559,13 +3559,13 @@ async fn interactive_login(
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
+    use meerkat_anthropic::runtime::oauth as a_oauth;
+    use meerkat_gemini::runtime::oauth as g_oauth;
+    use meerkat_openai::runtime::oauth as o_oauth;
     use meerkat_providers::auth_oauth::{OAuthError, PkcePair, run_loopback_callback};
     use meerkat_providers::auth_store::{
         PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreBackend,
     };
-    use meerkat_providers::providers::anthropic::oauth as a_oauth;
-    use meerkat_providers::providers::google::oauth as g_oauth;
-    use meerkat_providers::providers::openai::oauth as o_oauth;
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;

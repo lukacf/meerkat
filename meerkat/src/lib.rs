@@ -367,6 +367,39 @@ pub fn compose_tools_with_comms(
     Ok((Arc::new(composite), instructions))
 }
 
+// Re-export provider-runtime types for downstream consumers that used to
+// reach them via meerkat_providers::* or meerkat_client::*.
+pub use meerkat_llm_core::provider_runtime::{
+    ExternalAuthResolverHandle, ProviderAuthError, ProviderBindingError, ProviderClientError,
+    ProviderRuntime, ProviderRuntimeRegistry, ResolverEnvironment,
+};
+
+/// Construct a [`meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry`] populated with the
+/// feature-gated provider runtimes from the per-provider crates.
+///
+/// Replaces `meerkat_llm_core::ProviderRuntimeRegistry::default_registry()`,
+/// which is empty post-B2-split because `meerkat-llm-core` cannot reach the
+/// per-provider crates (cycle).
+pub fn default_provider_registry() -> meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry {
+    #[allow(unused_mut)]
+    let mut r = meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty();
+    #[cfg(feature = "anthropic")]
+    {
+        r = r.with_runtime(std::sync::Arc::new(
+            meerkat_anthropic::AnthropicProviderRuntime,
+        ));
+    }
+    #[cfg(feature = "openai")]
+    {
+        r = r.with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    }
+    #[cfg(feature = "gemini")]
+    {
+        r = r.with_runtime(std::sync::Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    }
+    r
+}
+
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use super::{

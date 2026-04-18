@@ -3122,14 +3122,18 @@ dependencies = [
  "futures",
  "indexmap",
  "inventory",
+ "meerkat-anthropic",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-gemini",
  "meerkat-hooks",
+ "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-memory",
  "meerkat-models",
+ "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-schedule",
@@ -3153,7 +3157,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "meerkat-client"
+name = "meerkat-anthropic"
 version = "0.6.0"
 dependencies = [
  "async-stream",
@@ -3161,26 +3165,80 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
- "dirs",
  "futures",
  "getrandom 0.3.4",
  "indexmap",
+ "meerkat-auth-core",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-models",
- "meerkat-runtime",
- "oai-rt-rs",
- "parking_lot",
+ "meerkat-llm-core",
  "reqwest",
- "schemars 1.2.1",
  "serde",
  "serde_json",
- "slab",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
  "tracing",
+]
+
+[[package]]
+name = "meerkat-auth-core"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-eventstream",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "axum",
+ "base64",
+ "chrono",
+ "dirs",
+ "fs4",
+ "futures",
+ "getrandom 0.3.4",
+ "hex",
+ "http 1.4.0",
+ "indexmap",
+ "jsonwebtoken",
+ "keyring",
+ "meerkat-core",
+ "meerkat-llm-core",
+ "oauth2",
+ "parking_lot",
+ "reqwest",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "meerkat-client"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "meerkat-anthropic",
+ "meerkat-core",
+ "meerkat-gemini",
+ "meerkat-llm-core",
+ "meerkat-openai",
+ "reqwest",
+ "schemars 1.2.1",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3246,7 +3304,6 @@ dependencies = [
  "indexmap",
  "js-sys",
  "jsonschema",
- "meerkat-models",
  "parking_lot",
  "schemars 1.2.1",
  "serde",
@@ -3260,6 +3317,31 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
+]
+
+[[package]]
+name = "meerkat-gemini"
+version = "0.6.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "getrandom 0.3.4",
+ "indexmap",
+ "meerkat-auth-core",
+ "meerkat-contracts",
+ "meerkat-core",
+ "meerkat-llm-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
 ]
 
 [[package]]
@@ -3308,6 +3390,30 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "meerkat-llm-core"
+version = "0.6.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "getrandom 0.3.4",
+ "indexmap",
+ "meerkat-contracts",
+ "meerkat-core",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "slab",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "tracing",
 ]
 
 [[package]]
@@ -3516,52 +3622,48 @@ dependencies = [
 name = "meerkat-models"
 version = "0.6.0"
 dependencies = [
+ "meerkat-core",
  "schemars 1.2.1",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "meerkat-providers"
+name = "meerkat-openai"
 version = "0.6.0"
 dependencies = [
+ "async-stream",
  "async-trait",
- "aws-config",
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-eventstream",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-types",
  "axum",
  "base64",
  "chrono",
- "dirs",
- "fs4",
  "futures",
  "getrandom 0.3.4",
- "hex",
- "http 1.4.0",
  "indexmap",
- "jsonwebtoken",
- "keyring",
- "meerkat-client",
+ "meerkat-auth-core",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-models",
- "oauth2",
- "parking_lot",
+ "meerkat-llm-core",
+ "meerkat-runtime",
+ "oai-rt-rs",
  "reqwest",
- "schemars 1.2.1",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio_with_wasm",
  "tracing",
- "urlencoding",
+]
+
+[[package]]
+name = "meerkat-providers"
+version = "0.6.0"
+dependencies = [
+ "meerkat-auth-core",
+ "meerkat-core",
+ "meerkat-llm-core",
+ "tokio",
 ]
 
 [[package]]
@@ -3578,13 +3680,16 @@ dependencies = [
  "http-body-util",
  "hyper",
  "meerkat",
+ "meerkat-anthropic",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-gemini",
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
+ "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
@@ -3615,12 +3720,15 @@ dependencies = [
  "futures",
  "indexmap",
  "meerkat",
+ "meerkat-anthropic",
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-gemini",
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-models",
+ "meerkat-openai",
  "meerkat-providers",
  "meerkat-runtime",
  "meerkat-store",
@@ -4675,14 +4783,17 @@ dependencies = [
  "futures",
  "humantime",
  "meerkat",
+ "meerkat-anthropic",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-gemini",
  "meerkat-mcp",
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-mob-pack",
+ "meerkat-openai",
  "meerkat-providers",
  "meerkat-rpc",
  "meerkat-runtime",

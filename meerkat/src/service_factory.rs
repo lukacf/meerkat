@@ -1151,7 +1151,7 @@ mod tests {
 
         let (tx2, _rx2) = mpsc::channel(8);
         builder
-            .build_agent(&make_session_request("gpt-5.2"), tx2)
+            .build_agent(&make_session_request("gpt-5.4"), tx2)
             .await
             .map_err(|e| format!("openai model should build: {e}"))?;
 

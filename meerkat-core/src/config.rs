@@ -4,13 +4,13 @@
 
 use crate::connection::RealmConfigSection;
 use crate::mcp_config::McpServerConfig;
+use crate::model_profile::catalog::ModelTier;
 use crate::{
     budget::BudgetLimits,
     hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
-use meerkat_models::ModelTier;
 use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
@@ -799,13 +799,13 @@ pub struct ModelDefaults {
 impl Default for ModelDefaults {
     fn default() -> Self {
         Self {
-            anthropic: meerkat_models::default_model("anthropic")
+            anthropic: crate::model_profile::catalog::default_model("anthropic")
                 .unwrap_or_default()
                 .to_string(),
-            openai: meerkat_models::default_model("openai")
+            openai: crate::model_profile::catalog::default_model("openai")
                 .unwrap_or_default()
                 .to_string(),
-            gemini: meerkat_models::default_model("gemini")
+            gemini: crate::model_profile::catalog::default_model("gemini")
                 .unwrap_or_default()
                 .to_string(),
         }

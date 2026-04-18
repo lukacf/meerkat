@@ -1,0 +1,2656 @@
+//! Google Gemini API client
+//!
+//! Implements the LlmClient trait for Google's Gemini API.
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
+use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_llm_core::LlmError;
+use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
+use meerkat_llm_core::{http, streaming};
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
+use std::collections::HashMap;
+
+/// Client for Google Gemini API
+pub struct GeminiClient {
+    api_key: String,
+    base_url: String,
+    http: reqwest::Client,
+    /// Dynamic authorizer — when set, replaces the `x-goog-api-key`
+    /// header path with `HttpAuthorizer::authorize` invocation (used
+    /// for Code Assist + Vertex ADC backends where the Bearer token
+    /// is acquired at request time from Google auth / metadata server).
+    authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+}
+
+impl GeminiClient {
+    /// Create a new Gemini client with the given API key
+    pub fn new(api_key: String) -> Self {
+        Self::new_with_base_url(
+            api_key,
+            "https://generativelanguage.googleapis.com".to_string(),
+        )
+    }
+
+    /// Create a new Gemini client with an explicit base URL
+    pub fn new_with_base_url(api_key: String, base_url: String) -> Self {
+        let http = http::build_http_client_for_base_url(reqwest::Client::builder(), &base_url)
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            api_key,
+            base_url,
+            http,
+            authorizer: None,
+        }
+    }
+
+    /// Set custom base URL
+    pub fn with_base_url(mut self, url: String) -> Self {
+        if let Ok(http) = http::build_http_client_for_base_url(reqwest::Client::builder(), &url) {
+            self.http = http;
+        }
+        self.base_url = url;
+        self
+    }
+
+    /// Attach a dynamic authorizer (Code Assist / Vertex ADC Bearer
+    /// token path). When set, `x-goog-api-key` is NOT sent; the
+    /// authorizer injects its own headers (typically
+    /// `Authorization: Bearer <token>`).
+    pub fn with_authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
+        self
+    }
+
+    /// Build request body for Gemini API
+    fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        let mut contents = Vec::new();
+        let mut system_instruction = None;
+
+        let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
+
+        for msg in &request.messages {
+            match msg {
+                Message::System(s) => {
+                    system_instruction = Some(serde_json::json!({
+                        "parts": [{"text": s.content}]
+                    }));
+                }
+                Message::SystemNotice(notice) => {
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": [{"text": notice.rendered_text()}]
+                    }));
+                }
+                Message::User(u) => {
+                    if meerkat_core::has_non_text_content(&u.content) {
+                        let parts: Vec<Value> = u
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text { text } => serde_json::json!({
+                                    "text": text
+                                }),
+                                ContentBlock::Image {
+                                    media_type,
+                                    data: ImageData::Inline { data },
+                                } => serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": data
+                                    }
+                                }),
+                                ContentBlock::Video {
+                                    media_type,
+                                    duration_ms: _,
+                                    data: meerkat_core::VideoData::Inline { data },
+                                } => serde_json::json!({
+                                    "inlineData": {
+                                        "mimeType": media_type,
+                                        "data": data
+                                    }
+                                }),
+                                _ => serde_json::json!({
+                                    "text": block.text_projection()
+                                }),
+                            })
+                            .collect();
+                        contents.push(serde_json::json!({
+                            "role": "user",
+                            "parts": parts
+                        }));
+                    } else {
+                        contents.push(serde_json::json!({
+                            "role": "user",
+                            "parts": [{"text": u.text_content()}]
+                        }));
+                    }
+                }
+                Message::Assistant(_) => {
+                    return Err(LlmError::InvalidRequest {
+                        message: "Legacy Message::Assistant is not supported by Gemini adapter; use BlockAssistant".to_string(),
+                    });
+                }
+                Message::BlockAssistant(a) => {
+                    // New format: ordered blocks with ProviderMeta
+                    let mut parts = Vec::new();
+
+                    for block in &a.blocks {
+                        match block {
+                            meerkat_core::AssistantBlock::Text { text, meta } => {
+                                if !text.is_empty() {
+                                    let mut part = serde_json::json!({"text": text});
+                                    // Gemini may have thoughtSignature on text parts for continuity
+                                    if let Some(meerkat_core::ProviderMeta::Gemini {
+                                        thought_signature,
+                                    }) = meta.as_deref()
+                                    {
+                                        part["thoughtSignature"] =
+                                            serde_json::json!(thought_signature);
+                                    }
+                                    parts.push(part);
+                                }
+                            }
+                            meerkat_core::AssistantBlock::Reasoning { text, .. } => {
+                                // Gemini doesn't accept reasoning blocks back
+                                // Just include as text if needed for context
+                                if !text.is_empty() {
+                                    parts.push(serde_json::json!({"text": format!("[Reasoning: {}]", text)}));
+                                }
+                            }
+                            meerkat_core::AssistantBlock::ToolUse {
+                                id,
+                                name,
+                                args,
+                                meta,
+                            } => {
+                                tool_name_by_id.insert(id.clone(), name.clone());
+                                // Parse RawValue to Value
+                                let args_value: Value = serde_json::from_str(args.get())
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                let mut part = serde_json::json!({"functionCall": {"name": name, "args": args_value}});
+                                // Only add signature if present (first parallel call has it)
+                                if let Some(meerkat_core::ProviderMeta::Gemini {
+                                    thought_signature,
+                                }) = meta.as_deref()
+                                {
+                                    part["thoughtSignature"] = serde_json::json!(thought_signature);
+                                }
+                                parts.push(part);
+                            }
+                            _ => {} // non_exhaustive: ignore unknown future variants
+                        }
+                    }
+
+                    contents.push(serde_json::json!({
+                        "role": "model",
+                        "parts": parts
+                    }));
+                }
+                Message::ToolResults { results } => {
+                    // Per spec section 2.3: thoughtSignature NEVER on functionResponse
+                    // Signature belongs on functionCall, not on the response
+                    let mut parts: Vec<Value> = Vec::new();
+
+                    for r in results {
+                        if r.has_video() {
+                            return Err(LlmError::InvalidRequest {
+                                message: "video blocks are not supported in Gemini tool results"
+                                    .to_string(),
+                            });
+                        }
+                        let function_name = tool_name_by_id
+                            .get(&r.tool_use_id)
+                            .cloned()
+                            .unwrap_or_else(|| r.tool_use_id.clone());
+
+                        // functionResponse only supports text content. For tool
+                        // results with images we emit text in the functionResponse
+                        // and append the images as separate inlineData parts so
+                        // the model still sees the actual image data.
+                        parts.push(serde_json::json!({
+                            "functionResponse": {
+                                "name": function_name,
+                                "response": {
+                                    "content": r.text_content(),
+                                    "error": r.is_error
+                                }
+                            }
+                        }));
+                        // NOTE: thoughtSignature is intentionally NOT included here
+                        // Verified by scripts/test_gemini_thought_signature.py:
+                        // - sig on functionCall only: PASS
+                        // - sig on functionResponse only: FAIL (400 error)
+
+                        if r.has_images() {
+                            for block in &r.content {
+                                if let ContentBlock::Image { media_type, data } = block {
+                                    match data {
+                                        ImageData::Inline { data } => {
+                                            parts.push(serde_json::json!({
+                                                "inlineData": {
+                                                    "mimeType": media_type,
+                                                    "data": data
+                                                }
+                                            }));
+                                        }
+                                        ImageData::Blob { .. } => parts.push(serde_json::json!({
+                                            "text": block.text_projection()
+                                        })),
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    contents.push(serde_json::json!({
+                        "role": "user",
+                        "parts": parts
+                    }));
+                }
+            }
+        }
+
+        let mut body = serde_json::json!({
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": request.max_tokens,
+            }
+        });
+
+        if let Some(system) = system_instruction {
+            body["systemInstruction"] = system;
+        }
+
+        if let Some(temp) = request.temperature
+            && let Some(num) = serde_json::Number::from_f64(temp as f64)
+        {
+            body["generationConfig"]["temperature"] = Value::Number(num);
+        }
+
+        // Extract provider-specific parameters from both formats:
+        // 1. Legacy flat format: {"thinking_budget": 10000, "top_k": 40}
+        // 2. Typed GeminiParams: {"thinking": {"include_thoughts": true, "thinking_budget": 10000}, "top_k": 40, "top_p": 0.95}
+        if let Some(ref params) = request.provider_params {
+            // Handle thinking config
+            let thinking_budget = params.get("thinking_budget").or_else(|| {
+                params
+                    .get("thinking")
+                    .and_then(|t| t.get("thinking_budget"))
+            });
+
+            if let Some(budget) = thinking_budget {
+                body["generationConfig"]["thinkingConfig"] = serde_json::json!({
+                    "thinkingBudget": budget
+                });
+            }
+
+            // Handle top_k
+            if let Some(top_k) = params.get("top_k") {
+                body["generationConfig"]["topK"] = top_k.clone();
+            }
+
+            // Handle top_p (only in typed params)
+            if let Some(top_p) = params.get("top_p") {
+                body["generationConfig"]["topP"] = top_p.clone();
+            }
+
+            // Handle structured output configuration
+            // Format: {"structured_output": {"schema": {...}, "name": "output", "strict": true}}
+            if let Some(structured) = params.get("structured_output") {
+                let output_schema: OutputSchema = serde_json::from_value(structured.clone())
+                    .map_err(|e| LlmError::InvalidRequest {
+                        message: format!("Invalid structured_output schema: {e}"),
+                    })?;
+                let compiled = Self::compile_schema_for_gemini(&output_schema).map_err(|e| {
+                    LlmError::InvalidRequest {
+                        message: e.to_string(),
+                    }
+                })?;
+                body["generationConfig"]["responseMimeType"] =
+                    Value::String("application/json".to_string());
+                body["generationConfig"]["responseJsonSchema"] = compiled.schema;
+            }
+        }
+
+        let has_function_declarations = !request.tools.is_empty();
+        if has_function_declarations {
+            let function_declarations: Vec<Value> = request
+                .tools
+                .iter()
+                .map(|t| {
+                    let parameters = normalize_gemini_function_parameters_schema(&t.input_schema)?;
+                    Ok(serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": parameters
+                    }))
+                })
+                .collect::<Result<Vec<_>, LlmError>>()?;
+
+            body["tools"] = serde_json::json!([{
+                "functionDeclarations": function_declarations
+            }]);
+        }
+
+        // Inject provider-native google_search tool from provider_params.
+        // google_search is a separate tools array element alongside functionDeclarations.
+        // Bool(false) and Null are treated as explicit disable; only objects are injected.
+        let mut has_server_side_tool = false;
+        if let Some(ref params) = request.provider_params
+            && let Some(gs) = params.get("google_search")
+            && gs.is_object()
+        {
+            has_server_side_tool = true;
+            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                Some(arr) => arr.push(serde_json::json!({"google_search": gs})),
+                None => {
+                    body["tools"] = Value::Array(vec![serde_json::json!({"google_search": gs})]);
+                }
+            }
+        }
+
+        if has_function_declarations && has_server_side_tool {
+            if !body["toolConfig"].is_object() {
+                body["toolConfig"] = serde_json::json!({});
+            }
+            body["toolConfig"]["includeServerSideToolInvocations"] = Value::Bool(true);
+        }
+
+        Ok(body)
+    }
+
+    /// Parse streaming response line
+    fn parse_stream_line(line: &str) -> Option<GenerateContentResponse> {
+        serde_json::from_str(line).ok()
+    }
+
+    /// Compile an output schema for Gemini structured outputs.
+    ///
+    /// Uses `responseJsonSchema` without destructive lowering so schema
+    /// semantics are preserved.
+    fn compile_schema_for_gemini(
+        output_schema: &OutputSchema,
+    ) -> Result<CompiledSchema, SchemaError> {
+        let schema = output_schema.schema.as_value().clone();
+        let warnings = validate_gemini_response_json_schema(&schema, Provider::Gemini);
+
+        if output_schema.compat == SchemaCompat::Strict && !warnings.is_empty() {
+            return Err(SchemaError::UnsupportedFeatures {
+                provider: Provider::Gemini,
+                warnings,
+            });
+        }
+
+        Ok(CompiledSchema { schema, warnings })
+    }
+}
+
+fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, LlmError> {
+    let mut unresolved_refs = Vec::new();
+    let mut normalized =
+        inline_local_schema_refs(schema, schema, &mut Vec::new(), 0, &mut unresolved_refs);
+    if !unresolved_refs.is_empty() {
+        unresolved_refs.sort();
+        unresolved_refs.dedup();
+        return Err(LlmError::InvalidRequest {
+            message: format!(
+                "Gemini function parameters schema contains unresolved $ref values: {}. \
+                 Only local refs (e.g. '#/$defs/...') are supported for inlining.",
+                unresolved_refs.join(", ")
+            ),
+        });
+    }
+    lower_gemini_function_parameters_schema(&mut normalized);
+    strip_gemini_function_parameters_unsupported_keywords(&mut normalized, 0);
+    Ok(normalized)
+}
+
+fn lower_gemini_function_parameters_schema(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            collapse_single_literal_composition(obj, "oneOf");
+            collapse_single_literal_composition(obj, "anyOf");
+            normalize_const_keyword(obj);
+            normalize_type_array_keyword(obj);
+
+            for child in obj.values_mut() {
+                lower_gemini_function_parameters_schema(child);
+            }
+
+            normalize_nullable_composition(obj, "oneOf");
+            normalize_nullable_composition(obj, "anyOf");
+        }
+        Value::Array(items) => {
+            for item in items {
+                lower_gemini_function_parameters_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collapse_single_literal_composition(obj: &mut Map<String, Value>, key: &str) {
+    let Some(variants) = obj.get(key).and_then(Value::as_array) else {
+        return;
+    };
+
+    let mut literals = Vec::new();
+    for variant in variants {
+        let Some(variant_obj) = variant.as_object() else {
+            return;
+        };
+        let Some(literal) = variant_obj.get("const").cloned() else {
+            return;
+        };
+        if variant_obj
+            .keys()
+            .any(|k| k != "const" && k != "title" && k != "description")
+        {
+            return;
+        }
+        literals.push(literal);
+    }
+
+    if literals.is_empty() {
+        return;
+    }
+
+    obj.remove(key);
+    obj.insert("enum".to_string(), Value::Array(literals.clone()));
+    if !obj.contains_key("type")
+        && let Some(common_type) = infer_common_literal_type(&literals)
+    {
+        obj.insert("type".to_string(), Value::String(common_type.to_string()));
+    }
+}
+
+fn infer_common_literal_type(values: &[Value]) -> Option<&'static str> {
+    let mut common: Option<&'static str> = None;
+    for value in values {
+        let value_type = infer_schema_type_from_literal(value)?;
+        match common {
+            Some(existing) if existing != value_type => return None,
+            Some(_) => {}
+            None => common = Some(value_type),
+        }
+    }
+    common
+}
+
+fn infer_schema_type_from_literal(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(_) => Some("string"),
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some("integer"),
+        Value::Number(_) => Some("number"),
+        Value::Bool(_) => Some("boolean"),
+        Value::Array(_) => Some("array"),
+        Value::Object(_) => Some("object"),
+        Value::Null => None,
+    }
+}
+
+fn normalize_const_keyword(obj: &mut Map<String, Value>) {
+    let Some(const_value) = obj.remove("const") else {
+        return;
+    };
+
+    if !obj.contains_key("enum") {
+        obj.insert("enum".to_string(), Value::Array(vec![const_value.clone()]));
+    }
+
+    if !obj.contains_key("type")
+        && let Some(value_type) = infer_schema_type_from_literal(&const_value)
+    {
+        obj.insert("type".to_string(), Value::String(value_type.to_string()));
+    }
+    if const_value.is_null() {
+        obj.insert("nullable".to_string(), Value::Bool(true));
+    }
+}
+
+fn normalize_type_array_keyword(obj: &mut Map<String, Value>) {
+    let Some(Value::Array(type_values)) = obj.get("type").cloned() else {
+        return;
+    };
+
+    let mut has_null = false;
+    let mut non_null_types: Vec<String> = Vec::new();
+    for value in type_values {
+        let Value::String(type_name) = value else {
+            return;
+        };
+        if type_name == "null" {
+            has_null = true;
+        } else if !non_null_types.iter().any(|t| t == &type_name) {
+            non_null_types.push(type_name);
+        }
+    }
+
+    if non_null_types.is_empty() {
+        obj.remove("type");
+        obj.insert("nullable".to_string(), Value::Bool(true));
+        return;
+    }
+
+    if non_null_types.len() == 1 {
+        obj.insert("type".to_string(), Value::String(non_null_types[0].clone()));
+        if has_null {
+            obj.insert("nullable".to_string(), Value::Bool(true));
+        }
+        return;
+    }
+
+    let mut variants = Vec::new();
+    for type_name in non_null_types {
+        let mut variant = Map::new();
+        variant.insert("type".to_string(), Value::String(type_name));
+        variants.push(Value::Object(variant));
+    }
+
+    obj.remove("type");
+    match obj.get_mut("anyOf") {
+        Some(Value::Array(existing)) => existing.extend(variants),
+        _ => {
+            obj.insert("anyOf".to_string(), Value::Array(variants));
+        }
+    }
+    if has_null {
+        obj.insert("nullable".to_string(), Value::Bool(true));
+    }
+}
+
+fn normalize_nullable_composition(obj: &mut Map<String, Value>, key: &str) {
+    let Some(Value::Array(variants)) = obj.get(key).cloned() else {
+        return;
+    };
+
+    let mut saw_null_branch = false;
+    let mut retained = Vec::new();
+    for variant in variants {
+        if is_null_schema(&variant) {
+            saw_null_branch = true;
+        } else {
+            retained.push(variant);
+        }
+    }
+
+    if !saw_null_branch {
+        return;
+    }
+
+    obj.insert("nullable".to_string(), Value::Bool(true));
+    if retained.is_empty() {
+        obj.remove(key);
+    } else {
+        obj.insert(key.to_string(), Value::Array(retained));
+    }
+}
+
+fn is_null_schema(value: &Value) -> bool {
+    let Value::Object(obj) = value else {
+        return false;
+    };
+    if matches!(obj.get("type"), Some(Value::String(t)) if t == "null") {
+        return true;
+    }
+    matches!(
+        obj.get("enum"),
+        Some(Value::Array(values)) if values.len() == 1 && values[0].is_null()
+    )
+}
+
+fn inline_local_schema_refs(
+    node: &Value,
+    root: &Value,
+    active_refs: &mut Vec<String>,
+    depth: usize,
+    unresolved_refs: &mut Vec<String>,
+) -> Value {
+    const MAX_REF_DEPTH: usize = 64;
+    if depth > MAX_REF_DEPTH {
+        return node.clone();
+    }
+
+    match node {
+        Value::Object(obj) => {
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str)
+                && let Some(resolved) = resolve_local_schema_ref(root, reference)
+                && !active_refs.iter().any(|r| r == reference)
+            {
+                active_refs.push(reference.to_string());
+                let mut inlined = inline_local_schema_refs(
+                    resolved,
+                    root,
+                    active_refs,
+                    depth + 1,
+                    unresolved_refs,
+                );
+                active_refs.pop();
+
+                if let Value::Object(ref mut inlined_obj) = inlined {
+                    for (key, value) in obj {
+                        if key == "$ref" {
+                            continue;
+                        }
+                        inlined_obj.insert(
+                            key.clone(),
+                            inline_local_schema_refs(
+                                value,
+                                root,
+                                active_refs,
+                                depth + 1,
+                                unresolved_refs,
+                            ),
+                        );
+                    }
+                    return inlined;
+                }
+
+                return inlined;
+            }
+            if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
+                unresolved_refs.push(reference.to_string());
+            }
+
+            let mut mapped = Map::new();
+            for (key, value) in obj {
+                mapped.insert(
+                    key.clone(),
+                    inline_local_schema_refs(value, root, active_refs, depth + 1, unresolved_refs),
+                );
+            }
+            Value::Object(mapped)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    inline_local_schema_refs(item, root, active_refs, depth + 1, unresolved_refs)
+                })
+                .collect(),
+        ),
+        _ => node.clone(),
+    }
+}
+
+fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    if !reference.starts_with("#/") {
+        return None;
+    }
+
+    let mut cursor = root;
+    for segment in reference.trim_start_matches("#/").split('/') {
+        let key = segment.replace("~1", "/").replace("~0", "~");
+        cursor = cursor.get(&key)?;
+    }
+
+    Some(cursor)
+}
+
+fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value, depth: usize) {
+    match value {
+        Value::Object(obj) => {
+            obj.remove("$schema");
+            obj.remove("$defs");
+            obj.remove("defs");
+            obj.remove("definitions");
+            obj.remove("$ref");
+            obj.remove("$id");
+            obj.remove("$anchor");
+            obj.remove("const");
+            obj.remove("title");
+            // Keep root-level additionalProperties to avoid dropping top-level
+            // caller intent. Nested additionalProperties remains unsupported on
+            // the function-declaration schema subset and is stripped.
+            if depth > 0 {
+                obj.remove("additionalProperties");
+            }
+
+            for (key, child) in obj.iter_mut() {
+                if key == "properties" {
+                    // The `properties` value is a map of property_name → schema.
+                    // Keys are user-defined field names (e.g. "title", "id"), NOT
+                    // JSON Schema keywords. Only recurse into each property's
+                    // schema without stripping keys from the map itself.
+                    if let Value::Object(props) = child {
+                        for prop_schema in props.values_mut() {
+                            strip_gemini_function_parameters_unsupported_keywords(
+                                prop_schema,
+                                depth + 1,
+                            );
+                        }
+                    }
+                } else {
+                    strip_gemini_function_parameters_unsupported_keywords(child, depth + 1);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_gemini_function_parameters_unsupported_keywords(item, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn text_event_for_part(
+    text: String,
+    is_thought: bool,
+    meta: Option<Box<meerkat_core::ProviderMeta>>,
+) -> LlmEvent {
+    if is_thought {
+        LlmEvent::ReasoningDelta { delta: text }
+    } else {
+        LlmEvent::TextDelta { delta: text, meta }
+    }
+}
+
+fn validate_gemini_response_json_schema(schema: &Value, provider: Provider) -> Vec<SchemaWarning> {
+    let mut warnings = Vec::new();
+    inspect_gemini_json_schema_node(schema, "", provider, &mut warnings);
+    warnings
+}
+
+fn inspect_gemini_json_schema_node(
+    value: &Value,
+    path: &str,
+    provider: Provider,
+    warnings: &mut Vec<SchemaWarning>,
+) {
+    match value {
+        Value::Object(obj) => {
+            for key in obj.keys() {
+                if !is_gemini_supported_schema_keyword(key) {
+                    warnings.push(SchemaWarning {
+                        provider,
+                        path: join_path(path, key),
+                        message: format!(
+                            "Keyword '{key}' may be ignored by Gemini responseJsonSchema"
+                        ),
+                    });
+                }
+            }
+
+            for (key, child) in obj {
+                match key.as_str() {
+                    // Map values are schemas keyed by arbitrary names.
+                    "properties" | "$defs" => {
+                        inspect_schema_map(child, &join_path(path, key), provider, warnings);
+                    }
+                    _ => inspect_gemini_json_schema_node(
+                        child,
+                        &join_path(path, key),
+                        provider,
+                        warnings,
+                    ),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                inspect_gemini_json_schema_node(item, &join_index(path, index), provider, warnings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inspect_schema_map(
+    value: &Value,
+    path: &str,
+    provider: Provider,
+    warnings: &mut Vec<SchemaWarning>,
+) {
+    match value {
+        Value::Object(map) => {
+            for (name, child) in map {
+                inspect_gemini_json_schema_node(child, &join_path(path, name), provider, warnings);
+            }
+        }
+        other => inspect_gemini_json_schema_node(other, path, provider, warnings),
+    }
+}
+
+fn is_gemini_supported_schema_keyword(key: &str) -> bool {
+    // Source: Gemini responseJsonSchema supported keyword subset in
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/control-generated-output#supported-schema-fields
+    // Verified against docs on 2026-02-27.
+    matches!(
+        key,
+        "$id"
+            | "$defs"
+            | "$ref"
+            | "$anchor"
+            | "type"
+            | "format"
+            | "title"
+            | "description"
+            | "const"
+            | "default"
+            | "examples"
+            | "enum"
+            | "items"
+            | "prefixItems"
+            | "minItems"
+            | "maxItems"
+            | "minimum"
+            | "maximum"
+            | "anyOf"
+            | "oneOf"
+            | "properties"
+            | "additionalProperties"
+            | "required"
+            | "propertyOrdering"
+            | "nullable"
+    )
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        format!("/{key}")
+    } else {
+        format!("{prefix}/{key}")
+    }
+}
+
+fn join_index(prefix: &str, index: usize) -> String {
+    if prefix.is_empty() {
+        format!("/{index}")
+    } else {
+        format!("{prefix}/{index}")
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl LlmClient for GeminiClient {
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let body = self.build_request_body(request)?;
+            let url = format!(
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                self.base_url, request.model
+            );
+
+            // Auth path: if an authorizer is attached (Code Assist /
+            // Vertex ADC Bearer flow), collect its headers via the
+            // HttpAuthorizer trait; otherwise fall back to x-goog-api-key.
+            let mut req = self.http
+                .post(&url)
+                .header("Content-Type", "application/json");
+            if let Some(authorizer) = &self.authorizer {
+                let mut extra: Vec<(String, String)> = Vec::new();
+                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &url,
+                    headers: &mut extra,
+                };
+                authorizer
+                    .authorize(&mut auth_req)
+                    .await
+                    .map_err(|e| LlmError::AuthenticationFailed {
+                        message: format!("gemini authorizer failed: {e}"),
+                    })?;
+                for (name, value) in extra {
+                    req = req.header(name, value);
+                }
+            } else {
+                req = req.header("x-goog-api-key", &self.api_key);
+            }
+            let response = req
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| LlmError::NetworkTimeout {
+                    duration_ms: 30000,
+                })?;
+
+            let status_code = response.status().as_u16();
+            let stream_result = if (200..=299).contains(&status_code) {
+                Ok(response.bytes_stream())
+            } else {
+                let headers = response.headers().clone();
+                let text = response.text().await.unwrap_or_default();
+                Err(LlmError::from_http_response(status_code, text, &headers))
+            };
+            let mut stream = stream_result?;
+            let mut buffer = String::with_capacity(512);
+            let mut tool_call_index: u32 = 0;
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim();
+                    let data = line.strip_prefix("data: ");
+                    let parsed_response = if let Some(d) = data {
+                        Self::parse_stream_line(d)
+                    } else {
+                        None
+                    };
+
+                    buffer.drain(..=newline_pos);
+
+                    if let Some(resp) = parsed_response {
+                        if let Some(usage) = resp.usage_metadata {
+                            yield LlmEvent::UsageUpdate {
+                                usage: Usage {
+                                    input_tokens: usage.prompt_token_count.unwrap_or(0),
+                                    output_tokens: usage.candidates_token_count.unwrap_or(0),
+                                    cache_creation_tokens: None,
+                                    cache_read_tokens: None,
+                                }
+                            };
+                        }
+
+                        if let Some(candidates) = resp.candidates {
+                            for cand in candidates {
+                                if let Some(content) = cand.content {
+                                    // Not collapsed: inner loop processes heterogeneous part types
+                                    // (text, function_call, function_response) independently.
+                                    #[allow(clippy::collapsible_if)]
+                                    if let Some(parts) = content.parts {
+                                        for part in parts {
+                                            // Build meta from thoughtSignature if present
+                                            let meta = part.thought_signature.as_ref().map(|sig| {
+                                                Box::new(meerkat_core::ProviderMeta::Gemini {
+                                                    thought_signature: sig.clone(),
+                                                })
+                                            });
+
+                                            if let Some(text) = part.text {
+                                                yield text_event_for_part(
+                                                    text,
+                                                    part.thought.unwrap_or(false),
+                                                    meta.clone(),
+                                                );
+                                            }
+                                            if let Some(fc) = part.function_call {
+                                                let id = format!("fc_{tool_call_index}");
+                                                tool_call_index += 1;
+                                                yield LlmEvent::ToolCallComplete {
+                                                    id,
+                                                    name: fc.name,
+                                                    args: fc.args.unwrap_or(json!({})),
+                                                    meta,
+                                                };
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(reason) = cand.finish_reason {
+                                    let stop = match reason.as_str() {
+                                        "MAX_TOKENS" => StopReason::MaxTokens,
+                                        "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+                                        // Gemini uses various names for tool calls
+                                        "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                                        // "STOP" and any unrecognized reason default to EndTurn
+                                        _ => StopReason::EndTurn,
+                                    };
+                                    yield LlmEvent::Done {
+                                        outcome: LlmDoneOutcome::Success { stop_reason: stop },
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        streaming::ensure_terminal_done(inner)
+    }
+
+    fn provider(&self) -> &'static str {
+        "gemini"
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+
+    fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
+        GeminiClient::compile_schema_for_gemini(output_schema)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateContentResponse {
+    candidates: Option<Vec<Candidate>>,
+    usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Candidate {
+    content: Option<CandidateContent>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CandidateContent {
+    parts: Option<Vec<Part>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Part {
+    text: Option<String>,
+    function_call: Option<FunctionCall>,
+    thought: Option<bool>,
+    thought_signature: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionCall {
+    name: String,
+    args: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiUsage {
+    prompt_token_count: Option<u64>,
+    candidates_token_count: Option<u64>,
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::explicit_counter_loop,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use meerkat_core::{
+        AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
+    };
+
+    fn assert_no_const_or_type_arrays(value: &Value) {
+        match value {
+            Value::Object(obj) => {
+                assert!(
+                    obj.get("const").is_none(),
+                    "const must be lowered/removed for Gemini function parameters: {value:?}"
+                );
+                if let Some(schema_type) = obj.get("type") {
+                    assert!(
+                        !schema_type.is_array(),
+                        "type must be scalar in Gemini function parameters: {value:?}"
+                    );
+                }
+                for child in obj.values() {
+                    assert_no_const_or_type_arrays(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_no_const_or_type_arrays(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_build_request_body_with_thinking_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param("thinking_budget", 10000);
+
+        let body = client.build_request_body(&request)?;
+
+        let generation_config = body.get("generationConfig").ok_or("missing config")?;
+        let thinking_config = generation_config
+            .get("thinkingConfig")
+            .ok_or("missing thinking")?;
+        let thinking_budget = thinking_config
+            .get("thinkingBudget")
+            .ok_or("missing budget")?;
+
+        assert_eq!(thinking_budget.as_i64(), Some(10000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_with_top_k() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param("top_k", 40);
+
+        let body = client.build_request_body(&request)?;
+        let generation_config = body.get("generationConfig").ok_or("missing config")?;
+        let top_k = generation_config.get("topK").ok_or("missing top_k")?;
+
+        assert_eq!(top_k.as_i64(), Some(40));
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_with_multiple_provider_params()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param("top_k", 50)
+        .with_provider_param("thinking_budget", 5000);
+
+        let body = client.build_request_body(&request)?;
+        let generation_config = body.get("generationConfig").ok_or("missing config")?;
+
+        let top_k = generation_config.get("topK").ok_or("missing top_k")?;
+        assert_eq!(top_k.as_i64(), Some(50));
+
+        let thinking_config = generation_config
+            .get("thinkingConfig")
+            .ok_or("missing thinking")?;
+        let thinking_budget = thinking_config
+            .get("thinkingBudget")
+            .ok_or("missing budget")?;
+        assert_eq!(thinking_budget.as_i64(), Some(5000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_no_provider_params() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let generation_config = body.get("generationConfig").ok_or("missing config")?;
+
+        assert!(generation_config.get("thinkingConfig").is_none());
+        assert!(generation_config.get("topK").is_none());
+        Ok(())
+    }
+
+    /// Test that functionCall has thoughtSignature but functionResponse does NOT
+    /// Per spec section 2.3: Signatures on functionCall, NEVER on functionResponse
+    /// Uses BlockAssistant with ProviderMeta::Gemini for thoughtSignature.
+    #[test]
+    fn test_tool_response_uses_function_name_no_signature() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use serde_json::value::RawValue;
+        let client = GeminiClient::new("test-key".to_string());
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![
+                Message::User(UserMessage::text("test".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        args: args_raw,
+                        meta: Some(Box::new(ProviderMeta::Gemini {
+                            thought_signature: "sig_123".to_string(),
+                        })),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                }),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_1".to_string(),
+                        "Sunny".to_string(),
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body
+            .get("contents")
+            .and_then(|c| c.as_array())
+            .ok_or("missing contents")?;
+
+        // Find the assistant message (role: "model") - functionCall SHOULD have signature
+        let model_content = contents
+            .iter()
+            .find(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+            .ok_or("missing model content")?;
+        let model_parts = model_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing model parts")?;
+        let fc_part = model_parts
+            .iter()
+            .find(|p| p.get("functionCall").is_some())
+            .ok_or("missing functionCall part")?;
+        assert_eq!(
+            fc_part["thoughtSignature"], "sig_123",
+            "functionCall SHOULD have signature"
+        );
+
+        // Find the tool result (last message) - functionResponse MUST NOT have signature
+        let tool_result_parts = contents
+            .last()
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.as_array())
+            .ok_or("missing parts")?;
+
+        let function_response = &tool_result_parts[0]["functionResponse"];
+        assert_eq!(function_response["name"], "get_weather");
+        // IMPORTANT: functionResponse MUST NOT have thoughtSignature (spec section 2.3)
+        assert!(
+            tool_result_parts[0].get("thoughtSignature").is_none(),
+            "functionResponse MUST NOT have thoughtSignature"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_stream_line_valid_response() -> Result<(), Box<dyn std::error::Error>> {
+        let line =
+            r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}]},"finishReason":"STOP"}]}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.ok_or("missing response")?;
+        assert!(response.candidates.is_some());
+        let candidates = response.candidates.ok_or("missing candidates")?;
+        assert_eq!(candidates.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_stream_line_with_usage() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.ok_or("missing response")?;
+        assert!(response.usage_metadata.is_some());
+        let usage = response.usage_metadata.ok_or("missing usage")?;
+        assert_eq!(usage.prompt_token_count, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_stream_line_function_call() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}}}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_some());
+        let response = response.ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+        let fc = parts[0].function_call.as_ref().ok_or("missing fc")?;
+        assert_eq!(fc.name, "get_weather");
+        assert_eq!(fc.args.as_ref().ok_or("missing args")?["city"], "Tokyo");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_stream_line_empty() {
+        let line = "";
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_line_invalid_json() {
+        let line = "{invalid}";
+        let response = GeminiClient::parse_stream_line(line);
+        assert!(response.is_none());
+    }
+
+    /// Regression: Gemini tool-call finish reasons must map to ToolUse.
+    /// Previously TOOL_CALL and FUNCTION_CALL mapped to EndTurn incorrectly.
+    #[test]
+    fn test_regression_gemini_finish_reason_tool_call_maps_to_tool_use() {
+        // Test the finish reason mapping logic directly
+        let finish_reasons = ["TOOL_CALL", "FUNCTION_CALL"];
+
+        for reason in finish_reasons {
+            let stop = match reason {
+                "MAX_TOKENS" => StopReason::MaxTokens,
+                "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+                "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+                // "STOP" and any unrecognized reason default to EndTurn
+                _ => StopReason::EndTurn,
+            };
+            assert_eq!(
+                stop,
+                StopReason::ToolUse,
+                "finish_reason '{reason}' should map to ToolUse"
+            );
+        }
+    }
+
+    /// Regression: Gemini RECITATION finish reason must map to ContentFilter.
+    #[test]
+    fn test_regression_gemini_finish_reason_recitation_maps_to_content_filter() {
+        let reason = "RECITATION";
+        let stop = match reason {
+            "MAX_TOKENS" => StopReason::MaxTokens,
+            "SAFETY" | "RECITATION" => StopReason::ContentFilter,
+            "TOOL_CALL" | "FUNCTION_CALL" => StopReason::ToolUse,
+            // "STOP" and any unrecognized reason default to EndTurn
+            _ => StopReason::EndTurn,
+        };
+        assert_eq!(stop, StopReason::ContentFilter);
+    }
+
+    /// Regression: Multiple tool calls to the same tool must get unique IDs.
+    /// Previously, IDs were set to the tool name, causing collisions when
+    /// the same tool was called multiple times (e.g., two "search" calls
+    /// both got id="search", breaking tool-result correlation).
+    #[test]
+    fn test_regression_gemini_tool_call_ids_must_be_unique() {
+        // Simulate the ID generation logic from streaming
+        let mut tool_call_index: u32 = 0;
+
+        // Simulate 3 calls to "search" tool
+        let tool_names = ["search", "search", "search"];
+        let mut generated_ids = Vec::new();
+
+        for _name in tool_names {
+            let id = format!("fc_{tool_call_index}");
+            tool_call_index += 1;
+            generated_ids.push(id);
+        }
+
+        // All IDs must be unique
+        assert_eq!(generated_ids[0], "fc_0");
+        assert_eq!(generated_ids[1], "fc_1");
+        assert_eq!(generated_ids[2], "fc_2");
+
+        // Verify no duplicates
+        let mut seen = std::collections::HashSet::new();
+        for id in &generated_ids {
+            assert!(
+                seen.insert(id.clone()),
+                "Duplicate tool call ID found: {id}"
+            );
+        }
+    }
+
+    /// Regression: Tool call IDs must be unique across mixed tool types.
+    #[test]
+    fn test_regression_gemini_tool_call_ids_unique_across_different_tools() {
+        let mut tool_call_index: u32 = 0;
+
+        // Simulate mixed tool calls
+        let tool_names = ["search", "write_file", "search", "read_file"];
+        let mut id_to_name = Vec::new();
+
+        for name in tool_names {
+            let id = format!("fc_{tool_call_index}");
+            tool_call_index += 1;
+            id_to_name.push((id, name));
+        }
+
+        // Each call gets a unique ID regardless of tool name
+        assert_eq!(id_to_name[0], ("fc_0".to_string(), "search"));
+        assert_eq!(id_to_name[1], ("fc_1".to_string(), "write_file"));
+        assert_eq!(id_to_name[2], ("fc_2".to_string(), "search")); // Second search gets fc_2
+        assert_eq!(id_to_name[3], ("fc_3".to_string(), "read_file"));
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            },
+            "required": ["name", "age"]
+        });
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": schema,
+                "name": "person",
+                "strict": true
+            }),
+        );
+
+        let body = client.build_request_body(&request)?;
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        assert_eq!(gen_config["responseMimeType"], "application/json");
+        assert!(gen_config.get("responseJsonSchema").is_some());
+
+        let response_schema = &gen_config["responseJsonSchema"];
+        assert_eq!(response_schema["type"], "object");
+        assert!(response_schema.get("properties").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_serializes_inline_video_user_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 12_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "video/mp4");
+        assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_rejects_video_tool_results() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::ToolResults {
+                results: vec![meerkat_core::ToolResult::with_blocks(
+                    "tool_1".to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 12_000,
+                        data: meerkat_core::VideoData::Inline {
+                            data: "AAAA".to_string(),
+                        },
+                    }],
+                    false,
+                )],
+            }],
+        );
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("video tool results should be rejected");
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(message.contains("video blocks are not supported"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_request_body_with_structured_output_preserves_schema_keywords()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+
+        // Schema keywords supported by Gemini responseJsonSchema should be preserved.
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {
+                "Address": {"type": "object"}
+            },
+            "$ref": "#/$defs/Address",
+            "anyOf": [
+                {"type": "object"},
+                {"type": "null"}
+            ],
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "additionalProperties": false
+        });
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param("structured_output", serde_json::json!({"schema": schema}));
+
+        let body = client.build_request_body(&request)?;
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        let response_schema = &gen_config["responseJsonSchema"];
+
+        // These should be preserved
+        assert!(response_schema.get("$defs").is_some());
+        assert_eq!(response_schema["$ref"], "#/$defs/Address");
+        assert!(response_schema.get("anyOf").is_some());
+        assert_eq!(response_schema["additionalProperties"], false);
+        assert_eq!(response_schema["type"], "object");
+        assert!(response_schema.get("properties").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_strict_errors_on_unsupported_keywords() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "allOf": [
+                {"type": "object"}
+            ]
+        });
+
+        let output_schema = OutputSchema::new(schema)
+            .expect("valid schema")
+            .with_compat(SchemaCompat::Strict);
+        let err = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect_err("strict mode should reject unsupported keywords");
+
+        match err {
+            SchemaError::UnsupportedFeatures { provider, warnings } => {
+                assert_eq!(provider, Provider::Gemini);
+                assert!(!warnings.is_empty());
+                assert!(
+                    warnings.iter().any(|w| w.path.contains("/allOf")),
+                    "expected warning path to include /allOf, got: {warnings:?}"
+                );
+            }
+            other => panic!("expected UnsupportedFeatures, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_lossy_keeps_schema_and_emits_warnings() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "allOf": [{"type": "object"}],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "pattern": "^[a-z]+$"
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema");
+        let expected = output_schema.schema.as_value().clone();
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("lossy mode should not error");
+
+        assert_eq!(compiled.schema, expected);
+        assert!(!compiled.warnings.is_empty());
+        assert!(
+            compiled.warnings.iter().any(|w| w.path.contains("/allOf")),
+            "expected /allOf warning"
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.path.contains("/properties/name/pattern")),
+            "expected /properties/name/pattern warning"
+        );
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_strict_accepts_supported_keywords() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "score": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                        },
+                        "required": ["id", "score"],
+                        "additionalProperties": false
+                    }
+                },
+                "choice": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "null"}
+                    ]
+                }
+            },
+            "required": ["items", "choice"],
+            "additionalProperties": false
+        });
+        let output_schema = OutputSchema::new(schema)
+            .expect("valid schema")
+            .with_compat(SchemaCompat::Strict);
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("strict mode should accept supported keywords");
+
+        assert!(compiled.warnings.is_empty());
+        assert_eq!(compiled.schema["type"], "object");
+    }
+
+    #[test]
+    fn test_compile_schema_for_gemini_warns_nested_unsupported_paths() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "allOf": [
+                        {"type": "object", "properties": {"x": {"type": "string"}}}
+                    ],
+                    "properties": {
+                        "payload": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "patternProperties": {
+                                    "^k_": {"type": "integer"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let output_schema = OutputSchema::new(schema).expect("valid schema");
+        let compiled = GeminiClient::compile_schema_for_gemini(&output_schema)
+            .expect("lossy mode should still compile");
+
+        let paths: Vec<String> = compiled.warnings.iter().map(|w| w.path.clone()).collect();
+        assert!(
+            paths.iter().any(|p| p.contains("/properties/nested/allOf")),
+            "expected warning at /properties/nested/allOf, got: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| {
+                p.contains("/properties/nested/properties/payload/items/patternProperties")
+            }),
+            "expected warning at nested patternProperties path, got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_request_body_strict_compat_rejects_unsupported_schema() {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param(
+            "structured_output",
+            serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "allOf": [{"type": "object"}]
+                },
+                "compat": "strict"
+            }),
+        );
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("strict compat should reject unsupported schema keywords");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("unsupported"),
+                    "unexpected message: {message}"
+                );
+                assert!(message.contains("Gemini"), "unexpected message: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_request_body_without_structured_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let client = GeminiClient::new("test-key".to_string());
+
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        );
+
+        let body = client.build_request_body(&request)?;
+
+        let gen_config = body
+            .get("generationConfig")
+            .ok_or("missing generationConfig")?;
+        assert!(
+            gen_config.get("responseMimeType").is_none(),
+            "responseMimeType should not be present"
+        );
+        assert!(
+            gen_config.get("responseJsonSchema").is_none(),
+            "responseJsonSchema should not be present"
+        );
+        Ok(())
+    }
+
+    /// Regression: type arrays must be lowered for functionDeclaration parameters.
+    #[test]
+    fn test_tool_schema_lowers_type_arrays() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": ["integer", "null"]},
+                "email": {"type": ["string", "null"]},
+                "score": {"type": ["string", "number"]}
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert_eq!(
+            lowered["properties"]["age"]["type"], "integer",
+            "['integer', 'null'] should lower to scalar type"
+        );
+        assert_eq!(
+            lowered["properties"]["age"]["nullable"],
+            serde_json::json!(true),
+            "null in type array should map to nullable=true"
+        );
+        assert_eq!(
+            lowered["properties"]["email"]["type"], "string",
+            "['string', 'null'] should lower to scalar type"
+        );
+        assert_eq!(
+            lowered["properties"]["email"]["nullable"],
+            serde_json::json!(true),
+            "null in type array should map to nullable=true"
+        );
+        assert!(
+            lowered["properties"]["score"].get("type").is_none(),
+            "multi-type union should move from type array to anyOf variants"
+        );
+        assert!(
+            lowered["properties"]["score"].get("anyOf").is_some(),
+            "multi-type union should become anyOf"
+        );
+        assert_eq!(
+            lowered["properties"]["name"]["type"], "string",
+            "'string' should remain 'string'"
+        );
+        assert_no_const_or_type_arrays(lowered);
+        Ok(())
+    }
+
+    /// Regression: const-based enum encodings must be lowered for Gemini tool schemas.
+    #[test]
+    fn test_tool_schema_lowers_const_compositions() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "oneOf": [
+                        {"const": "active"},
+                        {"const": "inactive"}
+                    ]
+                },
+                "category": {
+                    "anyOf": [
+                        {
+                            "oneOf": [
+                                {"const": "alpha"},
+                                {"const": "beta"},
+                                {"const": "gamma"}
+                            ]
+                        },
+                        {"type": "null"}
+                    ]
+                },
+                "value": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "number"}
+                    ]
+                }
+            },
+            "allOf": [
+                {"required": ["status"]}
+            ]
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let lowered = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(
+            lowered["properties"]["status"].get("enum").is_some(),
+            "const oneOf branches should collapse into enum"
+        );
+        assert_eq!(
+            lowered["properties"]["status"]["enum"],
+            serde_json::json!(["active", "inactive"])
+        );
+        assert_eq!(
+            lowered["properties"]["status"]["type"], "string",
+            "collapsed const enum should infer string type"
+        );
+        assert!(
+            lowered["properties"]["category"]["nullable"] == serde_json::json!(true),
+            "null composition branch should set nullable=true"
+        );
+        assert!(
+            lowered["properties"]["value"].get("anyOf").is_some(),
+            "anyOf should be preserved"
+        );
+        assert!(lowered.get("allOf").is_some(), "allOf should be preserved");
+        assert_no_const_or_type_arrays(lowered);
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_inlines_ref_and_strips_unsupported_keywords()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "RootParameters",
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/Payload"
+                }
+            },
+            "required": ["payload"],
+            "$defs": {
+                "Payload": {
+                    "title": "Payload",
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "title": "Message",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(
+            parameters.get("$schema").is_none(),
+            "tool parameters should not include $schema"
+        );
+        assert!(
+            parameters.get("$defs").is_none(),
+            "tool parameters should not include $defs"
+        );
+        assert!(
+            parameters.get("title").is_none(),
+            "tool parameters should not include title"
+        );
+        assert_eq!(
+            parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "tool parameters should preserve top-level additionalProperties"
+        );
+        assert!(
+            parameters["properties"]["payload"].get("$ref").is_none(),
+            "tool parameters should inline $ref targets"
+        );
+        assert!(
+            parameters["properties"]["payload"].get("title").is_none(),
+            "inlined payload should strip title"
+        );
+        assert_eq!(
+            parameters["properties"]["payload"]["type"], "object",
+            "inlined payload should preserve referenced type"
+        );
+        assert_eq!(
+            parameters["properties"]["payload"]["properties"]["message"]["type"], "string",
+            "inlined payload should preserve nested properties"
+        );
+        assert!(
+            parameters["properties"]["payload"]["properties"]["message"]
+                .get("title")
+                .is_none(),
+            "nested title should be stripped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_inline_ref_inside_anyof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "context": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/Context"},
+                        {"type": "null"}
+                    ]
+                }
+            },
+            "$defs": {
+                "Context": {
+                    "type": "object",
+                    "properties": {
+                        "ticket": {"type": "string"}
+                    },
+                    "required": ["ticket"],
+                    "additionalProperties": false
+                }
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let context_schema = &parameters["properties"]["context"];
+        let any_of = context_schema["anyOf"]
+            .as_array()
+            .ok_or("missing anyOf array")?;
+        let object_branch = any_of
+            .iter()
+            .find(|item| item["type"] == "object")
+            .ok_or("missing inlined object branch")?;
+
+        assert!(
+            object_branch.get("$ref").is_none(),
+            "inlined anyOf branch should not keep $ref"
+        );
+        assert!(
+            object_branch.get("additionalProperties").is_none(),
+            "additionalProperties should be stripped from inlined branch"
+        );
+        assert_eq!(object_branch["properties"]["ticket"]["type"], "string");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_rejects_unresolved_external_ref() {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "https://example.com/schemas/Payload.json"
+                }
+            }
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+
+        let err = client
+            .build_request_body(&request)
+            .expect_err("external refs should fail fast for function parameters");
+
+        match err {
+            LlmError::InvalidRequest { message } => {
+                assert!(
+                    message.contains("unresolved $ref"),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("https://example.com/schemas/Payload.json"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tool_schema_preserves_property_named_title() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "title": { "type": "string", "description": "Human readable title" },
+                "summary": { "type": "string" }
+            },
+            "required": ["id", "title", "summary"]
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "upsert_record".to_string(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let props = parameters["properties"]
+            .as_object()
+            .ok_or("missing properties")?;
+
+        assert!(
+            props.contains_key("title"),
+            "property named 'title' must not be stripped — it's a user field, not a schema keyword"
+        );
+        assert!(
+            props.contains_key("id"),
+            "property 'id' should be preserved"
+        );
+        assert!(
+            props.contains_key("summary"),
+            "property 'summary' should be preserved"
+        );
+
+        // The JSON Schema keyword `title` at the root level should still be stripped
+        assert!(
+            parameters.get("title").is_none(),
+            "root-level title keyword should be stripped"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Thought Signature Tests (Spec Section 3.5)
+    // =========================================================================
+
+    /// Parse thoughtSignature from functionCall parts into ProviderMeta::Gemini
+    #[test]
+    fn test_parse_function_call_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}},"thoughtSignature":"sig_abc123"}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert!(
+            parts[0].function_call.is_some(),
+            "should have function_call"
+        );
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_abc123"),
+            "should have thoughtSignature"
+        );
+        Ok(())
+    }
+
+    /// Parse thoughtSignature from text parts into ProviderMeta::Gemini
+    #[test]
+    fn test_parse_text_with_thought_signature() -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world","thoughtSignature":"sig_text_456"}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts[0].text.as_deref(), Some("Hello world"));
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_text_456"),
+            "text parts can have thoughtSignature for continuity"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_text_with_thought_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let line =
+            r#"{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}"#;
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.as_ref().ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts[0].text.as_deref(), Some("thinking..."));
+        assert_eq!(parts[0].thought, Some(true));
+        Ok(())
+    }
+
+    /// Parallel tool calls: only FIRST call has signature per spec section 2.3
+    #[test]
+    fn test_parallel_calls_only_first_has_signature() -> Result<(), Box<dyn std::error::Error>> {
+        // Simulating 3 parallel function calls from Gemini - only first has signature
+        let line = r#"{"candidates":[{"content":{"parts":[
+            {"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}},"thoughtSignature":"sig_first"},
+            {"functionCall":{"name":"get_time","args":{"tz":"JST"}}},
+            {"functionCall":{"name":"get_population","args":{"city":"Tokyo"}}}
+        ]}}]}"#;
+
+        let response = GeminiClient::parse_stream_line(line).ok_or("missing response")?;
+        let candidates = response.candidates.ok_or("missing candidates")?;
+        let parts = candidates[0]
+            .content
+            .as_ref()
+            .ok_or("missing content")?
+            .parts
+            .as_ref()
+            .ok_or("missing parts")?;
+
+        assert_eq!(parts.len(), 3);
+        assert_eq!(
+            parts[0].thought_signature.as_deref(),
+            Some("sig_first"),
+            "first parallel call MUST have signature"
+        );
+        assert!(
+            parts[1].thought_signature.is_none(),
+            "second parallel call must NOT have signature"
+        );
+        assert!(
+            parts[2].thought_signature.is_none(),
+            "third parallel call must NOT have signature"
+        );
+        Ok(())
+    }
+
+    /// Request building: thoughtSignature on functionCall via ProviderMeta, NEVER on functionResponse
+    #[test]
+    fn test_request_building_no_signature_on_function_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
+        let client = GeminiClient::new("test-key".to_string());
+
+        let args_raw = RawValue::from_string(json!({"city": "Tokyo"}).to_string()).unwrap();
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![
+                Message::User(UserMessage::text("What's the weather?".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        args: args_raw,
+                        meta: Some(Box::new(ProviderMeta::Gemini {
+                            thought_signature: "sig_123".to_string(),
+                        })),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                }),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::new(
+                        "call_1".to_string(),
+                        "Sunny, 25C".to_string(),
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body
+            .get("contents")
+            .and_then(|c| c.as_array())
+            .ok_or("missing contents")?;
+
+        // Find the assistant message (role: "model")
+        let assistant_content = contents
+            .iter()
+            .find(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+            .ok_or("missing model content")?;
+        let assistant_parts = assistant_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing parts")?;
+
+        // Assistant's functionCall SHOULD have thoughtSignature
+        let fc_part = assistant_parts
+            .iter()
+            .find(|p| p.get("functionCall").is_some())
+            .ok_or("missing functionCall part")?;
+        assert!(
+            fc_part.get("thoughtSignature").is_some(),
+            "functionCall part SHOULD have thoughtSignature"
+        );
+
+        // Find the tool results message (role: "user" with functionResponse)
+        let tool_results_content = contents.last().ok_or("missing last content")?;
+        let tool_result_parts = tool_results_content
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .ok_or("missing tool result parts")?;
+
+        // Tool result's functionResponse MUST NOT have thoughtSignature
+        let fr_part = tool_result_parts
+            .iter()
+            .find(|p| p.get("functionResponse").is_some())
+            .ok_or("missing functionResponse part")?;
+        assert!(
+            fr_part.get("thoughtSignature").is_none(),
+            "functionResponse MUST NOT have thoughtSignature"
+        );
+
+        Ok(())
+    }
+
+    /// ToolCallComplete event should use ProviderMeta::Gemini instead of deprecated thought_signature field
+    #[test]
+    fn test_tool_call_complete_uses_provider_meta() {
+        use meerkat_core::ProviderMeta;
+
+        // This test verifies the LlmEvent::ToolCallComplete uses the `meta` field
+        // with ProviderMeta::Gemini variant instead of the deprecated `thought_signature` field
+        let meta = Some(Box::new(ProviderMeta::Gemini {
+            thought_signature: "sig_test".to_string(),
+        }));
+
+        let event = LlmEvent::ToolCallComplete {
+            id: "fc_0".to_string(),
+            name: "test_tool".to_string(),
+            args: json!({}),
+            meta, // new field
+        };
+
+        if let LlmEvent::ToolCallComplete { meta: m, .. } = event {
+            assert!(m.is_some(), "meta should be Some");
+            match *m.unwrap() {
+                ProviderMeta::Gemini { thought_signature } => {
+                    assert_eq!(thought_signature, "sig_test");
+                }
+                _ => panic!("expected Gemini variant"),
+            }
+        }
+    }
+
+    /// TextDelta event should include meta for Gemini text parts with thoughtSignature
+    #[test]
+    fn test_text_delta_uses_provider_meta() {
+        use meerkat_core::ProviderMeta;
+
+        let meta = Some(Box::new(ProviderMeta::Gemini {
+            thought_signature: "sig_text".to_string(),
+        }));
+
+        let event = LlmEvent::TextDelta {
+            delta: "Hello".to_string(),
+            meta,
+        };
+
+        if let LlmEvent::TextDelta { meta: m, .. } = event {
+            assert!(m.is_some());
+            match *m.unwrap() {
+                ProviderMeta::Gemini { thought_signature } => {
+                    assert_eq!(thought_signature, "sig_text");
+                }
+                _ => panic!("expected Gemini variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_reasoning_delta_when_thought() {
+        let event = text_event_for_part("plan step".to_string(), true, None);
+        match event {
+            LlmEvent::ReasoningDelta { delta } => assert_eq!(delta, "plan step"),
+            _ => panic!("expected ReasoningDelta"),
+        }
+    }
+
+    #[test]
+    fn test_text_event_for_part_emits_text_delta_when_not_thought() {
+        use meerkat_core::ProviderMeta;
+
+        let event = text_event_for_part(
+            "final answer".to_string(),
+            false,
+            Some(Box::new(ProviderMeta::Gemini {
+                thought_signature: "sig_text".to_string(),
+            })),
+        );
+        match event {
+            LlmEvent::TextDelta { delta, meta } => {
+                assert_eq!(delta, "final answer");
+                let meta = meta.expect("meta");
+                match meta.as_ref() {
+                    ProviderMeta::Gemini { thought_signature } => {
+                        assert_eq!(thought_signature, "sig_text");
+                    }
+                    _ => panic!("expected Gemini meta"),
+                }
+            }
+            _ => panic!("expected TextDelta"),
+        }
+    }
+
+    // =========================================================================
+    // Multimodal content (ContentBlock::Image) serialization tests
+    // =========================================================================
+
+    #[test]
+    fn gemini_user_message_with_image_inline_data() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "describe this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR...".into(),
+                },
+            ]))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let user_content = &contents[0];
+
+        assert_eq!(user_content["role"], "user");
+
+        let parts = user_content["parts"].as_array().ok_or("missing parts")?;
+        assert_eq!(parts.len(), 2);
+
+        assert_eq!(parts[0]["text"], "describe this");
+
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBOR...");
+
+        // source_path must NOT leak
+        let body_str = serde_json::to_string(&body)?;
+        assert!(
+            !body_str.contains("source_path"),
+            "source_path must never appear in provider payload"
+        );
+        assert!(
+            !body_str.contains("/tmp/img.png"),
+            "source_path value must never appear in provider payload"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_text_only_user_message_stays_simple() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![Message::User(UserMessage::text("just text"))],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+
+        // Text-only should use simple single-part format
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "just text");
+        assert!(
+            parts[0].get("inlineData").is_none(),
+            "text-only should not have inlineData"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_tool_result_with_image_preserves_inline_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::value::RawValue;
+        let client = GeminiClient::new("test-key".to_string());
+        let args_raw = RawValue::from_string(json!({"url": "http://example.com"}).to_string())?;
+
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![
+                Message::User(UserMessage::text("take a screenshot")),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "screenshot".to_string(),
+                        args: args_raw,
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                }),
+                Message::ToolResults {
+                    results: vec![meerkat_core::ToolResult::with_blocks(
+                        "call_1".to_string(),
+                        vec![
+                            ContentBlock::Text {
+                                text: "captured".to_string(),
+                            },
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: "iVBOR...".into(),
+                            },
+                        ],
+                        false,
+                    )],
+                },
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+
+        // Last content entry is the tool result
+        let tool_result_content = contents.last().ok_or("no last content")?;
+        let parts = tool_result_content["parts"]
+            .as_array()
+            .ok_or("missing parts")?;
+
+        // First part: functionResponse with text content
+        let response = &parts[0]["functionResponse"]["response"];
+        let content_str = response["content"].as_str().ok_or("content not string")?;
+        assert!(
+            content_str.contains("captured"),
+            "text content should be preserved in functionResponse"
+        );
+
+        // Second part: inlineData with the actual image
+        assert!(
+            parts.len() >= 2,
+            "should have functionResponse + inlineData parts, got {} parts",
+            parts.len()
+        );
+        let inline_data = &parts[1]["inlineData"];
+        assert_eq!(
+            inline_data["mimeType"].as_str(),
+            Some("image/png"),
+            "image mimeType should be preserved"
+        );
+        assert_eq!(
+            inline_data["data"].as_str(),
+            Some("iVBOR..."),
+            "image base64 data should be preserved"
+        );
+        Ok(())
+    }
+
+    // =========================================================================
+    // Google search tool injection tests
+    // =========================================================================
+
+    #[test]
+    fn test_google_search_alongside_functions() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))])
+        .with_provider_params(serde_json::json!({"google_search": {}}));
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(
+            tools.len(),
+            2,
+            "should have functionDeclarations + google_search"
+        );
+        assert!(
+            tools[0].get("functionDeclarations").is_some(),
+            "first element should be functionDeclarations"
+        );
+        assert!(
+            tools[1].get("google_search").is_some(),
+            "second element should be google_search"
+        );
+        assert_eq!(
+            body["toolConfig"]["includeServerSideToolInvocations"].as_bool(),
+            Some(true),
+            "mixed built-in + function tools must opt into server-side tool invocations"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_google_search_alone() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_params(serde_json::json!({"google_search": {}}));
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1, "should have only google_search");
+        assert!(tools[0].get("google_search").is_some());
+        assert!(
+            body.get("toolConfig").is_none() || body["toolConfig"].is_null(),
+            "google_search alone should not force toolConfig"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_google_search_when_absent() -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-1.5-pro",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef::new(
+            "my_tool",
+            "A test tool",
+            serde_json::json!({"type": "object", "properties": {}}),
+        ))]);
+        let body = client.build_request_body(&request)?;
+        let tools = body["tools"].as_array().expect("tools should be array");
+        assert_eq!(tools.len(), 1, "should only have functionDeclarations");
+        assert!(tools[0].get("functionDeclarations").is_some());
+        assert!(
+            body.get("toolConfig").is_none() || body["toolConfig"].is_null(),
+            "functionDeclarations alone should not force toolConfig"
+        );
+        Ok(())
+    }
+}

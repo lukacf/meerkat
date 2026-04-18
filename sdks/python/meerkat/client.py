@@ -1522,6 +1522,37 @@ class MeerkatClient:
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
+    async def mob_snapshot(self, mob_id: str) -> dict[str, Any]:
+        """Point-in-time aggregate of mob status plus member list.
+
+        Wraps the ``mob/snapshot`` RPC (DELETE_ME C2). Returns
+        ``{mob_id, status, members}`` in one atomic call so consumers
+        do not have to compose ``mob/status`` + ``mob/members`` or fall
+        back to event-stream projection for point-in-time state.
+        """
+        return await self._request("mob/snapshot", {"mob_id": mob_id})
+
+    async def mob_destroy(self, mob_id: str) -> dict[str, Any]:
+        """Destroy a mob and surface the structured ``MobDestroyReport``.
+
+        Wraps the ``mob/destroy`` RPC (DELETE_ME C3). Unlike
+        ``mob/lifecycle`` with ``action="destroy"``, this dedicated
+        endpoint has a predictable response shape
+        (``{mob_id, ok, destroy_report}``) that does not require
+        branching on an action string.
+        """
+        return await self._request("mob/destroy", {"mob_id": mob_id})
+
+    async def mob_rotate_supervisor(self, mob_id: str) -> dict[str, Any]:
+        """Rotate the supervisor bridge for all members of a mob.
+
+        Wraps the ``mob/rotate_supervisor`` RPC (DELETE_ME C10). Returns
+        the full ``SupervisorRotationReport`` so operators can inspect
+        per-member rotation outcomes instead of getting a bare
+        ``ok: true``.
+        """
+        return await self._request("mob/rotate_supervisor", {"mob_id": mob_id})
+
     async def append_mob_system_context(
         self,
         mob_id: str,

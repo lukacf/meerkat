@@ -1119,6 +1119,57 @@ export class MeerkatClient {
     };
   }
 
+  /**
+   * Point-in-time aggregate of a mob's status plus its member list.
+   * Wraps the `mob/snapshot` RPC (DELETE_ME C2).
+   */
+  async mobSnapshot(mobId: string): Promise<{
+    mobId: string;
+    status: string;
+    members: unknown[];
+  }> {
+    const result = await this.request("mob/snapshot", { mob_id: mobId });
+    return {
+      mobId: String(result.mob_id ?? mobId),
+      status: String(result.status ?? "unknown"),
+      members: Array.isArray(result.members) ? result.members : [],
+    };
+  }
+
+  /**
+   * Destroy a mob and surface the structured `MobDestroyReport`.
+   * Wraps the `mob/destroy` RPC (DELETE_ME C3). Unlike `mob/lifecycle`
+   * with `action: "destroy"`, this dedicated endpoint has a predictable
+   * response shape that does not require branching on an action string.
+   */
+  async mobDestroy(mobId: string): Promise<{
+    mobId: string;
+    ok: boolean;
+    destroyReport: Record<string, unknown>;
+  }> {
+    const result = await this.request("mob/destroy", { mob_id: mobId });
+    const report =
+      result.destroy_report && typeof result.destroy_report === "object"
+        ? (result.destroy_report as Record<string, unknown>)
+        : {};
+    return {
+      mobId: String(result.mob_id ?? mobId),
+      ok: Boolean(result.ok ?? false),
+      destroyReport: report,
+    };
+  }
+
+  /**
+   * Rotate the supervisor bridge for all members of a mob.
+   * Wraps the `mob/rotate_supervisor` RPC (DELETE_ME C10). Returns the
+   * full `SupervisorRotationReport` so operators can inspect per-member
+   * rotation outcomes instead of getting a bare `ok: true`.
+   */
+  async mobRotateSupervisor(mobId: string): Promise<Record<string, unknown>> {
+    const result = await this.request("mob/rotate_supervisor", { mob_id: mobId });
+    return result;
+  }
+
   async waitMobKickoff(
     mobId: string,
     options?: MobKickoffWaitOptions,

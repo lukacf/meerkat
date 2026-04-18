@@ -182,12 +182,21 @@ async fn file_save_sets_0o600_perms() {
 
 // --- AutoTokenStore (4a.4) ---------------------------------------------
 //
-// Auto falls back to the file store when keyring is unavailable. Without
-// the `native-keyring` feature, Auto *is* a file store in practice. We
-// verify the fallback round-trip; keyring-primary behavior lives in a
-// `native-keyring`-gated test once the real impl lands.
+// Auto tries the OS keyring first (when `native-keyring` is enabled)
+// and falls back to the file store on failure. On macOS with the
+// feature enabled — which is the default through meerkat-cli's
+// dependency declaration — exercising this test hits the real
+// `login.keychain` and Security.framework pops a password dialog.
+// Interactive prompts in the default unit-test lane are a no-go, so
+// this test is `#[ignore]` by default and only runs when the caller
+// opts in via `--include-ignored` (or `--run-ignored all`). The
+// file-store round-trip the "falls back to file" claim rests on is
+// already covered by `file_round_trip_saves_and_loads`; this test
+// only adds coverage when someone is explicitly validating the
+// keyring path and is willing to approve the keychain dialog.
 
 #[tokio::test]
+#[ignore = "AutoTokenStore hits the real OS keychain when native-keyring is enabled; opt in with --include-ignored"]
 async fn auto_round_trip_falls_back_to_file() {
     let temp = tempfile::tempdir().unwrap();
     let store =

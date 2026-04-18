@@ -709,7 +709,8 @@ impl AgentMobToolSurface {
         self.ensure_mob_scope_authority(call.name, &mob_id).await?;
         let audit_handle = self.state.handle_for(&mob_id).await.ok();
 
-        self.state
+        let report = self
+            .state
             .mob_destroy(&mob_id)
             .await
             .map_err(|e| Self::map_mob_error(call, e))?;
@@ -719,7 +720,20 @@ impl AgentMobToolSurface {
                 .await;
         }
 
-        Self::encode_result(call, json!({"ok": true}))
+        // Surface the structured destroy report so agents can observe
+        // force-destroyed members, orphaned remotes, deadline overruns,
+        // and partial cleanup errors rather than getting a bare `ok: true`.
+        let report_value = serde_json::to_value(&report).map_err(|e| {
+            ToolError::execution_failed(format!(
+                "{}: failed to serialize destroy report: {e}",
+                call.name,
+            ))
+        })?;
+        let mut body = json!({"ok": true});
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("destroy_report".to_string(), report_value);
+        }
+        Self::encode_result(call, body)
     }
 
     async fn dispatch_mob_spawn_member(

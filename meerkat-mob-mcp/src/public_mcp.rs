@@ -789,20 +789,61 @@ pub async fn handle_public_tools_call(
         "meerkat_mob_lifecycle" => {
             let input: MeerkatMobLifecycleInput = parse_args(arguments)?;
             let mob_id = parse_mob_id(&input.mob_id)?;
-            match input.action.as_str() {
-                "stop" => state.mob_stop(&mob_id).await,
-                "resume" => state.mob_resume(&mob_id).await,
-                "complete" => state.mob_complete(&mob_id).await,
-                "reset" => state.mob_reset(&mob_id).await,
-                "destroy" => state.mob_destroy(&mob_id).await,
+            // `destroy` returns a structured MobDestroyReport; the public
+            // MCP surface projects it into the response body. Other actions
+            // stay `()` on success.
+            let destroy_report = match input.action.as_str() {
+                "stop" => {
+                    state
+                        .mob_stop(&mob_id)
+                        .await
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                    None
+                }
+                "resume" => {
+                    state
+                        .mob_resume(&mob_id)
+                        .await
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                    None
+                }
+                "complete" => {
+                    state
+                        .mob_complete(&mob_id)
+                        .await
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                    None
+                }
+                "reset" => {
+                    state
+                        .mob_reset(&mob_id)
+                        .await
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                    None
+                }
+                "destroy" => {
+                    let report = state
+                        .mob_destroy(&mob_id)
+                        .await
+                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+                    Some(report)
+                }
                 other => {
                     return Err(McpToolError::invalid_params(format!(
                         "unknown lifecycle action: {other}"
                     )));
                 }
+            };
+            let mut body = json!({ "mob_id": mob_id, "action": input.action, "ok": true });
+            if let Some(report) = destroy_report
+                && let Some(obj) = body.as_object_mut()
+            {
+                let report_value = serde_json::to_value(&report).map_err(|err| {
+                    McpToolError::internal(format!("destroy report serialize: {err}"))
+                })?;
+                obj.insert("destroy_report".to_string(), report_value);
             }
-            .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "mob_id": mob_id, "action": input.action, "ok": true }))
+            Ok(body)
         }
         "meerkat_mob_members" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;

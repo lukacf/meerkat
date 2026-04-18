@@ -1703,7 +1703,12 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
         "resume" => mob_state.mob_resume(&id).await.map_err(err_mob)?,
         "complete" => mob_state.mob_complete(&id).await.map_err(err_mob)?,
         "reset" => mob_state.mob_reset(&id).await.map_err(err_mob)?,
-        "destroy" => mob_state.mob_destroy(&id).await.map_err(err_mob)?,
+        "destroy" => {
+            // WASM lifecycle wrapper is `() on success`; Rust/RPC callers
+            // that need the structured MobDestroyReport use the RPC
+            // mob/lifecycle handler directly.
+            let _report = mob_state.mob_destroy(&id).await.map_err(err_mob)?;
+        }
         _ => {
             return Err(err_js(
                 "invalid_action",

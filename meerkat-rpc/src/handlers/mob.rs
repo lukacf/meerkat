@@ -448,21 +448,49 @@ pub async fn handle_lifecycle(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let result = match params.action.as_str() {
-        "stop" => state.mob_stop(&mob_id).await,
-        "resume" => state.mob_resume(&mob_id).await,
-        "complete" => state.mob_complete(&mob_id).await,
-        "reset" => state.mob_reset(&mob_id).await,
-        "destroy" => state.mob_destroy(&mob_id).await,
+    // `destroy` returns a structured `MobDestroyReport` with
+    // force_destroyed_members, orphaned_remote_members, partial errors, etc.
+    // The other lifecycle actions are `()` on success. Surface the report on
+    // destroy so clients (mobkit, tests) can distinguish clean destroy from
+    // partial cleanup instead of assuming `ok: true` means everything
+    // succeeded.
+    let destroy_report = match params.action.as_str() {
+        "stop" => match state.mob_stop(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "resume" => match state.mob_resume(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "complete" => match state.mob_complete(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "reset" => match state.mob_reset(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "destroy" => match state.mob_destroy(&mob_id).await {
+            Ok(report) => Some(report),
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
         other => return invalid_params(id, format!("Unknown mob lifecycle action: {other}")),
     };
-    match result {
-        Ok(()) => RpcResponse::success(
-            id,
-            serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true}),
-        ),
-        Err(err) => invalid_params(id, err.to_string()),
+    let mut body = serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true});
+    if let Some(report) = destroy_report
+        && let Some(obj) = body.as_object_mut()
+    {
+        match serde_json::to_value(&report) {
+            Ok(value) => {
+                obj.insert("destroy_report".to_string(), value);
+            }
+            Err(err) => {
+                return invalid_params(id, format!("destroy report serialize: {err}"));
+            }
+        }
     }
+    RpcResponse::success(id, body)
 }
 
 #[derive(Debug, Deserialize)]

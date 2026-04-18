@@ -992,6 +992,41 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
 
+    // mob/lifecycle destroy must surface the structured MobDestroyReport
+    // (Finding A1 regression: previously the report was dropped on the
+    // floor and the RPC client saw only `ok: true` even when partial
+    // cleanup errors had occurred).
+    let destroy_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "mob/lifecycle",
+        "params": {"mob_id": &mob_id, "action": "destroy"}
+    });
+    send_request(&mut writer, &destroy_req).await;
+    let destroy_resp = read_response(&mut reader).await;
+    assert!(
+        destroy_resp["error"].is_null(),
+        "mob/lifecycle(destroy) failed: {destroy_resp}"
+    );
+    assert_eq!(destroy_resp["result"]["ok"], true);
+    assert_eq!(destroy_resp["result"]["action"], "destroy");
+    assert_eq!(destroy_resp["result"]["mob_id"], mob_id);
+    // destroy_report is always present on a destroy success even when
+    // cleanup is clean (all structured fields will be defaults), so
+    // clients can distinguish a destroy response from a stop/reset one
+    // and can always introspect force_destroyed_members, errors, etc.
+    let destroy_report = &destroy_resp["result"]["destroy_report"];
+    assert!(
+        destroy_report.is_object(),
+        "destroy response must carry a `destroy_report` object: {destroy_resp}",
+    );
+    // serde's #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // means an empty clean destroy projects as `{}` — the presence of the
+    // object is what matters; fields only appear on non-default values.
+    // force_destroyed_members / orphaned_remote_members are omitted when
+    // empty, so we only assert the object exists, not that a specific
+    // field is present.
+
     drop(writer);
     handle.await.unwrap().unwrap();
 }

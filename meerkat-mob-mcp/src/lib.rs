@@ -498,7 +498,16 @@ impl MobMcpState {
     /// Destroy a mob. Rejects implicit delegation mobs — use
     /// [`destroy_bridge_session_mobs`](Self::destroy_bridge_session_mobs) for
     /// bridge-session cleanup.
-    pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
+    ///
+    /// Returns the structured [`meerkat_mob::MobDestroyReport`] so RPC/MCP
+    /// surfaces can project every cleanup result (force-destroyed members,
+    /// orphaned remote members, deadline exceeded, partial errors) — the
+    /// report was previously dropped on the floor, leaving mobkit and the
+    /// RPC client unable to tell partial failures from clean destroys.
+    pub async fn mob_destroy(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         if self.is_implicit_mob(mob_id).await {
             return Err(MobError::Internal(
                 "Cannot destroy implicit delegation mob directly. \
@@ -512,12 +521,18 @@ impl MobMcpState {
     /// Destroy a mob without the implicit-mob guard.
     ///
     /// Used by session cleanup paths and canonical implicit-mob reconciliation.
-    pub(crate) async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
+    pub(crate) async fn mob_destroy_unchecked(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         self.ensure_restored().await?;
         self.mob_destroy_unchecked_loaded(mob_id).await
     }
 
-    async fn mob_destroy_unchecked_loaded(&self, mob_id: &MobId) -> Result<(), MobError> {
+    async fn mob_destroy_unchecked_loaded(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
             mobs.remove(mob_id)
@@ -525,9 +540,9 @@ impl MobMcpState {
         };
 
         match managed.handle.destroy().await {
-            Ok(_report) => {
+            Ok(report) => {
                 Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
-                Ok(())
+                Ok(report)
             }
             Err(error) => {
                 let mut mobs = self.mobs.write().await;
@@ -2205,11 +2220,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .mob_complete(&mob_id)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    "destroy" => self
-                        .state
-                        .mob_destroy(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
+                    "destroy" => {
+                        // MCP tool surface treats destroy as "() on success";
+                        // the structured MobDestroyReport is available via the
+                        // RPC lifecycle handler for consumers that care about
+                        // force-destroyed members and partial-cleanup errors.
+                        let _report = self
+                            .state
+                            .mob_destroy(&mob_id)
+                            .await
+                            .map_err(|e| map_mob_err(call, e))?;
+                    }
                     other => {
                         return Err(ToolError::invalid_arguments(
                             call.name,

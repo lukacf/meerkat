@@ -66,6 +66,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "working".into(),
+            payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
@@ -85,6 +86,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
@@ -100,6 +102,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
@@ -112,6 +115,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
@@ -127,6 +131,7 @@ mod tests {
                 intent: "i".into(),
             }),
             body: "do it".into(),
+            payload: Some(serde_json::json!({"subject": "x"})),
             blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
@@ -139,6 +144,7 @@ mod tests {
             header: make_header(),
             convention: None,
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
@@ -167,6 +173,7 @@ mod tests {
                 header: make_header(),
                 convention,
                 body: "hi".into(),
+                payload: None,
                 blocks: None,
                 handling_mode: None,
             });

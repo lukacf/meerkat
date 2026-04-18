@@ -107,6 +107,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
             sessions_jsonl_dir: String::new(),
         },
         expose_paths: false,
+        realtime_rpc_tcp_addr: None,
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,

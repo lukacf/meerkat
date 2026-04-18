@@ -3,13 +3,10 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback under task-scheduling fairness
 
-use crate::error::AgentError;
 use crate::lifecycle::identifiers::{RunId, WaitRequestId};
 use crate::ops::OperationId;
 use crate::ops_lifecycle::WaitAllSatisfied;
-use crate::turn_execution_authority::{
-    TurnExecutionAuthority, TurnExecutionInput, TurnExecutionMutator, TurnExecutionTransition,
-};
+use crate::turn_execution_authority::TurnExecutionInput;
 
 #[derive(Debug, Clone)]
 pub struct OpsBarrierSatisfactionObligation {
@@ -25,13 +22,11 @@ pub fn accept_wait_all_satisfied(source: WaitAllSatisfied) -> OpsBarrierSatisfac
 }
 
 pub fn submit_ops_barrier_satisfied(
-    authority: &mut TurnExecutionAuthority,
     obligation: OpsBarrierSatisfactionObligation,
     run_id: RunId,
-) -> Result<TurnExecutionTransition, AgentError> {
-    let transition = authority.apply(TurnExecutionInput::OpsBarrierSatisfied {
+) -> TurnExecutionInput {
+    TurnExecutionInput::OpsBarrierSatisfied {
         run_id,
         operation_ids: obligation.operation_ids,
-    })?;
-    Ok(transition)
+    }
 }

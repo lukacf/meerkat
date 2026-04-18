@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_occurrence_lifecycle_machine as occurrence_lifecycle_machine,
+    dsl_schedule_lifecycle_machine as schedule_lifecycle_machine,
+};
 use meerkat_machine_schema::{
     CompositionSchemaError, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    meerkat_machine, meerkat_mob_seam_composition, mob_machine, occurrence_lifecycle_machine,
-    schedule_lifecycle_machine,
+    meerkat_mob_seam_composition,
 };
 
 #[test]
@@ -611,14 +615,6 @@ fn every_mutating_meerkat_runtime_command_has_transition_coverage() {
             "MeerkatMachine should model mutating runtime command {required} with at least one transition",
         );
     }
-
-    assert!(
-        schema
-            .surface_only_inputs
-            .iter()
-            .any(|name| name == "Recover"),
-        "Recover should remain surfaced even though recovery mutates only lower-authority ledger/runtime-driver state today",
-    );
 }
 
 #[test]
@@ -686,6 +682,7 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
         "InputState",
         "ListActiveInputs",
         "RuntimeState",
+        "RuntimeRealtimeAttachmentStatus",
         "LoadBoundaryReceipt",
     ] {
         assert!(

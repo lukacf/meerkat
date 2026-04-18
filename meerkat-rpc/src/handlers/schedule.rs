@@ -130,7 +130,7 @@ pub async fn handle_list(
                 schedules.retain(|schedule| {
                     labels
                         .iter()
-                        .all(|(key, value)| schedule.labels.get(key) == Some(value))
+                        .all(|(key, value)| schedule.config.labels.get(key) == Some(value))
                 });
             }
 

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::sync::Arc;
 
+use crate::handlers::runtime::to_wire_accept_result;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
@@ -39,7 +40,10 @@ pub async fn handle_external_event(
         .accept_external_event_via_runtime(&session_id, params.payload, source_name)
         .await
     {
-        Ok(outcome) => RpcResponse::success(id, outcome),
+        Ok(outcome) => match to_wire_accept_result(outcome) {
+            Ok(result) => RpcResponse::success(id, result),
+            Err(message) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, message),
+        },
         Err(err) => RpcResponse::error(id, err.code, err.message),
     }
 }

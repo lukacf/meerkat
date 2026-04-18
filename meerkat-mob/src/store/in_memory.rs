@@ -1,10 +1,15 @@
 //! In-memory store implementations.
 
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
-use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
+use super::{
+    ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord,
+};
 use crate::definition::MobDefinition;
 use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
+};
 use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
@@ -29,6 +34,136 @@ pub struct InMemoryMobEventStore {
 impl InMemoryMobEventStore {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+type ExternalBindingOverlayMap = BTreeMap<
+    (MobId, crate::ids::AgentIdentity, crate::ids::Generation),
+    ExternalBindingOverlayRecord,
+>;
+
+/// In-memory runtime metadata store for tests and ephemeral mobs.
+#[derive(Debug, Default)]
+pub struct InMemoryMobRuntimeMetadataStore {
+    supervisor_records: Arc<RwLock<BTreeMap<MobId, SupervisorAuthorityRecord>>>,
+    external_binding_overlays: Arc<RwLock<ExternalBindingOverlayMap>>,
+}
+
+impl InMemoryMobRuntimeMetadataStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl MobRuntimeMetadataStore for InMemoryMobRuntimeMetadataStore {
+    async fn load_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<SupervisorAuthorityRecord>, MobStoreError> {
+        Ok(self.supervisor_records.read().await.get(mob_id).cloned())
+    }
+
+    async fn put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<(), MobStoreError> {
+        self.supervisor_records
+            .write()
+            .await
+            .insert(mob_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let mut guard = self.supervisor_records.write().await;
+        if guard.contains_key(mob_id) {
+            return Ok(false);
+        }
+        guard.insert(mob_id.clone(), record.clone());
+        Ok(true)
+    }
+
+    async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        self.supervisor_records.write().await.remove(mob_id);
+        Ok(())
+    }
+
+    async fn list_external_binding_overlays(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<ExternalBindingOverlayRecord>, MobStoreError> {
+        Ok(self
+            .external_binding_overlays
+            .read()
+            .await
+            .iter()
+            .filter(|((stored_mob_id, _, _), _)| stored_mob_id == mob_id)
+            .map(|(_, record)| record.clone())
+            .collect())
+    }
+
+    async fn put_external_binding_overlay_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<bool, MobStoreError> {
+        let key = (
+            mob_id.clone(),
+            record.agent_identity.clone(),
+            record.generation,
+        );
+        let mut overlays = self.external_binding_overlays.write().await;
+        if overlays.contains_key(&key) {
+            return Ok(false);
+        }
+        overlays.insert(key, record.clone());
+        Ok(true)
+    }
+
+    async fn upsert_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<(), MobStoreError> {
+        let key = (
+            mob_id.clone(),
+            record.agent_identity.clone(),
+            record.generation,
+        );
+        self.external_binding_overlays
+            .write()
+            .await
+            .insert(key, record.clone());
+        Ok(())
+    }
+
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobStoreError> {
+        self.external_binding_overlays.write().await.remove(&(
+            mob_id.clone(),
+            agent_identity.clone(),
+            generation,
+        ));
+        Ok(())
+    }
+
+    async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        self.external_binding_overlays
+            .write()
+            .await
+            .retain(|(stored_mob_id, _, _), _| stored_mob_id != mob_id);
+        Ok(())
     }
 }
 
@@ -937,6 +1072,94 @@ mod tests {
 
         assert!(!store.delete_spec(&mob_id, Some(1)).await.unwrap());
         assert!(store.delete_spec(&mob_id, Some(2)).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_runtime_metadata_store_roundtrips_supervisor_and_overlay_records() {
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("mob-runtime");
+        let supervisor = SupervisorAuthorityRecord::generate(1);
+        store
+            .put_supervisor_authority(&mob_id, &supervisor)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(supervisor.clone())
+        );
+
+        let overlay = ExternalBindingOverlayRecord {
+            agent_identity: crate::AgentIdentity::from("worker-1"),
+            generation: crate::Generation::INITIAL,
+            normalized_member_ref: Some(crate::event::MemberRef::BackendPeer {
+                peer_id: "ed25519:test-worker-1".to_string(),
+                address: "inproc://worker-1".to_string(),
+                bootstrap_token: None,
+                session_id: None,
+            }),
+            bootstrap_token: None,
+            status: crate::store::ExternalBindingOverlayStatus::Normalized,
+            updated_at: Utc::now(),
+        };
+        assert!(
+            store
+                .put_external_binding_overlay_if_absent(&mob_id, &overlay)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_external_binding_overlay_if_absent(&mob_id, &overlay)
+                .await
+                .unwrap()
+        );
+        let overlays = store.list_external_binding_overlays(&mob_id).await.unwrap();
+        assert_eq!(overlays, vec![overlay.clone()]);
+
+        store
+            .delete_external_binding_overlays(&mob_id)
+            .await
+            .unwrap();
+        store.delete_supervisor_authority(&mob_id).await.unwrap();
+        assert!(
+            store
+                .list_external_binding_overlays(&mob_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .load_supervisor_authority(&mob_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_metadata_store_put_supervisor_if_absent_preserves_existing_record() {
+        let store = InMemoryMobRuntimeMetadataStore::new();
+        let mob_id = MobId::from("mob-runtime");
+        let first = SupervisorAuthorityRecord::generate(1);
+        let second = SupervisorAuthorityRecord::generate(1);
+
+        assert!(
+            store
+                .put_supervisor_authority_if_absent(&mob_id, &first)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_supervisor_authority_if_absent(&mob_id, &second)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first)
+        );
     }
 
     // -----------------------------------------------------------------------

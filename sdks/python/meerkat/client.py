@@ -20,6 +20,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, is_dataclass
 import json
 import os
 import platform
@@ -36,7 +37,12 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    RealtimeCapabilitiesResult,
+    RealtimeOpenInfo,
+    RealtimeOpenRequest,
+    RealtimeStatusResult,
     RuntimeAcceptResult,
+    RuntimeRealtimeAttachmentStatusResult,
     RuntimeResetResult,
     RuntimeRetireResult,
     RuntimeStateResult,
@@ -112,6 +118,12 @@ RenderMetadata = TypedDict(
     "RenderMetadata",
     {"class": RenderClass, "salience": NotRequired[RenderSalience]},
 )
+
+
+def _wire_params(value: Any) -> dict[str, Any]:
+    if is_dataclass(value):
+        return {key: item for key, item in asdict(value).items() if item is not None}
+    return dict(value)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -1228,6 +1240,24 @@ class MeerkatClient:
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
 
+    async def attach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/realtime_attach",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def detach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
+        await self._request_with_member_identity_compat(
+            "mob/realtime_detach",
+            {"mob_id": mob_id, "agent_identity": agent_identity},
+        )
+
+    async def attach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
+        await self.attach_mob_member_live(mob_id, agent_identity)
+
+    async def detach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
+        await self.detach_mob_member_live(mob_id, agent_identity)
+
     async def mob_turn_start(
         self,
         mob_id: str,
@@ -1271,6 +1301,11 @@ class MeerkatClient:
             ),
             "tokens_used": int(result.get("tokens_used", 0)),
             "is_final": bool(result.get("is_final", False)),
+            **(
+                {"realtime_attachment_status": str(result["realtime_attachment_status"])}
+                if result.get("realtime_attachment_status") is not None
+                else {}
+            ),
             **(
                 {"peer_connectivity": result["peer_connectivity"]}
                 if isinstance(result.get("peer_connectivity"), dict)
@@ -1486,6 +1521,98 @@ class MeerkatClient:
 
     async def mob_lifecycle(self, mob_id: str, action: str) -> None:
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
+
+    async def mob_snapshot(self, mob_id: str) -> dict[str, Any]:
+        """Point-in-time aggregate of mob status plus member list.
+
+        Wraps the ``mob/snapshot`` RPC (DELETE_ME C2). Returns
+        ``{mob_id, status, members}`` in one atomic call so consumers
+        do not have to compose ``mob/status`` + ``mob/members`` or fall
+        back to event-stream projection for point-in-time state.
+        """
+        return await self._request("mob/snapshot", {"mob_id": mob_id})
+
+    async def mob_destroy(self, mob_id: str) -> dict[str, Any]:
+        """Destroy a mob and surface the structured ``MobDestroyReport``.
+
+        Wraps the ``mob/destroy`` RPC (DELETE_ME C3). Unlike
+        ``mob/lifecycle`` with ``action="destroy"``, this dedicated
+        endpoint has a predictable response shape
+        (``{mob_id, ok, destroy_report}``) that does not require
+        branching on an action string.
+        """
+        return await self._request("mob/destroy", {"mob_id": mob_id})
+
+    async def mob_rotate_supervisor(self, mob_id: str) -> dict[str, Any]:
+        """Rotate the supervisor bridge for all members of a mob.
+
+        Wraps the ``mob/rotate_supervisor`` RPC (DELETE_ME C10). Returns
+        the full ``SupervisorRotationReport`` so operators can inspect
+        per-member rotation outcomes instead of getting a bare
+        ``ok: true``.
+        """
+        return await self._request("mob/rotate_supervisor", {"mob_id": mob_id})
+
+    async def mob_submit_work(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        generation: int,
+        fence_token: int,
+        content: Any,
+        *,
+        work_ref: str | None = None,
+        origin: str = "external",
+    ) -> dict[str, Any]:
+        """Submit a unit of work to a mob member through the work lane.
+
+        Wraps the ``mob/submit_work`` RPC (DELETE_ME C4). The work lane
+        was Rust-only prior to this; ``origin`` is ``"external"`` for
+        user-originated turns and ``"internal"`` for mob-orchestration
+        work. When ``work_ref`` is omitted the server generates a fresh
+        UUID.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "agent_identity": agent_identity,
+            "generation": generation,
+            "fence_token": fence_token,
+            "content": content,
+            "origin": origin,
+        }
+        if work_ref is not None:
+            params["work_ref"] = work_ref
+        return await self._request("mob/submit_work", params)
+
+    async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
+        """Cancel a previously submitted unit of work.
+
+        Wraps the ``mob/cancel_work`` RPC (DELETE_ME C4).
+        """
+        return await self._request(
+            "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}
+        )
+
+    async def mob_cancel_all_work(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        generation: int,
+        fence_token: int,
+    ) -> dict[str, Any]:
+        """Cancel all in-flight work for a specific mob member.
+
+        Wraps the ``mob/cancel_all_work`` RPC (DELETE_ME C4).
+        """
+        return await self._request(
+            "mob/cancel_all_work",
+            {
+                "mob_id": mob_id,
+                "agent_identity": agent_identity,
+                "generation": generation,
+                "fence_token": fence_token,
+            },
+        )
 
     async def append_mob_system_context(
         self,
@@ -1744,6 +1871,31 @@ class MeerkatClient:
         raw = await self._request("runtime/state", {"session_id": session_id})
         return RuntimeStateResult(**raw)
 
+    async def runtime_realtime_attachment_status(
+        self, session_id: str
+    ) -> RuntimeRealtimeAttachmentStatusResult:
+        raw = await self._request(
+            "runtime/realtime_attachment_status",
+            {"session_id": session_id},
+        )
+        return RuntimeRealtimeAttachmentStatusResult(**raw)
+
+    async def realtime_open_info(
+        self, request: RealtimeOpenRequest | dict[str, Any]
+    ) -> RealtimeOpenInfo:
+        raw = await self._request("realtime/open_info", _wire_params(request))
+        return RealtimeOpenInfo(**raw)
+
+    async def realtime_status(self, params: dict[str, Any]) -> RealtimeStatusResult:
+        raw = await self._request("realtime/status", _wire_params(params))
+        return RealtimeStatusResult(**raw)
+
+    async def realtime_capabilities(
+        self, params: dict[str, Any]
+    ) -> RealtimeCapabilitiesResult:
+        raw = await self._request("realtime/capabilities", _wire_params(params))
+        return RealtimeCapabilitiesResult(**raw)
+
     async def runtime_accept(
         self,
         session_id: str,
@@ -1957,7 +2109,7 @@ class MeerkatClient:
     ) -> list[str]:
         if legacy:
             return ["rpc"]
-        args: list[str] = []
+        args: list[str] = ["--realtime-ws", "127.0.0.1:0"]
         if isolated:
             args.append("--isolated")
         if realm_id:

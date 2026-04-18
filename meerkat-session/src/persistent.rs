@@ -32,8 +32,7 @@ use meerkat_core::{
     SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
 };
 use meerkat_runtime::identifiers::LogicalRuntimeId;
-use meerkat_runtime::input_lifecycle_authority::InputLifecycleInput;
-use meerkat_runtime::input_state::InputState;
+use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
 use meerkat_store::SessionStore;
@@ -293,7 +292,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         run_id: &RunId,
         sequence: u64,
         contributing_input_ids: &[InputId],
-    ) -> Result<Vec<InputState>, SessionError> {
+    ) -> Result<Vec<StoredInputState>, SessionError> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
             return Ok(Vec::new());
         };
@@ -310,17 +309,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(contributing_input_ids
             .iter()
             .filter_map(|input_id| {
-                let mut state = stored_states
+                let mut bundle = stored_states
                     .iter()
-                    .find(|candidate| &candidate.input_id == input_id)?
+                    .find(|candidate| &candidate.state.input_id == input_id)?
                     .clone();
-                // Stamp the run association and boundary sequence onto the authority,
-                // then apply the Consume transition through the canonical lifecycle.
-                state
-                    .authority_mut()
-                    .stamp_receipt_metadata(run_id.clone(), sequence);
-                let _ = state.apply(InputLifecycleInput::Consume);
-                Some(state)
+                // Stamp receipt metadata and mirror the Consumed terminal on
+                // the persisted snapshot. The authoritative DSL transition
+                // fires on the live driver via `machine_realize_run_completed`;
+                // this clone is only what the store persists alongside the
+                // boundary receipt, so `updated_at` tracks that receipt's
+                // logical moment rather than wall-clock.
+                bundle.seed.last_run_id = Some(run_id.clone());
+                bundle.seed.last_boundary_sequence = Some(sequence);
+                bundle.seed.phase = InputLifecycleState::Consumed;
+                bundle.seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                bundle.state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                Some(bundle)
             })
             .collect())
     }
@@ -476,6 +480,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.export_session_with_labels(id).await
     }
 
+    pub async fn wait_for_session_mutation_after(
+        &self,
+        id: &SessionId,
+        after: std::time::SystemTime,
+    ) -> Result<std::time::SystemTime, meerkat_core::comms::StreamError> {
+        self.inner.wait_for_session_mutation_after(id, after).await
+    }
+
     pub async fn execution_snapshot(
         &self,
         id: &SessionId,
@@ -488,6 +500,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, SessionError> {
         self.inner.tool_scope_snapshot(id).await
+    }
+
+    pub async fn live_visible_tool_defs(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
+        self.inner.live_visible_tool_defs(id).await
     }
 
     pub async fn external_tool_surface_snapshot(
@@ -512,6 +531,49 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub async fn persist_live_session_now(&self, id: &SessionId) -> Result<usize, SessionError> {
         self.persist_full_session(id).await
+    }
+
+    pub async fn dispatch_external_tool_call(
+        &self,
+        id: &SessionId,
+        call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        let outcome = self.inner.dispatch_external_tool_call(id, call).await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session(id).await;
+            return Err(error);
+        }
+        Ok(outcome)
+    }
+
+    pub async fn append_external_user_content(
+        &self,
+        id: &SessionId,
+        content: meerkat_core::types::ContentInput,
+    ) -> Result<(), SessionError> {
+        self.inner.append_external_user_content(id, content).await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session(id).await;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub async fn append_external_assistant_output(
+        &self,
+        id: &SessionId,
+        blocks: Vec<meerkat_core::types::AssistantBlock>,
+        stop_reason: meerkat_core::types::StopReason,
+        usage: meerkat_core::types::Usage,
+    ) -> Result<(), SessionError> {
+        self.inner
+            .append_external_assistant_output(id, blocks, stop_reason, usage)
+            .await?;
+        if let Err(error) = self.persist_full_session(id).await {
+            let _ = self.discard_live_session(id).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Create a new persistent session service.
@@ -850,6 +912,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             cursor_state: Arc::new(meerkat_core::EpochCursorState::new()),
                             tool_visibility_owner: Arc::new(
                                 meerkat_core::LocalToolVisibilityOwner::new(),
+                            ),
+                            turn_state: Arc::new(
+                                meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+                            ),
+                            comms_drain: Arc::new(
+                                meerkat_runtime::RuntimeCommsDrainHandle::ephemeral(),
+                            ),
+                            external_tool_surface: Arc::new(
+                                meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
+                            ),
+                            peer_comms: Arc::new(
+                                meerkat_runtime::RuntimePeerCommsHandle::ephemeral(),
+                            ),
+                            session_admission: Arc::new(
+                                meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral(),
                             ),
                         },
                     )
@@ -1741,6 +1818,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .map_err(|e| SessionError::Store(Box::new(e)))
     }
 
+    /// Load the authoritative durable session view.
+    ///
+    /// In runtime-backed mode, the runtime store can hold a newer canonical
+    /// boundary snapshot than the plain session-store row. Recovery and
+    /// post-turn inspection must therefore read through the same store/runtime
+    /// reconciliation seam instead of assuming the raw session-store row is
+    /// authoritative.
+    pub async fn load_authoritative_session(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        self.load_authoritative_session_base(id).await
+    }
+
     /// Export the full session from the live task and persist it to the store.
     ///
     /// Returns the saved message count so callers can seed a checkpointer's
@@ -1759,12 +1850,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 mod tests {
     use super::*;
     use crate::ephemeral::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
+    use meerkat_core::ToolDispatchOutcome;
     use meerkat_core::checkpoint::SessionCheckpointer;
     use meerkat_core::service::{
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
         SessionServiceControlExt,
     };
-    use meerkat_core::types::{ContentBlock, ContentInput, ImageData, Message, UserMessage};
+    use meerkat_core::types::{
+        ContentBlock, ContentInput, ImageData, Message, ToolCall, ToolResult, UserMessage,
+    };
     use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
     use meerkat_runtime::InMemoryRuntimeStore;
     use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
@@ -2286,6 +2380,190 @@ mod tests {
                 .unwrap_or_default();
             let system_context_state = session.system_context_state().unwrap_or_default();
             Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+            })
+        }
+    }
+
+    struct ToolDispatchAgent {
+        session: Arc<std::sync::Mutex<Session>>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionAgent for ToolDispatchAgent {
+        async fn run_with_events(
+            &mut self,
+            prompt: meerkat_core::types::ContentInput,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            let session_id = self.session_id();
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            session.push(meerkat_core::types::Message::User(
+                meerkat_core::types::UserMessage::text(prompt.text_content()),
+            ));
+            session.push(meerkat_core::types::Message::Assistant(
+                meerkat_core::types::AssistantMessage {
+                    content: "ok".to_string(),
+                    tool_calls: Vec::new(),
+                    stop_reason: meerkat_core::types::StopReason::EndTurn,
+                    usage: meerkat_core::types::Usage::default(),
+                },
+            ));
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id,
+                usage: meerkat_core::types::Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            Ok(())
+        }
+
+        async fn dispatch_external_tool_call(
+            &mut self,
+            call: ToolCall,
+        ) -> Result<ToolDispatchOutcome, meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut state = session.tool_visibility_state().unwrap_or_default();
+            state
+                .staged_requested_deferred_names
+                .insert(format!("requested:{}", call.name));
+            session.set_tool_visibility_state(state).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to persist tool dispatch state: {err}"
+                ))
+            })?;
+            Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
+                call.id,
+                format!("handled {}", call.name),
+                false,
+            )))
+        }
+
+        fn cancel(&mut self) {}
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), meerkat_core::error::AgentError> {
+            let mut session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let mut metadata =
+                session
+                    .session_metadata()
+                    .unwrap_or(meerkat_core::SessionMetadata {
+                        model: identity.model.clone(),
+                        max_tokens: 0,
+                        structured_output_retries: 2,
+                        provider: identity.provider,
+                        self_hosted_server_id: None,
+                        provider_params: identity.provider_params.clone(),
+                        tooling: meerkat_core::SessionTooling::default(),
+                        keep_alive: false,
+                        comms_name: None,
+                        peer_meta: None,
+                        realm_id: None,
+                        instance_id: None,
+                        backend: None,
+                        config_generation: None,
+                    });
+            metadata.apply_llm_identity(&identity);
+            session.set_session_metadata(metadata).map_err(|err| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to update tool-dispatch session metadata: {err}"
+                ))
+            })
+        }
+
+        fn session_id(&self) -> SessionId {
+            match self.session.lock() {
+                Ok(guard) => guard.id().clone(),
+                Err(poisoned) => poisoned.into_inner().id().clone(),
+            }
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            let session = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            SessionSnapshot {
+                created_at: session.created_at(),
+                updated_at: session.updated_at(),
+                message_count: session.messages().len(),
+                total_tokens: session.total_tokens(),
+                usage: session.total_usage(),
+                last_assistant_text: session.last_assistant_text(),
+            }
+        }
+
+        fn session_clone(&self) -> Session {
+            match self.session.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        fn apply_runtime_system_context(
+            &mut self,
+            appends: &[meerkat_core::PendingSystemContextAppend],
+        ) {
+            let mut guard = match self.session.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.append_system_context_blocks(appends);
+            let state = guard.system_context_state().unwrap_or_default();
+            self.system_context_state = Arc::new(std::sync::Mutex::new(state));
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    struct ToolDispatchBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for ToolDispatchBuilder {
+        type Agent = ToolDispatchAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(ToolDispatchAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
             })
@@ -3591,6 +3869,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_apply_runtime_context_appends_emits_run_lifecycle_events() {
+        use futures::StreamExt;
+        use meerkat_core::event::AgentEvent;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let run = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        let session_id = run.session_id;
+        let mut events = service
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe_session_events");
+
+        service
+            .apply_runtime_context_appends(
+                &session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}.".to_string(),
+                    source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("apply_runtime_context_appends");
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .expect("run_started timeout")
+            .expect("run_started event should exist");
+        match started.payload {
+            AgentEvent::RunStarted { prompt, .. } => {
+                let normalized = prompt.to_lowercase();
+                assert!(
+                    normalized.contains("peer_response_terminal:analyst-rt:req-123"),
+                    "run_started prompt should expose runtime system-context source: {prompt}"
+                );
+                assert!(
+                    normalized.contains("birch seventeen"),
+                    "run_started prompt should expose authoritative terminal peer payload: {prompt}"
+                );
+            }
+            other => panic!("expected run_started, got {other:?}"),
+        }
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .expect("run_completed timeout")
+            .expect("run_completed event should exist");
+        match completed.payload {
+            AgentEvent::RunCompleted { result, usage, .. } => {
+                assert!(
+                    result.is_empty(),
+                    "context-only runtime apply should not synthesize assistant output: {result:?}"
+                );
+                assert_eq!(
+                    usage,
+                    meerkat_core::types::Usage::default(),
+                    "context-only runtime apply should not report model usage"
+                );
+            }
+            other => panic!("expected run_completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_apply_runtime_context_appends_reinjects_generated_create_only_mob_authority() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let builder = CapturingBuildBuilder::new();
@@ -4234,5 +4593,93 @@ mod tests {
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_external_tool_call_persists_live_session_changes() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            ToolDispatchBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        let outcome = service
+            .dispatch_external_tool_call(
+                &id,
+                ToolCall::new(
+                    "call-1".to_string(),
+                    "tool_catalog_load".to_string(),
+                    serde_json::json!({}),
+                ),
+            )
+            .await
+            .expect("dispatch external tool call");
+
+        assert_eq!(outcome.result.text_content(), "handled tool_catalog_load");
+
+        let persisted = service
+            .load_persisted(&id)
+            .await
+            .expect("load persisted session")
+            .expect("persisted session should exist");
+        let visibility_state = persisted
+            .tool_visibility_state()
+            .expect("persistent dispatch should save session mutations");
+        assert!(
+            visibility_state
+                .staged_requested_deferred_names
+                .contains("requested:tool_catalog_load"),
+            "expected persisted tool-dispatch state to include the requested tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_external_tool_call_discards_live_session_when_persist_fails() {
+        let store = Arc::new(FailSaveStore::new());
+        let service = PersistentSessionService::new(
+            ToolDispatchBuilder,
+            4,
+            store.clone(),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::Defer))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        store.set_fail_save(true);
+        let error = service
+            .dispatch_external_tool_call(
+                &id,
+                ToolCall::new(
+                    "call-2".to_string(),
+                    "tool_catalog_load".to_string(),
+                    serde_json::json!({}),
+                ),
+            )
+            .await
+            .expect_err("persist failure should bubble out");
+
+        assert!(
+            matches!(error, SessionError::Store(_)),
+            "expected store error after persistence failure, got {error:?}"
+        );
+        let live = service.export_live_session(&id).await;
+        assert!(
+            matches!(live, Err(SessionError::NotFound { .. })),
+            "expected live session to be discarded after persist failure, got {live:?}"
+        );
     }
 }

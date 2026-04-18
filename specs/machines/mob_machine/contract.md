@@ -3,23 +3,23 @@
 _Generated from the Rust machine catalog. Do not edit by hand._
 
 - Version: `1`
-- Rust owner: `meerkat-mob` / `generated::mob_machine`
+- Rust owner: `self` / `catalog::dsl::mob_machine`
 
 ## State
 - Phase enum: `Running | Stopped | Completed | Destroyed`
 - `live_runtime_ids`: `Set<AgentRuntimeId>`
 - `externally_addressable_runtime_ids`: `Set<AgentRuntimeId>`
 - `runtime_fence_tokens`: `Map<AgentRuntimeId, FenceToken>`
-- `active_run_count`: `u32`
-- `pending_spawn_count`: `u32`
+- `active_run_count`: `u64`
+- `pending_spawn_count`: `u64`
 - `coordinator_bound`: `Bool`
+- `member_voice_intent`: `Set<AgentIdentity>`
 
 ## Inputs
-- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
-- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String)
 - `RunFlow`
 - `CancelFlow`
 - `FlowStatus`
+- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
 - `Retire`(agent_runtime_id: AgentRuntimeId)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
@@ -27,6 +27,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Unwire`
 - `ExternalTurn`
 - `InternalTurn`
+- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
@@ -54,6 +55,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
+- `RealtimeAttach`(agent_identity: AgentIdentity)
+- `RealtimeDetach`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -117,6 +120,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
+- `MemberVoiceIntentSet`(agent_identity: AgentIdentity)
+- `MemberVoiceIntentCleared`(agent_identity: AgentIdentity)
 
 ## Invariants
 
@@ -429,17 +434,53 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `NotifyCoordinator`
 - To: `Running`
 
+### `StopOrchestratorStopped`
+- From: `Stopped`
+- On: `StopOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Stopped`
+
+### `StopOrchestratorCompleted`
+- From: `Completed`
+- On: `StopOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Completed`
+
 ### `ResumeOrchestratorRunning`
 - From: `Running`
 - On: `ResumeOrchestrator`()
 - Emits: `NotifyCoordinator`
 - To: `Running`
 
+### `ResumeOrchestratorStopped`
+- From: `Stopped`
+- On: `ResumeOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Stopped`
+
+### `ResumeOrchestratorCompleted`
+- From: `Completed`
+- On: `ResumeOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Completed`
+
 ### `DestroyOrchestratorRunning`
 - From: `Running`
 - On: `DestroyOrchestrator`()
 - Emits: `NotifyCoordinator`
 - To: `Running`
+
+### `DestroyOrchestratorStopped`
+- From: `Stopped`
+- On: `DestroyOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Stopped`
+
+### `DestroyOrchestratorCompleted`
+- From: `Completed`
+- On: `DestroyOrchestrator`()
+- Emits: `NotifyCoordinator`
+- To: `Completed`
 
 ### `ForceCancelMemberRunning`
 - From: `Running`
@@ -499,7 +540,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `RunFlow`()
 - Guards:
-  - `active_members_present`
   - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
@@ -508,7 +548,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `StartFlow`()
 - Guards:
-  - `active_members_present`
   - `coordinator_bound`
 - Emits: `EmitFlowRunNotice`
 - To: `Running`
@@ -516,16 +555,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `CreateRunRunning`
 - From: `Running`
 - On: `CreateRun`()
-- Guards:
-  - `active_members_present`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `StartRunRunning`
 - From: `Running`
 - On: `StartRun`()
-- Guards:
-  - `active_members_present`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
@@ -610,6 +645,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `active_members_present`
   - `current_binding_matches`
 - Emits: `FlowTerminalized`
+- To: `Running`
+
+### `RealtimeAttach`
+- From: `Running`
+- On: `RealtimeAttach`(agent_identity)
+- Emits: `MemberVoiceIntentSet`
+- To: `Running`
+
+### `RealtimeDetach`
+- From: `Running`
+- On: `RealtimeDetach`(agent_identity)
+- Emits: `MemberVoiceIntentCleared`
 - To: `Running`
 
 ## Coverage

@@ -231,7 +231,7 @@ pub async fn handle_create(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: CreateSessionParams = match parse_params(params) {

@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use indexmap::IndexSet;
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
-use meerkat_core::comms_drain_lifecycle_authority::DrainExitReason;
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
@@ -22,23 +22,39 @@ use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OperationLifecycleSnapshot;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
-use meerkat_core::{CommsDrainMode, CommsDrainPhase};
 use meerkat_machine_derive::CommandManifest;
 use serde::{Deserialize, Serialize};
 
 use crate::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
+use crate::ingress_types::{ContentShape, RequestId, ReservationKey};
 use crate::input::Input;
 use crate::input_state::InputLifecycleState;
-use crate::input_state::InputState;
 use crate::input_state::InputTerminalOutcome;
+use crate::input_state::StoredInputState;
 use crate::runtime_event::RuntimeEventEnvelope;
-use crate::runtime_ingress_authority::{ContentShape, RequestId, ReservationKey};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
     RuntimeControlPlaneError, RuntimeDriverError,
 };
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeAttachmentStatus {
+    Unattached,
+    IntentPresentUnbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+    ReattachRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RealtimeAttachmentSignalAuthority {
+    pub session_id: SessionId,
+    pub authority_epoch: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -278,6 +294,9 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeState {
         runtime_id: LogicalRuntimeId,
     },
+    RuntimeRealtimeAttachmentStatus {
+        session_id: SessionId,
+    },
     LoadBoundaryReceipt {
         runtime_id: LogicalRuntimeId,
         run_id: LifecycleRunId,
@@ -330,7 +349,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     Spawned(bool),
     OpsLifecycleRegistry(Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>),
     Bindings(meerkat_core::SessionRuntimeBindings),
-    InputState(Option<InputState>),
+    InputState(Option<StoredInputState>),
     ActiveInputs(Vec<InputId>),
     LlmReconfigured(SessionLlmReconfigureReport),
     VisibilityRevision(meerkat_core::ToolScopeRevision),
@@ -341,6 +360,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     RecoveryReport(RecoveryReport),
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
+    RealtimeAttachmentStatus(RealtimeAttachmentStatus),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineLegacyRunPrepared),
 }

@@ -1,7 +1,8 @@
 //! State projection for the agent loop.
 //!
-//! Canonical transition legality lives in `TurnExecutionAuthority`; this enum
-//! is the persisted/user-facing loop shape.
+//! Canonical turn phase semantics live in the shared turn-execution types plus
+//! the runtime or standalone local turn-state owner; this enum is the
+//! persisted/user-facing loop shape.
 
 use serde::{Deserialize, Serialize};
 

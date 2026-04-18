@@ -6,25 +6,30 @@ mod realm_profile;
 mod sqlite;
 
 pub use in_memory::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
+    InMemoryMobSpecStore, InMemoryRealmProfileStore,
 };
 pub use realm_profile::{RealmProfileStore, StoredRealmProfile};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sqlite::{
-    SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores,
-    SqliteRealmProfileStore,
+    SqliteMobEventStore, SqliteMobRunStore, SqliteMobRuntimeMetadataStore, SqliteMobSpecStore,
+    SqliteMobStores, SqliteRealmProfileStore,
 };
 
 use crate::definition::MobDefinition;
-use crate::event::{MobEvent, NewMobEvent};
-use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::event::{MemberRef, MobEvent, NewMobEvent};
+use crate::ids::{
+    AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
+};
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_machine_kernels::KernelState;
+use serde::{Deserialize, Serialize};
 
 /// Errors from mob storage operations.
 ///
@@ -65,6 +70,67 @@ pub enum MobStoreError {
     Internal(String),
 }
 
+/// Persisted runtime-side supervisor authority for a mob.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupervisorAuthorityRecord {
+    /// Raw secret bytes for reconstructing the mob-owned supervisor keypair.
+    pub secret_key: [u8; 32],
+    /// Canonical peer id string for the corresponding public key.
+    pub public_peer_id: String,
+    /// Monotonic supervisor epoch for stale-authority rejection.
+    pub epoch: u64,
+    /// Protocol version carried on supervisor commands.
+    pub protocol_version: u32,
+}
+
+impl SupervisorAuthorityRecord {
+    /// Mint a fresh supervisor authority record.
+    pub fn generate(protocol_version: u32) -> Self {
+        let keypair = meerkat_comms::Keypair::generate();
+        Self {
+            secret_key: keypair.secret_bytes(),
+            public_peer_id: keypair.public_key().to_peer_id(),
+            epoch: 0,
+            protocol_version,
+        }
+    }
+
+    /// Reconstruct the signing keypair for runtime use.
+    pub fn keypair(&self) -> meerkat_comms::Keypair {
+        meerkat_comms::Keypair::from_secret(self.secret_key)
+    }
+}
+
+/// Normalization status for a legacy external binding overlay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExternalBindingOverlayStatus {
+    /// The legacy external binding was normalized to a peer-only member ref.
+    Normalized,
+    /// Normalization failed and the member should surface as broken.
+    Failed { reason: String },
+}
+
+/// Authoritative runtime metadata for an external binding overlay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalBindingOverlayRecord {
+    /// Stable member identity.
+    pub agent_identity: AgentIdentity,
+    /// Generation the overlay applies to.
+    pub generation: Generation,
+    /// Peer-only runtime binding when normalization succeeds.
+    ///
+    /// Crate-private alongside `MemberRef` itself (finding A7): the pre-0.6
+    /// bridge identity is never surfaced to external callers. Serde still
+    /// carries the value through the persisted overlay record.
+    pub(crate) normalized_member_ref: Option<MemberRef>,
+    /// Optional bootstrap proof for re-establishing supervisor control.
+    pub bootstrap_token: Option<BridgeBootstrapToken>,
+    /// Current normalization status.
+    pub status: ExternalBindingOverlayStatus,
+    /// Last update time for conflict resolution and diagnostics.
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Trait for persisting and querying mob events.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -92,6 +158,71 @@ pub trait MobEventStore: Send + Sync {
     async fn prune(&self, _older_than: DateTime<Utc>) -> Result<u64, MobStoreError> {
         Ok(0)
     }
+}
+
+/// Trait for persisting authoritative runtime-side mob metadata.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait MobRuntimeMetadataStore: Send + Sync {
+    /// Load the mob-owned supervisor authority record.
+    async fn load_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<SupervisorAuthorityRecord>, MobStoreError>;
+
+    /// Upsert the mob-owned supervisor authority record.
+    async fn put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<(), MobStoreError>;
+
+    /// Insert the mob-owned supervisor authority record if it is missing.
+    ///
+    /// Returns `true` when the caller won initialization, `false` when an
+    /// existing record already owned the key.
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError>;
+
+    /// Delete the mob-owned supervisor authority record.
+    async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError>;
+
+    /// List all authoritative external binding overlays for a mob.
+    async fn list_external_binding_overlays(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<ExternalBindingOverlayRecord>, MobStoreError>;
+
+    /// Insert a new overlay if one does not already exist for the identity/generation key.
+    ///
+    /// Returns `true` when the record was inserted, `false` when an existing
+    /// overlay already owns the key.
+    async fn put_external_binding_overlay_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<bool, MobStoreError>;
+
+    /// Upsert an overlay for the identity/generation key.
+    async fn upsert_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<(), MobStoreError>;
+
+    /// Delete the overlay for a specific identity/generation key.
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobStoreError>;
+
+    /// Delete all overlays for the given mob.
+    async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError>;
 }
 
 /// Trait for persisting and querying flow runs.

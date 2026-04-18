@@ -14,6 +14,7 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-models = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -28,6 +29,8 @@ indexmap = "2"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+oai-rt-rs = { workspace = true }
+meerkat-runtime = { workspace = true, default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }

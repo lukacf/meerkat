@@ -11,6 +11,13 @@ use crate::input_state::InputState;
 use crate::policy::PolicyDecision;
 use crate::policy_table::DefaultPolicyTable;
 
+// `AcceptOutcome` is a domain envelope. The wire shape lives in
+// `meerkat-contracts::wire::runtime::RuntimeAcceptResult` and is materialized
+// by per-surface handlers (see `meerkat-rpc::handlers::runtime`). The envelope
+// therefore carries the live `InputState` shell (no Serialize/Deserialize) and
+// a typed `RejectReason` that retains its own serde derives because rejection
+// payloads are translated into wire-facing strings.
+
 /// Machine-owned queue action for an admitted input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionQueueAction {
@@ -80,8 +87,12 @@ impl fmt::Display for RejectReason {
 }
 
 /// Outcome of `RuntimeDriver::accept_input()`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "outcome_type", rename_all = "snake_case")]
+///
+/// Domain envelope returned to in-process callers. Surface crates translate it
+/// into the wire shape (`RuntimeAcceptResult` in `meerkat-contracts`) before
+/// emitting it on the network, so this type intentionally has no
+/// `Serialize`/`Deserialize` derives.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 #[allow(clippy::large_enum_variant)]
 pub enum AcceptOutcome {
@@ -185,7 +196,15 @@ pub fn admission_plan_from_policy(
 /// Derive the handling mode from a resolved policy decision.
 pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
-        crate::policy::RoutingDisposition::Steer => HandlingMode::Steer,
+        crate::policy::RoutingDisposition::Steer | crate::policy::RoutingDisposition::Immediate => {
+            // Immediate routing must use the steer lane so runtime-owned
+            // semantic facts (for example terminal peer responses) cannot get
+            // stranded behind ordinary queued prompts before their immediate
+            // apply boundary is drained. This preserves the checked-in policy
+            // contract without upgrading WakeIfIdle into an active-turn
+            // interrupt on this branch.
+            HandlingMode::Steer
+        }
         _ => HandlingMode::Queue,
     }
 }
@@ -263,7 +282,7 @@ mod tests {
     };
 
     #[test]
-    fn accepted_serde() {
+    fn accepted_classifier() {
         let outcome = AcceptOutcome::Accepted {
             input_id: InputId::new(),
             policy: PolicyDecision {
@@ -279,38 +298,32 @@ mod tests {
             },
             state: InputState::new_accepted(InputId::new()),
         };
-        let json = serde_json::to_value(&outcome).unwrap();
-        assert_eq!(json["outcome_type"], "accepted");
-        let parsed: AcceptOutcome = serde_json::from_value(json).unwrap();
-        assert!(parsed.is_accepted());
-        assert!(!parsed.is_deduplicated());
-        assert!(!parsed.is_rejected());
+        assert!(outcome.is_accepted());
+        assert!(!outcome.is_deduplicated());
+        assert!(!outcome.is_rejected());
     }
 
     #[test]
-    fn deduplicated_serde() {
+    fn deduplicated_classifier() {
         let outcome = AcceptOutcome::Deduplicated {
             input_id: InputId::new(),
             existing_id: InputId::new(),
         };
-        let json = serde_json::to_value(&outcome).unwrap();
-        assert_eq!(json["outcome_type"], "deduplicated");
-        let parsed: AcceptOutcome = serde_json::from_value(json).unwrap();
-        assert!(parsed.is_deduplicated());
+        assert!(!outcome.is_accepted());
+        assert!(outcome.is_deduplicated());
+        assert!(!outcome.is_rejected());
     }
 
     #[test]
-    fn rejected_serde() {
+    fn rejected_classifier() {
         let outcome = AcceptOutcome::Rejected {
             reason: RejectReason::DurabilityViolation {
                 detail: "durability violation".into(),
             },
         };
-        let json = serde_json::to_value(&outcome).unwrap();
-        assert_eq!(json["outcome_type"], "rejected");
-        assert_eq!(json["reason"]["reject_type"], "durability_violation");
-        let parsed: AcceptOutcome = serde_json::from_value(json).unwrap();
-        assert!(parsed.is_rejected());
+        assert!(!outcome.is_accepted());
+        assert!(!outcome.is_deduplicated());
+        assert!(outcome.is_rejected());
     }
 
     #[test]
@@ -358,5 +371,22 @@ mod tests {
             let parsed: RejectReason = serde_json::from_value(json).unwrap();
             assert_eq!(parsed, reason);
         }
+    }
+
+    #[test]
+    fn immediate_routing_uses_steer_handling_mode() {
+        let policy = PolicyDecision {
+            apply_mode: ApplyMode::InjectNow,
+            wake_mode: WakeMode::WakeIfIdle,
+            queue_mode: QueueMode::None,
+            consume_point: ConsumePoint::OnApply,
+            drain_policy: DrainPolicy::Immediate,
+            routing_disposition: RoutingDisposition::Immediate,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: PolicyVersion(1),
+        };
+
+        assert_eq!(handling_mode_from_policy(&policy), HandlingMode::Steer);
     }
 }

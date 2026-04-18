@@ -4,13 +4,15 @@
 
 use crate::agent::types::{CommsMessage, MessageIntent};
 use crate::inproc::InprocRegistry;
-use crate::peer_comms_authority::{ContentShape as PeerContentShape, RawPeerKind};
+use crate::peer_types::{ContentShape as PeerContentShape, RawPeerKind};
 use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{PeerIngressKind, PeerInputClass};
 use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
+
+const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &["supervisor.bridge"];
 
 /// Receiver-owned context for synchronous ingress classification.
 ///
@@ -33,16 +35,16 @@ pub(crate) struct ClassificationResult {
     pub(crate) lifecycle_peer: Option<String>,
 }
 
-/// Authority-aligned ingress descriptor for one inbox item.
+/// Classified ingress descriptor for one inbox item.
 ///
-/// This keeps the live classification path close to the eventual
-/// `PeerCommsAuthority` handoff shape without forcing the authority onto the
-/// hot path yet.
+/// Carries the typed classification produced at ingress so the classified
+/// inbox queue can enqueue entries with full correlation context.
 pub(crate) struct PreparedIngressItem {
     pub(crate) item: InboxItem,
     pub(crate) raw_item_id: String,
     pub(crate) raw_kind: RawPeerKind,
     pub(crate) class: PeerInputClass,
+    pub(crate) auth_exempt: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
     pub(crate) from_peer: Option<String>,
@@ -108,80 +110,91 @@ impl IngressClassificationContext {
                         .unwrap_or_else(|| envelope.from.to_peer_id())
                 });
 
-                let (raw_kind, class, lifecycle_peer, request_id) = match &envelope.kind {
-                    MessageKind::Message { .. } => (
-                        RawPeerKind::Message,
-                        PeerInputClass::ActionableMessage,
-                        None,
-                        None,
-                    ),
-                    MessageKind::Request { intent, params, .. } => {
-                        let typed_intent = MessageIntent::from(intent.as_str());
-                        match typed_intent {
-                            MessageIntent::PeerAdded => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleAdded,
-                                    PeerInputClass::PeerLifecycleAdded,
-                                    Some(peer),
+                let (raw_kind, class, lifecycle_peer, request_id, auth_exempt) =
+                    match &envelope.kind {
+                        MessageKind::Message { .. } => (
+                            RawPeerKind::Message,
+                            PeerInputClass::ActionableMessage,
+                            None,
+                            None,
+                            false,
+                        ),
+                        MessageKind::Request { intent, params, .. } => {
+                            let typed_intent = MessageIntent::from(intent.as_str());
+                            let auth_exempt = AUTH_EXEMPT_REQUEST_INTENTS
+                                .iter()
+                                .any(|candidate| *candidate == intent);
+                            match typed_intent {
+                                MessageIntent::PeerAdded => {
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(from_name.as_str())
+                                        .to_string();
+                                    (
+                                        RawPeerKind::PeerLifecycleAdded,
+                                        PeerInputClass::PeerLifecycleAdded,
+                                        Some(peer),
+                                        Some(envelope.id.to_string()),
+                                        auth_exempt,
+                                    )
+                                }
+                                MessageIntent::PeerRetired => {
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(from_name.as_str())
+                                        .to_string();
+                                    (
+                                        RawPeerKind::PeerLifecycleRetired,
+                                        PeerInputClass::PeerLifecycleRetired,
+                                        Some(peer),
+                                        Some(envelope.id.to_string()),
+                                        auth_exempt,
+                                    )
+                                }
+                                _ if self.silent_intents.contains(intent.as_str()) => (
+                                    RawPeerKind::SilentRequest,
+                                    PeerInputClass::SilentRequest,
+                                    None,
                                     Some(envelope.id.to_string()),
-                                )
-                            }
-                            MessageIntent::PeerRetired => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleRetired,
-                                    PeerInputClass::PeerLifecycleRetired,
-                                    Some(peer),
+                                    auth_exempt,
+                                ),
+                                _ => (
+                                    RawPeerKind::Request,
+                                    PeerInputClass::ActionableRequest,
+                                    None,
                                     Some(envelope.id.to_string()),
-                                )
+                                    auth_exempt,
+                                ),
                             }
-                            _ if self.silent_intents.contains(intent.as_str()) => (
-                                RawPeerKind::SilentRequest,
-                                PeerInputClass::SilentRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                            ),
-                            _ => (
-                                RawPeerKind::Request,
-                                PeerInputClass::ActionableRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                            ),
                         }
-                    }
-                    MessageKind::Response {
-                        in_reply_to,
-                        status,
-                        ..
-                    } => (
-                        match status {
-                            crate::types::Status::Accepted => RawPeerKind::ResponseProgress,
-                            crate::types::Status::Completed | crate::types::Status::Failed => {
-                                RawPeerKind::ResponseTerminal
-                            }
-                        },
-                        PeerInputClass::Response,
-                        None,
-                        Some(in_reply_to.to_string()),
-                    ),
-                    MessageKind::Ack { in_reply_to } => (
-                        RawPeerKind::Ack,
-                        PeerInputClass::Ack,
-                        None,
-                        Some(in_reply_to.to_string()),
-                    ),
-                };
+                        MessageKind::Response {
+                            in_reply_to,
+                            status,
+                            ..
+                        } => (
+                            match status {
+                                crate::types::Status::Accepted => RawPeerKind::ResponseProgress,
+                                crate::types::Status::Completed | crate::types::Status::Failed => {
+                                    RawPeerKind::ResponseTerminal
+                                }
+                            },
+                            PeerInputClass::Response,
+                            None,
+                            Some(in_reply_to.to_string()),
+                            false,
+                        ),
+                        MessageKind::Ack { in_reply_to } => (
+                            RawPeerKind::Ack,
+                            PeerInputClass::Ack,
+                            None,
+                            Some(in_reply_to.to_string()),
+                            false,
+                        ),
+                    };
 
                 let text_projection = match &envelope.kind {
                     MessageKind::Message { body, .. } => {
@@ -208,6 +221,7 @@ impl IngressClassificationContext {
                     raw_item_id: envelope.id.to_string(),
                     raw_kind,
                     class,
+                    auth_exempt,
                     trusted_sender,
                     from_peer: Some(from_name),
                     lifecycle_peer,
@@ -235,6 +249,7 @@ impl IngressClassificationContext {
                     raw_item_id: interaction_id.to_string(),
                     raw_kind: RawPeerKind::PlainEvent,
                     class: PeerInputClass::PlainEvent,
+                    auth_exempt: false,
                     trusted_sender: true,
                     from_peer: None,
                     lifecycle_peer: None,
@@ -261,7 +276,8 @@ impl IngressClassificationContext {
         self.prepare(item.clone()).and_then(|prepared| {
             let drop_untrusted_external = matches!(prepared.item, InboxItem::External { .. })
                 && self.require_peer_auth
-                && !prepared.trusted_sender;
+                && !prepared.trusted_sender
+                && !prepared.auth_exempt;
             if drop_untrusted_external {
                 return None;
             }
@@ -279,10 +295,6 @@ impl IngressClassificationContext {
 mod tests {
     use super::*;
     use crate::identity::{Keypair, PubKey, Signature};
-    use crate::peer_comms_authority::{
-        PeerCommsAuthority, PeerCommsEffect, PeerCommsInput, PeerCommsMutator, PeerId, RawItemId,
-        RequestId,
-    };
     use crate::trust::TrustedPeer;
     use crate::types::Envelope;
     use uuid::Uuid;
@@ -496,6 +508,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_untrusted_supervisor_bridge_request_remains_admissible() {
+        let sender = make_keypair();
+        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let ctx = make_context(true, trusted, vec![]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "supervisor.bridge".to_string(),
+                params: serde_json::json!({
+                    "command": "bind_member",
+                    "supervisor": {
+                        "name": "mob/__mob_supervisor__",
+                        "peer_id": sender.public_key().to_peer_id(),
+                        "address": "inproc://mob/__mob_supervisor__"
+                    },
+                    "epoch": 1,
+                    "protocol_version": 1,
+                    "expected_peer_id": "peer-id",
+                    "expected_address": "inproc://peer"
+                }),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx
+            .classify(&item)
+            .expect("bind_member should remain admissible");
+        assert_eq!(result.class, PeerInputClass::ActionableRequest);
+        assert_eq!(result.from_peer, Some(sender.public_key().to_peer_id()));
+    }
+
+    #[test]
+    fn classify_untrusted_legacy_bridge_intent_drops_at_ingress() {
+        let sender = make_keypair();
+        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let ctx = make_context(true, trusted, vec![]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "mob.runtime.bind_member".to_string(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx.classify(&item);
+        assert!(
+            result.is_none(),
+            "legacy bridge intents should no longer bypass auth at ingress"
+        );
+    }
+
+    #[test]
     fn classify_plain_event() {
         let ctx = make_context(false, TrustedPeers::new(), vec![]);
         let item = InboxItem::PlainEvent {
@@ -578,116 +643,6 @@ mod tests {
                 );
             }
             other => panic!("expected normalized plain event, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn prepared_lifecycle_request_round_trips_to_peer_authority() {
-        let sender = make_keypair();
-        let trusted = make_trusted_peers("orchestrator", &sender.public_key());
-        let ctx = make_context(true, trusted, vec![]);
-        let envelope = make_envelope(
-            &sender,
-            MessageKind::Request {
-                intent: "mob.peer_added".to_string(),
-                params: serde_json::json!({"peer": "new-agent"}),
-                handling_mode: None,
-            },
-        );
-        let prepared = ctx
-            .prepare(InboxItem::External {
-                envelope: envelope.clone(),
-            })
-            .expect("trusted lifecycle request should prepare");
-
-        assert_eq!(prepared.class, PeerInputClass::PeerLifecycleAdded);
-        assert_eq!(prepared.raw_kind, RawPeerKind::PeerLifecycleAdded);
-
-        let mut authority = PeerCommsAuthority::new();
-        authority
-            .apply(PeerCommsInput::TrustPeer {
-                peer_id: PeerId(sender.public_key().to_peer_id()),
-            })
-            .expect("trust peer");
-        authority
-            .apply(PeerCommsInput::ReceivePeerEnvelope {
-                raw_item_id: RawItemId(prepared.raw_item_id.clone()),
-                peer_id: PeerId(sender.public_key().to_peer_id()),
-                raw_kind: prepared.raw_kind.clone(),
-                text_projection: prepared.text_projection.clone(),
-                content_shape: prepared.content_shape.clone(),
-                request_id: prepared.request_id.clone().map(RequestId),
-                reservation_key: None,
-                lifecycle_peer: prepared.lifecycle_peer.clone(),
-            })
-            .expect("receive prepared envelope");
-
-        let transition = authority
-            .apply(PeerCommsInput::SubmitTypedPeerInput {
-                raw_item_id: RawItemId(prepared.raw_item_id),
-            })
-            .expect("submit prepared envelope");
-
-        match &transition.effects[0] {
-            PeerCommsEffect::SubmitPeerInputCandidate(effect) => {
-                assert_eq!(effect.peer_input_class, PeerInputClass::PeerLifecycleAdded);
-                assert_eq!(effect.lifecycle_peer.as_deref(), Some("new-agent"));
-                assert_eq!(effect.request_id, Some(RequestId(envelope.id.to_string())));
-                assert!(
-                    effect.text_projection.contains("mob.peer_added"),
-                    "request projection should survive the authority round-trip"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn prepared_request_round_trips_to_peer_authority_when_auth_is_open() {
-        let sender = make_keypair();
-        let ctx = make_context(false, TrustedPeers::new(), vec![]);
-        let envelope = make_envelope(
-            &sender,
-            MessageKind::Request {
-                intent: "review".to_string(),
-                params: serde_json::json!({"scope": "peer"}),
-                handling_mode: None,
-            },
-        );
-        let prepared = ctx
-            .prepare(InboxItem::External {
-                envelope: envelope.clone(),
-            })
-            .expect("auth-open request should prepare even without trusted peer entry");
-
-        let mut authority = PeerCommsAuthority::new_with_auth_required(false);
-        authority
-            .apply(PeerCommsInput::ReceivePeerEnvelope {
-                raw_item_id: RawItemId(prepared.raw_item_id.clone()),
-                peer_id: PeerId(sender.public_key().to_peer_id()),
-                raw_kind: prepared.raw_kind.clone(),
-                text_projection: prepared.text_projection.clone(),
-                content_shape: prepared.content_shape.clone(),
-                request_id: prepared.request_id.clone().map(RequestId),
-                reservation_key: None,
-                lifecycle_peer: prepared.lifecycle_peer.clone(),
-            })
-            .expect("receive prepared auth-open envelope");
-
-        let transition = authority
-            .apply(PeerCommsInput::SubmitTypedPeerInput {
-                raw_item_id: RawItemId(prepared.raw_item_id),
-            })
-            .expect("submit prepared auth-open envelope");
-
-        match &transition.effects[0] {
-            PeerCommsEffect::SubmitPeerInputCandidate(effect) => {
-                assert_eq!(effect.peer_input_class, PeerInputClass::ActionableRequest);
-                assert_eq!(effect.request_id, Some(RequestId(envelope.id.to_string())));
-                assert!(
-                    effect.text_projection.contains("Intent: review"),
-                    "request projection should survive the auth-open authority round-trip"
-                );
-            }
         }
     }
 

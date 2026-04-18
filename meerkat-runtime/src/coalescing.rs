@@ -9,8 +9,9 @@ use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
 use crate::input::{Input, PeerConvention};
-use crate::input_lifecycle_authority::{InputLifecycleError, InputLifecycleInput};
-use crate::input_state::{InputState, InputTerminalOutcome};
+use crate::input_state::{
+    InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
+};
 
 /// Whether an input is eligible for coalescing.
 pub fn is_coalescing_eligible(input: &Input) -> bool {
@@ -76,24 +77,47 @@ pub fn check_supersession(
     }
 }
 
-/// Apply supersession: transition the superseded input to Superseded.
+/// Write the shell-side metadata for a supersession. Callers invoke the DSL
+/// `SupersedeInput` transition first (which flips `input_phases` and records
+/// the structured terminal metadata in the typed terminal maps); this helper
+/// keeps the shell's history log and typed outcome cache in step.
+///
+/// `from_phase` is the DSL-tracked lifecycle the input held at the moment the
+/// DSL transition fired, captured by the caller so the history entry is
+/// accurate.
 pub fn apply_supersession(
     superseded_state: &mut InputState,
+    from_phase: InputLifecycleState,
     superseded_by: InputId,
-) -> Result<(), InputLifecycleError> {
-    superseded_state.apply(InputLifecycleInput::Supersede)?;
-    superseded_state.set_terminal_outcome(InputTerminalOutcome::Superseded { superseded_by });
-    Ok(())
+) {
+    let now = Utc::now();
+    superseded_state.history.push(InputStateHistoryEntry {
+        timestamp: now,
+        from: from_phase,
+        to: InputLifecycleState::Superseded,
+        reason: Some("Supersede".into()),
+    });
+    superseded_state.terminal_outcome = Some(InputTerminalOutcome::Superseded { superseded_by });
+    superseded_state.updated_at = now;
 }
 
-/// Apply coalescing: transition the source input to Coalesced.
+/// Write the shell-side metadata for a coalesce. Callers invoke the DSL
+/// `CoalesceInput` transition first; this helper keeps the shell's history
+/// log and typed outcome cache in step.
 pub fn apply_coalescing(
     source_state: &mut InputState,
+    from_phase: InputLifecycleState,
     aggregate_id: InputId,
-) -> Result<(), InputLifecycleError> {
-    source_state.apply(InputLifecycleInput::Coalesce)?;
-    source_state.set_terminal_outcome(InputTerminalOutcome::Coalesced { aggregate_id });
-    Ok(())
+) {
+    let now = Utc::now();
+    source_state.history.push(InputStateHistoryEntry {
+        timestamp: now,
+        from: from_phase,
+        to: InputLifecycleState::Coalesced,
+        reason: Some("Coalesce".into()),
+    });
+    source_state.terminal_outcome = Some(InputTerminalOutcome::Coalesced { aggregate_id });
+    source_state.updated_at = now;
 }
 
 /// Create an aggregate input from multiple coalesced inputs.
@@ -170,6 +194,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "progress".into(),
+            payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
             handling_mode: None,
         });
@@ -193,6 +218,7 @@ mod tests {
             header: make_header_with_supersession(None),
             convention: Some(PeerConvention::Message),
             body: "hello".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
@@ -292,39 +318,35 @@ mod tests {
     }
 
     #[test]
-    fn apply_supersession_transitions_state() {
+    fn apply_supersession_records_history_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state
-            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
-            .unwrap();
         let superseder = InputId::new();
-        apply_supersession(&mut state, superseder).unwrap();
-        assert_eq!(
-            state.current_state(),
-            crate::input_state::InputLifecycleState::Superseded
-        );
+        apply_supersession(&mut state, InputLifecycleState::Queued, superseder);
         assert!(matches!(
-            state.terminal_outcome().cloned(),
+            state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Superseded { .. })
         ));
+        assert!(!state.history.is_empty());
+        assert_eq!(
+            state.history.last().map(|e| e.to),
+            Some(InputLifecycleState::Superseded)
+        );
     }
 
     #[test]
-    fn apply_coalescing_transitions_state() {
+    fn apply_coalescing_records_history_and_outcome() {
         let mut state = InputState::new_accepted(InputId::new());
-        state
-            .apply(crate::input_lifecycle_authority::InputLifecycleInput::QueueAccepted)
-            .unwrap();
         let aggregate = InputId::new();
-        apply_coalescing(&mut state, aggregate).unwrap();
-        assert_eq!(
-            state.current_state(),
-            crate::input_state::InputLifecycleState::Coalesced
-        );
+        apply_coalescing(&mut state, InputLifecycleState::Queued, aggregate);
         assert!(matches!(
-            state.terminal_outcome().cloned(),
+            state.terminal_outcome.clone(),
             Some(InputTerminalOutcome::Coalesced { .. })
         ));
+        assert!(!state.history.is_empty());
+        assert_eq!(
+            state.history.last().map(|e| e.to),
+            Some(InputLifecycleState::Coalesced)
+        );
     }
 
     #[test]

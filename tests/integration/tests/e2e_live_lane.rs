@@ -68,6 +68,15 @@ live_scenario!(
 );
 live_scenario!(e2e_live_s45_browser_raw_session_lifecycle, 45);
 live_scenario!(e2e_live_s46_browser_raw_session_recall, 46);
+live_scenario!(e2e_live_s65_realtime_stale_attachment_authority, 65);
+live_scenario!(e2e_live_s66_realtime_reconnect_budget_exhaustion, 66);
+live_scenario!(e2e_live_s67_realtime_unsupported_explicit_commit, 67);
+live_scenario!(e2e_live_s68_realtime_observer_fanout_and_read_only, 68);
+live_scenario!(
+    e2e_live_s69_realtime_disconnect_discards_staged_transcript,
+    69
+);
+live_scenario!(e2e_live_s70_realtime_tool_continuation_failure_path, 70);
 live_suite!(e2e_live_agent_mob_tools_suite, "agent-mob-tools");
 live_suite!(
     e2e_live_cli_mob_rpc_state_machine_probe,

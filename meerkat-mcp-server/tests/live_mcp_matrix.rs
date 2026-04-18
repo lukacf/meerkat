@@ -121,7 +121,7 @@ impl StreamableHttpHost {
                         let Ok((socket, _)) = accepted else { break; };
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
-                            let _ = serve_http_connection(socket, state).await;
+                            let _ = Box::pin(serve_http_connection(socket, state)).await;
                         });
                     }
                 }
@@ -209,7 +209,7 @@ async fn serve_http_connection(
                 write_http_response(&mut socket, "202 Accepted", &[], None).await?;
                 return Ok(());
             }
-            let response = handle_http_jsonrpc(&state, &request).await;
+            let response = Box::pin(handle_http_jsonrpc(&state, &request)).await;
             let body = serde_json::to_vec(&response).expect("response should serialize");
             write_http_response(
                 &mut socket,

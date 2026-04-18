@@ -311,7 +311,7 @@ pub fn render_composition_mapping_coverage(
 pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let module_name = machine_slug(&schema.machine);
-    let catalog_fn = format!("{module_name}_machine");
+    let catalog_fn = format!("catalog::dsl::dsl_{module_name}_machine");
 
     pushln!(
         &mut out,
@@ -651,6 +651,18 @@ fn render_update(update: &Update) -> String {
         Update::MapRemove { field, key } => {
             format!("{field}' = MapRemove({field}, {})", render_expr(key))
         }
+        Update::MapIncrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ + {amount} ]",
+                render_expr(key)
+            )
+        }
+        Update::MapDecrement { field, key, amount } => {
+            format!(
+                "{field}' = [ {field} EXCEPT ![{}] = @ - {amount} ]",
+                render_expr(key)
+            )
+        }
         Update::SetInsert { field, value } => {
             format!("{field}' = {field} \\cup {{ {} }}", render_expr(value))
         }
@@ -764,6 +776,9 @@ fn render_expr(expr: &Expr) -> String {
         Expr::Lte(left, right) => format!("{} <= {}", render_expr(left), render_expr(right)),
         Expr::Contains { collection, value } => {
             format!("{} \\in {}", render_expr(value), render_expr(collection))
+        }
+        Expr::MapContainsKey { map, key } => {
+            format!("{} \\in DOMAIN {}", render_expr(key), render_expr(map))
         }
         Expr::SeqStartsWith { seq, prefix } => {
             format!("StartsWith({}, {})", render_expr(seq), render_expr(prefix))

@@ -21,14 +21,43 @@
       "name": "session/history"
     },
     {
+      "description": "Remove session",
+      "name": "session/archive"
+    },
+    {
+      "description": "Start a new turn on existing session",
+      "name": "turn/start"
+    },
+    {
+      "description": "Cancel in-flight turn",
+      "name": "turn/interrupt"
+    },
+    {
+      "description": "Read config",
+      "name": "config/get"
+    },
+    {
+      "description": "Replace config",
+      "name": "config/set"
+    },
+    {
+      "description": "Merge-patch config",
+      "name": "config/patch"
+    },
+    {
+      "description": "Get runtime capabilities",
+      "name": "capabilities/get"
+    },
+    {
+      "description": "Get the effective model catalog (built-in plus config-backed entries)",
+      "name": "models/catalog",
+      "result_type": "ModelsCatalogResponse"
+    },
+    {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
       "name": "blob/get",
       "params_type": "BlobGetParams",
       "result_type": "BlobPayload"
-    },
-    {
-      "description": "Remove session",
-      "name": "session/archive"
     },
     {
       "description": "Queue a runtime-backed external event",
@@ -106,35 +135,6 @@
       "result_type": "Value"
     },
     {
-      "description": "Start a new turn on existing session",
-      "name": "turn/start"
-    },
-    {
-      "description": "Cancel in-flight turn",
-      "name": "turn/interrupt"
-    },
-    {
-      "description": "Read config",
-      "name": "config/get"
-    },
-    {
-      "description": "Replace config",
-      "name": "config/set"
-    },
-    {
-      "description": "Merge-patch config",
-      "name": "config/patch"
-    },
-    {
-      "description": "Get runtime capabilities",
-      "name": "capabilities/get"
-    },
-    {
-      "description": "Get the effective model catalog (built-in plus config-backed entries)",
-      "name": "models/catalog",
-      "result_type": "ModelsCatalogResponse"
-    },
-    {
       "description": "List available skills",
       "name": "skills/list"
     },
@@ -143,10 +143,34 @@
       "name": "skills/inspect"
     },
     {
+      "description": "Get bootstrap metadata for opening a realtime channel",
+      "name": "realtime/open_info",
+      "params_type": "RealtimeOpenRequest",
+      "result_type": "RealtimeOpenInfo"
+    },
+    {
+      "description": "Get product-layer realtime channel status for a target",
+      "name": "realtime/status",
+      "params_type": "RealtimeStatusParams",
+      "result_type": "RealtimeStatusResult"
+    },
+    {
+      "description": "Get product-layer realtime capabilities for a target",
+      "name": "realtime/capabilities",
+      "params_type": "RealtimeCapabilitiesParams",
+      "result_type": "RealtimeCapabilitiesResult"
+    },
+    {
       "description": "Get a session runtime's current state",
       "name": "runtime/state",
       "params_type": "RuntimeStateParams",
       "result_type": "RuntimeStateResult"
+    },
+    {
+      "description": "Get a session runtime's realtime attachment status",
+      "name": "runtime/realtime_attachment_status",
+      "params_type": "RuntimeRealtimeAttachmentStatusParams",
+      "result_type": "RuntimeRealtimeAttachmentStatusResult"
     },
     {
       "description": "Accept a runtime input for a session",
@@ -269,6 +293,18 @@
     {
       "description": "Force-cancel a mob member",
       "name": "mob/force_cancel"
+    },
+    {
+      "description": "Attach live voice intent to a mob member",
+      "name": "mob/realtime_attach",
+      "params_type": "MobRealtimeAttachParams",
+      "result_type": "MobRealtimeAttachResult"
+    },
+    {
+      "description": "Detach live voice intent from a mob member",
+      "name": "mob/realtime_detach",
+      "params_type": "MobRealtimeDetachParams",
+      "result_type": "MobRealtimeDetachResult"
     },
     {
       "description": "Start a turn on a mob member by identity",

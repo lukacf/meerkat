@@ -14,7 +14,10 @@ use crate::peer_meta::PeerMeta;
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
-use crate::types::{ContentInput, Message, SessionId, ToolDef, ToolProvenance, ToolResult, Usage};
+use crate::types::{
+    AssistantBlock, BlockAssistantMessage, ContentInput, Message, SessionId, StopReason, ToolDef,
+    ToolProvenance, ToolResult, Usage, UserMessage,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -577,6 +580,31 @@ impl Session {
     pub fn record_usage(&mut self, turn_usage: Usage) {
         self.usage.add(&turn_usage);
         self.updated_at = SystemTime::now();
+    }
+
+    /// Append externally-produced user content to the canonical transcript.
+    pub fn append_external_user_content(&mut self, content: ContentInput) {
+        self.push(Message::User(UserMessage::with_blocks(
+            content.into_blocks(),
+        )));
+    }
+
+    /// Append externally-produced assistant output to the canonical transcript.
+    pub fn append_external_assistant_blocks(
+        &mut self,
+        blocks: Vec<AssistantBlock>,
+        stop_reason: StopReason,
+        usage: Usage,
+    ) {
+        if !blocks.is_empty() {
+            self.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks,
+                stop_reason,
+            }));
+        }
+        if usage != Usage::default() {
+            self.record_usage(usage);
+        }
     }
 
     /// Set a system prompt (adds or replaces System message at start)

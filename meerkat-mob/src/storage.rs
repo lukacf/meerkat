@@ -5,8 +5,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::SqliteMobStores;
 use crate::store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
-    MobEventStore, MobRunStore, MobSpecStore, RealmProfileStore,
+    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
+    InMemoryMobSpecStore, InMemoryRealmProfileStore, MobEventStore, MobRunStore,
+    MobRuntimeMetadataStore, MobSpecStore, RealmProfileStore,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -23,6 +24,8 @@ pub struct MobStorage {
     pub runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
     pub specs: Arc<dyn MobSpecStore>,
+    /// Authoritative runtime metadata store for supervisor and normalization state.
+    pub runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     /// Realm-scoped reusable profile store.
     pub realm_profiles: Option<Arc<dyn RealmProfileStore>>,
 }
@@ -35,6 +38,7 @@ impl MobStorage {
             events: Arc::new(InMemoryMobEventStore::new()),
             runs,
             specs,
+            runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -54,6 +58,22 @@ impl MobStorage {
             events,
             runs,
             specs,
+            runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+            realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
+        }
+    }
+
+    /// Build a storage bundle from an event store plus an existing runtime metadata store.
+    pub fn with_events_and_runtime_metadata(
+        events: Arc<dyn MobEventStore>,
+        runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    ) -> Self {
+        let (runs, specs) = Self::in_memory_flow_stores();
+        Self {
+            events,
+            runs,
+            specs,
+            runtime_metadata,
             realm_profiles: Some(Arc::new(InMemoryRealmProfileStore::new())),
         }
     }
@@ -64,10 +84,26 @@ impl MobStorage {
         runs: Arc<dyn MobRunStore>,
         specs: Arc<dyn MobSpecStore>,
     ) -> Self {
+        Self::custom_with_runtime_metadata(
+            events,
+            runs,
+            specs,
+            Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+        )
+    }
+
+    /// Build a storage bundle from custom store implementations, including runtime metadata.
+    pub fn custom_with_runtime_metadata(
+        events: Arc<dyn MobEventStore>,
+        runs: Arc<dyn MobRunStore>,
+        specs: Arc<dyn MobSpecStore>,
+        runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
+    ) -> Self {
         Self {
             events,
             runs,
             specs,
+            runtime_metadata,
             realm_profiles: None,
         }
     }
@@ -83,6 +119,7 @@ impl MobStorage {
             events: Arc::new(stores.event_store()),
             runs: Arc::new(stores.run_store()),
             specs: Arc::new(stores.spec_store()),
+            runtime_metadata: Arc::new(stores.runtime_metadata_store()),
             realm_profiles: Some(Arc::new(stores.realm_profile_store())),
         })
     }
@@ -94,6 +131,7 @@ impl std::fmt::Debug for MobStorage {
             .field("events", &"<dyn MobEventStore>")
             .field("runs", &"<dyn MobRunStore>")
             .field("specs", &"<dyn MobSpecStore>")
+            .field("runtime_metadata", &"<dyn MobRuntimeMetadataStore>")
             .field(
                 "realm_profiles",
                 &self

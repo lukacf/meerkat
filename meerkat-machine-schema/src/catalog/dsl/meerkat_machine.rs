@@ -1,0 +1,1633 @@
+use super::OptionValueExt;
+use meerkat_machine_dsl::machine;
+
+machine! {
+    machine MeerkatMachine {
+        version: 1,
+        rust: "self" / "catalog::dsl::meerkat_machine",
+
+        state {
+            lifecycle_phase: MeerkatPhase,
+            session_id: Option<SessionId>,
+            active_runtime_id: Option<AgentRuntimeId>,
+            active_fence_token: Option<FenceToken>,
+            current_run_id: Option<RunId>,
+            pre_run_phase: Option<String>,
+            silent_intent_overrides: Set<String>,
+            // Realtime-attachment authority state — per-session binding-state
+            // machine with monotonic authority epochs for provider-callback
+            // validation. See docs/architecture/realtime-259-port-plan.md.
+            realtime_intent_present: bool,
+            realtime_binding_state: String,
+            realtime_binding_authority_epoch: Option<u64>,
+            realtime_reattach_required: bool,
+            realtime_next_authority_epoch: u64,
+            // Live-topology reconfigure phase — temporarily blocks realtime
+            // publishes/attaches while an LLM-identity swap is in progress.
+            live_topology_phase: String,
+        }
+
+        init(Initializing) {
+            session_id = None,
+            active_runtime_id = None,
+            active_fence_token = None,
+            current_run_id = None,
+            pre_run_phase = None,
+            silent_intent_overrides = EmptySet,
+            realtime_intent_present = false,
+            realtime_binding_state = "Unbound",
+            realtime_binding_authority_epoch = None,
+            realtime_reattach_required = false,
+            realtime_next_authority_epoch = 1,
+            live_topology_phase = "Idle",
+        }
+
+        terminal [Destroyed]
+
+        phase MeerkatPhase {
+            Initializing,
+            Idle,
+            Attached,
+            Running,
+            Retired,
+            Stopped,
+            Destroyed,
+        }
+
+        input MeerkatMachineInput {
+            // Direct inputs
+            RegisterSession { session_id: SessionId },
+            UnregisterSession { session_id: SessionId },
+            ReconfigureSessionLlmIdentity {
+                previous_identity: SessionLlmIdentity,
+                previous_visibility_state: SessionToolVisibilityState,
+                previous_capability_surface: Option<SessionLlmCapabilitySurface>,
+                previous_capability_surface_status: SessionLlmCapabilitySurfaceStatus,
+                target_identity: SessionLlmIdentity,
+                target_capability_surface: SessionLlmCapabilitySurface,
+                next_visibility_state: SessionToolVisibilityState,
+                next_capability_base_filter: ToolFilter,
+                next_active_visibility_revision: u64,
+                tool_visibility_delta: SessionToolVisibilityDelta,
+            },
+            PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
+            SetPeerIngressContext { keep_alive: bool },
+            NotifyDrainExited { reason: String },
+            InterruptCurrentRun,
+            CancelAfterBoundary,
+            StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
+            RequestDeferredTools { names: Set<String>, witnesses: Map<String, ToolVisibilityWitness> },
+            PublishCommittedVisibleSet {
+                active_filter: ToolFilter,
+                staged_filter: ToolFilter,
+                active_requested_deferred_names: Set<String>,
+                staged_requested_deferred_names: Set<String>,
+                active_visibility_revision: u64,
+                staged_visibility_revision: u64,
+            },
+            Recover,
+            Retire,
+            Reset,
+            StopRuntimeExecutor,
+            Destroy,
+            // Absorbed inputs
+            EnsureSessionWithExecutor { session_id: SessionId },
+            SetSilentIntents { session_id: SessionId, intents: Set<String> },
+            ContainsSession { session_id: SessionId },
+            SessionHasExecutor { session_id: SessionId },
+            SessionHasComms { session_id: SessionId },
+            OpsLifecycleRegistry { session_id: SessionId },
+            InputState { session_id: SessionId, input_id: InputId },
+            ListActiveInputs { session_id: SessionId },
+            Abort { session_id: SessionId },
+            AbortAll,
+            Wait { session_id: SessionId },
+            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: String },
+            PublishEvent { kind: String },
+            RuntimeState { runtime_id: String },
+            RuntimeRealtimeAttachmentStatus { session_id: SessionId },
+            LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
+            AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, run_id: RunId },
+            AcceptWithoutWake { input_id: InputId },
+            Prepare { session_id: SessionId, run_id: RunId },
+            Commit { input_id: InputId, run_id: RunId },
+            Fail { run_id: RunId },
+            Recycle,
+            // Realtime-attachment inputs.
+            ProjectRealtimeIntent { present: bool },
+            BeginRealtimeBinding,
+            ReplaceRealtimeBinding,
+            DetachRealtimeBinding,
+            RequireRealtimeReattach,
+            PublishRealtimeSignal { authority_epoch: u64, next_binding_state: String },
+            // Live-topology reconfigure inputs.
+            BeginLiveTopologyReconfigure { authority_epoch: u64 },
+            MarkLiveTopologyDetached,
+            ApplyLiveTopologyIdentity,
+            ApplyLiveTopologyVisibility,
+            CompleteLiveTopology,
+            AbortLiveTopologyBeforeDetach,
+            FailLiveTopologyAfterDetach,
+        }
+
+        surface_only [
+            ContainsSession,
+            SessionHasExecutor,
+            SessionHasComms,
+            OpsLifecycleRegistry,
+            InputState,
+            ListActiveInputs,
+            RuntimeState,
+            RuntimeRealtimeAttachmentStatus,
+            LoadBoundaryReceipt,
+            Recover
+        ]
+
+        signal MeerkatMachineSignal {
+            Initialize,
+            BoundaryApplied { revision: u64 },
+            DrainQueuedRun { run_id: RunId },
+            StartConversationRun,
+            StartImmediateAppend,
+            StartImmediateContext,
+            ClassifyExternalEnvelope,
+            ClassifyPlainEvent,
+            EnsureDrainRunning,
+            StageAdd,
+            StageRemove,
+            StageReload,
+            ApplySurfaceBoundary,
+            PendingSucceeded,
+            PendingFailed,
+            CallStarted,
+            CallFinished,
+            FinalizeRemovalClean,
+            FinalizeRemovalForced,
+            SnapshotAligned,
+            ShutdownSurface,
+        }
+
+        effect MeerkatMachineEffect {
+            RuntimeBound { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RuntimeRetired { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RequestCancellationAtBoundary,
+            WakeInterrupt,
+            CommittedVisibleSetPublished { revision: u64 },
+            RuntimeNotice { kind: String, detail: String },
+            // Absorbed effects
+            ResolveAdmission,
+            SubmitAdmittedIngressEffect,
+            SubmitRunPrimitive,
+            ResolveCompletionAsTerminated,
+            ApplyControlPlaneCommand,
+            InitiateRecycle,
+            IngressAccepted,
+            PostAdmissionSignal { signal: String },
+            ReadyForRun,
+            InputLifecycleNotice,
+            CompletionResolved,
+            IngressNotice,
+            SilentIntentApplied,
+            CheckCompaction,
+            RecordTerminalOutcome,
+            RecordRunAssociation,
+            RecordBoundarySequence,
+            SubmitOpEvent,
+            NotifyOpWatcher,
+            ExposeOperationPeer,
+            RetainTerminalRecord,
+            EvictCompletedRecord,
+            CompletionProduced { seq: u64, operation_id: OperationId, kind: OperationKind },
+            WaitAllSatisfied,
+            CollectCompletedResult,
+            EnqueueClassifiedEntry,
+            SpawnDrainTask,
+            ScheduleSurfaceCompletion,
+            RefreshVisibleSurfaceSet,
+            EmitExternalToolDelta,
+            CloseSurfaceConnection,
+            RejectSurfaceCall,
+            // Realtime-attachment effects.
+            RealtimeIntentProjected { present: bool },
+            RealtimeBindingRotated { authority_epoch: u64 },
+            // Live-topology reconfigure effects.
+            LiveTopologyPhaseChanged,
+        }
+
+        // =====================================================================
+        // Effect dispositions
+        // =====================================================================
+
+        disposition RuntimeBound => routed [MobMachine],
+        disposition RuntimeRetired => routed [MobMachine],
+        disposition RuntimeDestroyed => routed [MobMachine],
+        disposition RequestCancellationAtBoundary => local,
+        disposition WakeInterrupt => local,
+        disposition CommittedVisibleSetPublished => external,
+        disposition RuntimeNotice => external,
+        // Absorbed effect dispositions
+        disposition ResolveAdmission => local,
+        disposition SubmitAdmittedIngressEffect => local,
+        disposition SubmitRunPrimitive => local,
+        disposition ResolveCompletionAsTerminated => local,
+        disposition ApplyControlPlaneCommand => local,
+        disposition InitiateRecycle => local,
+        disposition IngressAccepted => external,
+        disposition PostAdmissionSignal => local,
+        disposition ReadyForRun => local,
+        disposition InputLifecycleNotice => external,
+        disposition CompletionResolved => local,
+        disposition IngressNotice => external,
+        disposition SilentIntentApplied => external,
+        disposition CheckCompaction => local,
+        disposition RecordTerminalOutcome => local,
+        disposition RecordRunAssociation => local,
+        disposition RecordBoundarySequence => local,
+        disposition SubmitOpEvent => local,
+        disposition NotifyOpWatcher => local,
+        disposition ExposeOperationPeer => local,
+        disposition RetainTerminalRecord => local,
+        disposition EvictCompletedRecord => local,
+        disposition CompletionProduced => local,
+        disposition WaitAllSatisfied => local,
+        disposition CollectCompletedResult => local,
+        disposition EnqueueClassifiedEntry => local,
+        disposition SpawnDrainTask => local,
+        disposition ScheduleSurfaceCompletion => local,
+        disposition RefreshVisibleSurfaceSet => external,
+        disposition EmitExternalToolDelta => external,
+        disposition CloseSurfaceConnection => local,
+        disposition RejectSurfaceCall => external,
+        disposition RealtimeIntentProjected => external,
+        disposition RealtimeBindingRotated => external,
+        disposition LiveTopologyPhaseChanged => external,
+
+        // =====================================================================
+        // Invariants
+        // =====================================================================
+
+        invariant fence_requires_bound_runtime {
+            self.active_fence_token == None || self.active_runtime_id != None
+        }
+
+        invariant running_has_current_run {
+            self.lifecycle_phase != Phase::Running || self.current_run_id != None
+        }
+
+        invariant current_run_only_while_running_or_retired {
+            self.current_run_id == None
+            || self.lifecycle_phase == Phase::Running
+            || self.lifecycle_phase == Phase::Retired
+        }
+
+        // Realtime binding state + authority epoch must stay in lockstep.
+        // Unbound iff no epoch; any active binding phase must carry Some(epoch).
+        // Prevents Unbound+Some(epoch) and BindingReady+None from being
+        // representable as a derived TLC fact.
+        invariant realtime_binding_epoch_consistency {
+            (self.realtime_binding_state == "Unbound")
+            == (self.realtime_binding_authority_epoch == None)
+        }
+
+        // =====================================================================
+        // Direct transitions
+        // =====================================================================
+
+        // 1. Initialize: Initializing → Idle
+        transition Initialize {
+            on signal Initialize
+            guard { self.lifecycle_phase == Phase::Initializing }
+            update {}
+            to Idle
+        }
+
+        // 2. RegisterSession: per-phase self-loop, no guard
+        transition RegisterSession {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterSession { session_id }
+            update {
+                self.session_id = Some(session_id);
+            }
+            to Idle
+        }
+
+        // 3. UnregisterSession: per-phase → Idle (NOT a self-loop, goes to Idle)
+        // Cannot use per_phase because target is always Idle, not source phase.
+        transition UnregisterSessionIdle {
+            on input UnregisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            update {
+                self.session_id = None;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition UnregisterSessionAttached {
+            on input UnregisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            update {
+                self.session_id = None;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition UnregisterSessionRunning {
+            on input UnregisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            update {
+                self.session_id = None;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition UnregisterSessionRetired {
+            on input UnregisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            update {
+                self.session_id = None;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition UnregisterSessionStopped {
+            on input UnregisterSession { session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            update {
+                self.session_id = None;
+                self.active_runtime_id = None;
+                self.active_fence_token = None;
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+
+        // 4. ReconfigureSessionLlmIdentity: Attached + Running self-loops
+        transition ReconfigureSessionLlmIdentityAttached {
+            on input ReconfigureSessionLlmIdentity {
+                previous_identity, previous_visibility_state,
+                previous_capability_surface, previous_capability_surface_status,
+                target_identity, target_capability_surface,
+                next_visibility_state, next_capability_base_filter,
+                next_active_visibility_revision, tool_visibility_delta
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {}
+            to Attached
+        }
+        transition ReconfigureSessionLlmIdentityRunning {
+            on input ReconfigureSessionLlmIdentity {
+                previous_identity, previous_visibility_state,
+                previous_capability_surface, previous_capability_surface_status,
+                target_identity, target_capability_surface,
+                next_visibility_state, next_capability_base_filter,
+                next_active_visibility_revision, tool_visibility_delta
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {}
+            to Running
+        }
+
+        // 5. StagePersistentFilter: per-phase self-loop, guard session_registered
+        transition StagePersistentFilter {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input StagePersistentFilter { filter, witnesses }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+        }
+
+        // 6. RequestDeferredTools: per-phase self-loop, guard session_registered
+        transition RequestDeferredTools {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequestDeferredTools { names, witnesses }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+        }
+
+        // 7. PrepareBindings: different source→target mappings per phase
+        // Initializing → Initializing (no guard, emits RuntimeBound)
+        transition PrepareBindingsInitializing {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Initializing
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        // Idle → Attached
+        transition PrepareBindingsIdle {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Attached
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        // Attached → Attached
+        transition PrepareBindingsAttached {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Attached
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        // Running → Running
+        transition PrepareBindingsRunning {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Running
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        // Retired → Retired
+        transition PrepareBindingsRetired {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Retired
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        // Stopped → Stopped (inline in hand-written catalog)
+        transition PrepareBindingsStopped {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {
+                self.active_runtime_id = Some(agent_runtime_id);
+                self.active_fence_token = Some(fence_token);
+            }
+            to Stopped
+            emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+
+        // 8. SetPeerIngressContext: per-phase self-loop, guard session_registered
+        transition SetPeerIngressContext {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input SetPeerIngressContext { keep_alive }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+        }
+
+        // 9. NotifyDrainExited: per-phase self-loop, guard session_registered, emit RuntimeNotice
+        transition NotifyDrainExited {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input NotifyDrainExited { reason }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+            emit RuntimeNotice { kind: "drain", detail: "drain exited" }
+        }
+
+        // 10. InterruptCurrentRun: Attached + Running self-loops
+        transition InterruptCurrentRunAttached {
+            on input InterruptCurrentRun
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {}
+            to Attached
+            emit WakeInterrupt
+            emit RequestCancellationAtBoundary
+        }
+        transition InterruptCurrentRun {
+            on input InterruptCurrentRun
+            guard { self.lifecycle_phase == Phase::Running }
+            update {}
+            to Running
+            emit WakeInterrupt
+            emit RequestCancellationAtBoundary
+        }
+
+        // 11. CancelAfterBoundary: Attached + Running self-loops
+        transition CancelAfterBoundaryAttached {
+            on input CancelAfterBoundary
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {}
+            to Attached
+            emit RequestCancellationAtBoundary
+        }
+        transition CancelAfterBoundary {
+            on input CancelAfterBoundary
+            guard { self.lifecycle_phase == Phase::Running }
+            update {}
+            to Running
+            emit RequestCancellationAtBoundary
+        }
+
+        // 12. BoundaryAppliedPublish: Running self-loop (signal)
+        transition BoundaryAppliedPublish {
+            on signal BoundaryApplied { revision }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {}
+            to Running
+            emit CommittedVisibleSetPublished { revision: revision }
+        }
+
+        // 13. PublishCommittedVisibleSet: per-phase self-loop, complex guards
+        transition PublishCommittedVisibleSetIdle {
+            on input PublishCommittedVisibleSet {
+                active_filter, staged_filter,
+                active_requested_deferred_names, staged_requested_deferred_names,
+                active_visibility_revision, staged_visibility_revision
+            }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            }
+            update {}
+            to Idle
+            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
+        }
+        transition PublishCommittedVisibleSetAttached {
+            on input PublishCommittedVisibleSet {
+                active_filter, staged_filter,
+                active_requested_deferred_names, staged_requested_deferred_names,
+                active_visibility_revision, staged_visibility_revision
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            }
+            update {}
+            to Attached
+            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
+        }
+        transition PublishCommittedVisibleSetRunning {
+            on input PublishCommittedVisibleSet {
+                active_filter, staged_filter,
+                active_requested_deferred_names, staged_requested_deferred_names,
+                active_visibility_revision, staged_visibility_revision
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            }
+            update {}
+            to Running
+            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
+        }
+        transition PublishCommittedVisibleSetRetired {
+            on input PublishCommittedVisibleSet {
+                active_filter, staged_filter,
+                active_requested_deferred_names, staged_requested_deferred_names,
+                active_visibility_revision, staged_visibility_revision
+            }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            }
+            update {}
+            to Retired
+            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
+        }
+        transition PublishCommittedVisibleSetStopped {
+            on input PublishCommittedVisibleSet {
+                active_filter, staged_filter,
+                active_requested_deferred_names, staged_requested_deferred_names,
+                active_visibility_revision, staged_visibility_revision
+            }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            guard "active_not_behind_staged" { active_visibility_revision >= staged_visibility_revision }
+            guard "equal_revision_requires_equal_active_and_staged_input" {
+                active_visibility_revision != staged_visibility_revision
+                || (active_filter == staged_filter
+                    && active_requested_deferred_names == staged_requested_deferred_names)
+            }
+            guard "active_requested_subset_of_staged_requested" {
+                for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
+            }
+            update {}
+            to Stopped
+            emit CommittedVisibleSetPublished { revision: active_visibility_revision }
+        }
+
+        // 14. Retire: from [Idle, Attached, Running] → Retired
+        transition RetireRequestedFromIdle {
+            on input Retire
+            guard {
+                self.lifecycle_phase == Phase::Idle
+                || self.lifecycle_phase == Phase::Attached
+                || self.lifecycle_phase == Phase::Running
+            }
+            update {}
+            to Retired
+            emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+
+        // 15. Reset: from [Initializing, Idle, Attached, Retired] → Idle
+        transition Reset {
+            on input Reset
+            guard {
+                self.lifecycle_phase == Phase::Initializing
+                || self.lifecycle_phase == Phase::Idle
+                || self.lifecycle_phase == Phase::Attached
+                || self.lifecycle_phase == Phase::Retired
+            }
+            update {
+                self.current_run_id = None;
+                self.active_fence_token = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Idle
+            emit RuntimeNotice { kind: "reset", detail: "runtime reset" }
+        }
+
+        // 16. StopRuntimeExecutor: different behavior per phase
+        // Unbound (Initializing, Idle, Retired) → Stopped
+        transition StopRuntimeExecutorUnbound {
+            on input StopRuntimeExecutor
+            guard {
+                self.lifecycle_phase == Phase::Initializing
+                || self.lifecycle_phase == Phase::Idle
+                || self.lifecycle_phase == Phase::Retired
+            }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Stopped
+            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+        }
+        // Attached → Attached (self-loop)
+        transition StopRuntimeExecutorAttached {
+            on input StopRuntimeExecutor
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Attached
+            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+        }
+        // Running → Running (self-loop)
+        transition StopRuntimeExecutorRunning {
+            on input StopRuntimeExecutor
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Running
+            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+        }
+
+        // 17. Destroy: from all non-Destroyed → Destroyed
+        transition Destroy {
+            on input Destroy
+            guard {
+                self.lifecycle_phase == Phase::Initializing
+                || self.lifecycle_phase == Phase::Idle
+                || self.lifecycle_phase == Phase::Attached
+                || self.lifecycle_phase == Phase::Running
+                || self.lifecycle_phase == Phase::Retired
+                || self.lifecycle_phase == Phase::Stopped
+            }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Destroyed
+            emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+
+        // =====================================================================
+        // Absorbed transitions
+        // =====================================================================
+
+        // 18. EnsureSessionWithExecutor
+        // Idle → Attached (phase change)
+        transition EnsureSessionWithExecutorIdle {
+            on input EnsureSessionWithExecutor { session_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {}
+            to Attached
+        }
+        // Attached, Running: self-loop
+        transition EnsureSessionWithExecutorAttached {
+            on input EnsureSessionWithExecutor { session_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            update {}
+            to Attached
+        }
+        transition EnsureSessionWithExecutorRunning {
+            on input EnsureSessionWithExecutor { session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {}
+            to Running
+        }
+        // Retired, Stopped: self-loop
+        transition EnsureSessionWithExecutorRetired {
+            on input EnsureSessionWithExecutor { session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {}
+            to Retired
+        }
+        transition EnsureSessionWithExecutorStopped {
+            on input EnsureSessionWithExecutor { session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            update {}
+            to Stopped
+        }
+
+        // 19. SetSilentIntents: per-phase, guard session_registered
+        // Idle, Attached, Running, Retired: update intents
+        transition SetSilentIntentsIdle {
+            on input SetSilentIntents { session_id, intents }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            update { self.silent_intent_overrides = intents; }
+            to Idle
+        }
+        transition SetSilentIntentsAttached {
+            on input SetSilentIntents { session_id, intents }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update { self.silent_intent_overrides = intents; }
+            to Attached
+        }
+        transition SetSilentIntentsRunning {
+            on input SetSilentIntents { session_id, intents }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update { self.silent_intent_overrides = intents; }
+            to Running
+        }
+        transition SetSilentIntentsRetired {
+            on input SetSilentIntents { session_id, intents }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_registered" { self.session_id != None }
+            update { self.silent_intent_overrides = intents; }
+            to Retired
+        }
+        // Stopped: no-op (no update)
+        transition SetSilentIntentsStopped {
+            on input SetSilentIntents { session_id, intents }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Stopped
+        }
+
+        // 20. Abort: per-phase self-loop, guard session_registered
+        transition Abort {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input Abort { session_id }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+        }
+
+        // 20b. Wait: per-phase self-loop, guard session_registered
+        transition Wait {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input Wait { session_id }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+        }
+
+        // 21. AbortAll: per-phase self-loop, no guard
+        transition AbortAll {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortAll
+            update {}
+            to Idle
+        }
+
+        // 22. EnsureDrainRunning: Attached/Running self-loops, emit SpawnDrainTask
+        transition EnsureDrainRunningAttached {
+            on signal EnsureDrainRunning
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit SpawnDrainTask
+        }
+        transition EnsureDrainRunningRunning {
+            on signal EnsureDrainRunning
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit SpawnDrainTask
+        }
+
+        // 23. Ingest: Idle/Attached/Running self-loops, emit ResolveAdmission
+        transition Ingest {
+            per_phase [Idle, Attached, Running]
+            on input Ingest { runtime_id, work_id, origin }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+            emit ResolveAdmission
+        }
+
+        // 24. PublishEvent: per-phase self-loop, emit IngressNotice
+        transition PublishEvent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PublishEvent { kind }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+            emit IngressNotice
+        }
+
+        // 25. AcceptWithCompletion: complex, multiple variants per phase
+        // Idle + queued (immediate=false, interrupt_yielding=false)
+        transition AcceptWithCompletionIdleQueued {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {}
+            to Idle
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "WakeLoop" }
+        }
+        // Idle + immediate (immediate=true, interrupt_yielding=false)
+        transition AcceptWithCompletionIdleImmediate {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {}
+            to Idle
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+        }
+        // Attached + immediate → Running (phase change!)
+        transition AcceptWithCompletionAttachedImmediate {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some("attached");
+            }
+            to Running
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+            emit SubmitRunPrimitive
+        }
+        // Attached + queued (immediate=false, interrupt_yielding=false)
+        transition AcceptWithCompletionAttachedQueued {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {}
+            to Attached
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "WakeLoop" }
+        }
+        // Running + queued passive (immediate=false, interrupt_yielding=false)
+        transition AcceptWithCompletionRunningQueuedPassive {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {}
+            to Running
+            emit IngressAccepted
+        }
+        // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
+        transition AcceptWithCompletionRunningInterruptYielding {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == true }
+            update {}
+            to Running
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "InterruptYielding" }
+        }
+        // Running + immediate (immediate=true, interrupt_yielding=false)
+        transition AcceptWithCompletionRunningImmediate {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == true }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            update {}
+            to Running
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "RequestImmediateProcessing" }
+        }
+
+        // 26. AcceptWithoutWake: Idle/Attached/Running self-loops
+        transition AcceptWithoutWake {
+            per_phase [Idle, Attached, Running]
+            on input AcceptWithoutWake { input_id }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Idle
+            emit IngressAccepted
+        }
+
+        // 27. ClassifyExternalEnvelope/ClassifyPlainEvent: Attached/Running, emit EnqueueClassifiedEntry
+        transition ClassifyExternalEnvelopeAttached {
+            on signal ClassifyExternalEnvelope
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+        }
+        transition ClassifyExternalEnvelopeRunning {
+            on signal ClassifyExternalEnvelope
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+        }
+        transition ClassifyPlainEventAttached {
+            on signal ClassifyPlainEvent
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+        }
+        transition ClassifyPlainEventRunning {
+            on signal ClassifyPlainEvent
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+        }
+
+        // 28. Prepare: Idle→Running, Attached→Running
+        transition PrepareIdle {
+            on input Prepare { session_id, run_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some("idle");
+            }
+            to Running
+            emit SubmitRunPrimitive
+        }
+        transition PrepareAttached {
+            on input Prepare { session_id, run_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some("attached");
+            }
+            to Running
+            emit SubmitRunPrimitive
+        }
+
+        // 29. DrainQueuedRun: Retired→Running (signal)
+        transition DrainQueuedRunRetired {
+            on signal DrainQueuedRun { run_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {
+                self.current_run_id = Some(run_id);
+                self.pre_run_phase = Some("retired");
+            }
+            to Running
+            emit SubmitRunPrimitive
+        }
+
+        // 30. StartConversationRun/StartImmediateAppend/StartImmediateContext:
+        //     Attached self-loops (signals), emit SubmitRunPrimitive
+        transition StartConversationRunAttached {
+            on signal StartConversationRun
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit SubmitRunPrimitive
+        }
+        transition StartImmediateAppendAttached {
+            on signal StartImmediateAppend
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit SubmitRunPrimitive
+        }
+        transition StartImmediateContextAttached {
+            on signal StartImmediateContext
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit SubmitRunPrimitive
+        }
+
+        // 31. Commit: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
+        transition CommitRunningToIdle {
+            on input Commit { input_id, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition CommitRunningToAttached {
+            on input Commit { input_id, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Attached
+        }
+        transition CommitRunningToRetired {
+            on input Commit { input_id, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Retired
+        }
+
+        // 32. Fail: Running → Idle/Attached/Retired (guard pre_run_phase + run_id match)
+        transition FailRunningToIdle {
+            on input Fail { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+        transition FailRunningToAttached {
+            on input Fail { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Attached
+            emit RecordTerminalOutcome
+        }
+        transition FailRunningToRetired {
+            on input Fail { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Retired
+            emit RecordTerminalOutcome
+        }
+
+        // 33. MCP surface signals: Attached/Running per-phase, emit EmitExternalToolDelta (or other)
+        transition StageAddAttached {
+            on signal StageAdd
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition StageAddRunning {
+            on signal StageAdd
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition StageRemoveAttached {
+            on signal StageRemove
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition StageRemoveRunning {
+            on signal StageRemove
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition StageReloadAttached {
+            on signal StageReload
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition StageReloadRunning {
+            on signal StageReload
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition ApplySurfaceBoundaryAttached {
+            on signal ApplySurfaceBoundary
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit ScheduleSurfaceCompletion
+        }
+        transition ApplySurfaceBoundaryRunning {
+            on signal ApplySurfaceBoundary
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit ScheduleSurfaceCompletion
+        }
+        transition PendingSucceededAttached {
+            on signal PendingSucceeded
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition PendingSucceededRunning {
+            on signal PendingSucceeded
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition PendingFailedAttached {
+            on signal PendingFailed
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition PendingFailedRunning {
+            on signal PendingFailed
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition CallStartedAttached {
+            on signal CallStarted
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+        }
+        transition CallStartedRunning {
+            on signal CallStarted
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+        }
+        transition CallFinishedAttached {
+            on signal CallFinished
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+        }
+        transition CallFinishedRunning {
+            on signal CallFinished
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+        }
+        transition FinalizeRemovalCleanAttached {
+            on signal FinalizeRemovalClean
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition FinalizeRemovalCleanRunning {
+            on signal FinalizeRemovalClean
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition FinalizeRemovalForcedAttached {
+            on signal FinalizeRemovalForced
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition FinalizeRemovalForcedRunning {
+            on signal FinalizeRemovalForced
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition SnapshotAlignedAttached {
+            on signal SnapshotAligned
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition SnapshotAlignedRunning {
+            on signal SnapshotAligned
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+        transition ShutdownSurfaceAttached {
+            on signal ShutdownSurface
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Attached
+            emit EmitExternalToolDelta
+        }
+        transition ShutdownSurfaceRunning {
+            on signal ShutdownSurface
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            update {}
+            to Running
+            emit EmitExternalToolDelta
+        }
+
+        // 34. Recycle: from Idle/Retired → Idle, from Attached → Attached
+        transition RecycleFromIdleOrRetired {
+            on input Recycle
+            guard {
+                self.lifecycle_phase == Phase::Idle || self.lifecycle_phase == Phase::Retired
+            }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {
+                self.active_fence_token = None;
+                self.current_run_id = None;
+            }
+            to Idle
+            emit InitiateRecycle
+        }
+        transition RecycleFromAttached {
+            on input Recycle
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {
+                self.active_fence_token = None;
+                self.current_run_id = None;
+            }
+            to Attached
+            emit InitiateRecycle
+        }
+
+        // =====================================================================
+        // Realtime-attachment transitions
+        // =====================================================================
+
+        transition ProjectRealtimeIntent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeIntent { present }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_intent_present = present;
+            }
+            to Idle
+            emit RealtimeIntentProjected { present: present }
+        }
+
+        transition BeginRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BeginRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            update {
+                self.realtime_binding_state = "BindingNotReady";
+                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
+        }
+
+        transition ReplaceRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            update {
+                self.realtime_binding_state = "ReplacementPending";
+                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
+        }
+
+        transition DetachRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DetachRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
+        transition RequireRealtimeReattach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequireRealtimeReattach
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
+        transition PublishRealtimeSignal {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PublishRealtimeSignal { authority_epoch, next_binding_state }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "valid_next_state" {
+                next_binding_state == "BindingNotReady"
+                || next_binding_state == "BindingReady"
+                || next_binding_state == "ReplacementPending"
+            }
+            update {
+                self.realtime_binding_state = next_binding_state;
+                self.realtime_reattach_required = false;
+            }
+            to Idle
+        }
+
+        // =====================================================================
+        // Live-topology reconfigure transitions
+        // =====================================================================
+
+        transition BeginLiveTopologyReconfigure {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BeginLiveTopologyReconfigure { authority_epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
+            guard "topology_idle" { self.live_topology_phase == "Idle" }
+            update {
+                self.live_topology_phase = "Reconfiguring";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition MarkLiveTopologyDetached {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input MarkLiveTopologyDetached
+            guard "session_registered" { self.session_id != None }
+            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            // DSL-native "safe to detach now" guard.
+            //
+            // **Catalog/runtime divergence (intentional):** the runtime DSL
+            // (`meerkat-runtime/src/meerkat_machine/dsl.rs`) guards on the
+            // richer `turn_phase ∈ {Ready, DrainingBoundary, Completed,
+            // Failed, Cancelled}` set, which permits detach at the natural
+            // draining boundary mid-run. The catalog DSL is the TLC-facing
+            // twin and does not model `turn_phase`; it conservatively
+            // approximates "safe to detach" as "no run currently open"
+            // (`current_run_id == None`). This is a strict over-
+            // approximation: any TLC trace that exercises this transition
+            // under the catalog guard is also admissible under the runtime
+            // guard, so invariants proven here hold in production.
+            guard "no_active_run" { self.current_run_id == None }
+            update {
+                self.live_topology_phase = "Detached";
+                // Compose the detach into the binding authority.
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition ApplyLiveTopologyIdentity {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyLiveTopologyIdentity
+            guard "session_registered" { self.session_id != None }
+            guard "topology_detached" { self.live_topology_phase == "Detached" }
+            update {
+                self.live_topology_phase = "HostIdentityApplied";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition ApplyLiveTopologyVisibility {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyLiveTopologyVisibility
+            guard "session_registered" { self.session_id != None }
+            guard "host_identity_applied" { self.live_topology_phase == "HostIdentityApplied" }
+            update {
+                self.live_topology_phase = "HostVisibilityApplied";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition CompleteLiveTopology {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CompleteLiveTopology
+            guard "session_registered" { self.session_id != None }
+            guard "host_visibility_applied" { self.live_topology_phase == "HostVisibilityApplied" }
+            update {
+                self.live_topology_phase = "Idle";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition AbortLiveTopologyBeforeDetach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortLiveTopologyBeforeDetach
+            guard "session_registered" { self.session_id != None }
+            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            update {
+                self.live_topology_phase = "Idle";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition FailLiveTopologyAfterDetach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FailLiveTopologyAfterDetach
+            guard "session_registered" { self.session_id != None }
+            guard "topology_past_detach" {
+                self.live_topology_phase == "Detached"
+                || self.live_topology_phase == "HostIdentityApplied"
+                || self.live_topology_phase == "HostVisibilityApplied"
+            }
+            update {
+                self.live_topology_phase = "Idle";
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+    }
+}
+
+// =====================================================================
+// Stub types for compilation
+// =====================================================================
+
+macro_rules! stub_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        pub struct $name(pub String);
+        impl<T: Into<String>> From<T> for $name {
+            fn from(s: T) -> Self {
+                Self(s.into())
+            }
+        }
+    };
+}
+
+stub_newtype!(SessionId);
+stub_newtype!(AgentRuntimeId);
+stub_newtype!(FenceToken);
+stub_newtype!(RunId);
+stub_newtype!(InputId);
+stub_newtype!(WorkId);
+stub_newtype!(OperationId);
+stub_newtype!(SessionLlmIdentity);
+stub_newtype!(SessionToolVisibilityState);
+stub_newtype!(SessionLlmCapabilitySurface);
+stub_newtype!(SessionLlmCapabilitySurfaceStatus);
+stub_newtype!(SessionToolVisibilityDelta);
+stub_newtype!(ToolFilter);
+stub_newtype!(ToolVisibilityWitness);
+stub_newtype!(Generation);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationKind {
+    #[default]
+    ToolCall,
+    Completion,
+}
+
+// =====================================================================
+// Tests
+// =====================================================================

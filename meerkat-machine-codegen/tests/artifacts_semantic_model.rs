@@ -1,5 +1,7 @@
 use meerkat_machine_codegen::render_machine_semantic_model;
-use meerkat_machine_schema::catalog::{meerkat_machine, mob_machine};
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+};
 
 #[test]
 fn meerkat_semantic_model_keeps_internal_session_transport_domain() {

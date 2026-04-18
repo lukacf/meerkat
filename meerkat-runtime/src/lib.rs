@@ -31,24 +31,22 @@ pub(crate) mod control_plane;
 pub mod detached_wake;
 pub mod driver;
 pub mod durability;
+pub mod handles;
 pub mod identifiers;
+pub mod ingress_types;
 pub mod input;
 pub mod input_ledger;
-pub mod input_lifecycle_authority;
 pub mod input_scope;
 pub mod input_state;
-pub mod lifecycle_ops;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
 pub mod ops_lifecycle;
-pub(crate) mod ops_lifecycle_authority;
 pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
 pub mod queue;
 pub mod runtime_event;
-pub mod runtime_ingress_authority;
 pub(crate) mod runtime_loop;
 pub mod runtime_state;
 pub mod service_ext;
@@ -65,32 +63,35 @@ pub use coalescing::{
 pub use completion::{CompletionHandle, CompletionOutcome};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
+pub use handles::{
+    HandleDslAuthority, RuntimeCommsDrainHandle, RuntimeExternalToolSurfaceHandle,
+    RuntimePeerCommsHandle, RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
+};
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,
     LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
 };
+pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
     ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
     InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
     ResponseProgressPhase, ResponseTerminalStatus,
 };
 pub use input_ledger::InputLedger;
-pub use input_lifecycle_authority::{
-    InputLifecycleAuthority, InputLifecycleEffect, InputLifecycleError, InputLifecycleInput,
-    InputLifecycleMutator, InputLifecycleTransition,
-};
 pub use input_scope::InputScope;
 pub use input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateEvent, InputStateHistoryEntry,
-    InputTerminalOutcome, PolicySnapshot, ReconstructionSource,
+    InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, ReconstructionSource,
 };
-pub use lifecycle_ops::{abandon_non_terminal, would_abandon};
 pub use meerkat_core::types::HandlingMode;
-pub use meerkat_machine::{MeerkatMachine, RuntimeBindingsError};
+pub use meerkat_machine::{
+    CommsDrainMode, CommsDrainPhase, DrainExitReason, MeerkatMachine, RuntimeBindingsError,
+};
 pub use meerkat_machine_types::{
-    HydratedSessionLlmState, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
-    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,
-    SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    HydratedSessionLlmState, RealtimeAttachmentSignalAuthority, RealtimeAttachmentStatus,
+    ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+    SessionToolVisibilityDelta,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{
@@ -109,10 +110,6 @@ pub use queue::InputQueue;
 pub use runtime_event::{
     InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeEventEnvelope,
     RuntimeProjectionEvent, RuntimeStateChangeEvent, RuntimeTopologyEvent,
-};
-pub use runtime_ingress_authority::{
-    ContentShape, RequestId, ReservationKey, RuntimeIngressAuthority, RuntimeIngressEffect,
-    RuntimeIngressError, RuntimeIngressInput, RuntimeIngressMutator, RuntimeIngressTransition,
 };
 pub use runtime_state::{RuntimeState, RuntimeStateTransitionError};
 pub use service_ext::{RuntimeMode, SessionServiceRuntimeExt};

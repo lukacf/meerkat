@@ -47,6 +47,7 @@ fn make_progress_input(label: &str) -> Input {
             phase: ResponseProgressPhase::InProgress,
         }),
         body: format!("progress-{label}"),
+        payload: Some(serde_json::json!({ "label": label })),
         blocks: None,
         handling_mode: None,
     })
@@ -105,8 +106,8 @@ impl CoreExecutor for RecordingExecutor {
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_reset_terminates_waited_progress_work_without_running_it() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -160,10 +161,10 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
         "reset should clear all active inputs"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -173,8 +174,8 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_work() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -236,10 +237,10 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
         "stopping the runtime should drain active inputs from the ledger"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Stopped,
         })
@@ -249,8 +250,8 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_drains_waited_progress_work_to_completion() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     let stop_calls = Arc::new(AtomicUsize::new(0));
@@ -309,15 +310,15 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
         "retire+drain should leave no active inputs behind"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
 #[ignore = "Phase 0 external boundary contract"]
 async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
 
     adapter.register_session(sid.clone()).await;
@@ -351,10 +352,10 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
         "retire without a loop should not leave active inputs behind"
     );
 
-    let state = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Retired,
         })

@@ -248,6 +248,9 @@ async fn initialize_roundtrip() {
     assert!(method_names.contains(&"session/inject_context"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"runtime/state"));
+    assert!(method_names.contains(&"realtime/open_info"));
+    assert!(method_names.contains(&"realtime/status"));
+    assert!(method_names.contains(&"realtime/capabilities"));
     assert!(method_names.contains(&"runtime/accept"));
     assert!(method_names.contains(&"input/state"));
     assert!(method_names.contains(&"config/get"));

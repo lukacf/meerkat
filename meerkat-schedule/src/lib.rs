@@ -6,9 +6,10 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub use ::tokio;
 
-mod authority;
 mod driver;
 mod error;
+mod lifecycle;
+pub(crate) mod machines;
 mod service;
 mod store;
 mod surface;
@@ -17,16 +18,16 @@ mod tools;
 mod trigger;
 mod types;
 
-pub use authority::{
-    OccurrenceLifecycleAuthority, OccurrenceLifecycleError, OccurrenceLifecycleInput,
-    OccurrenceLifecycleMutator, ScheduleLifecycleAuthority, ScheduleLifecycleError,
-    ScheduleLifecycleInput, ScheduleLifecycleMutator,
-};
 pub use driver::{
     DeliveryCompletion, DeliveryDispatch, DeliveryTerminal, ScheduleDriver, ScheduleDriverConfig,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleTickReport, TargetProbeOutcome,
 };
 pub use error::{ScheduleDomainError, ScheduleStoreError};
+pub use lifecycle::{
+    OccurrenceLifecycleEffect, OccurrenceLifecycleError, OccurrenceLifecycleInput,
+    OccurrenceLifecycleMutator, ScheduleLifecycleEffect, ScheduleLifecycleError,
+    ScheduleLifecycleInput, ScheduleLifecycleMutator,
+};
 pub use service::ScheduleService;
 pub use store::{
     ClaimDueRequest, ClaimDueResult, DisabledScheduleStore, MemoryScheduleStore, OccurrenceFilter,
@@ -44,9 +45,9 @@ pub use types::{
     CalendarFieldSpec, CalendarTriggerSpec, CreateScheduleRequest, DeliveryReceipt,
     DeliveryReceiptStage, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy,
     MissingTargetPolicy, MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule, ScheduleId,
-    SchedulePhase, ScheduleRevision, ScheduleSpawnTooling, ScheduledMobAction,
-    ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
+    OccurrenceOrdinal, OccurrencePhase, OverlapPolicy, ResolvedSpawnSnapshot, Schedule,
+    ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleSpawnTooling,
+    ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     UpdateScheduleRequest,
 };

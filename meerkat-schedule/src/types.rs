@@ -841,14 +841,29 @@ impl DeliveryReceipt {
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Schedule {
-    pub schedule_id: ScheduleId,
-    pub phase: SchedulePhase,
-    pub revision: ScheduleRevision,
+pub struct ScheduleConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default = "default_planning_horizon_days")]
+    pub planning_horizon_days: u32,
+    #[serde(default = "default_planning_horizon_occurrences")]
+    pub planning_horizon_occurrences: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub created_at_utc: DateTime<Utc>,
+    pub updated_at_utc: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at_utc: Option<DateTime<Utc>>,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub schedule_id: ScheduleId,
+    pub phase: SchedulePhase,
+    pub revision: ScheduleRevision,
     pub trigger: TriggerSpec,
     pub target: TargetBinding,
     #[serde(default)]
@@ -857,19 +872,11 @@ pub struct Schedule {
     pub overlap_policy: OverlapPolicy,
     #[serde(default)]
     pub missing_target_policy: MissingTargetPolicy,
-    #[serde(default = "default_planning_horizon_days")]
-    pub planning_horizon_days: u32,
-    #[serde(default = "default_planning_horizon_occurrences")]
-    pub planning_horizon_occurrences: u32,
     pub next_occurrence_ordinal: OccurrenceOrdinal,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_cursor_utc: Option<DateTime<Utc>>,
-    pub created_at_utc: DateTime<Utc>,
-    pub updated_at_utc: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deleted_at_utc: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
+    #[serde(flatten)]
+    pub config: ScheduleConfig,
 }
 
 impl Schedule {
@@ -879,35 +886,37 @@ impl Schedule {
             schedule_id: ScheduleId::new(),
             phase: SchedulePhase::Active,
             revision: ScheduleRevision::initial(),
-            name: request.name,
-            description: request.description,
             trigger: request.trigger,
             target: request.target,
             misfire_policy: request.misfire_policy,
             overlap_policy: request.overlap_policy,
             missing_target_policy: request.missing_target_policy,
-            planning_horizon_days: request
-                .planning_horizon_days
-                .unwrap_or(DEFAULT_PLANNING_HORIZON_DAYS),
-            planning_horizon_occurrences: request
-                .planning_horizon_occurrences
-                .unwrap_or(DEFAULT_PLANNING_HORIZON_OCCURRENCES),
             next_occurrence_ordinal: OccurrenceOrdinal(0),
             planning_cursor_utc: None,
-            created_at_utc: now,
-            updated_at_utc: now,
-            deleted_at_utc: None,
-            labels: request.labels,
+            config: ScheduleConfig {
+                name: request.name,
+                description: request.description,
+                planning_horizon_days: request
+                    .planning_horizon_days
+                    .unwrap_or(DEFAULT_PLANNING_HORIZON_DAYS),
+                planning_horizon_occurrences: request
+                    .planning_horizon_occurrences
+                    .unwrap_or(DEFAULT_PLANNING_HORIZON_OCCURRENCES),
+                labels: request.labels,
+                created_at_utc: now,
+                updated_at_utc: now,
+                deleted_at_utc: None,
+            },
         }
     }
 
     pub fn bump_revision(&mut self) {
         self.revision = self.revision.next();
-        self.updated_at_utc = Utc::now();
+        self.config.updated_at_utc = Utc::now();
     }
 
     pub fn touch(&mut self) {
-        self.updated_at_utc = Utc::now();
+        self.config.updated_at_utc = Utc::now();
     }
 }
 

@@ -370,7 +370,9 @@ impl CommsMessage {
                     "[COMMS REQUEST from {} (id: {})]\n\
                      Intent: {}{}\n\
                      \n\
-                     To respond, use send_response with peer=\"{}\", request_id=\"{}\"",
+                     This is a correlated peer request. Reply with send_response using \
+                     to=\"{}\", in_reply_to=\"{}\", status=\"completed\" or \"failed\", and result=<JSON payload>. \
+                     Do not answer this request with send_message.",
                     self.from_peer, request_id, intent, params_str, self.from_peer, request_id
                 )
             }
@@ -744,6 +746,10 @@ mod tests {
         assert!(text.contains("review"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
         assert!(text.contains("send_response"));
+        assert!(text.contains("to=\"coding-agent\""));
+        assert!(text.contains("in_reply_to=\"550e8400-e29b-41d4-a716-446655440000\""));
+        assert!(text.contains("status=\"completed\" or \"failed\""));
+        assert!(text.contains("Do not answer this request with send_message"));
     }
 
     #[test]

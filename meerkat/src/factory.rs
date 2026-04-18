@@ -967,6 +967,23 @@ impl AgentFactory {
         self
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), test))]
+    fn shell_project_root(&self) -> PathBuf {
+        self.project_root.clone().unwrap_or_else(|| {
+            // `store_path` may point at an uncreated session leaf (for example
+            // `<temp>/sessions`) or a database file. Using it directly as
+            // `current_dir` makes process spawn fail with ENOENT, so prefer the
+            // nearest existing parent directory when no explicit project root is set.
+            self.store_path
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| self.store_path.clone())
+                })
+        })
+    }
+
     fn realm_scope_root(&self, _build_config: &AgentBuildConfig) -> PathBuf {
         self.runtime_root
             .clone()
@@ -1251,7 +1268,11 @@ impl AgentFactory {
         provider: Provider,
         model: &str,
         config: &Config,
+        suppress_ambient_provider_search: bool,
     ) -> Option<serde_json::Value> {
+        if suppress_ambient_provider_search {
+            return None;
+        }
         let profile = registry.profile_for(model)?;
         if !profile.supports_web_search {
             return None;
@@ -1558,6 +1579,18 @@ impl AgentFactory {
 
         let registry = self.model_registry(config)?;
 
+        let explicit_meerkat_tool_policy =
+            !matches!(
+                build_config.override_builtins,
+                ToolCategoryOverride::Inherit
+            ) || !matches!(build_config.override_shell, ToolCategoryOverride::Inherit)
+                || !matches!(build_config.override_memory, ToolCategoryOverride::Inherit)
+                || !matches!(
+                    build_config.override_schedule,
+                    ToolCategoryOverride::Inherit
+                )
+                || !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
+
         // 2. Resolve provider and any self-hosted server binding.
         let resumed_self_hosted_server_id = resumed_session_metadata
             .as_ref()
@@ -1575,8 +1608,13 @@ impl AgentFactory {
         };
 
         // 2b. Resolve provider-native tool defaults (web search, etc.)
-        let provider_tool_defaults =
-            Self::resolve_provider_tool_defaults(&registry, provider, &build_config.model, config);
+        let provider_tool_defaults = Self::resolve_provider_tool_defaults(
+            &registry,
+            provider,
+            &build_config.model,
+            config,
+            explicit_meerkat_tool_policy,
+        );
 
         // 3. Create LLM client
         let llm_client: Arc<dyn LlmClient> = match build_config.llm_client_override.as_ref() {
@@ -1846,7 +1884,7 @@ impl AgentFactory {
                         effective_builtins,
                         effective_shell,
                         skill_engine.clone(),
-                        build_config.shell_env.take(),
+                        build_config.shell_env.clone(),
                         _session_id.clone(),
                         Arc::clone(&ops_lifecycle),
                         _image_tool_results,
@@ -2168,10 +2206,13 @@ impl AgentFactory {
         for section in &preloaded_skill_sections {
             extra_sections.push(section.as_str());
         }
-        // Append additional instructions after skills, before tool instructions.
+        // Append additional instructions after skills, before tool
+        // instructions. These are canonical build-state and must survive into
+        // persisted recovery / realtime reconstruction, so prompt assembly may
+        // read them but must not consume them.
         let additional_instruction_storage: Vec<String> = build_config
             .additional_instructions
-            .take()
+            .clone()
             .unwrap_or_default();
         for instruction in &additional_instruction_storage {
             if !instruction.is_empty() {
@@ -2399,6 +2440,9 @@ impl AgentFactory {
             builder = builder.with_epoch_cursor_state(Arc::clone(&bindings.cursor_state));
             builder =
                 builder.with_tool_visibility_owner(Arc::clone(&bindings.tool_visibility_owner));
+            builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
+            builder = builder
+                .with_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
         }
 
         // 12h. Wire completion feed + enrichment for cursor-based delivery
@@ -2581,6 +2625,24 @@ mod tests {
         assert_eq!(provider, Provider::SelfHosted);
         assert_eq!(server_id.as_deref(), Some("other"));
     }
+
+    #[test]
+    fn shell_project_root_uses_store_parent_when_project_root_is_unset() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_path = temp.path().join("sessions");
+        let factory = AgentFactory::new(store_path);
+
+        assert_eq!(factory.shell_project_root(), temp.path());
+    }
+
+    #[test]
+    fn shell_project_root_prefers_explicit_project_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit_root = temp.path().join("workspace");
+        let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&explicit_root);
+
+        assert_eq!(factory.shell_project_root(), explicit_root);
+    }
 }
 
 impl AgentFactory {
@@ -2630,10 +2692,7 @@ impl AgentFactory {
 
         // Create shell config if shell is enabled
         let shell_config = if effective_shell {
-            let project_root = self
-                .project_root
-                .clone()
-                .unwrap_or_else(|| self.store_path.clone());
+            let project_root = self.shell_project_root();
             let mut config = ShellConfig::with_project_root(project_root);
             if let Some(env) = shell_env {
                 config.env_vars = env;

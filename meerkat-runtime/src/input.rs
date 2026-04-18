@@ -321,8 +321,18 @@ pub struct PeerInput {
     /// The peer convention (message, request, response).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub convention: Option<PeerConvention>,
-    /// LLM-facing rendered text projection for this peer input.
+    /// Legacy textual body for this peer input.
+    ///
+    /// Message-style peer traffic uses this directly. Request/response prompt
+    /// projection is runtime-owned and must be reconstructed from
+    /// `convention + payload + source` rather than helper-rendered prose.
     pub body: String,
+    /// Structured peer payload, when one exists.
+    ///
+    /// For `Request`, this is the request params. For `Response*`, this is the
+    /// response result payload. Message traffic leaves this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
     /// Optional multimodal content blocks. When present, `body` serves as the
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +538,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi there".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
@@ -546,6 +557,7 @@ mod tests {
                 intent: "mob.peer_added".into(),
             }),
             body: "Agent joined".into(),
+            payload: Some(serde_json::json!({"name": "agent-1"})),
             blocks: None,
             handling_mode: None,
         });
@@ -567,6 +579,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "Done".into(),
+            payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
             handling_mode: None,
         });
@@ -584,6 +597,7 @@ mod tests {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: "Working...".into(),
+            payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
             handling_mode: None,
         });
@@ -750,6 +764,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
@@ -762,6 +777,7 @@ mod tests {
                 intent: "i".into(),
             }),
             body: "hi".into(),
+            payload: Some(serde_json::json!({"subject": "x"})),
             blocks: None,
             handling_mode: None,
         });
@@ -844,6 +860,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         });
@@ -862,6 +879,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
@@ -880,6 +898,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
@@ -912,6 +931,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
             handling_mode: None,
         });
@@ -930,6 +950,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         });
@@ -954,6 +975,7 @@ mod tests {
             header: make_header(),
             convention: Some(PeerConvention::Message),
             body: "hi".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });

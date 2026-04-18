@@ -2,12 +2,16 @@
 //!
 //! IndexMap<InputId, InputState> with dedup by idempotency_key.
 
+use chrono::{Duration, Utc};
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::InputId;
 
 use crate::identifiers::IdempotencyKey;
 use crate::input::InputDurability;
 use crate::input_state::InputState;
+
+const TERMINAL_DEDUP_RETENTION_LIMIT: usize = 4096;
+const TERMINAL_DEDUP_RETENTION_TTL_HOURS: i64 = 24;
 
 /// In-memory ledger tracking InputState for all inputs.
 #[derive(Debug, Default, Clone)]
@@ -36,6 +40,7 @@ impl InputLedger {
         state: InputState,
         key: IdempotencyKey,
     ) -> Option<InputId> {
+        self.prune_terminal_dedup(Utc::now());
         if let Some(existing_id) = self.idempotency_index.get(&key) {
             return Some(existing_id.clone());
         }
@@ -87,10 +92,12 @@ impl InputLedger {
 
     /// Iterate over all non-terminal input states.
     pub fn iter_non_terminal(&self) -> impl Iterator<Item = (&InputId, &InputState)> {
-        self.states.iter().filter(|(_, s)| !s.is_terminal())
+        self.states.iter().filter(|(_, state)| !state.is_terminal())
     }
 
-    /// Iterate over all input states.
+    /// Iterate over all input states. "Active" (non-terminal) filtering must
+    /// happen at the driver level, which has DSL access; the ledger by itself
+    /// carries only shell metadata.
     pub fn iter(&self) -> impl Iterator<Item = (&InputId, &InputState)> {
         self.states.iter()
     }
@@ -114,13 +121,44 @@ impl InputLedger {
     pub fn active_input_ids(&self) -> Vec<InputId> {
         self.iter_non_terminal().map(|(id, _)| id.clone()).collect()
     }
+
+    fn prune_terminal_dedup(&mut self, now: chrono::DateTime<Utc>) {
+        let cutoff = now - Duration::hours(TERMINAL_DEDUP_RETENTION_TTL_HOURS);
+        let expired_keys = self
+            .idempotency_index
+            .iter()
+            .filter_map(|(key, input_id)| {
+                let state = self.states.get(input_id)?;
+                (state.is_terminal() && state.updated_at() < cutoff).then(|| key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in expired_keys {
+            self.idempotency_index.shift_remove(&key);
+        }
+
+        let terminal_keys = self
+            .idempotency_index
+            .iter()
+            .filter(|(_, input_id)| {
+                self.states
+                    .get(*input_id)
+                    .is_some_and(InputState::is_terminal)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let overflow = terminal_keys
+            .len()
+            .saturating_sub(TERMINAL_DEDUP_RETENTION_LIMIT);
+        for key in terminal_keys.into_iter().take(overflow) {
+            self.idempotency_index.shift_remove(&key);
+        }
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::input_lifecycle_authority::InputLifecycleInput;
 
     #[test]
     fn accept_and_retrieve() {
@@ -163,7 +201,7 @@ mod tests {
 
         let id2 = InputId::new();
         let mut state2 = InputState::new_accepted(id2);
-        state2.apply(InputLifecycleInput::ConsumeOnAccept).unwrap();
+        state2.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
         ledger.accept(state2);
 
         let active: Vec<_> = ledger.iter_non_terminal().collect();
@@ -180,8 +218,9 @@ mod tests {
 
         let id3 = InputId::new();
         let mut state3 = InputState::new_accepted(id3);
-        state3.apply(InputLifecycleInput::QueueAccepted).unwrap();
-        state3.apply(InputLifecycleInput::Supersede).unwrap();
+        state3.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Superseded {
+            superseded_by: InputId::new(),
+        });
         ledger.accept(state3);
 
         assert_eq!(ledger.len(), 3);
@@ -220,6 +259,34 @@ mod tests {
         let result = ledger.accept_with_idempotency(state2, key);
         assert_eq!(result, Some(id1), "Dedup should find the recovered input");
         assert_eq!(ledger.len(), 1, "No duplicate entry should be created");
+    }
+
+    #[test]
+    fn terminal_dedup_retention_evicts_oldest_key_after_limit() {
+        let mut ledger = InputLedger::new();
+        let oldest_key = IdempotencyKey::new("oldest-terminal-key");
+
+        for index in 0..=TERMINAL_DEDUP_RETENTION_LIMIT {
+            let key = if index == 0 {
+                oldest_key.clone()
+            } else {
+                IdempotencyKey::new(format!("terminal-key-{index}"))
+            };
+            let mut state = InputState::new_accepted(InputId::new());
+            // InputLifecycle was absorbed into MeerkatMachine DSL; tests
+            // construct terminal state directly instead of simulating the
+            // authority apply that used to live in a standalone machine.
+            state.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
+            let duplicate = ledger.accept_with_idempotency(state, key);
+            assert!(duplicate.is_none(), "fresh terminal key should insert");
+        }
+
+        let replacement = InputState::new_accepted(InputId::new());
+        let result = ledger.accept_with_idempotency(replacement, oldest_key);
+        assert!(
+            result.is_none(),
+            "the oldest terminal dedup key should be evicted once the retention cap is exceeded"
+        );
     }
 
     #[test]

@@ -710,6 +710,11 @@ impl MeerkatMcpState {
         self.expose_paths
     }
 
+    #[cfg(feature = "mob")]
+    pub fn set_realtime_rpc_tcp_addr(&mut self, addr: Option<String>) {
+        self.mob_state.set_realtime_rpc_tcp_addr(addr);
+    }
+
     async fn upsert_mcp_adapter(
         &self,
         session_id: &meerkat::SessionId,
@@ -4450,14 +4455,14 @@ mod tests {
             }),
         );
 
-        let result = timeout(
+        let result = Box::pin(timeout(
             Duration::from_millis(50),
             handle_tools_call(
                 &state,
                 "meerkat_event_stream_read",
                 &json!({ "stream_id": stream_id, "no_timeout": true }),
             ),
-        )
+        ))
         .await;
         assert!(result.is_err(), "no_timeout should allow blocking reads");
     }

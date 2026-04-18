@@ -422,6 +422,16 @@ pub enum Update {
         key: Expr,
         value: Expr,
     },
+    MapIncrement {
+        field: String,
+        key: Expr,
+        amount: u64,
+    },
+    MapDecrement {
+        field: String,
+        key: Expr,
+        amount: u64,
+    },
     MapRemove {
         field: String,
         key: Expr,
@@ -525,6 +535,22 @@ impl Update {
                 )?;
             }
             Self::MapRemove { field, key } => {
+                if !field_names.contains(field.as_str()) {
+                    return Err(MachineSchemaError::UnknownField {
+                        field: field.clone(),
+                    });
+                }
+                key.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::MapIncrement { field, key, .. } | Self::MapDecrement { field, key, .. } => {
                 if !field_names.contains(field.as_str()) {
                     return Err(MachineSchemaError::UnknownField {
                         field: field.clone(),
@@ -688,6 +714,10 @@ pub enum Expr {
     Contains {
         collection: Box<Expr>,
         value: Box<Expr>,
+    },
+    MapContainsKey {
+        map: Box<Expr>,
+        key: Box<Expr>,
     },
     SeqStartsWith {
         seq: Box<Expr>,
@@ -876,6 +906,26 @@ impl Expr {
                     bindings,
                 )?;
                 value.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+            }
+            Self::MapContainsKey { map, key } => {
+                map.validate(
+                    phase_names,
+                    field_names,
+                    input_variants,
+                    signal_variants,
+                    effect_variants,
+                    helper_names,
+                    bindings,
+                )?;
+                key.validate(
                     phase_names,
                     field_names,
                     input_variants,
@@ -1086,15 +1136,18 @@ impl std::error::Error for MachineSchemaError {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{MachineSchemaError, catalog::meerkat_machine};
+    use crate::{MachineSchemaError, catalog::dsl::dsl_meerkat_machine as meerkat_machine};
 
     #[test]
     fn validates_meerkat_machine_schema() {
         let schema = meerkat_machine();
 
         assert_eq!(schema.machine, "MeerkatMachine");
-        assert_eq!(schema.rust.crate_name, "meerkat-runtime");
-        assert_eq!(schema.rust.module, "generated::meerkat_machine");
+        // DSL-generated schema uses `rust: "self" / "catalog::dsl::meerkat_machine"`
+        // because it lives inside meerkat-machine-schema itself. The runtime
+        // owner is anchored in meerkat-runtime via its own `machine!` invocation.
+        assert_eq!(schema.rust.crate_name, "self");
+        assert_eq!(schema.rust.module, "catalog::dsl::meerkat_machine");
         assert_eq!(schema.state.phase.name, "MeerkatPhase");
         assert!(
             schema

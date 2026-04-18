@@ -1,5 +1,5 @@
-use crate::authority::{OccurrenceLifecycleAuthority, OccurrenceLifecycleInput};
 use crate::error::ScheduleDomainError;
+use crate::lifecycle::OccurrenceLifecycleInput;
 use crate::service::ScheduleService;
 use crate::store::{ClaimDueRequest, ScheduleStore};
 use crate::types::{
@@ -147,7 +147,6 @@ pub struct ScheduleDriver {
     store: Arc<dyn ScheduleStore>,
     probe: Arc<dyn ScheduleTargetProbe>,
     delivery: Arc<dyn ScheduleTargetDelivery>,
-    occurrence_authority: Arc<OccurrenceLifecycleAuthority>,
     owner_id: String,
     config: ScheduleDriverConfig,
 }
@@ -166,7 +165,6 @@ impl ScheduleDriver {
             store,
             probe,
             delivery,
-            occurrence_authority: Arc::new(OccurrenceLifecycleAuthority),
             owner_id: owner_id.into(),
             config,
         }
@@ -345,29 +343,21 @@ impl ScheduleDriver {
             dispatch_receipt.materialized_session_id = dispatch.materialized_session_id.clone();
         }
 
-        let mut dispatching = self
-            .occurrence_authority
-            .apply(
-                occurrence,
-                OccurrenceLifecycleInput::DispatchStarted {
-                    correlation_id: dispatch.correlation_id.clone(),
-                    at_utc: store_now_utc,
-                },
-            )
+        let mut dispatching = occurrence
+            .apply(OccurrenceLifecycleInput::DispatchStarted {
+                correlation_id: dispatch.correlation_id.clone(),
+                at_utc: store_now_utc,
+            })
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .into_occurrence();
         dispatching.last_receipt = Some(dispatch_receipt.clone());
         self.store.put_occurrence(dispatching.clone()).await?;
         self.store.append_receipt(dispatch_receipt).await?;
 
-        dispatching = self
-            .occurrence_authority
-            .apply(
-                dispatching,
-                OccurrenceLifecycleInput::AwaitCompletion {
-                    at_utc: store_now_utc,
-                },
-            )
+        dispatching = dispatching
+            .apply(OccurrenceLifecycleInput::AwaitCompletion {
+                at_utc: store_now_utc,
+            })
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .into_occurrence();
         self.store.put_occurrence(dispatching.clone()).await?;

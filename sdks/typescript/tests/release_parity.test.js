@@ -1,7 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import packageJson from "../package.json" with { type: "json" };
-import { MeerkatClient, Session, DeferredSession, Mob } from "../dist/index.js";
+import {
+  MeerkatClient,
+  Session,
+  DeferredSession,
+  Mob,
+  RealtimeChannel,
+} from "../dist/index.js";
 
 describe("Phase 1 release parity targets", () => {
   it("keeps the packaged TypeScript entrypoints declared", () => {
@@ -36,6 +42,9 @@ describe("Phase 1 release parity targets", () => {
       "callScheduleTool",
       "readMobEvents",
       "spawnMobMembers",
+      "realtimeOpenInfo",
+      "realtimeStatus",
+      "realtimeCapabilities",
       "createMobProfile",
       "getMobProfile",
       "listMobProfiles",
@@ -63,5 +72,11 @@ describe("Phase 1 release parity targets", () => {
     for (const method of ["spawnMany", "readEvents"]) {
       assert.ok(mobMethods.includes(method), `missing Mob.${method}`);
     }
+  });
+
+  it("exports the RealtimeChannel scaffold", () => {
+    assert.equal(typeof RealtimeChannel, "function");
+    assert.equal(typeof RealtimeChannel.session, "function");
+    assert.equal(typeof RealtimeChannel.mobMember, "function");
   });
 });

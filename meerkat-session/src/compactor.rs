@@ -105,9 +105,29 @@ impl Compactor for DefaultCompactor {
             return false;
         }
 
-        // Trigger on either threshold
-        ctx.last_input_tokens >= self.config.auto_compact_threshold
-            || ctx.estimated_history_tokens >= self.config.auto_compact_threshold
+        // Trigger on either threshold. `last_input_tokens` is the
+        // authoritative provider-reported cost of the last LLM call;
+        // `estimated_history_tokens` is the fallback used when the provider
+        // never reports usage (voice-only sessions can run for hours
+        // without an agent-loop turn, so the fallback is what keeps history
+        // bounded). Both paths are traced so operators can see which branch
+        // fired in production.
+        let input_trigger = ctx.last_input_tokens >= self.config.auto_compact_threshold;
+        let history_trigger = ctx.estimated_history_tokens >= self.config.auto_compact_threshold;
+        if input_trigger || history_trigger {
+            tracing::trace!(
+                input_tokens = ctx.last_input_tokens,
+                estimated_history_tokens = ctx.estimated_history_tokens,
+                threshold = self.config.auto_compact_threshold,
+                branch = if input_trigger {
+                    "last_input_tokens"
+                } else {
+                    "estimated_history_tokens_fallback"
+                },
+                "compaction trigger fired",
+            );
+        }
+        input_trigger || history_trigger
     }
 
     fn prepare_for_summarization(&self, messages: &[Message]) -> Vec<Message> {
@@ -259,6 +279,45 @@ mod tests {
             session_boundary_index: 5,
         };
         assert!(c.should_compact(&ctx2));
+    }
+
+    #[test]
+    fn test_voice_only_session_compacts_via_estimated_history_fallback() {
+        // Voice-only sessions never pump the agent loop, so
+        // `last_input_tokens` stays at zero. The
+        // `estimated_history_tokens` path is the fallback that keeps a
+        // long-running voice session from growing unbounded. This locks
+        // in that the compactor fires on the fallback branch alone.
+        let c = DefaultCompactor::new(make_config());
+        let ctx = CompactionContext {
+            last_input_tokens: 0,
+            message_count: 200,
+            estimated_history_tokens: 150_000,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 42,
+        };
+        assert!(
+            c.should_compact(&ctx),
+            "voice-only session must compact via estimated_history_tokens \
+             when last_input_tokens is zero",
+        );
+    }
+
+    #[test]
+    fn test_should_not_compact_when_neither_threshold_met() {
+        // Regression guard for the Item 6 trace instrumentation: if neither
+        // the input-tokens nor the estimated-history branch exceeds the
+        // configured threshold, should_compact must still return false even
+        // though the tracing span is absent.
+        let c = DefaultCompactor::new(make_config());
+        let ctx = CompactionContext {
+            last_input_tokens: 50_000,
+            message_count: 20,
+            estimated_history_tokens: 50_000,
+            last_compaction_boundary_index: None,
+            session_boundary_index: 5,
+        };
+        assert!(!c.should_compact(&ctx));
     }
 
     #[test]

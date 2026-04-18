@@ -12,16 +12,24 @@ pub enum MobError {
     #[error("profile not found: {0}")]
     ProfileNotFound(ProfileName),
 
-    /// The requested meerkat does not exist in the roster.
-    #[error("meerkat not found: {0}")]
-    MeerkatNotFound(MeerkatId),
+    /// The requested mob member does not exist in the roster.
+    ///
+    /// Renamed from `MeerkatNotFound` by DELETE_ME finding A2 + B8 as
+    /// part of the 0.6 identity-first cascade. The inner type remains
+    /// [`MeerkatId`] until the full A5 DSL-schema migration flips it to
+    /// [`AgentIdentity`](crate::ids::AgentIdentity); the rename lands
+    /// first so public error matching doesn't leak the legacy term.
+    #[error("mob member not found: {0}")]
+    MemberNotFound(MeerkatId),
 
-    /// A meerkat with the given ID already exists.
-    #[error("meerkat already exists: {0}")]
-    MeerkatAlreadyExists(MeerkatId),
+    /// A mob member with the given ID already exists.
+    ///
+    /// Renamed from `MeerkatAlreadyExists` by DELETE_ME finding A2 + B8.
+    #[error("mob member already exists: {0}")]
+    MemberAlreadyExists(MeerkatId),
 
-    /// The meerkat's profile does not allow external turns.
-    #[error("meerkat is not externally addressable: {0}")]
+    /// The mob member's profile does not allow external turns.
+    #[error("mob member is not externally addressable: {0}")]
     NotExternallyAddressable(MeerkatId),
 
     /// The requested lifecycle state transition is invalid.
@@ -33,10 +41,13 @@ pub enum MobError {
     WiringError(String),
 
     /// The member failed to restore durable session state and is broken until repaired.
-    #[error("member {member_id} failed to restore session {session_id}: {reason}")]
+    #[error(
+        "member {member_id} failed to restore {}: {reason}",
+        format_member_restore_target(.session_id.as_ref())
+    )]
     MemberRestoreFailed {
         member_id: MeerkatId,
-        session_id: meerkat_core::types::SessionId,
+        session_id: Option<meerkat_core::types::SessionId>,
         reason: String,
     },
 
@@ -163,6 +174,13 @@ fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
         .join("; ")
 }
 
+fn format_member_restore_target(session_id: Option<&meerkat_core::types::SessionId>) -> String {
+    match session_id {
+        Some(session_id) => format!("session {session_id}"),
+        None => "runtime bridge state".to_string(),
+    }
+}
+
 impl From<Box<dyn std::error::Error + Send + Sync>> for MobError {
     fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Self::StorageError(error)
@@ -195,6 +213,35 @@ mod tests {
     fn test_profile_not_found_display() {
         let err = MobError::ProfileNotFound(ProfileName::from("missing"));
         assert!(format!("{err}").contains("missing"));
+    }
+
+    /// DELETE_ME A2 + B8 regression: the `Meerkat*` variant prefix and
+    /// the "meerkat" literal in error messages were renamed to
+    /// identity-first terminology ("mob member"). This test pins both
+    /// the display-string and the variant-construction shape so the
+    /// 0.6 identity-first cascade cannot regress into legacy wording.
+    #[test]
+    fn member_not_found_and_already_exists_use_identity_first_display() {
+        let not_found = MobError::MemberNotFound(MeerkatId::from("singer"));
+        let already = MobError::MemberAlreadyExists(MeerkatId::from("singer"));
+        let not_addressable = MobError::NotExternallyAddressable(MeerkatId::from("singer"));
+
+        let msg_nf = format!("{not_found}");
+        let msg_ae = format!("{already}");
+        let msg_na = format!("{not_addressable}");
+
+        assert_eq!(msg_nf, "mob member not found: singer");
+        assert_eq!(msg_ae, "mob member already exists: singer");
+        assert_eq!(msg_na, "mob member is not externally addressable: singer");
+
+        // No legacy "meerkat" literal should appear in any of the
+        // identity-first error displays.
+        for msg in [&msg_nf, &msg_ae, &msg_na] {
+            assert!(
+                !msg.to_lowercase().contains("meerkat"),
+                "identity-first mob errors must not carry legacy 'meerkat' wording: {msg}",
+            );
+        }
     }
 
     #[test]
@@ -259,8 +306,8 @@ mod tests {
         // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
             MobError::ProfileNotFound(ProfileName::from("p")),
-            MobError::MeerkatNotFound(MeerkatId::from("m")),
-            MobError::MeerkatAlreadyExists(MeerkatId::from("m")),
+            MobError::MemberNotFound(MeerkatId::from("m")),
+            MobError::MemberAlreadyExists(MeerkatId::from("m")),
             MobError::NotExternallyAddressable(MeerkatId::from("m")),
             MobError::InvalidTransition {
                 from: MobState::Creating,
@@ -269,7 +316,7 @@ mod tests {
             MobError::WiringError("w".to_string()),
             MobError::MemberRestoreFailed {
                 member_id: MeerkatId::from("m"),
-                session_id: meerkat_core::types::SessionId::new(),
+                session_id: Some(meerkat_core::types::SessionId::new()),
                 reason: "restore failed".to_string(),
             },
             MobError::KickoffWaitTimedOut {

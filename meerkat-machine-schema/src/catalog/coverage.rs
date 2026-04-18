@@ -5,10 +5,10 @@ use super::{
         meerkat_mob_seam_composition, schedule_bundle_composition, schedule_mob_bundle_composition,
         schedule_runtime_bundle_composition,
     },
-    meerkat_machine::meerkat_machine,
-    mob_machine::mob_machine,
-    occurrence_lifecycle::occurrence_lifecycle_machine,
-    schedule_lifecycle::schedule_lifecycle_machine,
+    dsl::{
+        dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
+        dsl_schedule_lifecycle_machine,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,11 +54,11 @@ pub struct CompositionCoverageManifest {
 pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
     vec![
         machine_manifest_from_schema(
-            &meerkat_machine(),
+            &dsl_meerkat_machine(),
             &[
                 anchor(
                     "meerkat_machine",
-                    "meerkat-runtime/src/meerkat_machine.rs",
+                    "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "authoritative MeerkatMachine command dispatch and state ownership",
                 ),
                 anchor(
@@ -96,7 +96,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &mob_machine(),
+            &dsl_mob_machine(),
             &[
                 anchor(
                     "mob_handle_surface",
@@ -121,11 +121,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             ],
         ),
         machine_manifest_from_schema(
-            &schedule_lifecycle_machine(),
+            &dsl_schedule_lifecycle_machine(),
             &[anchor(
-                "schedule_authority",
-                "meerkat-schedule/src/authority.rs",
-                "schedule lifecycle authority and revision ownership",
+                "schedule_lifecycle",
+                "meerkat-schedule/src/lifecycle.rs",
+                "Schedule::apply domain-facing lifecycle transition seam over the DSL",
             )],
             &[scenario(
                 "schedule_pause_resume_delete",
@@ -133,11 +133,11 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             )],
         ),
         machine_manifest_from_schema(
-            &occurrence_lifecycle_machine(),
+            &dsl_occurrence_lifecycle_machine(),
             &[anchor(
-                "occurrence_authority",
-                "meerkat-schedule/src/authority.rs",
-                "occurrence lifecycle authority",
+                "occurrence_lifecycle",
+                "meerkat-schedule/src/lifecycle.rs",
+                "Occurrence::apply domain-facing lifecycle transition seam over the DSL",
             )],
             &[scenario(
                 "occurrence_start_complete_fail",
@@ -159,7 +159,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
                 anchor(
                     "meerkat_runtime_entry",
-                    "meerkat-runtime/src/meerkat_machine.rs",
+                    "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "MeerkatMachine command authority consuming seam traffic",
                 ),
             ],

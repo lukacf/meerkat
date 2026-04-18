@@ -133,7 +133,7 @@ pub async fn handle_start(
     params: Option<&RawValue>,
     runtime: Arc<SessionRuntime>,
     notification_sink: &NotificationSink,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
     request_context: Option<RequestContext>,
 ) -> RpcResponse {
     let params: StartTurnParams = match parse_params(params) {

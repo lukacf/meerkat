@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
+use crate::handles::{
+    CommsDrainHandle, ExternalToolSurfaceHandle, PeerCommsHandle, SessionAdmissionHandle,
+    TurnStateHandle,
+};
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
 use crate::types::SessionId;
@@ -154,6 +158,16 @@ pub struct SessionRuntimeBindings {
     pub cursor_state: Arc<EpochCursorState>,
     /// Canonical durable tool-visibility owner for this session/runtime binding.
     pub tool_visibility_owner: Arc<dyn ToolVisibilityOwner>,
+    /// Turn-execution DSL handle (Phase 5F/0 addition).
+    pub turn_state: Arc<dyn TurnStateHandle>,
+    /// Comms drain lifecycle DSL handle (Phase 5F/0 addition).
+    pub comms_drain: Arc<dyn CommsDrainHandle>,
+    /// External tool surface DSL handle (Phase 5F/0 addition).
+    pub external_tool_surface: Arc<dyn ExternalToolSurfaceHandle>,
+    /// Peer comms classification DSL handle (Phase 5F/0 addition).
+    pub peer_comms: Arc<dyn PeerCommsHandle>,
+    /// Session turn-admission DSL handle (Phase 5F/0 addition).
+    pub session_admission: Arc<dyn SessionAdmissionHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -164,6 +178,11 @@ impl Clone for SessionRuntimeBindings {
             ops_lifecycle: Arc::clone(&self.ops_lifecycle),
             cursor_state: Arc::clone(&self.cursor_state),
             tool_visibility_owner: Arc::clone(&self.tool_visibility_owner),
+            turn_state: Arc::clone(&self.turn_state),
+            comms_drain: Arc::clone(&self.comms_drain),
+            external_tool_surface: Arc::clone(&self.external_tool_surface),
+            peer_comms: Arc::clone(&self.peer_comms),
+            session_admission: Arc::clone(&self.session_admission),
         }
     }
 }
@@ -176,6 +195,11 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("ops_lifecycle", &"<dyn OpsLifecycleRegistry>")
             .field("cursor_state", &self.cursor_state)
             .field("tool_visibility_owner", &"<dyn ToolVisibilityOwner>")
+            .field("turn_state", &"<dyn TurnStateHandle>")
+            .field("comms_drain", &"<dyn CommsDrainHandle>")
+            .field("external_tool_surface", &"<dyn ExternalToolSurfaceHandle>")
+            .field("peer_comms", &"<dyn PeerCommsHandle>")
+            .field("session_admission", &"<dyn SessionAdmissionHandle>")
             .finish()
     }
 }

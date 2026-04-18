@@ -514,10 +514,15 @@ impl JobManager {
         let mut cmd = Command::new(&shell_path);
         cmd.arg("-c").arg(command);
 
-        // Set working directory
+        // Set working directory — fall back to cwd if project_root is empty.
         let work_dir = resolved_dir.as_ref().unwrap_or(&self.config.project_root);
-        cmd.current_dir(work_dir);
-        cmd.env("PWD", work_dir);
+        let work_dir = if work_dir.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            work_dir.clone()
+        };
+        cmd.current_dir(&work_dir);
+        cmd.env("PWD", &work_dir);
 
         // Inject per-agent environment variables
         cmd.envs(&self.config.env_vars);
@@ -532,6 +537,13 @@ impl JobManager {
         cmd.process_group(0);
 
         // Spawn the child process
+        eprintln!(
+            "[SHELL-DEBUG] shell={} work_dir={} exists={} command={}",
+            shell_path.display(),
+            work_dir.display(),
+            work_dir.exists(),
+            &command[..command.len().min(80)]
+        );
         let child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {

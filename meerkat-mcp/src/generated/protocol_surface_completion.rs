@@ -8,6 +8,7 @@ use crate::external_tool_surface_authority::{
     ExternalToolSurfaceInput, ExternalToolSurfaceMutator, ExternalToolSurfaceTransition,
     SurfaceDeltaOperation, SurfaceId, TurnNumber,
 };
+use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceHandle};
 
 #[derive(Debug, Clone)]
 pub struct SurfaceCompletionObligation {
@@ -68,4 +69,23 @@ pub fn submit_pending_failed(
         applied_at_turn: obligation.applied_at_turn,
     })?;
     Ok(transition)
+}
+
+pub fn submit_pending_succeeded_handle(
+    handle: &(impl ExternalToolSurfaceHandle + ?Sized),
+    obligation: SurfaceCompletionObligation,
+) -> Result<(), DslTransitionError> {
+    handle.mark_pending_succeeded(
+        obligation.surface_id.0,
+        obligation.pending_task_sequence,
+        obligation.staged_intent_sequence,
+    )
+}
+
+pub fn submit_pending_failed_handle(
+    handle: &(impl ExternalToolSurfaceHandle + ?Sized),
+    obligation: SurfaceCompletionObligation,
+    reason: impl Into<String>,
+) -> Result<(), DslTransitionError> {
+    handle.mark_pending_failed(obligation.surface_id.0, reason.into())
 }

@@ -10,10 +10,11 @@ use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
+use meerkat_runtime::input_state::StoredInputState;
 use meerkat_runtime::{
-    Input, InputDurability, InputHeader, InputOrigin, InputState, InputVisibility,
-    LogicalRuntimeId, MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore,
-    RuntimeStoreError, SessionDelta, SessionServiceRuntimeExt,
+    Input, InputDurability, InputHeader, InputOrigin, InputVisibility, LogicalRuntimeId,
+    MeerkatMachine, PromptInput, RuntimeDriverError, RuntimeState, RuntimeStore, RuntimeStoreError,
+    SessionDelta, SessionServiceRuntimeExt,
 };
 use meerkat_store::MemoryBlobStore;
 
@@ -99,7 +100,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         run_id: RunId,
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
     ) -> Result<meerkat_core::lifecycle::RunBoundaryReceipt, RuntimeStoreError> {
         self.inner
             .commit_session_boundary(
@@ -118,7 +119,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
         if self.fail_atomic_apply {
@@ -140,7 +141,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn load_input_states(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-    ) -> Result<Vec<InputState>, RuntimeStoreError> {
+    ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
         if !self.load_input_states_delay.is_zero() {
             tokio::time::sleep(self.load_input_states_delay).await;
         }
@@ -168,7 +169,7 @@ impl RuntimeStore for HarnessRuntimeStore {
     async fn persist_input_state(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        state: &InputState,
+        state: &StoredInputState,
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .persist_input_state_calls
@@ -188,7 +189,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeStoreError> {
+    ) -> Result<Option<StoredInputState>, RuntimeStoreError> {
         self.inner.load_input_state(runtime_id, input_id).await
     }
 
@@ -211,7 +212,7 @@ impl RuntimeStore for HarnessRuntimeStore {
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
         runtime_state: RuntimeState,
-        input_states: &[InputState],
+        input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
         let call_index = self
             .atomic_lifecycle_commit_calls
@@ -232,7 +233,7 @@ impl RuntimeStore for HarnessRuntimeStore {
 
 #[tokio::test]
 async fn ephemeral_adapter_accept_and_query() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -249,7 +250,7 @@ async fn ephemeral_adapter_accept_and_query() {
 
 #[tokio::test]
 async fn accept_input_without_wake_keeps_idle_runtime_idle() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -276,7 +277,7 @@ async fn accept_input_without_wake_keeps_idle_runtime_idle() {
 #[tokio::test]
 async fn persistent_adapter_accept() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -287,7 +288,7 @@ async fn persistent_adapter_accept() {
 
 #[tokio::test]
 async fn unregistered_session_errors() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let result = adapter.accept_input(&sid, make_prompt("hi")).await;
     assert!(result.is_err());
@@ -295,7 +296,7 @@ async fn unregistered_session_errors() {
 
 #[tokio::test]
 async fn unregister_removes_driver() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
     adapter.unregister_session(&sid).await;
@@ -306,7 +307,7 @@ async fn unregister_removes_driver() {
 
 #[tokio::test]
 async fn recycle_preserves_ephemeral_queued_work() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -318,7 +319,7 @@ async fn recycle_preserves_ephemeral_queued_work() {
     adapter.accept_input(&sid, second).await.unwrap();
 
     let runtime_id = LogicalRuntimeId::new(sid.to_string());
-    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
     assert_eq!(report.inputs_transferred, 2);
@@ -337,11 +338,11 @@ async fn recycle_preserves_ephemeral_queued_work() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_state.current_state(),
+        first_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
     assert_eq!(
-        second_state.current_state(),
+        second_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -349,7 +350,7 @@ async fn recycle_preserves_ephemeral_queued_work() {
 #[tokio::test]
 async fn recycle_preserves_persistent_queued_work() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -361,7 +362,7 @@ async fn recycle_preserves_persistent_queued_work() {
     adapter.accept_input(&sid, second).await.unwrap();
 
     let runtime_id = LogicalRuntimeId::new(sid.to_string());
-    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
     assert_eq!(report.inputs_transferred, 2);
@@ -380,11 +381,11 @@ async fn recycle_preserves_persistent_queued_work() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        first_state.current_state(),
+        first_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
     assert_eq!(
-        second_state.current_state(),
+        second_state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -425,7 +426,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -437,7 +438,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
     let handle = handle.expect("accepted input should produce a completion handle");
 
     let runtime_id = LogicalRuntimeId::new(sid.to_string());
-    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
     assert_eq!(report.inputs_transferred, 1);
@@ -520,12 +521,13 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: format!("progress-{label}"),
+            payload: Some(serde_json::json!({ "label": label })),
             blocks: None,
             handling_mode: None,
         })
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
     adapter
@@ -545,7 +547,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
     let handle = handle.expect("queued progress input should expose a completion handle");
 
     let runtime_id = LogicalRuntimeId::new(sid.to_string());
-    let report = meerkat_runtime::RuntimeControlPlane::recycle(&adapter, &runtime_id)
+    let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
     assert_eq!(report.inputs_transferred, 1);
@@ -573,7 +575,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
 
 #[tokio::test]
 async fn unregister_session_terminates_pending_completion_waiters() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -645,7 +647,7 @@ async fn accept_with_executor_triggers_loop() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let executor = Box::new(TestExecutor {
         called: apply_called_clone,
@@ -705,7 +707,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
@@ -727,7 +729,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            is.current_state(),
+            is.seed.phase,
             InputLifecycleState::Queued | InputLifecycleState::Abandoned
         ),
         "Failed execution should roll input back or abandon it after retry budget exhaustion, not strand it in AppliedPendingConsumption"
@@ -766,7 +768,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     }
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(
@@ -792,7 +794,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert!(
         !matches!(
-            state.current_state(),
+            state.seed.phase,
             InputLifecycleState::Staged | InputLifecycleState::AppliedPendingConsumption
         ),
         "failed inputs must not remain stuck in an in-flight lifecycle state"
@@ -855,7 +857,7 @@ async fn failed_executor_continues_processing_backlog() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let calls = Arc::new(AtomicUsize::new(0));
     adapter
@@ -882,7 +884,7 @@ async fn failed_executor_continues_processing_backlog() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(second_state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -894,7 +896,7 @@ async fn failed_executor_continues_processing_backlog() {
     let first_state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
     assert!(
         matches!(
-            first_state.current_state(),
+            first_state.seed.phase,
             InputLifecycleState::Queued | InputLifecycleState::Consumed
         ),
         "the initially failed input should have been safely rolled back or retried after the backlog drained"
@@ -946,7 +948,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
     }
 
     let apply_called = Arc::new(AtomicBool::new(false));
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -979,7 +981,7 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
 
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state(),
+        is.seed.phase,
         InputLifecycleState::Consumed,
         "the pre-upgrade queued input should be processed once the loop is attached"
     );
@@ -1065,7 +1067,7 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
         "the racy registration path should still attach a live runtime loop"
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
 }
 
 #[tokio::test]
@@ -1142,7 +1144,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(PanicOnCancelExecutor))
@@ -1196,7 +1198,7 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     .expect("ensuring with executor should repair the stale attached driver");
 
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(state.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -1319,7 +1321,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
     use meerkat_runtime::input_state::InputLifecycleState;
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1358,7 +1360,7 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
         RuntimeState::Idle
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -1406,7 +1408,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
     adapter
@@ -1432,7 +1434,7 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
         RuntimeState::Attached
     );
     let state = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
-    assert_eq!(state.current_state(), InputLifecycleState::Queued);
+    assert_eq!(state.seed.phase, InputLifecycleState::Queued);
 }
 
 #[tokio::test]
@@ -1475,7 +1477,7 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_atomic_apply());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
@@ -1591,7 +1593,7 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 
     let store = Arc::new(HarnessRuntimeStore::failing_terminal_snapshot());
-    let adapter = MeerkatMachine::persistent(store, memory_blob_store());
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1701,7 +1703,7 @@ async fn dedup_terminal_input_returns_none_handle() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
@@ -1805,7 +1807,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
@@ -1861,7 +1863,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
 async fn accept_input_and_run_rejects_deduplicated_admission() {
     use meerkat_runtime::identifiers::IdempotencyKey;
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1893,7 +1895,7 @@ async fn accept_input_and_run_rejects_deduplicated_admission() {
 
     let state = adapter.input_state(&sid, &first_id).await.unwrap().unwrap();
     assert_eq!(
-        state.current_state(),
+        state.seed.phase,
         meerkat_runtime::InputLifecycleState::Queued
     );
 }
@@ -1936,7 +1938,7 @@ async fn completion_handle_resolves_without_result() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
@@ -1963,7 +1965,7 @@ async fn completion_handle_resolves_without_result() {
 #[tokio::test]
 async fn reset_runtime_resolves_pending_waiters() {
     // Register without executor so inputs queue but don't process
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -1993,7 +1995,7 @@ async fn reset_runtime_resolves_pending_waiters() {
 #[tokio::test]
 async fn retire_without_loop_resolves_waiters() {
     // Register without executor (no RuntimeLoop)
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -2266,7 +2268,7 @@ async fn successful_execution_fires_boundary_applied() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
@@ -2281,7 +2283,7 @@ async fn successful_execution_fires_boundary_applied() {
     // Input should have gone through full lifecycle: Queued → Staged → Applied → APC → Consumed
     let is = adapter.input_state(&sid, &input_id).await.unwrap().unwrap();
     assert_eq!(
-        is.current_state(),
+        is.seed.phase,
         InputLifecycleState::Consumed,
         "Successful execution should consume the input"
     );
@@ -2295,7 +2297,7 @@ async fn successful_execution_fires_boundary_applied() {
 
 #[tokio::test]
 async fn registered_session_is_not_executor_ready() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
 
@@ -2346,7 +2348,7 @@ async fn executor_attached_session_is_executor_ready() {
         }
     }
 
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();
     let _bindings = adapter.prepare_bindings(sid.clone()).await.unwrap();
 
@@ -2367,7 +2369,7 @@ async fn executor_attached_session_is_executor_ready() {
 
 #[tokio::test]
 async fn session_has_executor_false_for_unknown() {
-    let adapter = MeerkatMachine::ephemeral();
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
     let unknown = SessionId::new();
     assert!(
         !adapter.session_has_executor(&unknown).await,

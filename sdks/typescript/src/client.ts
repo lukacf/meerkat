@@ -44,7 +44,12 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import {
   CONTRACT_VERSION,
   type InputListResult,
+  type RealtimeCapabilitiesResult,
+  type RealtimeOpenInfo,
+  type RealtimeOpenRequest,
+  type RealtimeStatusResult,
   type RuntimeAcceptResult,
+  type RuntimeRealtimeAttachmentStatusResult,
   type RuntimeResetResult,
   type RuntimeRetireResult,
   type RuntimeStateResult,
@@ -1004,6 +1009,20 @@ export class MeerkatClient {
     });
   }
 
+  async attachMobMemberLive(mobId: string, agentIdentity: string): Promise<void> {
+    await this.request("mob/realtime_attach", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+    });
+  }
+
+  async detachMobMemberLive(mobId: string, agentIdentity: string): Promise<void> {
+    await this.request("mob/realtime_detach", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+    });
+  }
+
   async mobTurnStart(
     mobId: string,
     agentIdentity: string,
@@ -1030,6 +1049,13 @@ export class MeerkatClient {
     error?: string;
     tokensUsed: number;
     isFinal: boolean;
+    liveAttachmentStatus?:
+      | "unattached"
+      | "intent_present_unbound"
+      | "binding_not_ready"
+      | "binding_ready"
+      | "replacement_pending"
+      | "reattach_required";
     peerConnectivity?: {
       reachablePeerCount: number;
       unknownPeerCount: number;
@@ -1064,6 +1090,16 @@ export class MeerkatClient {
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       isFinal: Boolean(result.is_final),
+      liveAttachmentStatus:
+        typeof result.realtime_attachment_status === "string"
+          ? (result.realtime_attachment_status as
+              | "unattached"
+              | "intent_present_unbound"
+              | "binding_not_ready"
+              | "binding_ready"
+              | "replacement_pending"
+              | "reattach_required")
+          : undefined,
       peerConnectivity: rawConnectivity
         ? {
             reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -1081,6 +1117,123 @@ export class MeerkatClient {
           }
         : undefined,
     };
+  }
+
+  /**
+   * Point-in-time aggregate of a mob's status plus its member list.
+   * Wraps the `mob/snapshot` RPC (DELETE_ME C2).
+   */
+  async mobSnapshot(mobId: string): Promise<{
+    mobId: string;
+    status: string;
+    members: unknown[];
+  }> {
+    const result = await this.request("mob/snapshot", { mob_id: mobId });
+    return {
+      mobId: String(result.mob_id ?? mobId),
+      status: String(result.status ?? "unknown"),
+      members: Array.isArray(result.members) ? result.members : [],
+    };
+  }
+
+  /**
+   * Destroy a mob and surface the structured `MobDestroyReport`.
+   * Wraps the `mob/destroy` RPC (DELETE_ME C3). Unlike `mob/lifecycle`
+   * with `action: "destroy"`, this dedicated endpoint has a predictable
+   * response shape that does not require branching on an action string.
+   */
+  async mobDestroy(mobId: string): Promise<{
+    mobId: string;
+    ok: boolean;
+    destroyReport: Record<string, unknown>;
+  }> {
+    const result = await this.request("mob/destroy", { mob_id: mobId });
+    const report =
+      result.destroy_report && typeof result.destroy_report === "object"
+        ? (result.destroy_report as Record<string, unknown>)
+        : {};
+    return {
+      mobId: String(result.mob_id ?? mobId),
+      ok: Boolean(result.ok ?? false),
+      destroyReport: report,
+    };
+  }
+
+  /**
+   * Rotate the supervisor bridge for all members of a mob.
+   * Wraps the `mob/rotate_supervisor` RPC (DELETE_ME C10). Returns the
+   * full `SupervisorRotationReport` so operators can inspect per-member
+   * rotation outcomes instead of getting a bare `ok: true`.
+   */
+  async mobRotateSupervisor(mobId: string): Promise<Record<string, unknown>> {
+    const result = await this.request("mob/rotate_supervisor", { mob_id: mobId });
+    return result;
+  }
+
+  /**
+   * Submit a unit of work to a mob member through the work lane.
+   * Wraps the `mob/submit_work` RPC (DELETE_ME C4). Work lane was
+   * Rust-only prior to this; `origin` is `"external"` for
+   * user-originated turns and `"internal"` for mob-orchestration work.
+   * When `workRef` is omitted the server generates a fresh UUID.
+   */
+  async mobSubmitWork(args: {
+    mobId: string;
+    agentIdentity: string;
+    generation: number;
+    fenceToken: number;
+    content: unknown;
+    workRef?: string;
+    origin?: "external" | "internal";
+  }): Promise<{ mobId: string; workRef: string; agentRuntimeId: unknown }> {
+    const params: Record<string, unknown> = {
+      mob_id: args.mobId,
+      agent_identity: args.agentIdentity,
+      generation: args.generation,
+      fence_token: args.fenceToken,
+      content: args.content,
+      origin: args.origin ?? "external",
+    };
+    if (args.workRef !== undefined) {
+      params.work_ref = args.workRef;
+    }
+    const result = await this.request("mob/submit_work", params);
+    return {
+      mobId: String(result.mob_id ?? args.mobId),
+      workRef: String(result.work_ref ?? ""),
+      agentRuntimeId: result.agent_runtime_id,
+    };
+  }
+
+  /**
+   * Cancel a previously submitted unit of work.
+   * Wraps the `mob/cancel_work` RPC (DELETE_ME C4).
+   */
+  async mobCancelWork(mobId: string, workRef: string): Promise<{ ok: boolean }> {
+    const result = await this.request("mob/cancel_work", {
+      mob_id: mobId,
+      work_ref: workRef,
+    });
+    return { ok: Boolean(result.ok ?? false) };
+  }
+
+  /**
+   * Cancel all in-flight work for a specific mob member.
+   * Wraps the `mob/cancel_all_work` RPC (DELETE_ME C4).
+   */
+  async mobCancelAllWork(args: {
+    mobId: string;
+    agentIdentity: string;
+    generation: number;
+    fenceToken: number;
+  }): Promise<{ ok: boolean }> {
+    const result = await this.request("mob/cancel_all_work", {
+      mob_id: args.mobId,
+      agent_identity: args.agentIdentity,
+      generation: args.generation,
+      fence_token: args.fenceToken,
+    });
+    return { ok: Boolean(result.ok ?? false) };
   }
 
   async waitMobKickoff(
@@ -1608,6 +1761,60 @@ export class MeerkatClient {
       );
     }
     return result as unknown as RuntimeStateResult;
+  }
+
+  async runtimeRealtimeAttachmentStatus(
+    sessionId: string,
+  ): Promise<RuntimeRealtimeAttachmentStatusResult> {
+    const result = await this.request("runtime/realtime_attachment_status", {
+      session_id: sessionId,
+    });
+    if (typeof result.status !== "string" || result.status.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid runtime/realtime_attachment_status response: missing status",
+      );
+    }
+    return result as unknown as RuntimeRealtimeAttachmentStatusResult;
+  }
+
+  async realtimeOpenInfo(
+    request: RealtimeOpenRequest,
+  ): Promise<RealtimeOpenInfo> {
+    const result = await this.request("realtime/open_info", request);
+    if (typeof result.ws_url !== "string" || result.ws_url.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid realtime/open_info response: missing ws_url",
+      );
+    }
+    return result as unknown as RealtimeOpenInfo;
+  }
+
+  async realtimeStatus(
+    params: { target: Record<string, unknown> },
+  ): Promise<RealtimeStatusResult> {
+    const result = await this.request("realtime/status", params);
+    if (typeof result.status !== "object" || result.status === null) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid realtime/status response: missing status",
+      );
+    }
+    return result as unknown as RealtimeStatusResult;
+  }
+
+  async realtimeCapabilities(
+    params: { target: Record<string, unknown> },
+  ): Promise<RealtimeCapabilitiesResult> {
+    const result = await this.request("realtime/capabilities", params);
+    if (typeof result.capabilities !== "object" || result.capabilities === null) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid realtime/capabilities response: missing capabilities",
+      );
+    }
+    return result as unknown as RealtimeCapabilitiesResult;
   }
 
   async runtimeAccept(
@@ -2564,8 +2771,8 @@ export class MeerkatClient {
 
   private static buildArgs(legacy: boolean, options?: ConnectOptions): string[] {
     if (legacy) return ["rpc"];
-    if (!options) return [];
-    const args: string[] = [];
+    const args: string[] = ["--realtime-ws", "127.0.0.1:0"];
+    if (!options) return args;
     if (options.isolated) args.push("--isolated");
     if (options.realmId) args.push("--realm", options.realmId);
     if (options.instanceId) args.push("--instance", options.instanceId);

@@ -5,9 +5,11 @@ use serde_json::value::RawValue;
 
 use meerkat_contracts::{
     InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeResetParams, RuntimeResetResult,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
+    RuntimeRealtimeAttachmentStatusResult, RuntimeResetParams, RuntimeResetResult,
     RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
-    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry, WireRuntimeState,
+    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry,
+    WireRealtimeAttachmentStatus, WireRuntimeState,
 };
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::RuntimeState;
@@ -29,6 +31,31 @@ fn to_wire_runtime_state(state: RuntimeState) -> Result<WireRuntimeState, String
     })
 }
 
+fn to_wire_realtime_attachment_status(
+    status: meerkat_runtime::RealtimeAttachmentStatus,
+) -> WireRealtimeAttachmentStatus {
+    match status {
+        meerkat_runtime::RealtimeAttachmentStatus::Unattached => {
+            WireRealtimeAttachmentStatus::Unattached
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound => {
+            WireRealtimeAttachmentStatus::IntentPresentUnbound
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => {
+            WireRealtimeAttachmentStatus::BindingNotReady
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
+            WireRealtimeAttachmentStatus::BindingReady
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => {
+            WireRealtimeAttachmentStatus::ReplacementPending
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => {
+            WireRealtimeAttachmentStatus::ReattachRequired
+        }
+    }
+}
+
 fn to_wire_input_lifecycle_state(
     state: meerkat_runtime::InputLifecycleState,
 ) -> Result<WireInputLifecycleState, String> {
@@ -48,8 +75,11 @@ fn to_wire_input_lifecycle_state(
     })
 }
 
-fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputState, String> {
-    let json = serde_json::to_value(&state).map_err(|err| err.to_string())?;
+fn to_wire_input_state(
+    bundle: meerkat_runtime::input_state::StoredInputState,
+) -> Result<WireInputState, String> {
+    let json = serde_json::to_value(&bundle).map_err(|err| err.to_string())?;
+    let meerkat_runtime::input_state::StoredInputState { state, seed } = bundle;
     let history = state
         .history()
         .iter()
@@ -64,7 +94,7 @@ fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputSt
         .collect::<Result<Vec<_>, String>>()?;
     Ok(WireInputState {
         input_id: state.input_id.to_string(),
-        current_state: to_wire_input_lifecycle_state(state.current_state())?,
+        current_state: to_wire_input_lifecycle_state(seed.phase)?,
         policy: json.get("policy").cloned().filter(|value| !value.is_null()),
         terminal_outcome: json
             .get("terminal_outcome")
@@ -89,14 +119,14 @@ fn to_wire_input_state(state: meerkat_runtime::InputState) -> Result<WireInputSt
             .get("persisted_input")
             .cloned()
             .filter(|value| !value.is_null()),
-        last_run_id: state.last_run_id().map(ToString::to_string),
-        last_boundary_sequence: state.last_boundary_sequence(),
+        last_run_id: seed.last_run_id.map(|id| id.to_string()),
+        last_boundary_sequence: seed.last_boundary_sequence,
         created_at: state.created_at.to_rfc3339(),
         updated_at: state.updated_at().to_rfc3339(),
     })
 }
 
-fn to_wire_accept_result(
+pub(crate) fn to_wire_accept_result(
     outcome: meerkat_runtime::AcceptOutcome,
 ) -> Result<RuntimeAcceptResult, String> {
     Ok(match outcome {
@@ -104,14 +134,30 @@ fn to_wire_accept_result(
             input_id,
             policy,
             state,
-        } => RuntimeAcceptResult {
-            outcome_type: RuntimeAcceptOutcomeType::Accepted,
-            input_id: Some(input_id.to_string()),
-            existing_id: None,
-            reason: None,
-            policy: Some(serde_json::to_value(policy).map_err(|err| err.to_string())?),
-            state: Some(to_wire_input_state(state)?),
-        },
+        } => {
+            // Re-bundle the returned shell with a queue-seeded seed for the
+            // wire payload. accept_input transitions the DSL to Queued for
+            // durable/queued inputs; callers that need exact phase/run_id
+            // should use input_state lookups post-accept.
+            let bundle = meerkat_runtime::input_state::StoredInputState {
+                state,
+                seed: meerkat_runtime::input_state::InputStateSeed {
+                    phase: meerkat_runtime::InputLifecycleState::Queued,
+                    last_run_id: None,
+                    last_boundary_sequence: None,
+                    terminal_outcome: None,
+                    attempt_count: 0,
+                },
+            };
+            RuntimeAcceptResult {
+                outcome_type: RuntimeAcceptOutcomeType::Accepted,
+                input_id: Some(input_id.to_string()),
+                existing_id: None,
+                reason: None,
+                policy: Some(serde_json::to_value(policy).map_err(|err| err.to_string())?),
+                state: Some(to_wire_input_state(bundle)?),
+            }
+        }
         meerkat_runtime::AcceptOutcome::Deduplicated {
             input_id,
             existing_id,
@@ -160,6 +206,35 @@ pub async fn handle_runtime_state(
             Ok(state) => RpcResponse::success(id, RuntimeStateResult { state }),
             Err(err) => RpcResponse::error(id, crate::error::INTERNAL_ERROR, err),
         },
+        Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
+    }
+}
+
+/// Handle `runtime/realtime_attachment_status` — get live attachment status for a session.
+pub async fn handle_runtime_realtime_attachment_status(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    adapter: &dyn SessionServiceRuntimeExt,
+) -> RpcResponse {
+    let params: RuntimeRealtimeAttachmentStatusParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    let session_id = match SessionId::parse(&params.session_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return RpcResponse::error(id, crate::error::INVALID_PARAMS, "Invalid session ID");
+        }
+    };
+
+    match adapter.realtime_attachment_status(&session_id).await {
+        Ok(status) => RpcResponse::success(
+            id,
+            RuntimeRealtimeAttachmentStatusResult {
+                status: to_wire_realtime_attachment_status(status),
+            },
+        ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
 }
@@ -336,9 +411,10 @@ pub async fn handle_input_list(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_runtime::input_state::StoredInputState;
     use meerkat_runtime::{
-        AcceptOutcome, Input, InputState, PromptInput, ResetReport, RetireReport,
-        RuntimeDriverError, RuntimeMode, RuntimeState,
+        AcceptOutcome, Input, PromptInput, ResetReport, RetireReport, RuntimeDriverError,
+        RuntimeMode, RuntimeState,
     };
     use serde_json::{json, value::to_raw_value};
 
@@ -378,6 +454,13 @@ mod tests {
             Ok(RuntimeState::Retired)
         }
 
+        async fn realtime_attachment_status(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, RuntimeDriverError> {
+            Ok(meerkat_runtime::RealtimeAttachmentStatus::Unattached)
+        }
+
         async fn retire_runtime(
             &self,
             _session_id: &SessionId,
@@ -401,7 +484,7 @@ mod tests {
             &self,
             _session_id: &SessionId,
             _input_id: &InputId,
-        ) -> Result<Option<InputState>, RuntimeDriverError> {
+        ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
             Ok(None)
         }
 
@@ -465,5 +548,128 @@ mod tests {
                 .contains("retired"),
             "rejection reason should mention retired state"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_realtime_attachment_status_returns_runtime_owned_status() {
+        struct ReattachRequiredAdapter;
+
+        #[async_trait::async_trait]
+        impl SessionServiceRuntimeExt for ReattachRequiredAdapter {
+            fn runtime_mode(&self) -> RuntimeMode {
+                RuntimeMode::V9Compliant
+            }
+
+            async fn accept_input(
+                &self,
+                _session_id: &SessionId,
+                _input: Input,
+            ) -> Result<AcceptOutcome, RuntimeDriverError> {
+                Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Retired,
+                })
+            }
+
+            async fn accept_input_with_completion(
+                &self,
+                _session_id: &SessionId,
+                _input: Input,
+            ) -> Result<
+                (AcceptOutcome, Option<meerkat_runtime::CompletionHandle>),
+                RuntimeDriverError,
+            > {
+                Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Retired,
+                })
+            }
+
+            async fn runtime_state(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<RuntimeState, RuntimeDriverError> {
+                Ok(RuntimeState::Retired)
+            }
+
+            async fn realtime_attachment_status(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, RuntimeDriverError> {
+                Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired)
+            }
+
+            async fn retire_runtime(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<RetireReport, RuntimeDriverError> {
+                Ok(RetireReport {
+                    inputs_abandoned: 0,
+                    inputs_pending_drain: 0,
+                })
+            }
+
+            async fn reset_runtime(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<ResetReport, RuntimeDriverError> {
+                Ok(ResetReport {
+                    inputs_abandoned: 0,
+                })
+            }
+
+            async fn input_state(
+                &self,
+                _session_id: &SessionId,
+                _input_id: &InputId,
+            ) -> Result<Option<StoredInputState>, RuntimeDriverError> {
+                Ok(None)
+            }
+
+            async fn list_active_inputs(
+                &self,
+                _session_id: &SessionId,
+            ) -> Result<Vec<InputId>, RuntimeDriverError> {
+                Ok(Vec::new())
+            }
+
+            async fn reconfigure_session_llm_identity(
+                &self,
+                _session_id: &SessionId,
+                _request: meerkat_runtime::SessionLlmReconfigureRequest,
+            ) -> Result<meerkat_runtime::SessionLlmReconfigureReport, RuntimeDriverError>
+            {
+                Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Retired,
+                })
+            }
+        }
+
+        let params_result = to_raw_value(&json!({
+            "session_id": uuid::Uuid::new_v4().to_string(),
+        }));
+        assert!(params_result.is_ok(), "serialize params should succeed");
+        let Some(params) = params_result.ok() else {
+            return;
+        };
+
+        let response = handle_runtime_realtime_attachment_status(
+            Some(RpcId::Num(7)),
+            Some(params.as_ref()),
+            &ReattachRequiredAdapter,
+        )
+        .await;
+        assert!(response.error.is_none(), "runtime status should succeed");
+        assert!(
+            response.result.is_some(),
+            "runtime status result should be present"
+        );
+        let Some(result) = response.result else {
+            return;
+        };
+        let value_result: Result<serde_json::Value, _> = serde_json::from_str(result.get());
+        assert!(value_result.is_ok(), "json result parse should succeed");
+        let Some(value) = value_result.ok() else {
+            return;
+        };
+        assert_eq!(value["status"], "reattach_required");
     }
 }

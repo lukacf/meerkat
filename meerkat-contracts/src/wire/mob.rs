@@ -1,6 +1,7 @@
 //! Mob RPC wire contracts.
 
 use super::session::WireContentInput;
+use super::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::OutputSchema;
 use meerkat_core::{
     HandlingMode,
@@ -28,7 +29,12 @@ pub enum WireMobBackendKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRuntimeBinding {
     Session,
-    External { peer_id: String, address: String },
+    External {
+        peer_id: String,
+        address: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bootstrap_token: Option<BridgeBootstrapToken>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -517,6 +523,38 @@ pub struct MobMemberSendResult {
     /// Fence token for the current incarnation (0.6).
     pub fence_token: u64,
     pub handling_mode: WireHandlingMode,
+}
+
+/// Request payload for `mob/realtime_attach`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRealtimeAttachParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+}
+
+/// Response payload for `mob/realtime_attach`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRealtimeAttachResult {
+    pub attached: bool,
+}
+
+/// Request payload for `mob/realtime_detach`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobRealtimeDetachParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+}
+
+/// Response payload for `mob/realtime_detach`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobRealtimeDetachResult {
+    pub detached: bool,
 }
 
 /// Public handling mode for mob member delivery.

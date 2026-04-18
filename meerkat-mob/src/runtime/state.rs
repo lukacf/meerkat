@@ -1,8 +1,3 @@
-#[cfg(test)]
-#[cfg(test)]
-use super::mob_lifecycle_authority::MobLifecycleSnapshot;
-#[cfg(test)]
-use super::mob_orchestrator_authority::MobOrchestratorSnapshot;
 use super::*;
 use crate::run::MobRun;
 #[cfg(target_arch = "wasm32")]
@@ -58,6 +53,57 @@ impl std::fmt::Display for MobState {
 }
 
 // ---------------------------------------------------------------------------
+// Diagnostic snapshots (DSL-projected, shell-owned)
+// ---------------------------------------------------------------------------
+
+/// Observable snapshot of mob orchestrator-facing state.
+///
+/// Projected from the MobMachine DSL state plus shell-owned metadata that is
+/// not tracked by the DSL authority (`topology_revision`, `supervisor_active`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobOrchestratorSnapshot {
+    pub phase: MobState,
+    pub coordinator_bound: bool,
+    pub pending_spawn_count: u32,
+    pub active_flow_count: u32,
+    pub topology_revision: u32,
+    pub supervisor_active: bool,
+}
+
+impl Default for MobOrchestratorSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Creating,
+            coordinator_bound: false,
+            pending_spawn_count: 0,
+            active_flow_count: 0,
+            topology_revision: 0,
+            supervisor_active: false,
+        }
+    }
+}
+
+/// Observable snapshot of mob lifecycle-facing state.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MobLifecycleSnapshot {
+    pub phase: MobState,
+    pub active_run_count: u32,
+    pub cleanup_pending: bool,
+}
+
+#[cfg(test)]
+impl Default for MobLifecycleSnapshot {
+    fn default() -> Self {
+        Self {
+            phase: MobState::Running,
+            active_run_count: 0,
+            cleanup_pending: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MobCommand
 // ---------------------------------------------------------------------------
 
@@ -102,13 +148,14 @@ pub(super) enum MobCommand {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
         content: ContentInput,
-        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
         meerkat_id: MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
@@ -156,7 +203,9 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Destroy {
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<
+            Result<super::handle::MobDestroyReport, super::handle::MobDestroyError>,
+        >,
     },
     Reset {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -188,7 +237,10 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<EventStream, MobError>>,
     },
     SubscribeAllAgentEvents {
-        reply_tx: oneshot::Sender<Vec<(MeerkatId, EventStream)>>,
+        reply_tx: oneshot::Sender<Result<Vec<(MeerkatId, EventStream)>, MobError>>,
+    },
+    RotateSupervisor {
+        reply_tx: oneshot::Sender<Result<super::handle::SupervisorRotationReport, MobError>>,
     },
     PollEvents {
         after_cursor: u64,
@@ -206,6 +258,14 @@ pub(super) enum MobCommand {
     ForceCancel {
         meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    RealtimeAttach {
+        meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
+    RealtimeDetach {
+        meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,

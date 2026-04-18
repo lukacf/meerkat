@@ -91,6 +91,7 @@ pub fn interaction_to_peer_input(
         },
         convention: Some(convention),
         body: peer_rendered_body(interaction),
+        payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
         handling_mode: match interaction.handling_mode {
             meerkat_core::types::HandlingMode::Queue => None,
@@ -139,15 +140,9 @@ fn peer_rendered_body(interaction: &InboxInteraction) -> String {
             body.clone()
         }
         InteractionContent::Request { params, .. } => {
-            if !interaction.rendered_text.is_empty() {
-                return interaction.rendered_text.clone();
-            }
             serde_json::to_string(params).unwrap_or_default()
         }
         InteractionContent::Response { result, .. } => {
-            if !interaction.rendered_text.is_empty() {
-                return interaction.rendered_text.clone();
-            }
             serde_json::to_string(result).unwrap_or_default()
         }
     }
@@ -157,6 +152,14 @@ fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types
     match &interaction.content {
         InteractionContent::Message { blocks, .. } => blocks.clone(),
         _ => None,
+    }
+}
+
+fn peer_payload(interaction: &InboxInteraction) -> Option<serde_json::Value> {
+    match &interaction.content {
+        InteractionContent::Message { .. } => None,
+        InteractionContent::Request { params, .. } => Some(params.clone()),
+        InteractionContent::Response { result, .. } => Some(result.clone()),
     }
 }
 
@@ -249,6 +252,11 @@ mod tests {
                 other => panic!("Expected request convention, got {other:?}"),
             }
             assert_eq!(p.header.durability, InputDurability::Durable);
+            assert_eq!(
+                p.payload,
+                Some(serde_json::json!({"name": "agent-1"})),
+                "request params must remain structured on PeerInput so runtime prompt projection does not depend on pre-rendered comms prose"
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -320,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn request_body_uses_rendered_text_projection() {
+    fn request_body_uses_structured_json_projection_and_preserves_payload() {
         let interaction = InboxInteraction {
             from: "event:webhook".into(),
             content: InteractionContent::Request {
@@ -335,10 +343,8 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(
-                peer.body,
-                "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
-            );
+            assert_eq!(peer.body, "{\"peer\":\"agent-1\"}");
+            assert_eq!(peer.payload, Some(serde_json::json!({"peer":"agent-1"})));
         } else {
             panic!("Expected PeerInput");
         }
@@ -510,6 +516,11 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Durable);
+            assert_eq!(
+                p.payload,
+                Some(serde_json::json!({"ok": true})),
+                "terminal response result must remain structured on PeerInput so runtime prompt projection stays runtime-owned"
+            );
         } else {
             panic!("Expected PeerInput");
         }

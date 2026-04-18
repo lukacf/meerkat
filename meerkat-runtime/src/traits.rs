@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::accept::AcceptOutcome;
 use crate::identifiers::LogicalRuntimeId;
 use crate::input::Input;
-use crate::input_state::InputState;
+use crate::input_state::{InputLifecycleState, InputState, StoredInputState};
 use crate::runtime_event::RuntimeEventEnvelope;
 use crate::runtime_state::RuntimeState;
 
@@ -123,6 +123,18 @@ pub trait RuntimeDriver: Send + Sync {
 
     /// Get the state of a specific input.
     fn input_state(&self, input_id: &InputId) -> Option<&InputState>;
+
+    /// Get the current DSL-owned lifecycle phase of a specific input.
+    fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState>;
+
+    /// Get the current DSL-owned last run association for a specific input.
+    fn input_last_run_id(&self, input_id: &InputId) -> Option<RunId>;
+
+    /// Get the current DSL-owned last boundary sequence for a specific input.
+    fn input_last_boundary_sequence(&self, input_id: &InputId) -> Option<u64>;
+
+    /// Get the persisted shell+seed bundle for a specific input.
+    fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState>;
 
     /// List all non-terminal input IDs.
     fn active_input_ids(&self) -> Vec<InputId>;

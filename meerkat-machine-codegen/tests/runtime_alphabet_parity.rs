@@ -1,4 +1,7 @@
-use meerkat_machine_schema::{TriggerKind, meerkat_machine, mob_machine};
+use meerkat_machine_schema::TriggerKind;
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+};
 use meerkat_mob::canonical_mob_machine_command_manifest;
 use meerkat_runtime::canonical_meerkat_machine_command_manifest;
 use std::collections::BTreeSet;
@@ -15,7 +18,31 @@ fn variant_names<'a>(
 #[test]
 fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
     let schema = meerkat_machine();
-    let actual = variant_names(&schema.inputs.variants);
+    // Realtime-attachment + live-topology DSL inputs are staged directly
+    // via `stage_session_dsl_input` from MeerkatMachine public methods
+    // (see session_management.rs, llm_reconfigure.rs). They are internal
+    // DSL transitions, not dispatched through the MeerkatMachineCommand
+    // command channel — so they have no runtime manifest variants by
+    // design. Exclude them from the exact-parity assertion.
+    const DSL_INTERNAL_INPUTS: &[&str] = &[
+        "ProjectRealtimeIntent",
+        "BeginRealtimeBinding",
+        "ReplaceRealtimeBinding",
+        "DetachRealtimeBinding",
+        "RequireRealtimeReattach",
+        "PublishRealtimeSignal",
+        "BeginLiveTopologyReconfigure",
+        "MarkLiveTopologyDetached",
+        "ApplyLiveTopologyIdentity",
+        "ApplyLiveTopologyVisibility",
+        "CompleteLiveTopology",
+        "AbortLiveTopologyBeforeDetach",
+        "FailLiveTopologyAfterDetach",
+    ];
+    let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
+        .into_iter()
+        .filter(|name| !DSL_INTERNAL_INPUTS.contains(name))
+        .collect();
     let expected: BTreeSet<&str> = canonical_meerkat_machine_command_manifest()
         .into_iter()
         .collect();

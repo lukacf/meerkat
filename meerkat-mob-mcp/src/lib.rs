@@ -42,11 +42,12 @@ use meerkat_mob::{
     AgentIdentity, FlowId, MobBackendKind, MobBuilder, MobDefinition, MobError, MobHandle, MobId,
     MobRuntimeMode, MobSessionService, MobState, MobStorage, ProfileName, RunId, SpawnMemberSpec,
 };
+use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,6 +97,7 @@ fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob:
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    realtime_rpc_tcp_addr: StdMutex<Option<String>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -127,6 +129,7 @@ impl MobMcpState {
         Self {
             session_service,
             runtime_adapter,
+            realtime_rpc_tcp_addr: StdMutex::new(None),
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
@@ -177,6 +180,28 @@ impl MobMcpState {
             mob_root
         });
         self
+    }
+
+    pub fn with_realtime_rpc_tcp_addr(self, addr: Option<String>) -> Self {
+        *self
+            .realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
+        self
+    }
+
+    pub fn set_realtime_rpc_tcp_addr(&self, addr: Option<String>) {
+        *self
+            .realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
+    }
+
+    pub fn realtime_rpc_tcp_addr(&self) -> Option<String> {
+        self.realtime_rpc_tcp_addr
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
@@ -458,6 +483,18 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.stop().await
     }
 
+    /// Rotate the supervisor bridge for the mob, returning the structured
+    /// rotation report so RPC/MCP clients can inspect per-member outcomes
+    /// instead of guessing from a bare success signal. Finding C10:
+    /// `MobHandle::rotate_supervisor()` existed in the Rust API but had no
+    /// operator-facing RPC surface.
+    pub async fn mob_rotate_supervisor(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::SupervisorRotationReport, MobError> {
+        self.handle_for(mob_id).await?.rotate_supervisor().await
+    }
+
     pub async fn mob_resume(&self, mob_id: &MobId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.resume().await
     }
@@ -473,7 +510,16 @@ impl MobMcpState {
     /// Destroy a mob. Rejects implicit delegation mobs — use
     /// [`destroy_bridge_session_mobs`](Self::destroy_bridge_session_mobs) for
     /// bridge-session cleanup.
-    pub async fn mob_destroy(&self, mob_id: &MobId) -> Result<(), MobError> {
+    ///
+    /// Returns the structured [`meerkat_mob::MobDestroyReport`] so RPC/MCP
+    /// surfaces can project every cleanup result (force-destroyed members,
+    /// orphaned remote members, deadline exceeded, partial errors) — the
+    /// report was previously dropped on the floor, leaving mobkit and the
+    /// RPC client unable to tell partial failures from clean destroys.
+    pub async fn mob_destroy(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         if self.is_implicit_mob(mob_id).await {
             return Err(MobError::Internal(
                 "Cannot destroy implicit delegation mob directly. \
@@ -487,12 +533,18 @@ impl MobMcpState {
     /// Destroy a mob without the implicit-mob guard.
     ///
     /// Used by session cleanup paths and canonical implicit-mob reconciliation.
-    pub(crate) async fn mob_destroy_unchecked(&self, mob_id: &MobId) -> Result<(), MobError> {
+    pub(crate) async fn mob_destroy_unchecked(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         self.ensure_restored().await?;
         self.mob_destroy_unchecked_loaded(mob_id).await
     }
 
-    async fn mob_destroy_unchecked_loaded(&self, mob_id: &MobId) -> Result<(), MobError> {
+    async fn mob_destroy_unchecked_loaded(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::MobDestroyReport, MobError> {
         let managed = {
             let mut mobs = self.mobs.write().await;
             mobs.remove(mob_id)
@@ -500,11 +552,23 @@ impl MobMcpState {
         };
 
         match managed.handle.destroy().await {
-            Ok(()) => {
+            Ok(report) => {
                 Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
-                Ok(())
+                Ok(report)
             }
-            Err(error) => {
+            Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {
+                // Partial cleanup is a successful destroy with non-empty
+                // errors. Finding A9: callers shouldn't have to match on an
+                // Err variant to read the report — every consumer either
+                // ignored the report or did the match dance. Keep the
+                // storage file cleanup as-is (destroy attempt reached the
+                // reporting stage, so the storage side is considered
+                // finalised) and surface the report with its errors
+                // populated.
+                Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
+                Ok(report)
+            }
+            Err(meerkat_mob::MobDestroyError::Mob(error)) => {
                 let mut mobs = self.mobs.write().await;
                 match mobs.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -518,6 +582,24 @@ impl MobMcpState {
                     }
                 }
                 Err(error)
+            }
+            Err(other) => {
+                // MobDestroyError is #[non_exhaustive]; future variants we
+                // haven't coded for fall through to a generic internal
+                // error so the caller still gets a readable message.
+                let mut mobs = self.mobs.write().await;
+                match mobs.entry(mob_id.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(managed);
+                    }
+                    Entry::Occupied(_) => {
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            "mob destroy failed after a replacement mob with the same id was inserted; preserving replacement"
+                        );
+                    }
+                }
+                Err(MobError::Internal(format!("mob destroy failed: {other}")))
             }
         }
     }
@@ -695,6 +777,18 @@ impl MobMcpState {
         Ok((bridge_session_id, result))
     }
 
+    pub async fn mob_resolve_bridge_session_id(
+        &self,
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> Result<Option<SessionId>, MobError> {
+        Ok(self
+            .handle_for(mob_id)
+            .await?
+            .resolve_bridge_session_id(identity)
+            .await)
+    }
+
     pub async fn mob_member_send(
         &self,
         mob_id: &MobId,
@@ -721,6 +815,48 @@ impl MobMcpState {
             .await?
             .events()
             .poll(after_cursor, limit)
+            .await
+    }
+
+    /// Submit a unit of work to a mob member through the work-lane.
+    ///
+    /// Thin wrapper over [`meerkat_mob::MobHandle::submit_work`] for the
+    /// mob-surface crate. Finding C4 — the work-lane Rust API
+    /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
+    /// this exposes it to RPC/HTTP consumers such as mobkit.
+    pub async fn mob_submit_work(
+        &self,
+        mob_id: &MobId,
+        runtime_id: meerkat_mob::AgentRuntimeId,
+        fence_token: meerkat_mob::FenceToken,
+        work_ref: meerkat_mob::WorkRef,
+        spec: meerkat_mob::WorkSpec,
+    ) -> Result<meerkat_mob::WorkDeliveryReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .submit_work(runtime_id, fence_token, work_ref, spec)
+            .await
+    }
+
+    /// Cancel a previously submitted unit of work. Finding C4.
+    pub async fn mob_cancel_work(
+        &self,
+        mob_id: &MobId,
+        work_ref: meerkat_mob::WorkRef,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id).await?.cancel_work(work_ref).await
+    }
+
+    /// Cancel all in-flight work for a specific mob member. Finding C4.
+    pub async fn mob_cancel_all_work(
+        &self,
+        mob_id: &MobId,
+        runtime_id: meerkat_mob::AgentRuntimeId,
+        fence_token: meerkat_mob::FenceToken,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .cancel_all_work(runtime_id, fence_token)
             .await
     }
 
@@ -794,6 +930,51 @@ impl MobMcpState {
         identity: &AgentIdentity,
     ) -> Result<meerkat_mob::MobMemberSnapshot, MobError> {
         self.handle_for(mob_id).await?.member_status(identity).await
+    }
+
+    pub async fn realtime_validate_session_target(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.session_service.read(session_id).await.map(|_| ())
+    }
+
+    pub async fn realtime_session_realtime_attachment_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, SessionError> {
+        self.realtime_validate_session_target(session_id).await?;
+        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
+            SessionError::Unsupported(
+                "runtime adapter unavailable for realtime target inspection".to_string(),
+            )
+        })?;
+        adapter
+            .realtime_attachment_status(session_id)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))
+    }
+
+    pub async fn mob_realtime_attach(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<bool, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .realtime_attach(identity)
+            .await
+    }
+
+    pub async fn mob_realtime_detach(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<bool, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .realtime_detach(identity)
+            .await
     }
 
     pub async fn mob_wait_kickoff(
@@ -1843,7 +2024,8 @@ impl MobMcpDispatcher {
             tool(
                 "mob_member_status",
                 &format!("Get execution status snapshot for a member. Returns status, \
-                     output_preview, tokens_used, and is_final. {COMMON}"),
+                     output_preview (the current bridge session's last committed assistant text), \
+                     tokens_used, and is_final. {COMMON}"),
                 json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
             ),
             tool(
@@ -2122,11 +2304,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                         .mob_complete(&mob_id)
                         .await
                         .map_err(|e| map_mob_err(call, e))?,
-                    "destroy" => self
-                        .state
-                        .mob_destroy(&mob_id)
-                        .await
-                        .map_err(|e| map_mob_err(call, e))?,
+                    "destroy" => {
+                        // MCP tool surface treats destroy as "() on success";
+                        // the structured MobDestroyReport is available via the
+                        // RPC lifecycle handler for consumers that care about
+                        // force-destroyed members and partial-cleanup errors.
+                        let _report = self
+                            .state
+                            .mob_destroy(&mob_id)
+                            .await
+                            .map_err(|e| map_mob_err(call, e))?;
+                    }
                     other => {
                         return Err(ToolError::invalid_arguments(
                             call.name,
@@ -2418,6 +2606,14 @@ impl McpToolError {
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: -32602,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn capability_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code(),
             message: message.into(),
             data: None,
         }
@@ -3761,6 +3957,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live comms peer after external binding validation was added"]
     async fn test_mob_spawn_backend_arg_returns_backend_member_ref() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
@@ -3803,7 +4000,7 @@ mod tests {
             "mob_spawn_member",
             json!({
                 "mob_id": mob_id,
-                "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "test-key:w-ext", "address": "tcp://test.invalid/w-ext"}}]
+                "specs": [{"profile": "worker", "agent_identity": "w-ext", "binding": {"kind": "external", "peer_id": "ed25519:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=", "address": "inproc://test-w-ext"}}]
             }),
         )
         .await;

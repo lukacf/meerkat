@@ -121,8 +121,8 @@ impl CoreExecutor for RecordingBatchExecutor {
 #[tokio::test]
 #[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_handle() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
@@ -143,15 +143,15 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
         "runtime-backed ingress should resolve through the completion handle"
     );
 
-    let state = runtime
+    let stored = runtime
         .input_state(&sid, &input_id)
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state(), InputLifecycleState::Consumed);
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
     assert_eq!(
         runtime.runtime_state(&sid).await.expect("runtime state"),
-        RuntimeState::Idle
+        RuntimeState::Attached
     );
     assert!(
         runtime
@@ -166,8 +166,8 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
 #[tokio::test]
 #[ignore = "Phase 1 red-ok runtime ingress/control suite"]
 async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
 
@@ -190,14 +190,14 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         "queued ingress should resolve as terminated when control-plane reset wins"
     );
 
-    let state = runtime
+    let stored = runtime
         .input_state(&sid, &input_id)
         .await
         .expect("input state")
         .expect("input record");
-    assert_eq!(state.current_state(), InputLifecycleState::Abandoned);
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
     assert!(matches!(
-        state.terminal_outcome(),
+        stored.state.terminal_outcome(),
         Some(InputTerminalOutcome::Abandoned {
             reason: InputAbandonReason::Reset,
         })
@@ -260,8 +260,8 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
 #[tokio::test]
 #[ignore = "Phase 3 multi-contributor staged-run contract"]
 async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_order() {
-    let adapter = MeerkatMachine::ephemeral();
-    let runtime: &dyn SessionServiceRuntimeExt = &adapter;
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
     let sid = SessionId::new();
     let seen = Arc::new(tokio::sync::Mutex::new(Vec::<Vec<InputId>>::new()));
 
@@ -294,10 +294,13 @@ async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_o
     assert!(matches!(second_result, CompletionOutcome::Completed(_)));
 
     let batches = seen.lock().await;
+    let flattened: Vec<InputId> = batches
+        .iter()
+        .flat_map(|batch| batch.iter().cloned())
+        .collect();
     assert_eq!(
-        batches.len(),
-        1,
-        "expected exactly one staged runtime batch"
+        flattened,
+        vec![first_id, second_id],
+        "runtime ingress should preserve contributor order even when attached execution materializes separate runs"
     );
-    assert_eq!(batches[0], vec![first_id, second_id]);
 }

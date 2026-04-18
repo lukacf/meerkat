@@ -1474,6 +1474,44 @@
     "title": "MobCreateParams",
     "type": "object"
   },
+  "MobRealtimeAttachParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/realtime_attach`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity"
+    ],
+    "title": "MobRealtimeAttachParams",
+    "type": "object"
+  },
+  "MobRealtimeDetachParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/realtime_detach`.",
+    "properties": {
+      "agent_identity": {
+        "type": "string"
+      },
+      "mob_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "agent_identity"
+    ],
+    "title": "MobRealtimeDetachParams",
+    "type": "object"
+  },
   "MobUnwireParams": {
     "$defs": {
       "MobPeerTarget": {
@@ -1622,6 +1660,269 @@
     "title": "MobWireParams",
     "type": "object"
   },
+  "RealtimeCapabilitiesParams": {
+    "$defs": {
+      "RealtimeChannelTarget": {
+        "description": "Target for a public realtime channel.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `realtime/capabilities`.",
+    "properties": {
+      "target": {
+        "$ref": "#/$defs/RealtimeChannelTarget"
+      }
+    },
+    "required": [
+      "target"
+    ],
+    "title": "RealtimeCapabilitiesParams",
+    "type": "object"
+  },
+  "RealtimeOpenRequest": {
+    "$defs": {
+      "RealtimeChannelConfig": {
+        "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only — clients that do not carry this struct inherit the\nserver-default behavior via `#[serde(default)]` on the parent\n[`RealtimeOpenRequest`].",
+        "properties": {
+          "tool_timeout_ms": {
+            "description": "Maximum wall-clock time a tool dispatch may take before the channel\ngives up and injects a synthetic tool-error result. `None` disables the\ndeadline (product explicitly opted into unlimited tools); omitting the\nfield leaves the server default in place.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "RealtimeChannelRole": {
+        "description": "Opening role for a realtime channel.",
+        "enum": [
+          "primary",
+          "observer"
+        ],
+        "type": "string"
+      },
+      "RealtimeChannelTarget": {
+        "description": "Target for a public realtime channel.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RealtimeReconnectPolicy": {
+        "description": "Public reconnect policy for a realtime channel.",
+        "properties": {
+          "initial_backoff_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_attempts": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_backoff_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_total_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_attempts",
+          "initial_backoff_ms",
+          "max_backoff_ms",
+          "max_total_ms"
+        ],
+        "type": "object"
+      },
+      "RealtimeTurningMode": {
+        "description": "Turning mode for a realtime channel.",
+        "enum": [
+          "provider_managed",
+          "explicit_commit"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `realtime/open_info`.",
+    "properties": {
+      "channel_config": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeChannelConfig"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional per-channel runtime knobs (tool budget, etc.). Omitted means\n\"use server defaults\"."
+      },
+      "reconnect_policy": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RealtimeReconnectPolicy"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "role": {
+        "$ref": "#/$defs/RealtimeChannelRole"
+      },
+      "target": {
+        "$ref": "#/$defs/RealtimeChannelTarget"
+      },
+      "turning_mode": {
+        "$ref": "#/$defs/RealtimeTurningMode"
+      }
+    },
+    "required": [
+      "target",
+      "role",
+      "turning_mode"
+    ],
+    "title": "RealtimeOpenRequest",
+    "type": "object"
+  },
+  "RealtimeStatusParams": {
+    "$defs": {
+      "RealtimeChannelTarget": {
+        "description": "Target for a public realtime channel.",
+        "oneOf": [
+          {
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "session_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member_target",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `realtime/status`.",
+    "properties": {
+      "target": {
+        "$ref": "#/$defs/RealtimeChannelTarget"
+      }
+    },
+    "required": [
+      "target"
+    ],
+    "title": "RealtimeStatusParams",
+    "type": "object"
+  },
   "RuntimeAcceptParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `runtime/accept`.",
@@ -1636,6 +1937,20 @@
       "input"
     ],
     "title": "RuntimeAcceptParams",
+    "type": "object"
+  },
+  "RuntimeRealtimeAttachmentStatusParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `runtime/realtime_attachment_status`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "RuntimeRealtimeAttachmentStatusParams",
     "type": "object"
   },
   "RuntimeResetParams": {

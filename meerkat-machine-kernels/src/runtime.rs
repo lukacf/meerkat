@@ -536,6 +536,48 @@ impl GeneratedMachineKernel {
                 map.remove(&key);
                 state.fields.insert(field.clone(), KernelValue::Map(map));
             }
+            Update::MapIncrement { field, key, amount } => {
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                let mut map = state
+                    .fields
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(KernelValue::Map(BTreeMap::new()))
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let current = map
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(KernelValue::U64(0))
+                    .as_u64()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                map.insert(key, KernelValue::U64(current.saturating_add(*amount)));
+                state.fields.insert(field.clone(), KernelValue::Map(map));
+            }
+            Update::MapDecrement { field, key, amount } => {
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                let mut map = state
+                    .fields
+                    .get(field)
+                    .cloned()
+                    .unwrap_or(KernelValue::Map(BTreeMap::new()))
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let current = map
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(KernelValue::U64(0))
+                    .as_u64()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let next = current.checked_sub(*amount).ok_or_else(|| {
+                    self.eval_error(
+                        transition_name,
+                        format!("underflow decrementing map entry in `{field}`"),
+                    )
+                })?;
+                map.insert(key, KernelValue::U64(next));
+                state.fields.insert(field.clone(), KernelValue::Map(map));
+            }
             Update::SetInsert { field, value } => {
                 let value = self.eval_expr(state, bindings, value, transition_name)?;
                 let mut set = state
@@ -889,6 +931,14 @@ impl GeneratedMachineKernel {
                 let key = self.eval_expr(state, bindings, key, transition_name)?;
                 Ok(map.get(&key).cloned().unwrap_or(KernelValue::None))
             }
+            Expr::MapContainsKey { map, key } => {
+                let map = self.eval_expr(state, bindings, map, transition_name)?;
+                let map = map
+                    .into_map()
+                    .map_err(|reason| self.eval_error(transition_name, reason))?;
+                let key = self.eval_expr(state, bindings, key, transition_name)?;
+                Ok(KernelValue::Bool(map.contains_key(&key)))
+            }
             Expr::Some(inner) => Ok(option_some(self.eval_expr(
                 state,
                 bindings,
@@ -1116,7 +1166,10 @@ fn named_type_is_u64(name: &str) -> bool {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use meerkat_machine_schema::{canonical_machine_schemas, meerkat_machine, mob_machine};
+    use meerkat_machine_schema::canonical_machine_schemas;
+    use meerkat_machine_schema::catalog::dsl::{
+        dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    };
 
     use super::{
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,

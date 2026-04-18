@@ -292,7 +292,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
             .handle
             .get_member_by_meerkat_id(target)
             .await
-            .ok_or_else(|| MobError::MeerkatNotFound(target.clone()))?;
+            .ok_or_else(|| MobError::MemberNotFound(target.clone()))?;
 
         let (completion_tx, completion_rx) = oneshot::channel::<FlowTurnOutcome>();
         let scoped_event_tx = self.handle.flow_streams.lock().await.get(run_id).cloned();

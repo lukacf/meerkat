@@ -10,8 +10,10 @@ use meerkat_core::types::SessionId;
 use crate::accept::AcceptOutcome;
 use crate::completion::CompletionHandle;
 use crate::input::Input;
-use crate::input_state::InputState;
-use crate::meerkat_machine_types::{SessionLlmReconfigureReport, SessionLlmReconfigureRequest};
+use crate::input_state::StoredInputState;
+use crate::meerkat_machine_types::{
+    RealtimeAttachmentStatus, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
@@ -55,6 +57,12 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError>;
 
+    /// Get the live attachment status for a session.
+    async fn realtime_attachment_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<RealtimeAttachmentStatus, RuntimeDriverError>;
+
     /// Retire a session's runtime.
     async fn retire_runtime(
         &self,
@@ -67,12 +75,13 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
     ) -> Result<ResetReport, RuntimeDriverError>;
 
-    /// Get the state of a specific input.
+    /// Get the state of a specific input, bundled with its DSL-owned seed
+    /// (phase / run association / boundary sequence).
     async fn input_state(
         &self,
         session_id: &SessionId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeDriverError>;
+    ) -> Result<Option<StoredInputState>, RuntimeDriverError>;
 
     /// List all active (non-terminal) inputs for a session.
     async fn list_active_inputs(

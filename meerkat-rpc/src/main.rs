@@ -39,6 +39,11 @@ struct Cli {
     /// Example: --tcp 127.0.0.1:4800 or --tcp 0.0.0.0:4800
     #[arg(long)]
     tcp: Option<String>,
+    /// Listen on a sibling WebSocket address for realtime channels.
+    ///
+    /// Example: --realtime-ws 127.0.0.1:4900
+    #[arg(long)]
+    realtime_ws: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -187,12 +192,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
+    let realtime_ws = if let Some(ref realtime_ws_addr) = cli.realtime_ws {
+        let listener = tokio::net::TcpListener::bind(realtime_ws_addr).await?;
+        let actual_realtime_ws_addr = listener.local_addr()?;
+        let actual_ws_url = format!(
+            "ws://{actual_realtime_ws_addr}{}",
+            meerkat_rpc::REALTIME_WS_PATH
+        );
+        let mut host = meerkat_rpc::RealtimeWsHost::new(actual_ws_url.clone());
+        if let Ok(client) = meerkat_client::OpenAiLiveClient::from_env() {
+            host = host.with_session_factory(Arc::new(
+                meerkat_client::OpenAiRealtimeSessionFactory::new(Arc::new(client)),
+            ));
+        }
+        let host = Arc::new(host);
+        eprintln!("rkat-rpc listening on {actual_ws_url}");
+        let rt = Arc::clone(&runtime);
+        let cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        Some((
+            host,
+            tokio::spawn(async move {
+                meerkat_rpc::serve_realtime_ws_listener(listener, ws_host, rt, cs).await
+            }),
+        ))
+    } else {
+        None
+    };
+
     let serve_result = if let Some(ref tcp_addr) = cli.tcp {
         eprintln!("rkat-rpc listening on tcp://{tcp_addr}");
-        meerkat_rpc::serve_tcp(tcp_addr, runtime, config_store, skill_runtime).await
+        if let Some((realtime_ws_host, _)) = &realtime_ws {
+            meerkat_rpc::serve_tcp_with_realtime_ws_host(
+                tcp_addr,
+                runtime,
+                config_store,
+                skill_runtime,
+                Some(Arc::clone(realtime_ws_host)),
+            )
+            .await
+        } else {
+            meerkat_rpc::serve_tcp(tcp_addr, runtime, config_store, skill_runtime).await
+        }
+    } else if let Some((realtime_ws_host, _)) = &realtime_ws {
+        meerkat_rpc::serve_stdio_with_skill_runtime_and_realtime_ws_host(
+            runtime,
+            config_store,
+            skill_runtime,
+            Some(Arc::clone(realtime_ws_host)),
+        )
+        .await
     } else {
         meerkat_rpc::serve_stdio_with_skill_runtime(runtime, config_store, skill_runtime).await
     };
+    if let Some((_, realtime_ws_handle)) = realtime_ws {
+        realtime_ws_handle.abort();
+        let _ = realtime_ws_handle.await;
+    }
     lease.shutdown().await;
     serve_result?;
 

@@ -73,9 +73,22 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     let receipt = CoreCommsRuntime::send(&sender, request_cmd)
         .await
         .expect("PeerRequest send should succeed");
+    let (request_envelope_id, local_interaction_id) = match receipt {
+        SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            ..
+        } => (envelope_id, interaction_id),
+        other => panic!("expected PeerRequestSent, got: {other:?}"),
+    };
     assert!(
-        matches!(receipt, SendReceipt::PeerRequestSent { .. }),
-        "expected PeerRequestSent, got: {receipt:?}"
+        request_envelope_id != local_interaction_id.0,
+        "peer request receipt should return a transport envelope id distinct from the local interaction reservation id"
+    );
+    assert_ne!(
+        request_envelope_id,
+        Uuid::nil(),
+        "peer request envelope id should be populated"
     );
 
     // Receiver drains inbox and sees the request
@@ -92,6 +105,10 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         meerkat_core::InteractionContent::Request { intent, params } => {
             assert_eq!(intent, "mob.ping");
             assert_eq!(params["seq"], 1);
+            assert_eq!(
+                request_interaction.id.0, request_envelope_id,
+                "receiver-visible request interaction id should equal the sender envelope id for response correlation"
+            );
             request_interaction.id
         }
         other => panic!("expected Request interaction, got: {other:?}"),

@@ -9,7 +9,11 @@ const SDK_DIR = path.resolve(__dirname, "..");
 const LOCK_DIR = path.join(SDK_DIR, ".wasm-build.lock");
 const OUT_DIR = path.join(SDK_DIR, "wasm");
 const CRATE_DIR = path.resolve(SDK_DIR, "../../meerkat-web-runtime");
-const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
+// Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
+// wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
+// tests that all compete for this lock. 15 minutes gives comfortable headroom
+// without masking genuinely stuck builds.
+const LOCK_TIMEOUT_MS = 15 * 60 * 1000;
 const LOCK_RETRY_MS = 250;
 
 async function acquireLock() {

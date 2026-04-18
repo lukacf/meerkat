@@ -1,0 +1,5 @@
+error: duplicate transition name `DoThing`
+  --> tests/compile_fail/duplicate_transition_name.rs:32:20
+   |
+32 |         transition DoThing {
+   |                    ^^^^^^^

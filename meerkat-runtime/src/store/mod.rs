@@ -12,7 +12,7 @@ use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use sha2::{Digest, Sha256};
 
 use crate::identifiers::LogicalRuntimeId;
-use crate::input_state::InputState;
+use crate::input_state::StoredInputState;
 use crate::runtime_state::RuntimeState;
 
 /// Errors from RuntimeStore operations.
@@ -90,7 +90,7 @@ pub trait RuntimeStore: Send + Sync {
         run_id: RunId,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
     ) -> Result<RunBoundaryReceipt, RuntimeStoreError>;
 
     /// Atomically persist session delta + receipt + input state updates.
@@ -108,7 +108,7 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
         session_delta: Option<SessionDelta>,
         receipt: RunBoundaryReceipt,
-        input_updates: Vec<InputState>,
+        input_updates: Vec<StoredInputState>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError>;
 
@@ -116,7 +116,7 @@ pub trait RuntimeStore: Send + Sync {
     async fn load_input_states(
         &self,
         runtime_id: &LogicalRuntimeId,
-    ) -> Result<Vec<InputState>, RuntimeStoreError>;
+    ) -> Result<Vec<StoredInputState>, RuntimeStoreError>;
 
     /// Load a specific boundary receipt.
     async fn load_boundary_receipt(
@@ -136,7 +136,7 @@ pub trait RuntimeStore: Send + Sync {
     async fn persist_input_state(
         &self,
         runtime_id: &LogicalRuntimeId,
-        state: &InputState,
+        state: &StoredInputState,
     ) -> Result<(), RuntimeStoreError>;
 
     /// Load a single input state.
@@ -144,7 +144,7 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
         input_id: &InputId,
-    ) -> Result<Option<InputState>, RuntimeStoreError>;
+    ) -> Result<Option<StoredInputState>, RuntimeStoreError>;
 
     /// Persist the runtime state itself (for durable retire/stop semantics).
     async fn persist_runtime_state(
@@ -167,7 +167,7 @@ pub trait RuntimeStore: Send + Sync {
         &self,
         runtime_id: &LogicalRuntimeId,
         runtime_state: RuntimeState,
-        input_states: &[InputState],
+        input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError>;
 
     /// Persist a snapshot of the ops lifecycle registry state.

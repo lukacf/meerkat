@@ -14,6 +14,9 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true }
+meerkat-machine-dsl = { workspace = true }
+meerkat-machine-schema = { workspace = true }
+indexmap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -39,3 +42,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"
 
 [lints]
 workspace = true
+
+# Both `indexmap` and `meerkat-machine-schema` are consumed through the
+# `machine!` macro expansion in `meerkat-machine-dsl`. `cargo-machete` does
+# not analyse proc-macro output, so we have to mark them as intentionally
+# retained.
+[package.metadata.cargo-machete]
+ignored = ["indexmap", "meerkat-machine-schema"]

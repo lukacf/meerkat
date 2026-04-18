@@ -62,6 +62,37 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 ANTHROPIC_API_KEY=... ./scripts/repo-cargo run --example simple
 ```
 
+## Build Efficiency
+
+This is a large workspace (~25 crates). Careless builds waste minutes. Follow these rules:
+
+**Use package-scoped commands during development.** Do NOT default to `--workspace` for every build or check. Scope to the crate you're changing and its immediate dependents:
+
+```bash
+# Editing meerkat-core? Check just what you touched + direct dependents
+./scripts/repo-cargo check -p meerkat-core -p meerkat-runtime -p meerkat-session
+
+# Editing meerkat-mob? Check the mob subtree
+./scripts/repo-cargo check -p meerkat-mob -p meerkat-mob-mcp
+
+# Running tests for one crate
+./scripts/repo-cargo nextest run -p meerkat-mob
+
+# Only use workspace-wide commands for final verification
+./scripts/repo-cargo clippy --workspace -- -D warnings
+./scripts/repo-cargo nextest run --workspace --status-level none --final-status-level fail
+```
+
+**Never run parallel cargo commands.** They deadlock on the workspace file lock. Run builds sequentially.
+
+**Always use `./scripts/repo-cargo`** instead of bare `cargo`. The wrapper manages per-worktree build caches and avoids cross-worktree cache pollution.
+
+**Key dependency chains to know** (touching a crate rebuilds everything downstream):
+- `meerkat-core` → rebuilds almost everything (~27s incremental)
+- `meerkat-runtime` → rebuilds mob, rpc, rest, cli, integration tests
+- `meerkat-mob` → rebuilds mob-mcp, rpc, rest, cli, integration tests
+- Leaf crates (`meerkat-models`, `meerkat-machine-schema`) → fast, minimal cascade
+
 ## Architecture
 
 ```
@@ -82,7 +113,8 @@ meerkat-mcp-server → Expose Meerkat as MCP tools (meerkat_run, meerkat_resume,
 meerkat-rpc       → JSON-RPC stdio server (stateful SessionRuntime, IDE/desktop integration)
 meerkat-rest      → Optional REST API server
 meerkat-comms     → Inter-agent communication (Ed25519-signed messaging, transports, trust model)
-meerkat-contracts → Wire types, capability registry, error codes (canonical over all surfaces)
+meerkat-contracts → Wire types, capability registry, error codes, supervisor bridge protocol
+                     (canonical over all surfaces; BridgeCommand/BridgeReply for mob↔runtime boundary)
 meerkat-skills    → Skill loading, resolution, rendering (filesystem, git, HTTP, embedded sources)
 meerkat-hooks     → Hook infrastructure (in-process, command, HTTP runtimes)
 meerkat-mob       → Multi-agent mob orchestration (spawn, provision, finalize, SQLite storage, flow frames/loops)
@@ -183,6 +215,10 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 
 **Architecture:** Each session gets a dedicated tokio task that exclusively owns the `Agent` (no mutex needed for `cancel(&mut self)`). The `SessionRuntime` dispatches commands via channels. `AgentFactory.build_agent()` consolidates the agent construction pipeline shared across all surfaces.
 
+## Mob Orchestration
+
+**Bridge rotation rollback is best-effort once a remote has rotated forward.** The supervisor-bridge strict `BindMember` gate rejects rollback attempts against an already-rotated remote, so partial-failure during `handle_rotate_supervisor` falls through to the `advance local authority` path rather than reverting peers — see `meerkat-mob/src/runtime/actor.rs::handle_rotate_supervisor` (around line 5756). This is expected behavior: after a successful forward rotation the local authority is the source of truth, and deterministic recovery requires the local state to match the partially applied next authority rather than the superseded previous one. Callers observing `MobError::WiringError` with `rollback failures: ...` should treat it as a rotation-completed-then-local-advanced outcome, not a fully reverted rotation.
+
 ## Key Files
 
 - `meerkat-core/src/agent.rs` - Main agent execution loop
@@ -213,6 +249,11 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 - `meerkat-rpc/src/server.rs` - RPC server main loop
 - `meerkat-rpc/src/handlers/mcp.rs` - Live MCP controls (mcp/add, mcp/remove, mcp/reload)
 - `meerkat-core/src/tool_scope.rs` - Runtime tool visibility control
+- `meerkat-contracts/src/wire/supervisor_bridge.rs` - Supervisor bridge protocol types (BridgeCommand, BridgeReply, payloads)
+- `meerkat-mob/src/runtime/bridge.rs` - MobMemberRuntimeBridge trait (mob-owned protocol boundary)
+- `meerkat-mob/src/runtime/bridge_protocol.rs` - Re-exports of bridge protocol types from contracts
+- `meerkat-mob/src/runtime/local_bridge.rs` - LocalMobRuntimeBridge (in-process MeerkatMachine wrapper)
+- `meerkat-mob/src/runtime/supervisor_bridge.rs` - MobSupervisorBridge (comms transport for remote commands)
 - `meerkat-mob/src/storage.rs` - MobStorage bundle (SQLite persistent, in-memory)
 - `meerkat-mob/src/runtime/flow_frame_engine.rs` - Frame-based flow execution (repeat_until loops)
 - `meerkat-mob/src/runtime/loop_iteration_authority.rs` - Loop body/evaluate seam ownership

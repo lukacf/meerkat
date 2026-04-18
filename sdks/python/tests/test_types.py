@@ -16,6 +16,7 @@ from meerkat import (
     McpAddParams,
     McpLiveOpResponse,
     MeerkatClient,
+    RealtimeChannel,
     RunResult,
     SchemaWarning,
     SessionAssistantBlock,
@@ -57,6 +58,11 @@ from meerkat.events import (
     UnknownEvent,
     parse_event,
 )
+from meerkat.generated.types import (
+    RealtimeCapabilities as GeneratedRealtimeCapabilities,
+    RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
+    RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
+)
 
 
 def test_contract_version():
@@ -71,6 +77,42 @@ def test_contract_version_matches_package_version():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text())
     assert CONTRACT_VERSION == data["project"]["version"]
+
+
+def test_generated_realtime_types_include_open_info_shape():
+    info = GeneratedRealtimeOpenInfo(
+        ws_url="ws://localhost:9999/realtime/ws",
+        open_token="token-1",
+        expires_at="2026-04-15T12:00:00Z",
+        target={"type": "session_target", "session_id": "session-1"},
+        supported_protocol_versions=["1"],
+        default_protocol_version="1",
+        capabilities=GeneratedRealtimeCapabilities(
+            input_kinds=["text", "audio"],
+            output_kinds=["text", "audio"],
+            turning_modes=["provider_managed", "explicit_commit"],
+            interrupt_supported=True,
+            transcript_supported=True,
+            tool_lifecycle_events_supported=True,
+            video_supported=False,
+        ),
+    )
+
+    assert info.ws_url.endswith("/realtime/ws")
+    assert info.default_protocol_version == "1"
+    assert info.supported_protocol_versions == ["1"]
+    assert info.capabilities.turning_modes == [
+        "provider_managed",
+        "explicit_commit",
+    ]
+
+    frame = GeneratedRealtimeChannelOpenFrame(
+        protocol_version="1",
+        open_token="token-1",
+        role="primary",
+        turning_mode="provider_managed",
+    )
+    assert frame.protocol_version == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -1026,6 +1068,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "is_final": False,
                 "agent_runtime_id": "agent-a:1",
                 "fence_token": 7,
+                "realtime_attachment_status": "binding_ready",
             }
         if method == "mob/respawn":
             return {
@@ -1058,6 +1101,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         if method == "mob/append_system_context":
             return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "staged"}
+        if method == "runtime/realtime_attachment_status":
+            return {"status": "binding_ready"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -1090,6 +1135,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     status = await client.mob_member_status("mob-1", "agent-a")
     assert status["agent_runtime_id"] == "agent-a:1"
     assert status["fence_token"] == 7
+    assert status["realtime_attachment_status"] == "binding_ready"
+
+    await client.attach_mob_member_live("mob-1", "agent-a")
+    await client.detach_mob_member_live("mob-1", "agent-a")
+    runtime_status = await client.runtime_realtime_attachment_status("session-1")
+    assert runtime_status.status == "binding_ready"
 
     client._request = fake_request  # type: ignore[method-assign]
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
@@ -1110,6 +1161,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert wait_members[0]["agent_runtime_id"] == "agent-a:1"
 
     mob_handle = client.mob("mob-1")
+    await mob_handle.realtime_attach("agent-b")
+    await mob_handle.realtime_detach("agent-b")
     scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
     assert scoped_wait_members[0]["agent_identity"] == "agent-a"
 
@@ -1132,11 +1185,16 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/spawn",
         "mob/retire",
         "mob/member_status",
+        "mob/realtime_attach",
+        "mob/realtime_detach",
+        "runtime/realtime_attachment_status",
         "mob/respawn",
         "mob/wire",
         "mob/unwire",
         "mob/lifecycle",
         "mob/wait_kickoff",
+        "mob/realtime_attach",
+        "mob/realtime_detach",
         "mob/wait_kickoff",
         "mob/append_system_context",
         "mob/flows",
@@ -1144,8 +1202,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
-    assert calls[8][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
-    assert calls[9][1] == {
+    assert calls[11][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
+    assert calls[12][1] == {
         "mob_id": "mob-1",
         "member": "a",
         "peer": {
@@ -1156,13 +1214,106 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
-    assert calls[11][1] == {
+    assert calls[9][1] == {
+        "session_id": "session-1",
+    }
+    assert calls[14][1] == {
         "mob_id": "mob-1",
         "member_ids": ["agent-a"],
         "timeout_ms": 1234,
     }
-    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[17][1] == {"mob_id": "mob-1", "timeout_ms": 99}
     assert calls[4][1]["agent_identity"] == "agent-a"
+
+
+@pytest.mark.asyncio
+async def test_realtime_wrappers_and_channel_scaffold() -> None:
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        if method == "realtime/open_info":
+            return {
+                "ws_url": "ws://localhost:9999/realtime/ws",
+                "open_token": "token-1",
+                "expires_at": "2026-04-15T12:00:00Z",
+                "target": params["target"],
+                "supported_protocol_versions": ["1"],
+                "default_protocol_version": "1",
+                "capabilities": {
+                    "input_kinds": ["text", "audio"],
+                    "output_kinds": ["text", "audio"],
+                    "turning_modes": ["provider_managed"],
+                    "interrupt_supported": True,
+                    "transcript_supported": True,
+                    "tool_lifecycle_events_supported": False,
+                    "video_supported": False,
+                },
+            }
+        if method == "realtime/status":
+            return {"status": {"state": "opening", "attempt_count": 0}}
+        if method == "realtime/capabilities":
+            return {
+                "capabilities": {
+                    "input_kinds": ["text", "audio"],
+                    "output_kinds": ["text", "audio"],
+                    "turning_modes": ["provider_managed"],
+                    "interrupt_supported": True,
+                    "transcript_supported": True,
+                    "tool_lifecycle_events_supported": False,
+                    "video_supported": False,
+                }
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    session_channel = RealtimeChannel.session(client, "session-1")
+    assert session_channel.open_request().target == {
+        "type": "session_target",
+        "session_id": "session-1",
+    }
+    assert session_channel.open_request().role == "primary"
+    assert session_channel.open_request().turning_mode == "provider_managed"
+
+    member_channel = RealtimeChannel.mob_member(
+        client,
+        "mob-1",
+        "agent-a",
+        role="observer",
+        turning_mode="explicit_commit",
+    )
+    assert member_channel.open_request().target == {
+        "type": "mob_member_target",
+        "mob_id": "mob-1",
+        "agent_identity": "agent-a",
+    }
+    assert member_channel.open_request().role == "observer"
+    assert member_channel.open_request().turning_mode == "explicit_commit"
+
+    open_info = await client.realtime_open_info(session_channel.open_request())
+    status = await client.realtime_status({"target": session_channel.target})
+    capabilities = await client.realtime_capabilities({"target": session_channel.target})
+
+    scoped_open_info = await session_channel.open_info()
+    scoped_status = await session_channel.status()
+    scoped_capabilities = await session_channel.capabilities()
+
+    assert open_info.default_protocol_version == "1"
+    assert status.status["state"] == "opening"
+    assert capabilities.capabilities["turning_modes"] == ["provider_managed"]
+    assert scoped_open_info.open_token == "token-1"
+    assert scoped_status.status["state"] == "opening"
+    assert scoped_capabilities.capabilities["input_kinds"] == ["text", "audio"]
+    assert [method for method, _ in calls] == [
+        "realtime/open_info",
+        "realtime/status",
+        "realtime/capabilities",
+        "realtime/open_info",
+        "realtime/status",
+        "realtime/capabilities",
+    ]
 
 
 @pytest.mark.asyncio

@@ -69,6 +69,7 @@ export interface MobMemberSnapshot {
   error?: string;
   tokensUsed: number;
   isFinal: boolean;
+  liveAttachmentStatus?: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
   peerConnectivity?: {
     reachablePeerCount: number;
     unknownPeerCount: number;
@@ -170,6 +171,14 @@ export class Mob {
 
   async forceCancel(agentIdentity: string): Promise<void> {
     await this.client.forceCancelMobMember(this.mobId, agentIdentity);
+  }
+
+  async liveAttach(agentIdentity: string): Promise<void> {
+    await this.client.attachMobMemberLive(this.mobId, agentIdentity);
+  }
+
+  async liveDetach(agentIdentity: string): Promise<void> {
+    await this.client.detachMobMemberLive(this.mobId, agentIdentity);
   }
 
   async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {

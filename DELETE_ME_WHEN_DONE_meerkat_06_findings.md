@@ -5,10 +5,11 @@ Verified against worktree `/Users/luka/.codex/worktrees/ae76/meerkat` on branch 
 ## Status (updated as fixes land)
 
 - ✅ **A1** — `mob/lifecycle destroy` surfaces `MobDestroyReport` (commit `07dd9d67f`, regression in `meerkat-rpc/tests/regression_rpc.rs::mob_create_status_list_lifecycle`).
+- ✅ **A9** — `MobDestroyError::Incomplete { report }` no longer forces callers to match on `Err`; the state wrapper returns `Ok(report)` so partial-cleanup reports are read the same way as clean destroys (commit `310905c77`; covered transitively by the A1 regression).
 - ✅ **B1 / C11** — `MobMemberListEntry.realtime_attachment_status` landed (commit `93e5aab10`).
 - ✅ **B2 / C8** — `voice_intent_present` exposed on `MobMemberSnapshot` and `MobMemberListEntry` (commit `93e5aab10`, regression in `meerkat-mob/src/runtime/handle.rs::tests::mob_member_snapshot_exposes_agent_identity_convenience_and_voice_intent`).
 - ✅ **C9** — `MobMemberSnapshot::agent_identity()` convenience landed (commit `93e5aab10`, same regression as B2/C8).
-- 📌 Remaining: A2, A3, A4, A5, A6, A7, A8, A9, A10, B3, B4, B5, B6, B7, B8, C1, C2, C3, C4, C5, C6, C7, C10, C12 — all tracked, all require regression coverage per the "extensive regression tests" standard. Priority order:
+- 📌 Remaining: A2, A3, A4, A5, A6, A7, A8, A10, B3, B4, B5, B6, B7, B8, C1, C2, C3, C4, C5, C6, C7, C10, C12 — all tracked, all require regression coverage per the "extensive regression tests" standard. Priority order:
     - P0 (dogma-critical): A4 (inert DSL voice-intent field), B6 (two-kernel voice-intent overlap), A5 (identity-first string-round-trip on hot paths).
     - P1 (API hygiene / migration correctness): A2 (MobError variants still `Meerkat*`), A3 + C1 (no public session-adoption path), C6 (WorkSpec.content is `String`), A9 (MobDestroyError::Incomplete awkward), A10 (MobSpawnParams drops 8 of 15 spec fields), B3 (reset() vs destroy() asymmetry).
     - P2 (surface completeness): A6, A7, A8, B4, B5, B7, B8, C2, C3, C4, C5, C7, C10, C12.

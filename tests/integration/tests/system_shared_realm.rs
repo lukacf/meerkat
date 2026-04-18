@@ -17,7 +17,12 @@ use tokio::time::{Duration, sleep, timeout};
 // Give the process-level shell steps more room than individual RPC calls, while
 // still staying comfortably below the outer e2e lane timeout.
 const SHARED_REALM_BINARY_STEP_TIMEOUT_SECS: u64 = 600;
-const SHARED_REALM_RPC_STEP_TIMEOUT_SECS: u64 = 120;
+// 240s accommodates the `session/create` live-LLM call path on slower
+// Linux CI runners. Local (fast M-class Mac) runs take ~163s end-to-end
+// for rpc_rest_rpc; CI runners have consistently exceeded the prior
+// 120s cap. Was 180s originally; the reduction to 120s proved too
+// tight.
+const SHARED_REALM_RPC_STEP_TIMEOUT_SECS: u64 = 240;
 
 fn sqlite_shared_realm_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

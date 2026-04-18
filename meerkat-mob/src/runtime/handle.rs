@@ -974,7 +974,7 @@ impl MobHandle {
                     .read()
                     .await
                     .entry(&meerkat_id)
-                    .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                    .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
                 if entry.fence_token != fence_token {
                     return Err(MobError::StaleFenceToken {
                         runtime_id,
@@ -1021,7 +1021,7 @@ impl MobHandle {
                     .read()
                     .await
                     .entry(&meerkat_id)
-                    .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                    .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
                 if entry.fence_token != fence_token {
                     return Err(MobError::StaleFenceToken {
                         runtime_id,
@@ -1826,9 +1826,9 @@ impl MobHandle {
         let entry = self
             .get_member(identity)
             .await
-            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+            .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
         if entry.state != crate::roster::MemberState::Active {
-            return Err(MobError::MeerkatNotFound(meerkat_id.clone()));
+            return Err(MobError::MemberNotFound(meerkat_id.clone()));
         }
         Ok(MemberHandle {
             mob: self.clone(),
@@ -1871,7 +1871,7 @@ impl MobHandle {
     /// Looks up the member's backing bridge session from the roster, then
     /// subscribes to the session-level event stream via [`MobSessionService`].
     ///
-    /// Returns `MobError::MeerkatNotFound` if the member is not in the
+    /// Returns `MobError::MemberNotFound` if the member is not in the
     /// roster or has no backing bridge session.
     pub async fn subscribe_agent_events(
         &self,

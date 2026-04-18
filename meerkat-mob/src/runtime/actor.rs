@@ -2504,7 +2504,7 @@ impl MobActor {
                             .read()
                             .await
                             .entry(&meerkat_id)
-                            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                            .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
                         let session_id = match entry.member_ref.bridge_session_id().cloned() {
                             Some(session_id) => session_id,
                             None => {
@@ -2918,13 +2918,13 @@ impl MobActor {
             );
 
             if self.pending_spawns.contains_member(&meerkat_id) {
-                return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+                return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
             }
 
             {
                 let roster = self.roster.read().await;
                 if roster.get(&meerkat_id).is_some() {
-                    return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+                    return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
                 }
                 if roster
                     .list()
@@ -3106,7 +3106,7 @@ impl MobActor {
                 let source_session_id = {
                     let roster = self.roster.read().await;
                     let source_entry = roster.get(&source_member_id).ok_or_else(|| {
-                        MobError::MeerkatNotFound(source_member_id.clone())
+                        MobError::MemberNotFound(source_member_id.clone())
                     })?;
                     source_entry
                         .member_ref
@@ -3555,12 +3555,12 @@ impl MobActor {
             )));
         }
         if self.pending_spawns.contains_member(meerkat_id) {
-            return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+            return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
         }
         {
             let roster = self.roster.read().await;
             if roster.get(meerkat_id).is_some() {
-                return Err(MobError::MeerkatAlreadyExists(meerkat_id.clone()));
+                return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
             }
             if roster
                 .list()
@@ -4076,7 +4076,7 @@ impl MobActor {
         let roster = self.roster.read().await;
         let entry = roster
             .get(&meerkat_id)
-            .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+            .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
         let member_ref = entry.member_ref.clone();
         drop(roster);
 
@@ -4090,7 +4090,7 @@ impl MobActor {
             roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
         };
 
         if !entry.voice_intent_present {
@@ -4114,7 +4114,7 @@ impl MobActor {
             roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
         };
 
         if entry.voice_intent_present {
@@ -4251,7 +4251,7 @@ impl MobActor {
             let entry = roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
@@ -4873,10 +4873,10 @@ impl MobActor {
                 {
                     let roster = self.roster.read().await;
                     if roster.get(&local).is_none() {
-                        return Err(MobError::MeerkatNotFound(local.clone()));
+                        return Err(MobError::MemberNotFound(local.clone()));
                     }
                     if roster.get(&peer).is_none() {
-                        return Err(MobError::MeerkatNotFound(peer.clone()));
+                        return Err(MobError::MemberNotFound(peer.clone()));
                     }
                 }
                 self.ensure_member_not_broken(&peer).await?;
@@ -4905,7 +4905,7 @@ impl MobActor {
             let entry = roster
                 .get(local)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
             let external_identity = AgentIdentity::from(external_name.as_str());
             let already_wired = entry.wired_to.contains(&external_identity);
             let collides_with_local_member = roster.get(&external_name).is_some();
@@ -5025,7 +5025,7 @@ impl MobActor {
                     let roster = self.roster.read().await;
                     let local_entry = roster
                         .get(&local)
-                        .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
+                        .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
                     let peer_exists = roster.get(&peer).is_some();
                     let peer_identity = AgentIdentity::from(peer.as_str());
                     let looks_external = !peer_exists
@@ -5064,11 +5064,11 @@ impl MobActor {
             let ea = roster
                 .get(a)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(a.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(a.clone()))?;
             let eb = roster
                 .get(b)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(b.clone()))?;
             let a_has_b_edge = ea.wired_to.contains(b.as_str());
             let b_has_a_edge = eb.wired_to.contains(a.as_str());
             (ea, eb, a_has_b_edge, b_has_a_edge)
@@ -5416,7 +5416,7 @@ impl MobActor {
             let entry = roster
                 .get(local)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(local.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
             let peer_identity = AgentIdentity::from(peer_name.as_str());
             let already_wired = entry.wired_to.contains(&peer_identity);
             let stored_spec = entry.external_peer_specs.get(peer_name).cloned();
@@ -6350,7 +6350,7 @@ impl MobActor {
         let entry = match entry {
             Some(e) => {
                 if e.state != crate::roster::MemberState::Active {
-                    return Err(MobError::MeerkatNotFound(meerkat_id));
+                    return Err(MobError::MemberNotFound(meerkat_id));
                 }
                 self.ensure_member_not_broken(&e.meerkat_id).await?;
                 e
@@ -6381,7 +6381,7 @@ impl MobActor {
                     }
                     spawned_entry
                 } else {
-                    return Err(MobError::MeerkatNotFound(meerkat_id));
+                    return Err(MobError::MemberNotFound(meerkat_id));
                 }
             }
         };
@@ -6415,10 +6415,10 @@ impl MobActor {
             roster
                 .get(&meerkat_id)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(meerkat_id.clone()))?
+                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
         };
         if entry.state != crate::roster::MemberState::Active {
-            return Err(MobError::MeerkatNotFound(meerkat_id));
+            return Err(MobError::MemberNotFound(meerkat_id));
         }
         self.ensure_member_not_broken(&entry.meerkat_id).await?;
 
@@ -7302,11 +7302,11 @@ impl MobActor {
             let ea = roster
                 .get(a)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(a.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(a.clone()))?;
             let eb = roster
                 .get(b)
                 .cloned()
-                .ok_or_else(|| MobError::MeerkatNotFound(b.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(b.clone()))?;
             let identity_b = AgentIdentity::from(b.as_str());
             let identity_a = AgentIdentity::from(a.as_str());
             let a_has_b_edge = ea.wired_to.contains(&identity_b);

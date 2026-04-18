@@ -3583,7 +3583,7 @@ async fn interrupt_member_target(
 #[cfg(feature = "mob")]
 fn mob_error_frame(err: meerkat_mob::MobError, action: &str) -> RealtimeChannelErrorFrame {
     match err {
-        meerkat_mob::MobError::MeerkatNotFound(_) | meerkat_mob::MobError::ProfileNotFound(_) => {
+        meerkat_mob::MobError::MemberNotFound(_) | meerkat_mob::MobError::ProfileNotFound(_) => {
             RealtimeChannelErrorFrame {
                 code: RealtimeErrorCode::InvalidTarget,
                 message: format!("realtime {action} target is unavailable"),

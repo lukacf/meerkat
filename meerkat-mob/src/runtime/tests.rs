@@ -9337,7 +9337,7 @@ async fn test_spawn_duplicate_meerkat_id_fails() {
     let result = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
         .await;
-    assert!(matches!(result, Err(MobError::MeerkatAlreadyExists(_))));
+    assert!(matches!(result, Err(MobError::MemberAlreadyExists(_))));
 }
 
 #[tokio::test]
@@ -10494,7 +10494,7 @@ async fn test_wire_unknown_meerkat_fails() {
     let result = handle
         .wire(AgentIdentity::from("w-1"), MeerkatId::from("nonexistent"))
         .await;
-    assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
+    assert!(matches!(result, Err(MobError::MemberNotFound(_))));
 }
 
 #[tokio::test]
@@ -12458,7 +12458,7 @@ async fn test_external_turn_unknown_meerkat_fails() {
             None,
         )
         .await;
-    assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
+    assert!(matches!(result, Err(MobError::MemberNotFound(_))));
 }
 
 #[tokio::test]
@@ -12484,7 +12484,7 @@ async fn test_internal_turn_unknown_meerkat_fails() {
     let result = handle
         .internal_turn(AgentIdentity::from("nonexistent"), "Hello")
         .await;
-    assert!(matches!(result, Err(MobError::MeerkatNotFound(_))));
+    assert!(matches!(result, Err(MobError::MemberNotFound(_))));
 }
 
 // -----------------------------------------------------------------------
@@ -13516,13 +13516,13 @@ async fn test_retiring_member_is_not_routable_before_disposal_completes() {
 
     let start_turn_calls_before = service.start_turn_call_count();
     let external_turn = handle.member(&AgentIdentity::from("w-1")).await;
-    assert!(matches!(external_turn, Err(MobError::MeerkatNotFound(id)) if id.as_str() == "w-1"));
+    assert!(matches!(external_turn, Err(MobError::MemberNotFound(id)) if id.as_str() == "w-1"));
 
     let internal_turn = handle
         .internal_turn(AgentIdentity::from("w-1"), "still there?".to_string())
         .await
         .expect_err("retiring member must reject new internal work");
-    assert!(matches!(internal_turn, MobError::MeerkatNotFound(id) if id.as_str() == "w-1"));
+    assert!(matches!(internal_turn, MobError::MemberNotFound(id) if id.as_str() == "w-1"));
 
     assert_eq!(
         service.start_turn_call_count(),
@@ -13571,7 +13571,7 @@ async fn test_spawn_rejects_duplicate_id_while_first_spawn_is_pending() {
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-dup"), None)
         .await
         .expect_err("duplicate pending spawn should fail immediately");
-    assert!(matches!(duplicate, MobError::MeerkatAlreadyExists(_)));
+    assert!(matches!(duplicate, MobError::MemberAlreadyExists(_)));
 
     first
         .await
@@ -20398,7 +20398,7 @@ async fn test_submit_work_unknown_member_fails() {
         )
         .await;
     assert!(
-        matches!(result, Err(MobError::MeerkatNotFound(_))),
+        matches!(result, Err(MobError::MemberNotFound(_))),
         "submit_work to nonexistent member must fail: {result:?}"
     );
 }
@@ -21457,8 +21457,8 @@ fn summarize_mob_runtime_success(probe: MobRuntimeParityProbeInput, summary: &st
 fn summarize_mob_runtime_error(error: &MobError) -> String {
     match error {
         MobError::ProfileNotFound(_) => "profile_not_found".to_string(),
-        MobError::MeerkatNotFound(_) => "meerkat_not_found".to_string(),
-        MobError::MeerkatAlreadyExists(_) => "meerkat_already_exists".to_string(),
+        MobError::MemberNotFound(_) => "meerkat_not_found".to_string(),
+        MobError::MemberAlreadyExists(_) => "meerkat_already_exists".to_string(),
         MobError::NotExternallyAddressable(_) => "not_externally_addressable".to_string(),
         MobError::InvalidTransition { from, to } => {
             format!("invalid_transition:{}->{}", from.as_str(), to.as_str())

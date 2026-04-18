@@ -124,6 +124,13 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
         .await?;
     }
 
+    // macOS 26.3.1+ `codeSigningMonitor=2` SIGKILLs adhoc/linker-signed
+    // binaries whose content hash was invalidated after signing (which
+    // happens when any cargo invocation re-links between scenario runs).
+    // Re-sign every `CARGO_BIN_EXE_*` binary with a fresh adhoc signature
+    // so the scenario can `exec` them cleanly. No-op on non-macOS.
+    ensure_binary_signatures_fresh(spec, &env_overrides).await;
+
     let completed = run_command(command, &cwd, &env_overrides, spec.timeout_secs).await?;
     if let Some(problem) = analyze_success_output(output_policy, &completed.output) {
         return Err(format!(
@@ -430,6 +437,22 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
 fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
     let cargo_target_dir = cargo_target_dir()?;
+    // macOS 26.3.1+ `codeSigningMonitor=2` SIGKILLs adhoc/linker-signed
+    // binaries whose signature is invalidated while dyld is loading them.
+    // Smoke scenarios spawn nested `cargo test` children that perform
+    // incremental relinking, which can overwrite test-fixture binaries
+    // (`rkat-rest`, `rkat-rpc`, ...) mid-exec. Two mitigations combined:
+    //   1. Disable incremental compilation in the nested invocation.
+    //   2. Redirect the nested cargo to its own `CARGO_TARGET_DIR` so
+    //      its build actions cannot overwrite the binaries that the
+    //      smoke scenario is about to `exec`. The scenario continues
+    //      to resolve binaries via `CARGO_BIN_EXE_*` pointing at the
+    //      outer target dir, which is the "frozen" copy.
+    env.entry("CARGO_INCREMENTAL".to_string())
+        .or_insert_with(|| "0".to_string());
+    let nested_target_dir = cargo_target_dir.join("nested-scenario-target");
+    env.entry("CARGO_TARGET_DIR".to_string())
+        .or_insert_with(|| nested_target_dir.display().to_string());
     for (key, value) in spec.env {
         env.insert(
             (*key).to_string(),
@@ -437,13 +460,24 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
         );
     }
     for binary in spec.cargo_bin_env {
+        let source = cargo_target_dir
+            .join("debug")
+            .join(platform_binary_name(binary));
+        // macOS 26.3.1+ `codeSigningMonitor=2` kills adhoc/linker-signed
+        // binaries whose on-disk content changes after the signature was
+        // verified at dyld load. The nested cargo invocations spawned by
+        // smoke scenarios sometimes re-link these binaries even when we
+        // point CARGO_TARGET_DIR at a separate nested location, because
+        // cargo's workspace-wide freshness check can find a stale build
+        // graph entry and rewrite the file. Resolving this robustly on
+        // macOS requires giving the scenario a path that no cargo owns —
+        // a hard-copy of the current binary to a lane-local snapshot
+        // directory that cargo will never touch.
+        let resolved_path =
+            snapshot_binary_for_scenario(&source, binary, &cargo_target_dir).unwrap_or(source);
         env.insert(
             format!("CARGO_BIN_EXE_{binary}"),
-            cargo_target_dir
-                .join("debug")
-                .join(platform_binary_name(binary))
-                .display()
-                .to_string(),
+            resolved_path.display().to_string(),
         );
     }
     if matches!(spec.command, CommandSpec::Pytest { .. })
@@ -468,6 +502,132 @@ fn platform_binary_name(name: &str) -> String {
         format!("{name}.exe")
     } else {
         name.to_string()
+    }
+}
+
+/// Copy a cargo-built test binary to a lane-local snapshot path that
+/// no cargo invocation owns, and return the snapshot path. Used on
+/// macOS to avoid the `codeSigningMonitor=2` SIGKILL that fires when
+/// the on-disk binary content changes between signing and
+/// `exec`. A no-op on other platforms (returns `None` so the caller
+/// falls back to the original path).
+fn snapshot_binary_for_scenario(
+    source: &Path,
+    binary: &str,
+    cargo_target_dir: &Path,
+) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    if !source.exists() {
+        return None;
+    }
+    let snapshot_dir = cargo_target_dir.join("scenario-bin-snapshots");
+    std::fs::create_dir_all(&snapshot_dir).ok()?;
+    let snapshot_path = snapshot_dir.join(platform_binary_name(binary));
+
+    // Copy if the source is newer than the snapshot (or snapshot
+    // absent). `std::fs::copy` overwrites atomically on macOS APFS,
+    // so concurrent scenarios asking for the same snapshot are safe:
+    // at worst they race to produce identical content.
+    let source_mtime = source.metadata().ok()?.modified().ok()?;
+    let snapshot_stale = snapshot_path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|snap_mtime| source_mtime > snap_mtime)
+        .unwrap_or(true);
+    if snapshot_stale {
+        std::fs::copy(source, &snapshot_path).ok()?;
+        // Ensure the snapshot carries a fresh adhoc signature matching
+        // the copy's content. `codesign --force` re-hashes and embeds.
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&snapshot_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    Some(snapshot_path)
+}
+
+/// Sanitize every advertised test binary (`CARGO_BIN_EXE_*` and
+/// `RKAT_TEST_BIN_*`) so it can be `exec`d on macOS 26.3.1+.
+///
+/// Background: macOS 26.3 tightens two loader gates on locally-built
+/// binaries:
+///
+/// 1. **Code signing**: `codeSigningMonitor=2` refuses to load an
+///    adhoc/linker-signed binary whose on-disk content hash no longer
+///    matches the embedded signature — a situation that arises when
+///    the outer `cargo test` (or a sibling scenario in the same lane)
+///    has re-linked the binary between signing and scenario spawn.
+/// 2. **Provenance sandbox**: `AppleSystemPolicy` refuses to apply
+///    the provenance sandbox to a binary whose `com.apple.provenance`
+///    extended attribute was lost or mangled — the classic case being
+///    a `cp` of a cargo-built binary into a scenario-private staging
+///    directory. The symptom is
+///    `(AppleSystemPolicy) ASP: Unable to apply provenance sandbox`
+///    in the system log and `SIGKILL (Code Signature Invalid)` to
+///    the child, with empty stdout/stderr.
+///
+/// Both gates are repaired by stripping the extended attributes and
+/// re-applying a fresh adhoc signature — `xattr -c <path>` followed by
+/// `codesign --force --sign - <path>`. No-op on non-macOS platforms.
+async fn ensure_binary_signatures_fresh(spec: &Spec, env_overrides: &[(String, String)]) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    for (key, value) in env_overrides {
+        // Cover every binary the scenario could spawn: cargo-advertised
+        // binaries via CARGO_BIN_EXE_* and scenario-local staged copies
+        // via RKAT_TEST_BIN_*.
+        if !key.starts_with("CARGO_BIN_EXE_") && !key.starts_with("RKAT_TEST_BIN_") {
+            continue;
+        }
+        let path = Path::new(value);
+        if !path.exists() {
+            continue;
+        }
+        // Strip extended attributes first — `cp` on macOS carries
+        // `com.apple.provenance` from the source, and the kernel's
+        // AppleSystemPolicy rejects the exec when the provenance
+        // sandbox can't be applied.
+        let _ = tokio::process::Command::new("xattr")
+            .arg("-c")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        // Now re-sign with a fresh adhoc signature so the signing
+        // monitor accepts the current on-disk content.
+        let output = tokio::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+        match output {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!(
+                    "warning: codesign refresh failed for {} (lane scenario {}): {stderr}",
+                    path.display(),
+                    run_label(spec),
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "warning: failed to invoke codesign for {} (lane scenario {}): {err}",
+                    path.display(),
+                    run_label(spec),
+                );
+            }
+        }
     }
 }
 

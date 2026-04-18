@@ -104,6 +104,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/realtime_detach` | Mob | Detach realtime attachment intent from a member (mob feature) |
 | `mob/turn_start` | Mob | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
+| `mob/snapshot` | Mob | Point-in-time aggregate of mob status plus member list (mob feature) |
+| `mob/destroy` | Mob | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
+| `mob/rotate_supervisor` | Mob | Rotate the supervisor bridge for all members of a mob (mob feature) |
 | `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
 | `mob/profile/create` | Mob | Create a realm-scoped mob profile (mob feature) |
 | `mob/profile/get` | Mob | Read a realm-scoped mob profile (mob feature) |

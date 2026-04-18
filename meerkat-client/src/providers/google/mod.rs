@@ -237,17 +237,12 @@ impl ProviderRuntime for GoogleProviderRuntime {
         };
         // Authorizer-backed path (Vertex ADC, Code Assist GoogleOauth/
         // ComputeAdc, ExternalAuthorizer-dynamic). Must run before the
-        // simpler Secret-extraction match because the Authorizer needs
-        // backend-specific wiring (Vertex vs Code Assist base URLs).
+        // simpler secret-extraction branch because the authorizer
+        // needs backend-specific wiring (Vertex vs Code Assist base
+        // URLs). Plan §6.11: read the authorizer from the auth lease
+        // directly.
         #[cfg(not(target_arch = "wasm32"))]
-        if matches!(connection.shim_credential, ShimCredential::Authorizer) {
-            let authorizer = match connection.auth_lease.kind() {
-                meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => auth.clone(),
-                other => unreachable!(
-                    "Google ShimCredential::Authorizer requires DynamicAuthorizer \
-                     lease kind, got {other:?} — resolver invariant violated"
-                ),
-            };
+        if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url = connection
                 .backend_profile
                 .base_url
@@ -264,16 +259,16 @@ impl ProviderRuntime for GoogleProviderRuntime {
                 .with_authorizer(authorizer);
             return Ok(Arc::new(client));
         }
-        let secret = match connection.shim_credential {
-            ShimCredential::Secret(s) => s,
-            ShimCredential::Authorizer => {
-                // On wasm32 authorizers are compiled out.
-                return Err(ProviderClientError::MissingFeature(
-                    "google-authorizer-backed auth not available on wasm32",
-                ));
-            }
-            ShimCredential::None => return Err(ProviderClientError::NoCredentialMaterial),
-        };
+        #[cfg(target_arch = "wasm32")]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::MissingFeature(
+                "google-authorizer-backed auth not available on wasm32",
+            ))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::NoCredentialMaterial)?;
         match backend_kind {
             GoogleBackendKind::GoogleGenAi => {
                 // S1-verified: GeminiClient::new returns Self (infallible).

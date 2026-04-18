@@ -286,16 +286,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         // Authorizer-backed path (ExternalAuthorizer→DynamicAuthorizer
         // envelope). Wire through OpenAiClient.with_authorizer so the
         // request uses HttpAuthorizer::authorize for headers rather
-        // than Authorization: Bearer <api_key>.
+        // than Authorization: Bearer <api_key>. Plan §6.11: read the
+        // authorizer from the auth lease directly instead of the
+        // ShimCredential side channel.
         #[cfg(not(target_arch = "wasm32"))]
-        if matches!(connection.shim_credential, ShimCredential::Authorizer) {
-            let authorizer = match connection.auth_lease.kind() {
-                meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => auth.clone(),
-                other => unreachable!(
-                    "OpenAi ShimCredential::Authorizer requires DynamicAuthorizer \
-                     lease kind, got {other:?} — resolver invariant violated"
-                ),
-            };
+        if let Some(authorizer) = connection.resolved_authorizer() {
             let base_url = connection
                 .backend_profile
                 .base_url
@@ -306,15 +301,20 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .with_authorizer(authorizer);
             return Ok(Arc::new(client));
         }
-        let secret = match connection.shim_credential {
-            ShimCredential::Secret(s) => s,
-            ShimCredential::Authorizer => {
-                return Err(ProviderClientError::MissingFeature(
-                    "openai-authorizer-backed auth not available on wasm32",
-                ));
-            }
-            ShimCredential::None => return Err(ProviderClientError::NoCredentialMaterial),
-        };
+        // No __secret__ header and no DynamicAuthorizer kind: the
+        // lease was constructed empty. Surface as missing credential
+        // material (or MissingFeature on wasm32 where authorizers
+        // don't compile) so surfaces get a typed error.
+        #[cfg(target_arch = "wasm32")]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::MissingFeature(
+                "openai-authorizer-backed auth not available on wasm32",
+            ))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let secret = connection
+            .resolved_secret()
+            .ok_or(ProviderClientError::NoCredentialMaterial)?;
         // Pull account identity + fedramp from the resolved lease's
         // AuthMetadata so the ChatGPT backend can emit the wire
         // headers Codex's bearer_auth_provider.rs:23-38 requires.

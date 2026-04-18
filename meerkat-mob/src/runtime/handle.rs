@@ -2249,6 +2249,54 @@ impl MobHandle {
     }
 
     /// Rotate the persisted mob supervisor authority.
+    ///
+    /// # Scope: mob-wide
+    ///
+    /// The supervisor authority is a **single per-mob fact** persisted in
+    /// [`SupervisorAuthorityRecord`](crate::store::SupervisorAuthorityRecord) keyed by
+    /// `mob_id`. Rotation generates a fresh authority (new public peer id,
+    /// incremented epoch) and broadcasts
+    /// [`BridgeCommand::AuthorizeSupervisor`](meerkat_contracts::wire::supervisor_bridge::BridgeCommand)
+    /// to **every** remote member binding currently on the roster, then
+    /// atomically advances the persisted local authority when the remote
+    /// dispatch succeeds (or partially advances — see below — on partial
+    /// failure).
+    ///
+    /// There is no per-member scope here, and no scoping parameter is
+    /// missing. Per-member [`BridgeBootstrapToken`](meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken)s
+    /// carried on `MemberRef::BackendPeer` are the **bootstrap proof** that
+    /// authorizes a specific member's bridge to (re)establish under the
+    /// current supervisor — they are not a separate supervisor identity.
+    /// One supervisor, many bootstrap tokens.
+    ///
+    /// # Partial-failure semantics
+    ///
+    /// If some remote bindings accept the rotation and others reject it,
+    /// the local authority is advanced to match the partially applied
+    /// next authority rather than reverted (see
+    /// `MobActor::handle_rotate_supervisor` in `actor.rs` for the
+    /// authoritative implementation). Callers observing
+    /// [`MobError::WiringError`] with a message containing
+    /// `"rollback failures"` should treat it as
+    /// "rotation completed then local authority advanced", not
+    /// "fully reverted rotation". This matches the top-level `CLAUDE.md`
+    /// warning: once a remote has rotated forward, rolling it back is
+    /// best-effort.
+    ///
+    /// # Dogma fit (B4)
+    ///
+    /// DELETE_ME finding B4 flagged the `&self`-only signature as
+    /// potentially missing a scoping parameter. After audit the
+    /// supervisor is unambiguously mob-wide (one
+    /// `SupervisorAuthorityRecord` per `mob_id`, one persistence key,
+    /// one rotation broadcast), so a scoping parameter would be
+    /// fictional. Per dogma principle #1 ("one semantic fact, one
+    /// owner") the signature already matches the data model.
+    /// Regression coverage lives in `meerkat-mob/src/runtime/tests.rs`:
+    /// `test_rotate_supervisor_updates_runtime_metadata`,
+    /// `test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_stale_epoch`,
+    /// `test_rotate_supervisor_bind_fallback_binds_next_authority`, and
+    /// `test_rotate_supervisor_advances_local_authority_when_rollback_fails`.
     pub async fn rotate_supervisor(&self) -> Result<SupervisorRotationReport, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::RotateSupervisor { reply_tx })
             .await?

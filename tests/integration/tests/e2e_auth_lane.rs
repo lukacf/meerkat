@@ -16,7 +16,6 @@
 //!
 //! Run with: `./scripts/repo-cargo e2e-auth`
 
-#![cfg(feature = "integration-real-tests")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::env;

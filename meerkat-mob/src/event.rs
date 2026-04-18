@@ -243,6 +243,21 @@ pub enum MobEventKind {
     /// Replaces `MeerkatSpawned` in the public contract. Carries
     /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
     /// [`AgentRuntimeId`] instead of [`MeerkatId`] / [`MemberRef`].
+    ///
+    /// Unlike the other `Member*` variants which use inline struct fields,
+    /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
+    /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries a
+    /// `#[serde(skip)] pub(crate) bridge_member_ref: Option<MemberRef>`
+    /// field used by in-crate event replay (see
+    /// [`encode_stored_mob_event`] / [`decode_stored_mob_event`]) that is
+    /// deliberately omitted from the public wire shape. A named struct
+    /// keeps the internal replay pointer, its `#[serde(skip)]` attribute,
+    /// and the constructor/`with_*` helpers self-contained. Inline variant
+    /// fields would force the replay plumbing into this enum and leak
+    /// "shell owns mechanics, not meaning" internal state into the public
+    /// event contract. Finding A6 (DELETE_ME) flagged the shape difference;
+    /// the difference is intentional and regression-pinned by
+    /// `member_spawned_public_wire_shape_excludes_bridge_member_ref`.
     MemberSpawned(MemberSpawnedEvent),
     /// A member was retired.
     ///
@@ -878,6 +893,55 @@ mod tests {
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
+    }
+
+    /// DELETE_ME A6 regression: `MemberSpawned(MemberSpawnedEvent)` uses
+    /// a named struct variant while every other `Member*` variant uses
+    /// inline fields. The reason is load-bearing: `bridge_member_ref` is
+    /// crate-internal replay metadata gated by `#[serde(skip)]` that must
+    /// never leak onto the public wire shape. This test pins the public
+    /// `MobEventKind::MemberSpawned` serialized form to exclude
+    /// `bridge_member_ref` so a future refactor cannot silently promote
+    /// the internal replay pointer into the public event contract.
+    #[test]
+    fn member_spawned_public_wire_shape_excludes_bridge_member_ref() {
+        let identity = AgentIdentity::from("researcher");
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let kind = MobEventKind::MemberSpawned(
+            MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::INITIAL,
+                FenceToken::new(1),
+                AgentRuntimeId::initial(identity),
+                ProfileName::from("worker"),
+            )
+            // set the internal pointer so we know the exclusion is real,
+            // not a side-effect of it being None.
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid))),
+        );
+
+        let value = serde_json::to_value(&kind).expect("serialize mob event kind");
+        let object = value
+            .as_object()
+            .expect("MemberSpawned serializes as an object");
+
+        // The public wire shape is {"type":"MemberSpawned", ...fields...}.
+        // We don't assert the exact tag convention (that may be internally
+        // tagged or adjacent); we assert the inner payload does NOT carry
+        // bridge_member_ref under any key path.
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            !serialized.contains("bridge_member_ref"),
+            "public MemberSpawned wire shape must never expose bridge_member_ref; got: {serialized}",
+        );
+
+        // And the standard struct fields ARE present.
+        let payload_carrier = object.values().find(|v| v.is_object()).unwrap_or(&value);
+        let payload_object = payload_carrier.as_object().unwrap_or(object);
+        assert!(
+            payload_object.contains_key("agent_identity") || serialized.contains("agent_identity"),
+            "public MemberSpawned must carry agent_identity: {serialized}",
+        );
     }
 
     #[test]

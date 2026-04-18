@@ -661,14 +661,19 @@ where
 
             match self.state {
                 LoopState::CallingLlm => {
-                    // 0. Auth lease check (Phase 1.5-rev).
-                    //    If the session routes through a connection_ref and the
-                    //    lease is in `reauth_required`, emit a SYSTEM NOTICE and
-                    //    abort this run — the provider call would fail anyway
-                    //    and the notice gives the agent actionable guidance.
+                    // 0. Auth lease refresh loop (Phase 1.5-rev).
+                    //    The canonical auth-state owner is the MeerkatMachine
+                    //    DSL (see meerkat-machine-schema/src/catalog/dsl/
+                    //    meerkat_machine.rs). The runner's role here is
+                    //    *mechanism*: it drives DSL-legal transitions when
+                    //    the observable state calls for them, and consumes
+                    //    the DSL's own EmitAuthReauthNotice effect by
+                    //    surfacing a synthetic system notice. The runner
+                    //    never decides terminal *class* — it only acts on
+                    //    the state the machine has already committed to.
                     //
-                    //    Strip any prior synthetic AuthReauthRequired notices so
-                    //    the current state is unambiguously reflected.
+                    //    Strip prior synthetic AuthReauthRequired notices
+                    //    so the notice always reflects current DSL state.
                     self.session.messages_mut().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
                     });
@@ -677,22 +682,52 @@ where
                         self.connection_ref_binding_key.as_deref(),
                     ) {
                         let snapshot = handle.snapshot(binding_key);
-                        if snapshot.state.as_deref() == Some("reauth_required") {
-                            let notice = format!(
-                                "Connection `{binding_key}` requires re-authentication. \
-                                 Run `rkat auth login` for the provider, then retry."
-                            );
-                            self.session.push(synthetic_notice_message(
-                                SystemNoticeKind::AuthReauthRequired,
-                                notice.clone(),
-                            ));
-                            self.pending_fatal_diagnostic = Some(AgentError::InternalError(
-                                format!("auth_reauth_required: {notice}"),
-                            ));
-                            self.apply_turn_input(TurnExecutionInput::FatalFailure {
-                                run_id: run_id.clone(),
-                            })?;
-                            return self.build_result(turn_count, tool_call_count).await;
+                        match snapshot.state.as_deref() {
+                            // expiring → drive BeginAuthRefresh input so
+                            // the DSL transitions into `refreshing`.
+                            // The refresh HTTP round-trip itself is driven
+                            // by the provider-runtime registry on the next
+                            // LLM call (which sees the `refreshing` state
+                            // and re-resolves fresh credentials). Failure
+                            // routes back via refresh_failed(permanent) →
+                            // `reauth_required`, which the next CallingLlm
+                            // iteration picks up via this same arm.
+                            Some("expiring") => {
+                                // Silently swallow the transition error if
+                                // the guard rejects (e.g. a concurrent
+                                // refresh already drove the state past
+                                // `expiring`); that's legal per-DSL and
+                                // this path isn't load-bearing correctness.
+                                let _ = handle.begin_refresh(binding_key);
+                            }
+                            // reauth_required → consume the machine-owned
+                            // EmitAuthReauthNotice effect as a synthetic
+                            // session-level system notice, then terminate
+                            // the run. The DSL has already decided that
+                            // this binding cannot proceed; the runner only
+                            // surfaces that decision.
+                            Some("reauth_required") => {
+                                let notice = format!(
+                                    "Connection `{binding_key}` requires re-authentication. \
+                                     Run `rkat auth login` for the provider, then retry."
+                                );
+                                self.session.push(synthetic_notice_message(
+                                    SystemNoticeKind::AuthReauthRequired,
+                                    notice.clone(),
+                                ));
+                                self.pending_fatal_diagnostic = Some(AgentError::InternalError(
+                                    format!("auth_reauth_required: {notice}"),
+                                ));
+                                self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                    run_id: run_id.clone(),
+                                })?;
+                                return self.build_result(turn_count, tool_call_count).await;
+                            }
+                            // valid / refreshing / None: no runner action.
+                            // `refreshing` means another caller is mid-flight;
+                            // we can proceed with the call because the lease
+                            // hasn't been invalidated yet.
+                            _ => {}
                         }
                     }
 

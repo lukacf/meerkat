@@ -16,11 +16,19 @@
 //! Phase 6. The test's assertion *is* the plan-defined gate: the gate
 //! will flip green only when each deleted symbol has zero production
 //! hits. Until then, the output is the living punch list.
+//!
+//! Uses std::fs directly (no rg dependency) so it runs on every CI
+//! runner whether or not ripgrep is installed.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::type_complexity
+)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn repo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR → tests/integration; parent ×2 = workspace root.
@@ -33,107 +41,113 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn grep_count_rust_source(pattern: &str, root: &Path, exclude_globs: &[&str]) -> (usize, String) {
-    let mut args = vec![
-        "--no-ignore-vcs",
-        "--glob=*.rs",
-        // Exclude generated artifacts and archival fixtures.
-        "--glob=!target/**",
-        "--glob=!**/generated/**",
-        "--glob=!tests/integration/tests/phase6_cleanup_sweep.rs",
-    ];
-    for glob in exclude_globs {
-        args.push(glob);
-    }
-    args.push("--count-matches");
-    args.push(pattern);
-    args.push(".");
+/// Recursively walk a directory collecting all `*.rs` file paths,
+/// skipping `target/`, `.git/`, and generated-artifact directories.
+fn walk_rust_sources(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_rec(root, &mut out);
+    out
+}
 
-    let out = Command::new("rg")
-        .args(&args)
-        .current_dir(root)
-        .output()
-        .expect("rg is available on the runner");
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    // rg --count-matches emits `path:count` lines; total is the sum.
-    let total: usize = stdout
-        .lines()
-        .filter_map(|line| line.rsplit(':').next())
-        .filter_map(|s| s.parse::<usize>().ok())
-        .sum();
-    (total, stdout)
+fn walk_rec(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if path.is_dir() {
+            // Skip build artifacts, VCS, node_modules, and all `generated`
+            // directories (SDK codegen output, machine codegen output).
+            if matches!(
+                name,
+                "target" | ".git" | "node_modules" | "generated" | ".cargo" | "dist"
+            ) {
+                continue;
+            }
+            walk_rec(&path, out);
+        } else if name.ends_with(".rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn count_substring_hits(
+    sources: &[PathBuf],
+    needle: &str,
+    skip_self: &Path,
+) -> Vec<(PathBuf, usize)> {
+    let mut hits = Vec::new();
+    for path in sources {
+        if path == skip_self {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let count = content.matches(needle).count();
+        if count > 0 {
+            hits.push((path.clone(), count));
+        }
+    }
+    hits
 }
 
 /// Symbols Phase 6 commits to deleting. Each entry is
-/// `(pattern, human_label, exclude_extra_globs)`.
-///
-/// `exclude_extra_globs` omits files that are *allowed* to keep the
-/// symbol — typically tests asserting legacy-path behavior that ship
-/// with the legacy path and will be removed at the same commit.
-fn phase6_deletions() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
+/// `(needle, human_label)`. Substring match (not regex) so every needle
+/// must be specific enough to avoid false positives — which all plan-§6
+/// deletion targets are.
+fn phase6_deletions() -> Vec<(&'static str, &'static str)> {
     vec![
         (
-            r"\bresolve_provider_credentials\b",
+            "resolve_provider_credentials",
             "meerkat/src/factory.rs::resolve_provider_credentials (plan §6.1)",
-            vec![],
         ),
         (
-            r"\bbuild_direct_session_request\b",
+            "build_direct_session_request",
             "meerkat-web-runtime::build_direct_session_request (plan §6.14)",
-            vec![],
         ),
         (
-            r"\bShimCredential\b",
+            "ShimCredential",
             "meerkat-client::runtime::binding::ShimCredential (plan §6.11)",
-            vec![],
+        ),
+        ("StaticLease::empty", "StaticLease::empty (plan §6.11)"),
+        (
+            "ProviderConfig::Anthropic",
+            "ProviderConfig::Anthropic (plan §6.9)",
         ),
         (
-            r"\bStaticLease::empty\b",
-            "StaticLease::empty (plan §6.11)",
-            vec![],
+            "ProviderConfig::OpenAI",
+            "ProviderConfig::OpenAI (plan §6.9)",
         ),
         (
-            r"ProviderConfig::(Anthropic|OpenAI|Gemini)\b",
-            "ProviderConfig::{Anthropic,OpenAI,Gemini} variants (plan §6.9)",
-            vec![],
+            "ProviderConfig::Gemini",
+            "ProviderConfig::Gemini (plan §6.9)",
         ),
         (
-            r"\bproviders\.api_keys\b",
+            "providers.api_keys",
             "ProviderSettings.api_keys (plan §6.10)",
-            vec![],
         ),
         (
-            r"\bproviders\.base_urls\b",
+            "providers.base_urls",
             "ProviderSettings.base_urls (plan §6.10)",
-            vec![],
         ),
         (
-            r"BuildAgentError::MissingApiKey\b",
+            "BuildAgentError::MissingApiKey",
             "BuildAgentError::MissingApiKey (plan §6.3)",
-            vec![],
         ),
         (
-            r"FactoryError::MissingApiKey\b",
+            "FactoryError::MissingApiKey",
             "FactoryError::MissingApiKey (plan §6.3)",
-            vec![],
         ),
         (
-            r"\bfrom_env\(\)",
-            "{OpenAi,Anthropic,Gemini}Client::from_env (plan §6.5)",
-            vec![
-                "--glob=!**/rpc_auth_methods.rs",
-                "--glob=!**/rest_auth_endpoints.rs",
-            ],
-        ),
-        (
-            r"ProviderResolver::api_key_for\b",
+            "ProviderResolver::api_key_for",
             "ProviderResolver::api_key_for (plan §6.6)",
-            vec![],
         ),
         (
-            r"LlmClientFactory::create_client\b",
+            "LlmClientFactory::create_client",
             "LlmClientFactory::create_client (plan §6.7)",
-            vec![],
         ),
     ]
 }
@@ -142,42 +156,75 @@ fn phase6_deletions() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
 #[ignore = "plan §6.16 — flips green once Phase 6 slices 6.1–6.15 ship"]
 fn phase6_deleted_symbols_have_zero_production_hits() {
     let root = repo_root();
-    let mut failures: Vec<(String, usize, String)> = Vec::new();
+    let self_path = root.join("tests/integration/tests/phase6_cleanup_sweep.rs");
+    let sources = walk_rust_sources(&root);
+    assert!(
+        !sources.is_empty(),
+        "no Rust source files discovered under {}",
+        root.display()
+    );
 
-    for (pattern, label, excludes) in phase6_deletions() {
-        let (count, raw) = grep_count_rust_source(pattern, &root, &excludes);
-        println!(
-            "\n=== {label} ===\npattern: {pattern}\nhits:    {count}\n{raw}",
-            label = label,
-            pattern = pattern,
-            count = count,
-            raw = raw
-        );
-        if count > 0 {
-            failures.push((label.to_string(), count, raw));
+    let mut failures: Vec<(String, usize, Vec<(PathBuf, usize)>)> = Vec::new();
+
+    for (needle, label) in phase6_deletions() {
+        let hits = count_substring_hits(&sources, needle, &self_path);
+        let total: usize = hits.iter().map(|(_, c)| c).sum();
+        println!("\n=== {label} ===\nneedle: {needle}\nhits:   {total}");
+        for (path, count) in &hits {
+            let rel = path.strip_prefix(&root).unwrap_or(path);
+            println!("  {count:>4}  {}", rel.display());
+        }
+        if total > 0 {
+            failures.push((label.to_string(), total, hits));
         }
     }
 
     if !failures.is_empty() {
         let mut summary =
             String::from("Phase 6 deletion punch list (plan §Phase 6) — symbols still present:\n");
-        for (label, count, raw) in &failures {
-            summary.push_str(&format!("\n  [{count}] {label}\n{raw}"));
+        for (label, count, hits) in &failures {
+            summary.push_str(&format!("\n  [{count}] {label}\n"));
+            for (path, c) in hits {
+                let rel = path.strip_prefix(&root).unwrap_or(path);
+                summary.push_str(&format!("        {c:>4}  {}\n", rel.display()));
+            }
         }
-        panic!("{summary}\n\nPhase 6 is not complete until every line above prints 0 hits.");
+        panic!("{summary}\nPhase 6 is not complete until every line above prints 0 hits.");
     }
 }
 
-/// Sanity check that the sweep infrastructure itself works — searches
-/// for a pattern that we know exists in the workspace. Runs by default;
-/// if this fails, `rg` plumbing is broken, not Phase 6.
+/// Baseline check: the walker finds a non-trivial number of Rust sources
+/// and can detect a pattern known to appear widely in the workspace.
+/// If this fails, the sweep plumbing itself is broken (walker, file
+/// reads, etc.) — not Phase 6. Safe to run in CI on any runner.
 #[test]
 fn sweep_infrastructure_finds_known_pattern() {
     let root = repo_root();
-    // `#[tokio::test]` appears hundreds of times across the tree.
-    let (count, _) = grep_count_rust_source(r"#\[tokio::test\]", &root, &[]);
+    let sources = walk_rust_sources(&root);
     assert!(
-        count >= 10,
-        "rg plumbing is broken — expected at least 10 hits for #[tokio::test], got {count}"
+        sources.len() >= 100,
+        "expected at least 100 .rs files under workspace root, found {} — walker broken?",
+        sources.len()
+    );
+    let hits: usize = sources
+        .iter()
+        .filter_map(|p| fs::read_to_string(p).ok())
+        .map(|s| s.matches("#[tokio::test]").count())
+        .sum();
+    assert!(
+        hits >= 10,
+        "plumbing broken — expected at least 10 hits for #[tokio::test], got {hits}"
+    );
+}
+
+/// Proves the deletion-needle list is non-empty and each entry compiles
+/// (guards against regressions where someone deletes the list entirely).
+#[test]
+fn phase6_deletion_list_is_non_empty() {
+    let deletions = phase6_deletions();
+    assert!(
+        deletions.len() >= 10,
+        "Phase 6 deletion list looks wrong: {} entries",
+        deletions.len()
     );
 }

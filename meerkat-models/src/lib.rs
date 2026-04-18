@@ -8,10 +8,14 @@
 //! Consumers include `meerkat-core` (config defaults), `meerkat-client` (adapter rules),
 //! `meerkat-tools` (sub-agent validation), and the facade layer (surface endpoints).
 
+pub mod capabilities;
 pub mod catalog;
 pub mod profile;
 
 // Re-exports for convenience
+pub use capabilities::{
+    BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport, all_capabilities, capabilities_for,
+};
 pub use catalog::{CatalogEntry, ModelTier, ProviderDefaults};
 pub use catalog::{
     allowed_models, catalog, default_model, entry_for, provider_defaults, provider_names,

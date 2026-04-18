@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
-    CommsDrainHandle, ExternalToolSurfaceHandle, PeerCommsHandle, SessionAdmissionHandle,
-    TurnStateHandle,
+    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, PeerCommsHandle,
+    SessionAdmissionHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -168,6 +168,8 @@ pub struct SessionRuntimeBindings {
     pub peer_comms: Arc<dyn PeerCommsHandle>,
     /// Session turn-admission DSL handle (Phase 5F/0 addition).
     pub session_admission: Arc<dyn SessionAdmissionHandle>,
+    /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
+    pub auth_lease: Arc<dyn AuthLeaseHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -183,6 +185,7 @@ impl Clone for SessionRuntimeBindings {
             external_tool_surface: Arc::clone(&self.external_tool_surface),
             peer_comms: Arc::clone(&self.peer_comms),
             session_admission: Arc::clone(&self.session_admission),
+            auth_lease: Arc::clone(&self.auth_lease),
         }
     }
 }
@@ -200,6 +203,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("external_tool_surface", &"<dyn ExternalToolSurfaceHandle>")
             .field("peer_comms", &"<dyn PeerCommsHandle>")
             .field("session_admission", &"<dyn SessionAdmissionHandle>")
+            .field("auth_lease", &"<dyn AuthLeaseHandle>")
             .finish()
     }
 }

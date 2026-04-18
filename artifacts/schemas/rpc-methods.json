@@ -54,6 +54,62 @@
       "result_type": "ModelsCatalogResponse"
     },
     {
+      "description": "List configured auth profiles",
+      "name": "auth/profile/list"
+    },
+    {
+      "description": "Get one auth profile by id",
+      "name": "auth/profile/get"
+    },
+    {
+      "description": "Create an auth profile",
+      "name": "auth/profile/create"
+    },
+    {
+      "description": "Delete an auth profile",
+      "name": "auth/profile/delete"
+    },
+    {
+      "description": "Dry-run the auth profile's resolve path and return its status",
+      "name": "auth/profile/test"
+    },
+    {
+      "description": "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
+      "name": "auth/login/start"
+    },
+    {
+      "description": "Finish an OAuth login by exchanging an authorization code",
+      "name": "auth/login/complete"
+    },
+    {
+      "description": "Begin a device-code OAuth login; returns user-code + verification URL",
+      "name": "auth/login/device_start"
+    },
+    {
+      "description": "Single-poll completion for a device-code OAuth login; returns pending / slow_down / access_denied / expired / ready",
+      "name": "auth/login/device_complete"
+    },
+    {
+      "description": "Console-OAuth → API key provisioning (Anthropic oauth_to_api_key): POST access_token to create_api_key endpoint, persist returned api_key",
+      "name": "auth/login/provision_api_key"
+    },
+    {
+      "description": "Get auth status for a profile",
+      "name": "auth/status/get"
+    },
+    {
+      "description": "Revoke + remove persisted credentials",
+      "name": "auth/logout"
+    },
+    {
+      "description": "List realms with binding summaries",
+      "name": "realm/list"
+    },
+    {
+      "description": "Get one realm's full connection set",
+      "name": "realm/get"
+    },
+    {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
       "name": "blob/get",
       "params_type": "BlobGetParams",
@@ -313,6 +369,30 @@
     {
       "description": "Get live status for a mob member",
       "name": "mob/member_status"
+    },
+    {
+      "description": "Point-in-time aggregate of mob status plus member list",
+      "name": "mob/snapshot"
+    },
+    {
+      "description": "Destroy a mob and surface the structured MobDestroyReport",
+      "name": "mob/destroy"
+    },
+    {
+      "description": "Rotate the supervisor bridge for all members of a mob",
+      "name": "mob/rotate_supervisor"
+    },
+    {
+      "description": "Submit a unit of work to a mob member through the work lane",
+      "name": "mob/submit_work"
+    },
+    {
+      "description": "Cancel a previously submitted unit of work",
+      "name": "mob/cancel_work"
+    },
+    {
+      "description": "Cancel all in-flight work for a mob member",
+      "name": "mob/cancel_all_work"
     },
     {
       "description": "Wait for kickoff completion for a member",

@@ -66,6 +66,11 @@ e2e-smoke:
 	@echo "$(YELLOW)Running e2e-smoke lane (ignored by default)...$(NC)"
 	$(CARGO) e2e-smoke
 
+# Live per-model catalog validation (ignored by default; on-demand / pre-release)
+e2e-models:
+	@echo "$(YELLOW)Running e2e-models lane (ignored by default)...$(NC)"
+	$(CARGO) e2e-models
+
 # Temporary compatibility shims during lane migration.
 test-int-real: e2e-system
 

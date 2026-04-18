@@ -15,6 +15,7 @@
 //! When enabled, the REST instance uses its instance-scoped data directory
 //! as the project root for task storage and shell working directory.
 
+pub mod auth_endpoints;
 mod schedule_host;
 pub mod webhook;
 
@@ -147,6 +148,10 @@ pub struct AppState {
     pub mcp_sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
     /// Request-level cancellation executor.
     pub request_executor: Arc<SurfaceRequestExecutor>,
+    /// Persistent TokenStore for OAuth-backed bindings. Shared with the
+    /// AgentFactory so both read and write paths (login, resolve,
+    /// logout) see the same credentials.
+    pub token_store: Arc<dyn meerkat_client::auth_store::TokenStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,7 +278,19 @@ impl AppState {
         let rest_host = Cow::Owned(config.rest.host.clone());
         let rest_port = config.rest.port;
 
+        // Shared TokenStore: attach to the factory AND to AppState so the
+        // OAuth write-path handlers (auth/login/complete, auth/profile/
+        // create, auth/logout) can read/write the same persisted
+        // credentials as the factory's resolve_binding path.
+        let token_store: Arc<dyn meerkat_client::auth_store::TokenStore> =
+            match meerkat_client::auth_store::TokenStoreBackend::default_auto()
+                .and_then(meerkat_client::auth_store::TokenStoreBackend::open)
+            {
+                Ok(store) => store,
+                Err(_) => Arc::new(meerkat_client::auth_store::EphemeralTokenStore::new()),
+            };
         let mut factory = AgentFactory::new(store_path.clone())
+            .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
             .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
@@ -355,6 +372,7 @@ impl AppState {
             request_executor: Arc::new(SurfaceRequestExecutor::new(
                 std::time::Duration::from_secs(5),
             )),
+            token_store,
         })
     }
 
@@ -1110,7 +1128,45 @@ pub fn router(state: AppState) -> Router {
         .route("/runtime/{id}/retire", post(runtime_retire))
         .route("/runtime/{id}/reset", post(runtime_reset))
         .route("/input/{id}/list", get(input_list))
-        .route("/input/{session_id}/{input_id}", get(input_state));
+        .route("/input/{session_id}/{input_id}", get(input_state))
+        // Phase 4d — auth + realm endpoints.
+        .route(
+            "/auth/profiles",
+            get(crate::auth_endpoints::list_auth_profiles)
+                .post(crate::auth_endpoints::create_auth_profile),
+        )
+        .route(
+            "/auth/profiles/{id}",
+            get(crate::auth_endpoints::get_auth_profile)
+                .delete(crate::auth_endpoints::delete_auth_profile),
+        )
+        .route(
+            "/auth/profiles/{id}/test",
+            post(crate::auth_endpoints::test_auth_profile),
+        )
+        .route(
+            "/auth/login/start",
+            post(crate::auth_endpoints::start_login),
+        )
+        .route(
+            "/auth/login/complete",
+            post(crate::auth_endpoints::complete_login),
+        )
+        .route(
+            "/auth/login/device/start",
+            post(crate::auth_endpoints::start_device_login),
+        )
+        .route(
+            "/auth/login/device/complete",
+            post(crate::auth_endpoints::complete_device_login),
+        )
+        .route(
+            "/auth/status/{id}",
+            get(crate::auth_endpoints::get_auth_status),
+        )
+        .route("/auth/logout/{id}", post(crate::auth_endpoints::logout))
+        .route("/realms", get(crate::auth_endpoints::list_realms))
+        .route("/realms/{id}", get(crate::auth_endpoints::get_realm));
 
     #[cfg(feature = "mob")]
     let r = r
@@ -3048,6 +3104,7 @@ async fn create_session_inner(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        connection_ref: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -3804,6 +3861,7 @@ async fn continue_session_inner(
             instance_id: state.instance_id.clone(),
             backend: Some(state.backend.clone()),
             config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
+            connection_ref: None,
             keep_alive,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

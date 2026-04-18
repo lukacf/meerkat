@@ -978,6 +978,41 @@ impl MethodRouter {
                 let config = self.config_store.get().await.unwrap_or_default();
                 handlers::models::handle_catalog(id, &config)
             }
+            // Auth + realm methods (Phase 4d).
+            "auth/profile/list" => {
+                handlers::auth::handle_auth_profile_list(id, params, &self.runtime).await
+            }
+            "auth/profile/get" => {
+                handlers::auth::handle_auth_profile_get(id, params, &self.runtime).await
+            }
+            "auth/profile/create" => {
+                handlers::auth::handle_auth_profile_create(id, params, &self.runtime).await
+            }
+            "auth/profile/delete" => {
+                handlers::auth::handle_auth_profile_delete(id, params, &self.runtime).await
+            }
+            "auth/profile/test" => {
+                handlers::auth::handle_auth_profile_test(id, params, &self.runtime).await
+            }
+            "auth/login/start" => handlers::auth::handle_auth_login_start(id, params).await,
+            "auth/login/complete" => {
+                handlers::auth::handle_auth_login_complete(id, params, &self.runtime).await
+            }
+            "auth/login/device_start" => {
+                handlers::auth::handle_auth_login_device_start(id, params).await
+            }
+            "auth/login/device_complete" => {
+                handlers::auth::handle_auth_login_device_complete(id, params, &self.runtime).await
+            }
+            "auth/login/provision_api_key" => {
+                handlers::auth::handle_auth_login_provision_api_key(id, params, &self.runtime).await
+            }
+            "auth/status/get" => {
+                handlers::auth::handle_auth_status_get(id, params, &self.runtime).await
+            }
+            "auth/logout" => handlers::auth::handle_auth_logout(id, params, &self.runtime).await,
+            "realm/list" => handlers::auth::handle_realm_list(id, &self.runtime).await,
+            "realm/get" => handlers::auth::handle_realm_get(id, params, &self.runtime).await,
             "config/get" => {
                 handlers::config::handle_get(id, &self.config_store, self.runtime.config_runtime())
                     .await

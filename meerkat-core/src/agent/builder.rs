@@ -59,6 +59,8 @@ pub struct AgentBuilder {
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
+    pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    pub(super) connection_ref_binding_key: Option<String>,
 }
 
 impl AgentBuilder {
@@ -93,6 +95,8 @@ impl AgentBuilder {
             tool_visibility_owner: None,
             turn_state_handle: None,
             external_tool_surface_handle: None,
+            auth_lease_handle: None,
+            connection_ref_binding_key: None,
         }
     }
 
@@ -330,6 +334,8 @@ impl AgentBuilder {
             turn_state: super::turn_state::LocalTurnExecutionState::new(),
             runtime_execution_kind: None,
             external_tool_surface_handle: self.external_tool_surface_handle,
+            auth_lease_handle: self.auth_lease_handle,
+            connection_ref_binding_key: self.connection_ref_binding_key,
             cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
@@ -533,6 +539,28 @@ impl AgentBuilder {
         handle: Arc<dyn crate::ExternalToolSurfaceHandle>,
     ) -> Self {
         self.external_tool_surface_handle = Some(handle);
+        self
+    }
+
+    /// Set the runtime-backed auth lease handle for this build (Phase 1.5-rev).
+    ///
+    /// When set together with [`with_connection_ref_binding_key`], the runner
+    /// drives `AuthLeaseHandle` transitions at each CallingLlm boundary and
+    /// emits reauth notices when a permanent refresh failure occurs.
+    pub fn with_auth_lease_handle(
+        mut self,
+        handle: Arc<dyn crate::handles::AuthLeaseHandle>,
+    ) -> Self {
+        self.auth_lease_handle = Some(handle);
+        self
+    }
+
+    /// Identify the `connection_ref` this agent routes LLM calls through.
+    ///
+    /// Format: `"<realm_id>:<binding_id>"`. Used together with
+    /// [`with_auth_lease_handle`] to key lease lifecycle transitions.
+    pub fn with_connection_ref_binding_key(mut self, binding_key: String) -> Self {
+        self.connection_ref_binding_key = Some(binding_key);
         self
     }
 

@@ -37,24 +37,23 @@ export interface InitResult {
 
 // ─── Session config ─────────────────────────────────────────────
 
-/** Configuration for creating a direct (non-mob) session. */
+/** Configuration for creating a direct (non-mob) session.
+ *
+ * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
+ * deleted. Credentials flow from bootstrap-populated realm config
+ * (`initRuntimeFromConfig`) or the host's registered external-auth
+ * resolver (`register_external_auth_resolver`). Per-session binding
+ * is selected via `connectionRef` ("realm:binding" form).
+ */
 export interface SessionConfig {
   /** LLM model identifier. */
   model: string;
-  /** API key for the model's provider. */
-  apiKey: string;
+  /** Optional "realm:binding" selector; overrides default provider-match. */
+  connectionRef?: string;
   /** System prompt. */
   systemPrompt?: string;
   /** Max tokens per response. Default: 4096. */
   maxTokens?: number;
-  /** Backward-compat single base URL. */
-  baseUrl?: string;
-  /** Anthropic base URL. */
-  anthropicBaseUrl?: string;
-  /** OpenAI base URL. */
-  openaiBaseUrl?: string;
-  /** Gemini base URL. */
-  geminiBaseUrl?: string;
   /** Enable comms for this session. */
   commsName?: string;
   /** Whether this session runs in keep-alive mode. */

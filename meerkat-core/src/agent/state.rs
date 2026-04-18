@@ -661,6 +661,118 @@ where
 
             match self.state {
                 LoopState::CallingLlm => {
+                    // 0. Auth lease refresh loop (Phase 1.5-rev).
+                    //    The canonical auth-state owner is the MeerkatMachine
+                    //    DSL (see meerkat-machine-schema/src/catalog/dsl/
+                    //    meerkat_machine.rs). The runner's role here is
+                    //    *mechanism*: it drives DSL-legal transitions when
+                    //    the observable state calls for them, and emits a
+                    //    synthetic session notice when the projected DSL
+                    //    state is `reauth_required`. The runner never
+                    //    decides terminal *class* — it only surfaces the
+                    //    state the machine has already committed to.
+                    //    (Plan §1.5r.9: snapshot-poll is the canonical
+                    //    runner-side mechanism; dogma §3 "rebuild
+                    //    projections" permits the read; no redundant DSL
+                    //    effect is declared.)
+                    //
+                    //    Strip prior synthetic AuthReauthRequired notices
+                    //    so the notice always reflects current DSL state.
+                    self.session.messages_mut().retain(|message| {
+                        !is_synthetic_notice(message, SystemNoticeKind::AuthReauthRequired)
+                    });
+                    if let (Some(handle), Some(binding_key)) = (
+                        self.auth_lease_handle.as_deref(),
+                        self.connection_ref_binding_key.as_deref(),
+                    ) {
+                        let snapshot = handle.snapshot(binding_key);
+
+                        // TTL sampler — Phase 1.5-rev refresh-loop leg
+                        // (b): when the lease is still `valid` but the
+                        // resolver's recorded expires_at is within 60s
+                        // of now, drive MarkAuthExpiring so the runner
+                        // (next iteration) sees `expiring` and fires
+                        // begin_refresh. Comparing DSL-recorded TTL
+                        // against SystemTime is shell-mechanics; the
+                        // DSL's transition guard enforces legality.
+                        if snapshot.state.as_deref() == Some("valid")
+                            && let Some(expires_at) = snapshot.expires_at
+                        {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            // Policy constant is owned by the
+                            // handle-trait module (dogma §9/§20).
+                            // Leases within AUTH_LEASE_TTL_REFRESH_WINDOW_SECS
+                            // of expiry (or already past) trigger
+                            // expiring. Max sentinel (u64::MAX) means
+                            // "no expiry" — api_key/env-var leases
+                            // land here and never expire.
+                            let window = crate::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS;
+                            if expires_at != u64::MAX && expires_at <= now.saturating_add(window) {
+                                let _ = handle.mark_expiring(binding_key);
+                            }
+                        }
+
+                        // Re-read state — may have moved to `expiring`
+                        // via the TTL check above.
+                        let snapshot = handle.snapshot(binding_key);
+                        match snapshot.state.as_deref() {
+                            // expiring → observable state only. Plan
+                            // §1.5r.9's "call provider resolver refresh
+                            // → complete_refresh or refresh_failed" leg
+                            // is architecturally blocked on mid-session
+                            // client hot-swap (plan §Explicit deferrals),
+                            // so driving into `refreshing` from here
+                            // would create a state the production flow
+                            // has no path out of. Dogma §19 forbids that
+                            // theater. The TTL-expiry signal is still
+                            // useful to external observers (CLI status,
+                            // REST AuthStatus), which is why
+                            // `mark_expiring` fires above; the machine's
+                            // `refreshing` state remains reachable from
+                            // tests and — when the refresh driver lands
+                            // — from a session-scoped driver task.
+                            Some("expiring") => {}
+                            // reauth_required → project the DSL state into a
+                            // synthetic session-level system notice, then
+                            // terminate the run. The DSL has already
+                            // decided that this binding cannot proceed;
+                            // the runner only surfaces that decision.
+                            Some("reauth_required") => {
+                                let notice = format!(
+                                    "Connection `{binding_key}` requires re-authentication. \
+                                     Run `rkat auth login` for the provider, then retry."
+                                );
+                                self.session.push(synthetic_notice_message(
+                                    SystemNoticeKind::AuthReauthRequired,
+                                    notice.clone(),
+                                ));
+                                // Typed terminal — the machine decided
+                                // this binding cannot proceed. Surfaces
+                                // can pattern-match on
+                                // AgentError::AuthReauthRequired rather
+                                // than parsing a string prefix out of
+                                // InternalError (dogma §5).
+                                self.pending_fatal_diagnostic =
+                                    Some(AgentError::AuthReauthRequired {
+                                        binding_key: binding_key.to_string(),
+                                        message: notice,
+                                    });
+                                self.apply_turn_input(TurnExecutionInput::FatalFailure {
+                                    run_id: run_id.clone(),
+                                })?;
+                                return self.build_result(turn_count, tool_call_count).await;
+                            }
+                            // valid / refreshing / None: no runner action.
+                            // `refreshing` means another caller is mid-flight;
+                            // we can proceed with the call because the lease
+                            // hasn't been invalidated yet.
+                            _ => {}
+                        }
+                    }
+
                     // 1. Poll external updates BEFORE tool capture so newly
                     //    connected tools are visible in the same LLM call.
                     let ext = self.tools.poll_external_updates().await;

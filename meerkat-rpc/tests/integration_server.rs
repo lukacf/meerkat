@@ -1083,10 +1083,10 @@ async fn in_session_model_switch_via_turn_start() {
         first_text.contains("Hello from mock"),
         "First turn should produce mock text, got: {first_text}"
     );
-    // Default model is claude-opus-4-6; verify it
+    // Default model is claude-opus-4-7; verify it
     assert!(
-        first_text.contains("model=claude-opus-4-6"),
-        "First turn should use default model (claude-opus-4-6), got: {first_text}"
+        first_text.contains("model=claude-opus-4-7"),
+        "First turn should use default model (claude-opus-4-7), got: {first_text}"
     );
 
     // 2. turn/start with model override on the materialized session

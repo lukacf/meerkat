@@ -7,7 +7,7 @@
 //! - `ANTHROPIC_API_KEY`: Required API key for Anthropic
 
 use clap::{Parser, ValueEnum};
-use meerkat_core::{Config, ProviderConfig, RealmConfig, RealmSelection, RuntimeBootstrap};
+use meerkat_core::{Config, RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_rest::{AppState, router};
 use meerkat_store::RealmBackend;
 use std::{net::SocketAddr, path::PathBuf};
@@ -118,14 +118,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = config.apply_env_overrides() {
         tracing::warn!("Failed to apply env overrides: {}", err);
     }
-    let has_api_key = match &config.provider {
-        ProviderConfig::Anthropic { api_key, .. } => api_key.is_some(),
-        ProviderConfig::OpenAI { api_key, .. } => api_key.is_some(),
-        ProviderConfig::Gemini { api_key } => api_key.is_some(),
-    };
+    // Plan §6.9/§6.10 deleted the legacy `config.provider` enum block
+    // and the `providers.{api_keys,base_urls}` shared maps. Post-0.6.0
+    // the REST server relies on env vars (ANTHROPIC_API_KEY /
+    // OPENAI_API_KEY / GEMINI_API_KEY, RKAT_*-prefixed overrides) or
+    // `[realm.<id>]` TOML blocks. The no-key warning inspects both.
+    let env_var_names: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "RKAT_ANTHROPIC_API_KEY",
+        "RKAT_OPENAI_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+    ];
+    let has_api_key =
+        !config.realm.is_empty() || env_var_names.iter().any(|v| std::env::var(v).is_ok());
     if !has_api_key {
         tracing::warn!(
-            "No provider API key configured (config or environment). \
+            "No provider API key configured (config, realm, or environment). \
              API calls will fail until a key is set."
         );
     }

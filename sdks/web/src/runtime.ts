@@ -11,7 +11,7 @@ import type {
 } from './types.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
-const EXPECTED_VERSION = '0.5.2';
+const EXPECTED_VERSION = '0.6.0';
 
 /**
  * Convert a camelCase config object to the snake_case expected by WASM.
@@ -34,15 +34,15 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
 }
 
 function sessionToWasm(config: SessionConfig): Record<string, unknown> {
+  // Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
+  // deleted. Credentials come from bootstrap-populated config.realm or
+  // the host's registered external-auth resolver; connection_ref is
+  // the optional per-session binding selector.
   return {
     model: config.model,
-    api_key: config.apiKey,
+    connection_ref: config.connectionRef,
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
-    base_url: config.baseUrl,
-    anthropic_base_url: config.anthropicBaseUrl,
-    openai_base_url: config.openaiBaseUrl,
-    gemini_base_url: config.geminiBaseUrl,
     comms_name: config.commsName,
     keep_alive: config.keepAlive,
     labels: config.labels,

@@ -1876,6 +1876,91 @@ export class MeerkatClient {
       : [];
   }
 
+  // -- Auth + realm (Phase 4d) --------------------------------------------
+  //
+  // These wrappers cover the RPC catalog's auth/* and realm/* methods.
+  // Write-side methods (auth/profile/create, delete, login/start,
+  // login/complete, login/device_start, logout) are currently server-stubbed
+  // with typed INVALID_REQUEST pointing to the CLI; the wrappers surface
+  // whatever the server returns so they stay honest about the state.
+
+  async realmList(): Promise<unknown> {
+    return this.request("realm/list", {});
+  }
+
+  async realmGet(realmId: string): Promise<unknown> {
+    return this.request("realm/get", { realm_id: realmId });
+  }
+
+  async authProfileList(realmId: string): Promise<unknown> {
+    return this.request("auth/profile/list", { realm_id: realmId });
+  }
+
+  async authProfileGet(realmId: string, profileId: string): Promise<unknown> {
+    return this.request("auth/profile/get", {
+      realm_id: realmId,
+      profile_id: profileId,
+    });
+  }
+
+  async authProfileCreate(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("auth/profile/create", params);
+  }
+
+  async authProfileDelete(realmId: string, profileId: string): Promise<unknown> {
+    return this.request("auth/profile/delete", {
+      realm_id: realmId,
+      profile_id: profileId,
+    });
+  }
+
+  async authProfileTest(realmId: string, bindingId: string): Promise<unknown> {
+    return this.request("auth/profile/test", {
+      realm_id: realmId,
+      binding_id: bindingId,
+    });
+  }
+
+  async authLoginStart(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("auth/login/start", params);
+  }
+
+  async authLoginComplete(params: Record<string, unknown>): Promise<unknown> {
+    return this.request("auth/login/complete", params);
+  }
+
+  async authLoginDeviceStart(
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request("auth/login/device_start", params);
+  }
+
+  async authLoginDeviceComplete(
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request("auth/login/device_complete", params);
+  }
+
+  async authLoginProvisionApiKey(
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    return this.request("auth/login/provision_api_key", params);
+  }
+
+  async authStatusGet(realmId: string, profileId: string): Promise<unknown> {
+    return this.request("auth/status/get", {
+      realm_id: realmId,
+      profile_id: profileId,
+    });
+  }
+
+  async authLogout(realmId: string, profileId: string): Promise<unknown> {
+    return this.request("auth/logout", {
+      realm_id: realmId,
+      profile_id: profileId,
+    });
+  }
+
   // -- Transport ----------------------------------------------------------
 
   private handleLine(line: string): void {

@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 inventory = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
 
 # Feature-gated
 schemars = { workspace = true, optional = true }

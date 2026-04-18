@@ -30,6 +30,11 @@ pub struct AnthropicClient {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
+    /// Dynamic authorizer — when set, replaces the `x-api-key` header
+    /// path with `HttpAuthorizer::authorize` invocation (used for
+    /// Vertex and Foundry backends where the Bearer token is acquired
+    /// at request time from Google Auth / Azure AD).
+    authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
 /// Builder for AnthropicClient
@@ -39,6 +44,7 @@ pub struct AnthropicClientBuilder {
     connect_timeout: Duration,
     request_timeout: Duration,
     pool_idle_timeout: Duration,
+    authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
 impl AnthropicClientBuilder {
@@ -49,12 +55,24 @@ impl AnthropicClientBuilder {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             pool_idle_timeout: DEFAULT_POOL_IDLE_TIMEOUT,
+            authorizer: None,
         }
     }
 
     /// Set custom base URL
     pub fn base_url(mut self, url: String) -> Self {
         self.base_url = url;
+        self
+    }
+
+    /// Attach a dynamic authorizer (Vertex/Foundry Bearer token path).
+    /// When set, `x-api-key` is NOT sent; the authorizer injects its
+    /// own headers (typically `Authorization: Bearer <token>`).
+    pub fn authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
         self
     }
 
@@ -100,11 +118,29 @@ impl AnthropicClientBuilder {
             connect_timeout,
             request_timeout,
             pool_idle_timeout,
+            authorizer: self.authorizer,
         })
     }
 }
 
 impl AnthropicClient {
+    /// Runtime override: force-enable temperature for this request even if the
+    /// model profile says unsupported. Useful for proxied or custom deployments.
+    pub(crate) const INTERNAL_SUPPORTS_TEMPERATURE: &'static str = "__meerkat_supports_temperature";
+
+    fn model_supports_temperature(model: &str) -> bool {
+        meerkat_models::profile::anthropic::supports_temperature(model)
+    }
+
+    fn request_supports_temperature(request: &LlmRequest) -> bool {
+        request
+            .provider_params
+            .as_ref()
+            .and_then(|params| params.get(Self::INTERNAL_SUPPORTS_TEMPERATURE))
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| Self::model_supports_temperature(&request.model))
+    }
+
     /// Create a new Anthropic client with the given API key and default HTTP settings
     pub fn new(api_key: String) -> Result<Self, LlmError> {
         AnthropicClientBuilder::new(api_key).build()
@@ -113,14 +149,6 @@ impl AnthropicClient {
     /// Create a builder for more control over HTTP configuration
     pub fn builder(api_key: String) -> AnthropicClientBuilder {
         AnthropicClientBuilder::new(api_key)
-    }
-
-    /// Create from environment variable ANTHROPIC_API_KEY
-    pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("RKAT_ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-            .map_err(|_| LlmError::InvalidApiKey)?;
-        Self::new(api_key)
     }
 
     /// Set custom base URL
@@ -370,7 +398,8 @@ impl AnthropicClient {
             body["system"] = Value::String(system);
         }
 
-        if let Some(temp) = request.temperature
+        if Self::request_supports_temperature(request)
+            && let Some(temp) = request.temperature
             && let Some(num) = serde_json::Number::from_f64(temp as f64)
         {
             body["temperature"] = Value::Number(num);
@@ -622,11 +651,36 @@ impl LlmClient for AnthropicClient {
                 betas.push("compact-2026-01-12");
             }
 
+            let url = format!("{}/v1/messages", self.base_url);
             let mut req = self.http
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
+                .post(&url)
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json");
+
+            // Auth: dynamic authorizer takes precedence over x-api-key.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(authorizer) = &self.authorizer {
+                let mut extra: Vec<(String, String)> = Vec::new();
+                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &url,
+                    headers: &mut extra,
+                };
+                authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                    LlmError::AuthenticationFailed {
+                        message: format!("authorizer failed: {e}"),
+                    }
+                })?;
+                for (k, v) in extra {
+                    req = req.header(k, v);
+                }
+            } else {
+                req = req.header("x-api-key", &self.api_key);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                req = req.header("x-api-key", &self.api_key);
+            }
 
             if !betas.is_empty() {
                 req = req.header("anthropic-beta", betas.join(","));
@@ -1337,6 +1391,60 @@ mod tests {
     }
 
     #[test]
+    fn test_request_omits_temperature_for_opus_47() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-opus-4-7",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_temperature(0.3);
+
+        let body = client.build_request_body(&request)?;
+        assert!(
+            body.get("temperature").is_none(),
+            "claude-opus-4-7 requests must not include temperature (API rejects non-default)",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_keeps_temperature_for_opus_46() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-opus-4-6",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_temperature(0.3);
+
+        let body = client.build_request_body(&request)?;
+        let temp = body
+            .get("temperature")
+            .and_then(Value::as_f64)
+            .expect("temperature should be present for opus 4.6");
+        assert!((temp - 0.3).abs() < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_internal_flag_forces_temperature_on_opus_47()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-opus-4-7",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_temperature(0.3)
+        .with_provider_param(AnthropicClient::INTERNAL_SUPPORTS_TEMPERATURE, true);
+
+        let body = client.build_request_body(&request)?;
+        assert!(
+            body.get("temperature").is_some(),
+            "internal override must force-include temperature",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_build_request_body_with_top_k() -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;
 
@@ -1698,6 +1806,22 @@ mod tests {
             "output_config should be present"
         );
         assert_eq!(body["output_config"]["effort"], "medium");
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_effort_xhigh_opus_47() -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-7",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_param("effort", "xhigh");
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["output_config"]["effort"], "xhigh");
         Ok(())
     }
 

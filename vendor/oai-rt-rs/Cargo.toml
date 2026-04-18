@@ -1,3 +1,8 @@
+# Standalone workspace marker so tooling (cargo fmt --all, etc.) doesn't
+# climb into a parent workspace when this vendor crate is used inside a
+# worktree that lives beneath another checkout of meerkat.
+[workspace]
+
 [package]
 name = "oai-rt-rs"
 version = "0.2.1"

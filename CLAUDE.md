@@ -41,6 +41,9 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 # Run kitchen-sink live smoke lane (ignored by default)
 ./scripts/repo-cargo e2e-smoke
 
+# Run per-model catalog validation lane (ignored by default)
+./scripts/repo-cargo e2e-models
+
 # Cargo aliases (defined in .cargo/config.toml)
 ./scripts/cargo-rct       # Fast tests (unit + integration-fast)
 ./scripts/repo-cargo unit # Unit tests only
@@ -50,6 +53,7 @@ Meerkat (`rkat`) is a minimal, high-performance agent harness for LLM-powered ap
 ./scripts/repo-cargo e2e-system  # Real binary / local resource lane
 ./scripts/repo-cargo e2e-live    # Targeted live-provider lane
 ./scripts/repo-cargo e2e-smoke   # Compound live-provider smoke lane
+./scripts/repo-cargo e2e-models  # Live per-model catalog validation (on-demand / pre-release)
 
 # Legacy compatibility shims (during migration)
 ./scripts/repo-cargo int-real  # Alias for e2e-system
@@ -440,7 +444,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 |----------|------------|
 | OpenAI | `gpt-5.4` or `gpt-5.3-codex` or `gpt-5.2` |
 | Gemini | `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite` or `gemini-3.1-flash-lite-preview` or `gemini-3-flash-preview` |
-| Anthropic | `claude-opus-4-6` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
+| Anthropic | `claude-opus-4-7` or `claude-opus-4-6` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 
 Do NOT use older model names like `gpt-4o-mini`, `gemini-2.0-flash`, or `claude-3-7-sonnet-20250219`.
 
@@ -458,7 +462,7 @@ See `docs/reference/design-philosophy.mdx` for the full treatment with code exam
 - **Errors separate mechanism from policy** — typed three-tier errors (`ToolError` → `AgentError` → `SessionError`) with stable `error_code()` for wire formats; the loop retries, callers decide to resume or abort
 - **Wire types ≠ domain types** — `meerkat-contracts` owns wire format and feeds SDK codegen; domain types in `meerkat-core` are richer and version-locked
 - **Configuration is layered and declarative** — `Config::default()` → file → env (keys only) → per-request `SessionBuildOptions`; no cascading merges, no global mutable state
-- **Testing is a design constraint** — core has no I/O so unit tests need no mocks; the repo standardizes on named lanes: `cargo unit`, `cargo int`, `cargo e2e-fast`, `cargo e2e-system`, `cargo e2e-live`, and `cargo e2e-smoke`
+- **Testing is a design constraint** — core has no I/O so unit tests need no mocks; the repo standardizes on named lanes: `cargo unit`, `cargo int`, `cargo e2e-fast`, `cargo e2e-system`, `cargo e2e-live`, `cargo e2e-smoke`, and `cargo e2e-models`
 
 ### Rust Implementation Principles
 

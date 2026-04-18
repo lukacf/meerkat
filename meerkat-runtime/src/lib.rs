@@ -23,6 +23,7 @@ pub mod tokio {
 pub use ::tokio;
 
 pub mod accept;
+pub mod auth_machine;
 pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_drain;
@@ -64,8 +65,9 @@ pub use completion::{CompletionHandle, CompletionOutcome};
 pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionSignal};
 pub use durability::{DurabilityError, validate_durability};
 pub use handles::{
-    HandleDslAuthority, RuntimeCommsDrainHandle, RuntimeExternalToolSurfaceHandle,
-    RuntimePeerCommsHandle, RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
+    HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
+    RuntimeExternalToolSurfaceHandle, RuntimePeerCommsHandle, RuntimeSessionAdmissionHandle,
+    RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,

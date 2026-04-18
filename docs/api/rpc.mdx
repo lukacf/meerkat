@@ -138,6 +138,20 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `config/get` | Config | Read current config |
 | `config/set` | Config | Replace config |
 | `config/patch` | Config | Merge-patch config (RFC 7396) |
+| `auth/profile/list` | Auth | List auth profiles in a realm |
+| `auth/profile/get` | Auth | Get one auth profile |
+| `auth/profile/create` | Auth | Create an auth profile (CLI-driven for now) |
+| `auth/profile/delete` | Auth | Delete an auth profile (CLI-driven for now) |
+| `auth/profile/test` | Auth | Dry-run a binding's resolve path |
+| `auth/login/start` | Auth | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
+| `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
+| `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
+| `auth/login/device_complete` | Auth | Single-poll completion for a device-code OAuth login |
+| `auth/login/provision_api_key` | Auth | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
+| `auth/status/get` | Auth | Get auth status for a profile |
+| `auth/logout` | Auth | Revoke + remove persisted credentials |
+| `realm/list` | Realm | List realm summaries |
+| `realm/get` | Realm | Get full realm connection set |
 
 <Note>
 `runtime/*` and `input/*` methods are advertised only when the server is running with the runtime-backed ingress/control-plane surface enabled.

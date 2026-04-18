@@ -18,10 +18,10 @@ use meerkat_client::{LlmClient, TestClient};
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
-    AgentToolDispatcher, Config, Provider, ProviderConfig, SelfHostedApiStyle,
-    SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, Session, SessionId,
-    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride,
-    ToolDef, ToolDispatchOutcome, ToolError, UserMessage,
+    AgentToolDispatcher, Config, Provider, SelfHostedApiStyle, SelfHostedModelConfig,
+    SelfHostedServerConfig, SelfHostedTransport, Session, SessionId, SessionLlmIdentity,
+    SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef,
+    ToolDispatchOutcome, ToolError, UserMessage,
 };
 use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
@@ -272,18 +272,18 @@ async fn build_agent_without_override_fails_missing_api_key() {
     );
 }
 
-/// 2b. Provider API key from config.provider is honored when env vars are absent.
+/// 2b. Provider API key from a `[realm.default]` inline-secret binding is
+///     honored when env vars are absent. Plan §6.9/§6.10 removed both
+///     the legacy enum block and the shared settings map; this test
+///     now exercises the realm-based path.
 #[tokio::test]
 async fn build_agent_uses_provider_config_api_key() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
-    let config = Config {
-        provider: ProviderConfig::OpenAI {
-            api_key: Some("test-openai-key".to_string()),
-            base_url: None,
-        },
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    let section =
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]);
+    config.realm.insert("default".to_string(), section);
 
     let build_config = AgentBuildConfig::new("gpt-5.2");
     let result = factory.build_agent(build_config, &config).await;
@@ -677,6 +677,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
     session.set_session_metadata(original_metadata).unwrap();
 
@@ -752,6 +753,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -829,6 +831,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -881,6 +884,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -933,6 +937,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1010,6 +1015,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1334,6 +1340,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .expect("resume metadata");
 
@@ -1473,6 +1480,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1524,6 +1532,7 @@ async fn resume_with_disable_mob_stays_disabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1573,6 +1582,7 @@ async fn resume_with_enable_mob_stays_enabled() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1644,6 +1654,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1718,6 +1729,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
 
@@ -1810,6 +1822,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .unwrap();
     session

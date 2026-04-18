@@ -65,6 +65,22 @@
           "other"
         ],
         "type": "string"
+      },
+      "WireConnectionRef": {
+        "description": "Wire projection of [`meerkat_core::ConnectionRef`].",
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -80,6 +96,17 @@
         ]
       },
       "app_context": true,
+      "connection_ref": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireConnectionRef"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Phase 4c — realm-scoped binding reference. When set, the session\nis built through the realm connection set; when omitted, the\nlegacy flat `provider + api_key` path is used."
+      },
       "labels": {
         "additionalProperties": {
           "type": "string"

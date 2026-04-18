@@ -1,10 +1,56 @@
 {
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.5.2"
+    "version": "0.6.0"
   },
   "openapi": "3.0.0",
   "paths": {
+    "/auth/login/complete": {
+      "post": {
+        "summary": "Finish OAuth login with an authorization code"
+      }
+    },
+    "/auth/login/device/start": {
+      "post": {
+        "summary": "Begin device-code OAuth login"
+      }
+    },
+    "/auth/login/start": {
+      "post": {
+        "summary": "Begin OAuth login (loopback flow)"
+      }
+    },
+    "/auth/logout/{id}": {
+      "post": {
+        "summary": "Revoke + remove persisted credentials"
+      }
+    },
+    "/auth/profiles": {
+      "get": {
+        "summary": "List auth profiles"
+      },
+      "post": {
+        "summary": "Create an auth profile"
+      }
+    },
+    "/auth/profiles/{id}": {
+      "delete": {
+        "summary": "Delete an auth profile"
+      },
+      "get": {
+        "summary": "Get one auth profile"
+      }
+    },
+    "/auth/profiles/{id}/test": {
+      "post": {
+        "summary": "Dry-run the profile's resolve path"
+      }
+    },
+    "/auth/status/{id}": {
+      "get": {
+        "summary": "Get auth status"
+      }
+    },
     "/capabilities": {
       "get": {
         "summary": "Get runtime capabilities"
@@ -89,6 +135,16 @@
     "/models/catalog": {
       "get": {
         "summary": "Get the compiled-in model catalog"
+      }
+    },
+    "/realms": {
+      "get": {
+        "summary": "List realm summaries"
+      }
+    },
+    "/realms/{id}": {
+      "get": {
+        "summary": "Get a realm's connection set"
       }
     },
     "/realtime/capabilities": {

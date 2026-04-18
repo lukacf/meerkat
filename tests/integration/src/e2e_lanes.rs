@@ -12,6 +12,10 @@ pub enum Lane {
     System,
     Live,
     Smoke,
+    /// Auth-lane: live OAuth + refresh + dedup tests. Requires
+    /// ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY env, and
+    /// optional CLAUDE_CODE_OAUTH_TOKEN for interactive flow tests.
+    Auth,
 }
 
 #[derive(Clone, Copy)]

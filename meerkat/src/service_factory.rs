@@ -735,6 +735,7 @@ mod tests {
             ),
             peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
             session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
+            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {
@@ -918,6 +919,7 @@ mod tests {
             ),
             peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
             session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
+            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {
@@ -1096,7 +1098,7 @@ mod tests {
         assert!(build.keep_alive);
     }
 
-    // ── Per-agent provider resolution via Config.providers.api_keys ──
+    // ── Per-agent provider resolution via realm config ──
     //
     // These tests verify the architectural invariant that per-agent provider
     // agnosticity works via Config — the same code path used by WASM when
@@ -1120,7 +1122,7 @@ mod tests {
         }
     }
 
-    /// When Config.providers.api_keys is populated and default_llm_client is None,
+    /// When realm config is populated and default_llm_client is None,
     /// build_agent() resolves the correct provider per-model from the Config map.
     /// This is the WASM code path after the default_llm_client fix.
     #[tokio::test]
@@ -1128,11 +1130,17 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let mut config = Config::default();
-        config.providers.api_keys = Some(std::collections::HashMap::from([
-            ("anthropic".into(), "test-anthropic-key".into()),
-            ("openai".into(), "test-openai-key".into()),
-            ("gemini".into(), "test-gemini-key".into()),
-        ]));
+        let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[
+            ("anthropic", "test-anthropic-key"),
+            ("openai", "test-openai-key"),
+            ("gemini", "test-gemini-key"),
+        ]);
+        // First-entry default_binding = anthropic by the helper's
+        // sorted order. All three bindings are resolvable by provider.
+        // The test asserts multi-provider dispatch, so we need a
+        // binding per provider.
+        let _ = &mut section;
+        config.realm.insert("default".to_string(), section);
         let builder = FactoryAgentBuilder::new(factory, config);
 
         let (tx1, _rx1) = mpsc::channel(8);
@@ -1185,10 +1193,9 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let mut config = Config::default();
-        config.providers.api_keys = Some(std::collections::HashMap::from([(
-            "anthropic".into(),
-            "test-key".into(),
-        )]));
+        let section =
+            meerkat_core::RealmConfigSection::from_inline_api_keys(&[("anthropic", "test-key")]);
+        config.realm.insert("default".to_string(), section);
         let builder = FactoryAgentBuilder::new(factory, config);
 
         let (tx, _rx) = mpsc::channel(8);

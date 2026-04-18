@@ -2,14 +2,14 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.5.2
+Contract version: 0.6.0
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 
-CONTRACT_VERSION = "0.5.2"
+CONTRACT_VERSION = "0.6.0"
 
 
 @dataclass
@@ -605,6 +605,79 @@ class WireModelProfile:
     supports_thinking: bool = False
     supports_web_search: bool = False
 
+
+@dataclass
+class WireConnectionRef:
+    """Wire projection of [`meerkat_core::ConnectionRef`]."""
+    binding_id: str = ''
+    realm_id: str = ''
+
+
+@dataclass
+class WireBackendProfile:
+    """Wire projection of [`meerkat_core::BackendProfile`]."""
+    backend_kind: str = ''
+    base_url: Optional[str] = None
+    id: str = ''
+    options: Any = None
+    provider: str = ''
+
+
+@dataclass
+class WireAuthProfile:
+    """Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential
+material is NOT wire-projected — callers that want to read secret
+material have to go through the server-side
+`auth.profile.get` / `/auth/profiles/:id` endpoints which return
+typed redacted shapes. `source_kind` is a discriminator for the
+credential-source variant."""
+    auth_method: str = ''
+    id: str = ''
+    provider: str = ''
+    source_kind: str = ''
+    storage_kind: str = ''
+
+
+@dataclass
+class WireProviderBinding:
+    """Wire projection of [`meerkat_core::ProviderBinding`]."""
+    allow_auth_override: bool = False
+    auth_profile: str = ''
+    backend_profile: str = ''
+    default_model: Optional[str] = None
+    id: str = ''
+    require_metadata_account: bool = False
+    require_metadata_workspace: bool = False
+
+
+@dataclass
+class WireRealmConnectionSet:
+    """Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned
+from the `realm/get` / `GET /realm/:id` endpoints."""
+    auth_profiles: dict[str, Any] = field(default_factory=dict)
+    backends: dict[str, Any] = field(default_factory=dict)
+    bindings: dict[str, Any] = field(default_factory=dict)
+    default_binding: Optional[str] = None
+    realm_id: str = ''
+
+
+@dataclass
+class WireAuthStatus:
+    """Wire projection of the auth-profile status. Returned from
+`auth.status.get` / `GET /auth/status/:id`."""
+    account_id: Optional[str] = None
+    auth_method: str = ''
+    expires_at: Optional[str] = None
+    last_error: Optional[dict[str, Any]] = None
+    last_refresh_at: Optional[str] = None
+    profile_id: str = ''
+    provider: str = ''
+    state: str = ''
+
+
+# Stable wire kind for auth errors. Mirrors `meerkat_core::AuthErrorKind`
+# on the wire as a normalized string.
+WireAuthError = dict[str, Any]
 
 # Wire-safe content block (no `source_path` — internal only).
 WireContentBlock = dict[str, Any]

@@ -20,7 +20,7 @@ int = [
   "--workspace",
   "--tests",
   "-E",
-  "not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane)",
+  "not binary(e2e_fast_lane) and not binary(e2e_system_lane) and not binary(e2e_live_lane) and not binary(e2e_smoke_lane) and not binary(e2e_models_lane)",
   "--show-progress",
   "none",
   "--status-level",
@@ -30,10 +30,12 @@ int = [
 ]
 
 # Canonical e2e lanes
-e2e-fast = "nextest run -p meerkat-integration-tests --test e2e_fast_lane --no-fail-fast --status-level pass --final-status-level fail"
-e2e-system = "nextest run -p meerkat-integration-tests --test e2e_system_lane --no-fail-fast --status-level pass --final-status-level fail"
-e2e-live = "nextest run -p meerkat-integration-tests --test e2e_live_lane --run-ignored ignored-only --no-fail-fast --status-level pass --final-status-level fail --test-threads=4"
-e2e-smoke = "nextest run -p meerkat-integration-tests --test e2e_smoke_lane --run-ignored ignored-only --no-fail-fast --status-level pass --final-status-level fail --test-threads=4 --retries=1"
+e2e-fast = "nextest run -p meerkat-integration-tests --test e2e_fast_lane --no-fail-fast --show-progress none --status-level none --final-status-level fail"
+e2e-system = "nextest run -p meerkat-integration-tests --test e2e_system_lane --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-live = "nextest run -p meerkat-integration-tests --test e2e_live_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-smoke = "nextest run -p meerkat-integration-tests --test e2e_smoke_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-models = "nextest run -p meerkat-integration-tests --test e2e_models_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-auth = "nextest run -p meerkat-integration-tests --test e2e_auth_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
 
 # Temporary compatibility shims during lane migration.
 int-real = "!./scripts/repo-cargo e2e-system"

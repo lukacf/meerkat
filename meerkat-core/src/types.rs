@@ -876,12 +876,18 @@ pub enum SystemNoticeKind {
     BackgroundJob,
     ToolScope,
     ToolScopeWarning,
+    /// Auth lease transitioned to `reauth_required` — the active
+    /// `connection_ref` needs manual re-authentication before the next LLM
+    /// call can proceed (Phase 1.5-rev).
+    AuthReauthRequired,
 }
 
 impl SystemNoticeKind {
     pub const fn render_class(self) -> RenderClass {
         match self {
-            Self::Generic | Self::McpPending => RenderClass::SystemNotice,
+            Self::Generic | Self::McpPending | Self::AuthReauthRequired => {
+                RenderClass::SystemNotice
+            }
             Self::BackgroundJob => RenderClass::OpsProgress,
             Self::ToolScope | Self::ToolScopeWarning => RenderClass::ToolScopeNotice,
         }
@@ -894,6 +900,7 @@ impl SystemNoticeKind {
             Self::BackgroundJob => "[SYSTEM NOTICE][BG_JOB]",
             Self::ToolScope => "[SYSTEM NOTICE][TOOL_SCOPE]",
             Self::ToolScopeWarning => "[SYSTEM NOTICE][TOOL_SCOPE][WARNING]",
+            Self::AuthReauthRequired => "[SYSTEM NOTICE][AUTH_REAUTH_REQUIRED]",
         }
     }
 
@@ -909,6 +916,10 @@ impl SystemNoticeKind {
                 "[SYSTEM NOTICE][MCP_PENDING] ",
             ),
             (SystemNoticeKind::BackgroundJob, "[SYSTEM NOTICE][BG_JOB] "),
+            (
+                SystemNoticeKind::AuthReauthRequired,
+                "[SYSTEM NOTICE][AUTH_REAUTH_REQUIRED] ",
+            ),
             (SystemNoticeKind::Generic, "[SYSTEM NOTICE] "),
         ];
 

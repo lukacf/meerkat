@@ -159,6 +159,14 @@ pub struct MeerkatRunInput {
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Route this session's LLM calls through a realm-scoped provider
+    /// binding. Format: `"<realm_id>:<binding_id>"` referencing a
+    /// `[realm.<realm_id>.binding.<binding_id>]` entry in the active
+    /// Config. When set, the provider runtime registry resolves the
+    /// binding's auth profile and backend profile through the standard
+    /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<String>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -2585,6 +2593,14 @@ async fn handle_meerkat_run(
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
+        connection_ref: input
+            .connection_ref
+            .as_deref()
+            .and_then(|raw| raw.split_once(':'))
+            .map(|(realm_id, binding_id)| meerkat_core::ConnectionRef {
+                realm_id: realm_id.to_string(),
+                binding_id: binding_id.to_string(),
+            }),
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -2874,6 +2890,7 @@ async fn handle_meerkat_resume(
             .and_then(|m| m.backend.clone())
             .or_else(|| Some(state.backend.clone())),
         config_generation: current_generation,
+        connection_ref: None,
         keep_alive,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
@@ -3825,6 +3842,7 @@ mod tests {
                 additional_instructions: None,
                 app_context: None,
                 shell_env: None,
+                connection_ref: None,
             },
             None,
             None,
@@ -3873,6 +3891,7 @@ mod tests {
                 additional_instructions: None,
                 app_context: None,
                 shell_env: None,
+                connection_ref: None,
             },
             None,
             Some(context),

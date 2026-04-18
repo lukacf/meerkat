@@ -22,6 +22,16 @@ pub struct OpenAiClient {
     api_key: Option<String>,
     base_url: String,
     http: reqwest::Client,
+    /// Extra headers emitted on every request (e.g. `ChatGPT-Account-ID`,
+    /// `X-OpenAI-Fedramp`). Populated by provider runtimes when the
+    /// backend is the ChatGPT backend and the OAuth token's JWT carries
+    /// identity claims per Codex `bearer_auth_provider.rs:23-38`.
+    extra_headers: Vec<(String, String)>,
+    /// Dynamic authorizer — when set, replaces the `Authorization:
+    /// Bearer <api_key>` header path with `HttpAuthorizer::authorize`
+    /// invocation. Used for ExternalAuthorizer flows that produce a
+    /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
+    authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
 impl OpenAiClient {
@@ -79,7 +89,34 @@ impl OpenAiClient {
             api_key,
             base_url,
             http,
+            extra_headers: Vec::new(),
+            authorizer: None,
         }
+    }
+
+    /// Install a set of (name, value) headers to include on every request.
+    ///
+    /// ChatGPT-backend callers pass `ChatGPT-Account-ID` and optionally
+    /// `X-OpenAI-Fedramp` here.
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    /// Attach a dynamic authorizer. When set, overrides the
+    /// `Authorization: Bearer <api_key>` path on every request with
+    /// `HttpAuthorizer::authorize`. Extra headers (ChatGPT-Account-ID
+    /// etc.) still flow through unchanged.
+    pub fn with_authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
+        self
+    }
+
+    pub fn extra_headers(&self) -> &[(String, String)] {
+        &self.extra_headers
     }
 
     /// Set custom base URL
@@ -91,14 +128,6 @@ impl OpenAiClient {
         }
         self.base_url = url;
         self
-    }
-
-    /// Create from environment variable OPENAI_API_KEY
-    pub fn from_env() -> Result<Self, LlmError> {
-        let api_key = std::env::var("RKAT_OPENAI_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .map_err(|_| LlmError::InvalidApiKey)?;
-        Ok(Self::new(api_key))
     }
 
     /// Build request body for OpenAI Responses API
@@ -390,15 +419,34 @@ impl LlmClient for OpenAiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
 
-            let request_builder = self
+            let endpoint = format!("{}/v1/responses", self.base_url);
+            let mut request_builder = self
                 .http
-                .post(format!("{}/v1/responses", self.base_url))
+                .post(&endpoint)
                 .header("Content-Type", "application/json");
-            let request_builder = if let Some(api_key) = &self.api_key {
-                request_builder.header("Authorization", format!("Bearer {api_key}"))
-            } else {
-                request_builder
-            };
+            // Auth path: authorizer overrides Bearer<api_key>.
+            if let Some(authorizer) = &self.authorizer {
+                let mut extra: Vec<(String, String)> = Vec::new();
+                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &endpoint,
+                    headers: &mut extra,
+                };
+                authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                    LlmError::AuthenticationFailed {
+                        message: format!("openai authorizer failed: {e}"),
+                    }
+                })?;
+                for (name, value) in extra {
+                    request_builder = request_builder.header(name, value);
+                }
+            } else if let Some(api_key) = &self.api_key {
+                request_builder =
+                    request_builder.header("Authorization", format!("Bearer {api_key}"));
+            }
+            for (name, value) in &self.extra_headers {
+                request_builder = request_builder.header(name, value);
+            }
             let response = request_builder
                 .json(&body)
                 .send()

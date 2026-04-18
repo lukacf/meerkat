@@ -321,6 +321,71 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             "/health",
             vec![RestOperationDescriptor::new("get", "Health check")],
         ),
+        // Phase 4c — auth + realm endpoints.
+        RestPathDescriptor::new(
+            "/auth/profiles",
+            vec![
+                RestOperationDescriptor::new("get", "List auth profiles"),
+                RestOperationDescriptor::new("post", "Create an auth profile"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/auth/profiles/{id}",
+            vec![
+                RestOperationDescriptor::new("get", "Get one auth profile"),
+                RestOperationDescriptor::new("delete", "Delete an auth profile"),
+            ],
+        ),
+        RestPathDescriptor::new(
+            "/auth/profiles/{id}/test",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Dry-run the profile's resolve path",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/login/start",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Begin OAuth login (loopback flow)",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/login/complete",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Finish OAuth login with an authorization code",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/login/device/start",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Begin device-code OAuth login",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/auth/status/{id}",
+            vec![RestOperationDescriptor::new("get", "Get auth status")],
+        ),
+        RestPathDescriptor::new(
+            "/auth/logout/{id}",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Revoke + remove persisted credentials",
+            )],
+        ),
+        RestPathDescriptor::new(
+            "/realms",
+            vec![RestOperationDescriptor::new("get", "List realm summaries")],
+        ),
+        RestPathDescriptor::new(
+            "/realms/{id}",
+            vec![RestOperationDescriptor::new(
+                "get",
+                "Get a realm's connection set",
+            )],
+        ),
     ]
 }
 

@@ -95,6 +95,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireToolResult": schema_for!(crate::wire::WireToolResult),
         "ScheduleListResult": schema_for!(crate::wire::ScheduleListResult),
         "ScheduleOccurrencesResult": schema_for!(crate::wire::ScheduleOccurrencesResult),
+        // Phase 4c — connection/auth wire types.
+        "WireConnectionRef": schema_for!(crate::wire::WireConnectionRef),
+        "WireBackendProfile": schema_for!(crate::wire::WireBackendProfile),
+        "WireAuthProfile": schema_for!(crate::wire::WireAuthProfile),
+        "WireProviderBinding": schema_for!(crate::wire::WireProviderBinding),
+        "WireRealmConnectionSet": schema_for!(crate::wire::WireRealmConnectionSet),
+        "WireAuthStatus": schema_for!(crate::wire::WireAuthStatus),
+        "WireAuthError": schema_for!(crate::wire::WireAuthError),
     });
     fs::write(
         output_dir.join("wire-types.json"),

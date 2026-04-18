@@ -1,7 +1,7 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.5.2
+// Contract version: 0.6.0
 
-export const CONTRACT_VERSION = "0.5.2";
+export const CONTRACT_VERSION = "0.6.0";
 
 export interface WireUsage {
   input_tokens: number;
@@ -502,3 +502,55 @@ export interface WireModelProfile {
   supports_thinking: boolean;
   supports_web_search?: boolean;
 }
+
+export interface WireConnectionRef {
+  binding_id: string;
+  realm_id: string;
+}
+
+export interface WireBackendProfile {
+  backend_kind: string;
+  base_url?: string;
+  id: string;
+  options?: unknown;
+  provider: string;
+}
+
+export interface WireAuthProfile {
+  auth_method: string;
+  id: string;
+  provider: string;
+  source_kind: string;
+  storage_kind: string;
+}
+
+export interface WireProviderBinding {
+  allow_auth_override?: boolean;
+  auth_profile: string;
+  backend_profile: string;
+  default_model?: string;
+  id: string;
+  require_metadata_account?: boolean;
+  require_metadata_workspace?: boolean;
+}
+
+export interface WireRealmConnectionSet {
+  auth_profiles: Record<string, unknown>;
+  backends: Record<string, unknown>;
+  bindings: Record<string, unknown>;
+  default_binding?: string;
+  realm_id: string;
+}
+
+export interface WireAuthStatus {
+  account_id?: string;
+  auth_method: string;
+  expires_at?: string;
+  last_error?: Record<string, unknown>;
+  last_refresh_at?: string;
+  profile_id: string;
+  provider: string;
+  state: string;
+}
+
+export type WireAuthError = Record<string, unknown>;

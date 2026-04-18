@@ -24,12 +24,14 @@ use std::sync::{Arc, Mutex};
 use crate::meerkat_machine::dsl as mm_dsl;
 use meerkat_core::handles::DslTransitionError;
 
+mod auth_lease;
 mod comms_drain;
 mod external_tool_surface;
 mod peer_comms;
 mod session_admission;
 mod turn_state;
 
+pub use auth_lease::RuntimeAuthLeaseHandle;
 pub use comms_drain::RuntimeCommsDrainHandle;
 pub use external_tool_surface::RuntimeExternalToolSurfaceHandle;
 pub use peer_comms::RuntimePeerCommsHandle;

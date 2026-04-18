@@ -230,6 +230,18 @@ pub enum AgentError {
     #[error("Build error: {0}")]
     BuildError(String),
 
+    /// MeerkatMachine DSL observed an auth lease in `reauth_required`
+    /// state at a CallingLlm boundary; the binding cannot proceed
+    /// until the user re-authenticates (`rkat auth login`). This is a
+    /// machine-owned terminal class (Phase 1.5-rev), distinct from
+    /// [`AgentError::InternalError`] which is for genuinely
+    /// unexpected failures.
+    #[error("Connection `{binding_key}` requires re-authentication: {message}")]
+    AuthReauthRequired {
+        binding_key: String,
+        message: String,
+    },
+
     /// A tool call must be routed externally (callback pending)
     #[error("Callback pending for tool '{tool_name}'")]
     CallbackPending {

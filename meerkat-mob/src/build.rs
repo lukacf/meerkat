@@ -703,6 +703,7 @@ mod tests {
                 instance_id: None,
                 backend: None,
                 config_generation: None,
+                connection_ref: None,
             })
             .expect("session metadata");
 

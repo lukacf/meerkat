@@ -1,8 +1,14 @@
-//! Curated model catalog — the canonical source of truth for supported models.
+//! Curated model catalog — a narrow projection over [`crate::capabilities`].
 //!
-//! All model defaults, allowlists, and display metadata derive from this module.
-//! `meerkat-core` reads defaults from here; `config_template.toml` is validated against it.
+//! The catalog surfaces the small subset of data that is stable across the
+//! platform: id, provider, display name, tier, context window, and max output
+//! tokens. Richer capability data (effort levels, thinking modes, beta
+//! headers) lives in [`crate::capabilities`] and is not re-exposed here.
+//!
+//! `meerkat-core` reads defaults from this module; `config_template.toml` is
+//! validated against it.
 
+use crate::capabilities;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -53,86 +59,8 @@ pub struct ProviderDefaults {
 /// Canonical provider names in alphabetical order.
 const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
 
-const CATALOG_DATA: &[CatalogEntry] = &[
-    // ── Anthropic ──────────────────────────────────────────────────────
-    CatalogEntry {
-        id: "claude-opus-4-6",
-        display_name: "Claude Opus 4.6",
-        provider: "anthropic",
-        tier: ModelTier::Recommended,
-        context_window: Some(200_000),
-        max_output_tokens: Some(32_768),
-    },
-    CatalogEntry {
-        id: "claude-sonnet-4-6",
-        display_name: "Claude Sonnet 4.6",
-        provider: "anthropic",
-        tier: ModelTier::Recommended,
-        context_window: Some(200_000),
-        max_output_tokens: Some(16_384),
-    },
-    CatalogEntry {
-        id: "claude-sonnet-4-5",
-        display_name: "Claude Sonnet 4.5",
-        provider: "anthropic",
-        tier: ModelTier::Supported,
-        context_window: Some(200_000),
-        max_output_tokens: Some(16_384),
-    },
-    CatalogEntry {
-        id: "claude-opus-4-5",
-        display_name: "Claude Opus 4.5",
-        provider: "anthropic",
-        tier: ModelTier::Supported,
-        context_window: Some(200_000),
-        max_output_tokens: Some(32_768),
-    },
-    // ── OpenAI ─────────────────────────────────────────────────────────
-    CatalogEntry {
-        id: "gpt-5.4",
-        display_name: "GPT-5.4",
-        provider: "openai",
-        tier: ModelTier::Recommended,
-        context_window: Some(128_000),
-        max_output_tokens: Some(16_384),
-    },
-    CatalogEntry {
-        id: "gpt-5.3-codex",
-        display_name: "GPT-5.3 Codex",
-        provider: "openai",
-        tier: ModelTier::Supported,
-        context_window: Some(128_000),
-        max_output_tokens: Some(16_384),
-    },
-    // ── Gemini ─────────────────────────────────────────────────────────
-    CatalogEntry {
-        id: "gemini-3-flash-preview",
-        display_name: "Gemini 3 Flash Preview",
-        provider: "gemini",
-        tier: ModelTier::Recommended,
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(8_192),
-    },
-    CatalogEntry {
-        id: "gemini-3.1-pro-preview",
-        display_name: "Gemini 3.1 Pro Preview",
-        provider: "gemini",
-        tier: ModelTier::Supported,
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(8_192),
-    },
-    CatalogEntry {
-        id: "gemini-3.1-flash-lite-preview",
-        display_name: "Gemini 3.1 Flash Lite Preview",
-        provider: "gemini",
-        tier: ModelTier::Supported,
-        context_window: Some(1_000_000),
-        max_output_tokens: Some(8_192),
-    },
-];
-
 /// Default model ID per provider. First recommended model wins.
-const DEFAULT_ANTHROPIC: &str = "claude-opus-4-6";
+const DEFAULT_ANTHROPIC: &str = "claude-opus-4-7";
 const DEFAULT_OPENAI: &str = "gpt-5.4";
 const DEFAULT_GEMINI: &str = "gemini-3-flash-preview";
 
@@ -140,9 +68,21 @@ const DEFAULT_GEMINI: &str = "gemini-3-flash-preview";
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Return all catalog entries.
+/// Return all catalog entries, derived from [`crate::capabilities`].
 pub fn catalog() -> &'static [CatalogEntry] {
-    CATALOG_DATA
+    static CATALOG_DATA: OnceLock<Vec<CatalogEntry>> = OnceLock::new();
+    CATALOG_DATA.get_or_init(|| {
+        capabilities::all_capabilities()
+            .map(|c| CatalogEntry {
+                id: c.id,
+                display_name: c.display_name,
+                provider: c.provider,
+                tier: c.tier,
+                context_window: Some(c.context_window),
+                max_output_tokens: Some(c.max_output_tokens),
+            })
+            .collect()
+    })
 }
 
 /// Return canonical provider names.
@@ -163,7 +103,7 @@ pub fn default_model(provider: &str) -> Option<&'static str> {
 /// Return an iterator over model IDs in the catalog for a given provider.
 pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 'static {
     let provider = provider.to_string();
-    CATALOG_DATA
+    catalog()
         .iter()
         .filter(move |e| e.provider == provider.as_str())
         .map(|e| e.id)
@@ -171,7 +111,7 @@ pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 's
 
 /// Look up a specific catalog entry by provider and model ID.
 pub fn entry_for(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
-    CATALOG_DATA
+    catalog()
         .iter()
         .find(|e| e.provider == provider && e.id == model_id)
 }
@@ -186,7 +126,7 @@ pub fn provider_defaults() -> &'static [ProviderDefaults] {
             .iter()
             .filter_map(|&provider| {
                 let default_id = default_model(provider)?;
-                let models: Vec<CatalogEntry> = CATALOG_DATA
+                let models: Vec<CatalogEntry> = catalog()
                     .iter()
                     .filter(|e| e.provider == provider)
                     .cloned()
@@ -206,6 +146,7 @@ pub fn provider_defaults() -> &'static [ProviderDefaults] {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -242,7 +183,7 @@ mod tests {
     #[test]
     fn all_provider_strings_canonical() {
         let canonical: HashSet<&str> = PROVIDER_NAMES.iter().copied().collect();
-        for entry in CATALOG_DATA {
+        for entry in catalog() {
             assert!(
                 canonical.contains(entry.provider),
                 "catalog entry '{}' has non-canonical provider '{}'",
@@ -255,7 +196,7 @@ mod tests {
     #[test]
     fn no_duplicate_model_ids_within_provider() {
         for &provider in PROVIDER_NAMES {
-            let ids: Vec<&str> = CATALOG_DATA
+            let ids: Vec<&str> = catalog()
                 .iter()
                 .filter(|e| e.provider == provider)
                 .map(|e| e.id)
@@ -296,7 +237,7 @@ mod tests {
     fn allowed_models_matches_catalog() {
         for &provider in PROVIDER_NAMES {
             let allowed: Vec<&str> = allowed_models(provider).collect();
-            let from_catalog: Vec<&str> = CATALOG_DATA
+            let from_catalog: Vec<&str> = catalog()
                 .iter()
                 .filter(|e| e.provider == provider)
                 .map(|e| e.id)
@@ -305,6 +246,20 @@ mod tests {
                 allowed, from_catalog,
                 "allowed_models('{provider}') must match catalog entries"
             );
+        }
+    }
+
+    #[test]
+    fn catalog_matches_capability_table() {
+        for entry in catalog() {
+            let caps = capabilities::capabilities_for(entry.provider, entry.id)
+                .expect("catalog entry must have a capability row");
+            assert_eq!(entry.id, caps.id);
+            assert_eq!(entry.provider, caps.provider);
+            assert_eq!(entry.display_name, caps.display_name);
+            assert_eq!(entry.tier, caps.tier);
+            assert_eq!(entry.context_window, Some(caps.context_window));
+            assert_eq!(entry.max_output_tokens, Some(caps.max_output_tokens));
         }
     }
 }

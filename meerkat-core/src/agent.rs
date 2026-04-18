@@ -840,6 +840,16 @@ where
     /// Runtime-backed external tool-surface diagnostic handle, when provided
     /// by the session runtime bindings.
     pub(crate) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
+    /// Runtime-backed auth lease handle (Phase 1.5-rev). When set, the runner
+    /// drives lease lifecycle transitions at each CallingLlm boundary and
+    /// emits `AUTH_REAUTH_REQUIRED` notices when a permanent refresh failure
+    /// occurs. `connection_ref_binding_key` identifies which binding the
+    /// session's LLM calls route through.
+    pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    /// Binding key for the connection_ref this session resolves through,
+    /// in `"realm_id:binding_id"` form. Populated when the agent was built
+    /// via a connection_ref path; `None` for env-var / legacy flat path.
+    pub(crate) connection_ref_binding_key: Option<String>,
     /// Shared live flag for cancellation at the next turn boundary.
     pub(crate) cancel_after_boundary_requested: Arc<std::sync::atomic::AtomicBool>,
     /// Optional resolver for model-specific operational defaults (e.g., call timeout).

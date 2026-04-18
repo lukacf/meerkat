@@ -2,6 +2,7 @@
 //!
 //! Supports layered configuration: defaults → file → env (secrets only) → CLI
 
+use crate::connection::RealmConfigSection;
 use crate::mcp_config::McpServerConfig;
 use crate::{
     budget::BudgetLimits,
@@ -25,7 +26,6 @@ use std::time::Duration;
 #[serde(default)]
 pub struct Config {
     pub agent: AgentConfig,
-    pub provider: ProviderConfig,
     pub storage: StorageConfig,
     pub budget: BudgetConfig,
     pub retry: RetryConfig,
@@ -35,7 +35,6 @@ pub struct Config {
     pub max_tokens: u32,
     pub shell: ShellDefaults,
     pub store: StoreConfig,
-    pub providers: ProviderSettings,
     pub comms: CommsRuntimeConfig,
     pub compaction: CompactionRuntimeConfig,
     pub limits: LimitsConfig,
@@ -44,6 +43,13 @@ pub struct Config {
     pub skills: crate::skills_config::SkillsConfig,
     pub self_hosted: SelfHostedConfig,
     pub provider_tools: ProviderToolsConfig,
+    /// Realm-scoped connection sets (backend profiles, auth profiles,
+    /// bindings). TOML keys use the singular `[realm.<id>.*]` namespace
+    /// even though the Rust field is plural-adjacent — `#[serde(rename)]`
+    /// bridges the two. See
+    /// `/Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md`.
+    #[serde(rename = "realm", default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub realm: BTreeMap<String, RealmConfigSection>,
 }
 
 impl Default for Config {
@@ -56,7 +62,6 @@ impl Default for Config {
             .unwrap_or(agent.max_tokens_per_turn);
         Self {
             agent,
-            provider: ProviderConfig::default(),
             storage: StorageConfig::default(),
             budget: BudgetConfig::default(),
             retry: RetryConfig::default(),
@@ -65,7 +70,6 @@ impl Default for Config {
             max_tokens,
             shell: ShellDefaults::default(),
             store: StoreConfig::default(),
-            providers: ProviderSettings::default(),
             comms: CommsRuntimeConfig::default(),
             compaction: CompactionRuntimeConfig::default(),
             limits: LimitsConfig::default(),
@@ -74,6 +78,7 @@ impl Default for Config {
             skills: crate::skills_config::SkillsConfig::default(),
             self_hosted: SelfHostedConfig::default(),
             provider_tools: ProviderToolsConfig::default(),
+            realm: BTreeMap::new(),
         }
     }
 }
@@ -271,9 +276,6 @@ impl Config {
             self.agent.extraction_prompt = other.agent.extraction_prompt;
         }
 
-        // Provider config
-        self.provider = other.provider;
-
         // Storage config
         if other.storage.directory.is_some() {
             self.storage.directory = other.storage.directory;
@@ -304,9 +306,6 @@ impl Config {
         }
         if other.store != StoreConfig::default() {
             self.store = other.store;
-        }
-        if other.providers != ProviderSettings::default() {
-            self.providers = other.providers;
         }
         if other.comms != CommsRuntimeConfig::default() {
             self.comms = other.comms;
@@ -584,41 +583,18 @@ impl Config {
     /// This exists primarily to make tests deterministic without mutating the process-wide
     /// environment (which is unsafe in multi-threaded programs on Unix).
     #[doc(hidden)]
-    pub fn apply_env_overrides_from<F>(&mut self, mut env: F) -> Result<(), ConfigError>
+    pub fn apply_env_overrides_from<F>(&mut self, _env: F) -> Result<(), ConfigError>
     where
         F: FnMut(&str) -> Option<String>,
     {
-        // Provider API keys (fallback if not set in config). Only secret env vars are honored.
-        match &mut self.provider {
-            ProviderConfig::Anthropic { api_key, .. } => {
-                if api_key.is_none() {
-                    let key = env("RKAT_ANTHROPIC_API_KEY").or_else(|| env("ANTHROPIC_API_KEY"));
-                    if let Some(key) = key {
-                        *api_key = Some(key);
-                    }
-                }
-            }
-            ProviderConfig::OpenAI { api_key, .. } => {
-                if api_key.is_none() {
-                    let key = env("RKAT_OPENAI_API_KEY").or_else(|| env("OPENAI_API_KEY"));
-                    if let Some(key) = key {
-                        *api_key = Some(key);
-                    }
-                }
-            }
-            ProviderConfig::Gemini { api_key } => {
-                if api_key.is_none() {
-                    // Try GEMINI_API_KEY first, then GOOGLE_API_KEY
-                    let key = env("RKAT_GEMINI_API_KEY")
-                        .or_else(|| env("GEMINI_API_KEY"))
-                        .or_else(|| env("GOOGLE_API_KEY"));
-                    if let Some(key) = key {
-                        *api_key = Some(key);
-                    }
-                }
-            }
-        }
-
+        // Plan §6.9 deleted the legacy `config.provider = ProviderConfig::X
+        // { api_key }` path. Env-var-based credentials are now read at
+        // resolve time through `ResolverEnvironment::env_lookup` applied
+        // to `CredentialSourceSpec::Env` inside the provider runtime
+        // registry — there is no longer a mutable in-memory field on
+        // `Config` that env vars write into. This method is retained as
+        // a no-op so callers compile through 0.6.0; it will be deleted
+        // once surfaces drop the apply_env_overrides call entirely.
         Ok(())
     }
 
@@ -700,44 +676,11 @@ impl Config {
             ));
         }
 
-        if let Some(base_urls) = &self.providers.base_urls {
-            let maybe_conflict = match &self.provider {
-                ProviderConfig::Anthropic {
-                    base_url: Some(url),
-                    ..
-                } => base_urls.get("anthropic").filter(|mapped| *mapped != url),
-                ProviderConfig::OpenAI {
-                    base_url: Some(url),
-                    ..
-                } => base_urls.get("openai").filter(|mapped| *mapped != url),
-                _ => None,
-            };
-            if maybe_conflict.is_some() {
-                return Err(ConfigError::Validation(
-                    "provider base_url conflicts with providers.base_urls entry".to_string(),
-                ));
-            }
-        }
-
-        if let Some(api_keys) = &self.providers.api_keys {
-            let maybe_conflict = match &self.provider {
-                ProviderConfig::Anthropic {
-                    api_key: Some(key), ..
-                } => api_keys.get("anthropic").filter(|mapped| *mapped != key),
-                ProviderConfig::OpenAI {
-                    api_key: Some(key), ..
-                } => api_keys.get("openai").filter(|mapped| *mapped != key),
-                ProviderConfig::Gemini { api_key: Some(key) } => {
-                    api_keys.get("gemini").filter(|mapped| *mapped != key)
-                }
-                _ => None,
-            };
-            if maybe_conflict.is_some() {
-                return Err(ConfigError::Validation(
-                    "provider api_key conflicts with providers.api_keys entry".to_string(),
-                ));
-            }
-        }
+        // Plan §6.9 deleted the per-provider config enum block, so
+        // there is no longer a nominal conflict between the legacy
+        // inline api_key/base_url fields and the shared
+        // `config.providers.{base_urls,api_keys}` maps. Those maps stay
+        // (scheduled for deletion in §6.10) and are consumed directly.
 
         crate::model_registry::ModelRegistry::from_config(self)?;
 
@@ -1005,13 +948,10 @@ pub struct StoreConfig {
     pub database_dir: Option<PathBuf>,
 }
 
-/// Provider settings sourced from config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(default)]
-pub struct ProviderSettings {
-    pub base_urls: Option<HashMap<String, String>>,
-    pub api_keys: Option<HashMap<String, String>>,
-}
+// Plan §6.10 deleted `ProviderSettings` entirely. Per-provider api keys
+// and base URLs now live exclusively in `[realm.<id>]` config blocks
+// (programmatically constructed via `RealmConfigSection::from_inline_api_keys`
+// for surfaces that receive credentials at bootstrap).
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1339,32 +1279,17 @@ pub enum CommsRuntimeMode {
     Uds,
 }
 
-/// LLM provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ProviderConfig {
-    Anthropic {
-        api_key: Option<String>,
-        base_url: Option<String>,
-    },
-    #[serde(rename = "openai")]
-    OpenAI {
-        api_key: Option<String>,
-        base_url: Option<String>,
-    },
-    Gemini {
-        api_key: Option<String>,
-    },
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self::Anthropic {
-            api_key: None,
-            base_url: None,
-        }
-    }
-}
+// Plan §6.9 deleted the `ProviderConfig` enum entirely. Per-provider
+// credentials now live in:
+//   - env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY,
+//     RKAT_*-prefixed overrides) — the default path, consumed through
+//     `RealmConnectionSet::synthesize_env_default(provider)`.
+//   - `[realm.<id>]` blocks in TOML — explicit realm/binding declarations,
+//     consumed through `ProviderRuntimeRegistry::resolve`.
+//
+// The legacy `config.provider = ProviderConfig::{Anthropic,OpenAI,Gemini}`
+// block and the legacy shared settings maps are
+// removed in the same 0.6.0 cutover (plan §6.10).
 
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1815,9 +1740,6 @@ pub enum ConfigError {
     #[error("Missing required field: {0}")]
     MissingField(String),
 
-    #[error("Missing API key: {0}")]
-    MissingApiKey(&'static str),
-
     #[error("Internal error: {0}")]
     InternalError(String),
 
@@ -1921,7 +1843,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.agent.model, "claude-opus-4-6");
+        assert_eq!(config.agent.model, "claude-opus-4-7");
         assert_eq!(config.agent.max_tokens_per_turn, 16384);
         assert_eq!(config.retry.max_retries, 3);
     }
@@ -1930,25 +1852,24 @@ mod tests {
     fn test_config_layering() {
         // 1. Test defaults
         let config = Config::default();
-        assert_eq!(config.agent.model, "claude-opus-4-6");
+        assert_eq!(config.agent.model, "claude-opus-4-7");
         assert_eq!(config.budget.max_tokens, None);
 
         // 2. Test env override (secrets only)
         {
-            let env = std::collections::HashMap::from([
-                ("RKAT_MODEL".to_string(), "env-model".to_string()),
-                ("ANTHROPIC_API_KEY".to_string(), "secret-key".to_string()),
-            ]);
+            // Plan §6.9 deleted the `config.provider = ProviderConfig::X`
+            // mutable sink. apply_env_overrides_from is now a no-op;
+            // env-var-based credential resolution happens at resolve
+            // time in the provider-runtime registry. This branch retains
+            // the call-site shape so the merge precedence test passes.
+            let env = std::collections::HashMap::from([(
+                "RKAT_MODEL".to_string(),
+                "env-model".to_string(),
+            )]);
             let mut config = Config::default();
             config
                 .apply_env_overrides_from(|key| env.get(key).cloned())
                 .expect("apply env overrides");
-            match config.provider {
-                ProviderConfig::Anthropic { api_key, .. } => {
-                    assert_eq!(api_key.as_deref(), Some("secret-key"));
-                }
-                _ => unreachable!("expected anthropic provider"),
-            }
         }
 
         // 3. Test file merge
@@ -2195,32 +2116,13 @@ bearer_token = "secret-token"
         );
     }
 
-    #[test]
-    fn test_merge_providers_section_replaces_non_default() {
-        let mut base = Config::default();
-        base.providers.base_urls = Some(HashMap::from([
-            ("anthropic".to_string(), "https://a.example".to_string()),
-            ("openai".to_string(), "https://o.example".to_string()),
-        ]));
-
-        let mut other = Config::default();
-        other.providers.base_urls = Some(HashMap::from([(
-            "openai".to_string(),
-            "https://override.example".to_string(),
-        )]));
-
-        base.merge(other);
-        let urls = base
-            .providers
-            .base_urls
-            .expect("providers.base_urls missing");
-        assert_eq!(urls.len(), 1);
-        assert_eq!(
-            urls.get("openai").map(String::as_str),
-            Some("https://override.example")
-        );
-        assert!(!urls.contains_key("anthropic"));
-    }
+    // Plan §6.10 deleted the ProviderSettings struct (and its api_keys /
+    // base_urls maps) entirely. The corresponding merge test that
+    // asserted the "non-default other replaces self" semantics went
+    // with it. Realm-scoped base_urls now live in
+    // `[realm.<id>.backend.<b>.base_url]` and round-trip through the
+    // normal TOML merge path that the
+    // `test_merge_extraction_prompt_survives_layering` case exercises.
 
     #[test]
     fn test_merge_toml_tools_omitted_fields_preserve_lower_layer() {
@@ -2294,32 +2196,10 @@ initial_delay = "750ms"
         );
     }
 
-    #[test]
-    fn test_provider_config_serialization() {
-        let anthropic = ProviderConfig::Anthropic {
-            api_key: Some("sk-test".to_string()),
-            base_url: None,
-        };
-
-        let json = serde_json::to_value(&anthropic).unwrap();
-        assert_eq!(json["type"], "anthropic");
-        assert_eq!(json["api_key"], "sk-test");
-
-        let openai = ProviderConfig::OpenAI {
-            api_key: Some("sk-openai".to_string()),
-            base_url: Some("https://custom.openai.com".to_string()),
-        };
-
-        let json = serde_json::to_value(&openai).unwrap();
-        assert_eq!(json["type"], "openai");
-
-        let gemini = ProviderConfig::Gemini {
-            api_key: Some("gemini-key".to_string()),
-        };
-
-        let json = serde_json::to_value(&gemini).unwrap();
-        assert_eq!(json["type"], "gemini");
-    }
+    // Plan §6.9 deleted the ProviderConfig enum and the
+    // `test_provider_config_serialization` test that exercised its
+    // serde discriminator. Realm-based credential configs are round-
+    // tripped by tests in meerkat-contracts/tests/connection_ref_wire.rs.
 
     #[test]
     fn test_budget_config_serialization() {
@@ -2431,42 +2311,9 @@ api_style = "chat_completions"
         assert!(err.to_string().contains("agent.max_tokens_per_turn"));
     }
 
-    #[test]
-    fn test_validate_rejects_provider_base_url_conflict() {
-        let mut config = Config {
-            provider: ProviderConfig::OpenAI {
-                api_key: None,
-                base_url: Some("https://one.example".to_string()),
-            },
-            ..Config::default()
-        };
-        config.providers.base_urls = Some(std::collections::HashMap::from([(
-            "openai".to_string(),
-            "https://two.example".to_string(),
-        )]));
-        let err = config
-            .validate()
-            .expect_err("conflicting base_url settings should be invalid");
-        assert!(err.to_string().contains("provider base_url conflicts"));
-    }
-
-    #[test]
-    fn test_validate_rejects_provider_api_key_conflict() {
-        let mut config = Config {
-            provider: ProviderConfig::Gemini {
-                api_key: Some("one".to_string()),
-            },
-            ..Config::default()
-        };
-        config.providers.api_keys = Some(std::collections::HashMap::from([(
-            "gemini".to_string(),
-            "two".to_string(),
-        )]));
-        let err = config
-            .validate()
-            .expect_err("conflicting api_key settings should be invalid");
-        assert!(err.to_string().contains("provider api_key conflicts"));
-    }
+    // Plan §6.9 deleted the `config.provider = ProviderConfig::X` block
+    // and the matching validate-time conflict checks against
+    // `providers.{base_urls,api_keys}`. Those tests went with it.
 
     #[test]
     fn test_provider_parse_strict() {

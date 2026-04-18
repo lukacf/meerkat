@@ -1,27 +1,12 @@
-//! Gemini model family detection, capabilities, and parameter schemas.
+//! Gemini family detection and legacy fallback for non-catalog model IDs.
+//!
+//! All capability data for catalog models lives in
+//! [`crate::capabilities::gemini`]. This module retains only a minimal
+//! family detection + [`fallback_caps`] helper for synthesizing a
+//! [`ModelCapabilities`] for non-catalog model IDs (e.g., `gemini-3.1-flash-lite`).
 
-use super::ModelProfile;
-use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
-
-// ---------------------------------------------------------------------------
-// Family detection
-// ---------------------------------------------------------------------------
-
-/// Returns `true` if the model supports thinking mode.
-///
-/// Gemini 3+ models support thinking.
-pub fn supports_thinking(model: &str) -> bool {
-    let m = model.to_ascii_lowercase();
-    m.starts_with("gemini-3") || m.starts_with("gemini-4")
-}
-
-/// Returns `true` if the model accepts a `temperature` parameter.
-///
-/// All Gemini models support temperature.
-pub fn supports_temperature(_model: &str) -> bool {
-    true
-}
+use crate::capabilities::{ModelCapabilities, ThinkingSupport};
+use crate::catalog::ModelTier;
 
 fn detect_family(model: &str) -> Option<&'static str> {
     let m = model.to_ascii_lowercase();
@@ -38,146 +23,86 @@ fn detect_family(model: &str) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parameter schema
-//
-// Matches what meerkat-client/src/gemini.rs actually reads from
-// provider_params (lines 199-238):
-//   - thinking_budget (flat): legacy format
-//   - thinking.thinking_budget: nested format
-//   - top_k: sampling param
-//   - top_p: sampling param
-//
-// Note: the adapter does NOT read `thinking.include_thoughts`.
-// The typed GeminiParams in meerkat-client/src/types.rs has this field,
-// but the adapter only extracts thinking_budget from the nested object.
-// ---------------------------------------------------------------------------
-
-/// Gemini-specific model parameters accepted via `provider_params`.
+/// Synthesize capabilities for a Gemini model ID that isn't in the catalog.
 ///
-/// This struct documents what the Gemini adapter actually reads.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GeminiModelParams {
-    /// Thinking configuration (nested format).
-    /// The adapter reads `thinking.thinking_budget` from this object.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<GeminiThinkingParam>,
-    /// Legacy flat thinking budget (alternative to `thinking.thinking_budget`).
-    /// The adapter checks this first, then falls back to the nested format.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u64>,
-    /// Top-K sampling parameter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-    /// Top-P (nucleus) sampling parameter.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-}
-
-/// Nested thinking configuration for Gemini models.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GeminiThinkingParam {
-    /// Token budget for thinking.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_budget: Option<u64>,
-}
-
-fn params_schema() -> &'static serde_json::Value {
-    static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let schema = schemars::schema_for!(GeminiModelParams);
-        serde_json::to_value(schema).unwrap_or_default()
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Profile
-// ---------------------------------------------------------------------------
-
-/// Build a profile for a Gemini model, or `None` if unrecognized.
-pub fn profile(model: &str) -> Option<ModelProfile> {
+/// Matches the pre-refactor shape: single schema for all Gemini models
+/// (`thinking`, `thinking_budget`, `top_k`, `top_p`), with thinking support
+/// only for the `gemini-3*` family per the current heuristic.
+pub fn fallback_caps(model: &str) -> Option<ModelCapabilities> {
     let family = detect_family(model)?;
-    // Gemini flash variants are fast models with short expected call envelopes.
-    // Pro variants support thinking and may take significantly longer.
-    let m_lower = model.to_ascii_lowercase();
-    let is_flash = m_lower.contains("flash");
+    let m = model.to_ascii_lowercase();
+    let is_flash = m.contains("flash");
     let call_timeout_secs = if is_flash {
-        Some(120) // 2 minutes: flash models are fast, timeout signals a real problem
+        Some(120)
     } else {
         match family {
-            "gemini-3" => Some(600), // 10 minutes: thinking-capable pro model
-            "gemini-2" => Some(180), // 3 minutes: older non-flash model
-            "gemini-1" => Some(180), // 3 minutes: legacy model
+            "gemini-3" => Some(600),
+            "gemini-2" => Some(180),
+            "gemini-1" => Some(180),
             _ => None,
         }
     };
-    Some(ModelProfile {
-        provider: "gemini".to_string(),
-        model_family: family.to_string(),
-        supports_temperature: supports_temperature(model),
-        supports_thinking: supports_thinking(model),
-        supports_reasoning: false,
-        supports_web_search: true,
-        inline_video: true,
+    let thinking = if family == "gemini-3" {
+        ThinkingSupport::GeminiThinkingLevel
+    } else {
+        ThinkingSupport::None
+    };
+    Some(ModelCapabilities {
+        id: "",
+        provider: "gemini",
+        display_name: "",
+        tier: ModelTier::Supported,
+        model_family: family,
+        context_window: 1_000_000,
+        max_output_tokens: 8_192,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
         vision: true,
         image_tool_results: true,
-        params_schema: params_schema().clone(),
+        inline_video: true,
+        supports_temperature: true,
+        supports_top_p: true,
+        supports_top_k: true,
+        thinking,
+        supports_reasoning: false,
+        effort_levels: &[],
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: true,
+        beta_headers: &[],
         call_timeout_secs,
     })
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn gemini3_supports_thinking() {
-        assert!(supports_thinking("gemini-3-flash-preview"));
-        assert!(supports_thinking("gemini-3-pro-preview"));
-        assert!(supports_thinking("gemini-3.1-pro-preview"));
-    }
-
-    #[test]
-    fn gemini2_no_thinking() {
-        assert!(!supports_thinking("gemini-2.0-flash"));
-    }
-
-    #[test]
-    fn gemini3_family_detected() {
+    fn detect_family_known_prefixes() {
         assert_eq!(detect_family("gemini-3-flash-preview"), Some("gemini-3"));
         assert_eq!(detect_family("gemini-3.1-pro-preview"), Some("gemini-3"));
-    }
-
-    #[test]
-    fn non_gemini_not_detected() {
+        assert_eq!(detect_family("gemini-2.0-flash"), Some("gemini-2"));
         assert_eq!(detect_family("claude-opus-4-6"), None);
-        assert_eq!(detect_family("gpt-5.2"), None);
     }
 
     #[test]
-    fn schema_matches_adapter_params() {
-        let schema = params_schema();
-        let props = schema.get("properties").and_then(|p| p.as_object());
-        assert!(props.is_some(), "schema must have properties");
-        let props = props.unwrap_or(&serde_json::Map::new()).clone();
-        // Must include what the adapter reads
-        assert!(props.contains_key("thinking"), "must include thinking");
-        assert!(
-            props.contains_key("thinking_budget"),
-            "must include thinking_budget (flat)"
-        );
-        assert!(props.contains_key("top_k"), "must include top_k");
-        assert!(props.contains_key("top_p"), "must include top_p");
-        // Must NOT include fields the adapter ignores
-        assert!(
-            !props.contains_key("include_thoughts"),
-            "must not include include_thoughts (adapter ignores it)"
-        );
+    fn fallback_thinking_gated_on_gemini_3() {
+        let caps = fallback_caps("gemini-3.1-flash-lite").unwrap();
+        assert_eq!(caps.thinking, ThinkingSupport::GeminiThinkingLevel);
+        let caps = fallback_caps("gemini-2.0-flash").unwrap();
+        assert_eq!(caps.thinking, ThinkingSupport::None);
     }
 
     #[test]
-    fn schema_is_valid_object() {
-        let schema = params_schema();
-        assert!(schema.is_object(), "schema must be a JSON object");
+    fn fallback_flash_timeout_short() {
+        let caps = fallback_caps("gemini-3-flash-preview").unwrap();
+        assert_eq!(caps.call_timeout_secs, Some(120));
+        let caps = fallback_caps("gemini-3.1-pro-preview").unwrap();
+        assert_eq!(caps.call_timeout_secs, Some(600));
     }
 }

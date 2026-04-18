@@ -1,13 +1,26 @@
-//! Model profile rules — capability detection and parameter schema generation.
+//! Model profile — projects a [`crate::capabilities::ModelCapabilities`] row
+//! into the narrower [`ModelProfile`] surface consumed by the rest of the
+//! platform.
 //!
-//! Each provider submodule owns family detection logic and parameter schemas.
-//! The adapter crates (`meerkat-client`) delegate to these functions so that
-//! runtime behavior and the public catalog agree on model capabilities.
+//! Before the per-model capability refactor, this module owned the full
+//! capability definitions via hand-written struct-per-bucket types. That
+//! lived in `anthropic.rs`, `openai.rs`, `gemini.rs` — each providing a
+//! `profile(model)` function, a fixed set of JSON Schema buckets, and
+//! heuristic helpers (`supports_adaptive_thinking`, `is_gpt5_family`, …).
+//!
+//! After the refactor, capability data lives in
+//! [`crate::capabilities`] as a per-model table, and the JSON Schema is
+//! derived from it by [`schema_builder::build_params_schema`]. The
+//! per-provider modules now hold only family-detection + fallback logic
+//! for ad-hoc model IDs that aren't in the static catalog (e.g., dated
+//! snapshots such as `claude-haiku-4-5-20251001`).
 
 pub mod anthropic;
 pub mod gemini;
 pub mod openai;
+pub mod schema_builder;
 
+use crate::capabilities::{ModelCapabilities, ThinkingSupport, capabilities_for};
 use serde::{Deserialize, Serialize};
 
 /// Runtime profile for a model, describing its capabilities and operational defaults.
@@ -50,14 +63,41 @@ pub struct ModelProfile {
 
 /// Look up the profile for a model by provider string and model ID.
 ///
-/// Returns `None` if the provider is unknown or the model doesn't match
-/// any recognized family.
+/// - Catalog models project directly from their capability row.
+/// - Non-catalog models (e.g., dated snapshots) fall back to a per-provider
+///   heuristic that synthesizes a capability record matching the pre-refactor
+///   shape for that family. This keeps the runtime workable for model IDs that
+///   the user passes in before a new catalog entry is added.
+///
+/// Returns `None` if the provider is unknown or the model doesn't match any
+/// recognized family.
 pub fn profile_for(provider: &str, model: &str) -> Option<ModelProfile> {
-    match provider {
-        "anthropic" => anthropic::profile(model),
-        "openai" => openai::profile(model),
-        "gemini" => gemini::profile(model),
-        _ => None,
+    if let Some(caps) = capabilities_for(provider, model) {
+        return Some(project_to_profile(caps));
+    }
+    let owned = match provider {
+        "anthropic" => anthropic::fallback_caps(model)?,
+        "openai" => openai::fallback_caps(model)?,
+        "gemini" => gemini::fallback_caps(model)?,
+        _ => return None,
+    };
+    Some(project_to_profile(&owned))
+}
+
+/// Project a capability record into the [`ModelProfile`] surface.
+pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
+    ModelProfile {
+        provider: caps.provider.to_string(),
+        model_family: caps.model_family.to_string(),
+        supports_temperature: caps.supports_temperature,
+        supports_thinking: caps.thinking != ThinkingSupport::None,
+        supports_reasoning: caps.supports_reasoning,
+        supports_web_search: caps.supports_web_search,
+        inline_video: caps.inline_video,
+        vision: caps.vision,
+        image_tool_results: caps.image_tool_results,
+        params_schema: schema_builder::build_params_schema(caps),
+        call_timeout_secs: caps.call_timeout_secs,
     }
 }
 
@@ -150,7 +190,6 @@ mod tests {
 
     #[test]
     fn call_timeout_secs_populated_for_known_models() {
-        // Verify all catalog models have a call_timeout_secs value
         for entry in crate::catalog::catalog() {
             let profile = profile_for(entry.provider, entry.id);
             if let Some(p) = profile {
@@ -201,15 +240,11 @@ mod tests {
 
     #[test]
     fn unknown_provider_call_timeout_is_none() {
-        // Unknown provider returns None, so no call_timeout_secs
         assert!(profile_for("unknown", "model").is_none());
     }
 
     #[test]
     fn web_search_flag_populated_for_all_catalog_models() {
-        // Every catalog model must have a profile that includes the
-        // supports_web_search field. We don't assert the value — future
-        // models may not support web search.
         for entry in crate::catalog::catalog() {
             let profile = profile_for(entry.provider, entry.id);
             assert!(

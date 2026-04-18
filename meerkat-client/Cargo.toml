@@ -22,15 +22,55 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 async-stream = { workspace = true }
+chrono = { workspace = true }
 tracing = { workspace = true }
 slab = "0.4"
 indexmap = "2"
+parking_lot = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
 oai-rt-rs = { workspace = true }
 meerkat-runtime = { workspace = true, default-features = false }
+
+# Phase 4a optional deps (feature-gated, non-wasm only).
+# keyring backends:
+#   - apple-native: macOS Keychain
+#   - windows-native: Windows Credential Manager
+#   - linux-native: Linux kernel keyutils (no libdbus dependency; reboots
+#     lose the keyring. The AutoTokenStore falls back to FileTokenStore on
+#     read failures, so persistent tokens survive via $XDG_CONFIG_HOME.)
+#   We deliberately avoid linux-native-sync-persistent because its
+#   dbus-secret-service transitive pulls in libdbus-1-dev system headers,
+#   which CI runners don't install by default. The file fallback provides
+#   equivalent persistence without external system-library dependencies.
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
+fs4 = { version = "0.12", optional = true }
+oauth2 = { version = "5", optional = true }
+jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
+axum = { workspace = true, optional = true }
+
+# Phase 4a authorizers (cloud SDK-backed). aws-sigv4 signs Bedrock requests;
+# aws-credential-types + aws-config provide the default credential chain.
+aws-sigv4 = { version = "1", optional = true, features = ["http1"] }
+aws-credential-types = { version = "1", optional = true }
+aws-config = { version = "1", optional = true, default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "credentials-process", "sso"] }
+aws-types = { version = "1", optional = true }
+aws-smithy-runtime-api = { version = "1", optional = true }
+aws-smithy-eventstream = { version = "0.60", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+http = { version = "1", optional = true }
+# Google ADC is implemented manually against metadata.google.internal +
+# $GOOGLE_APPLICATION_CREDENTIALS service-account JSON. No monolithic SDK.
+# (jsonwebtoken above signs the SA JWT assertion; reqwest talks to the token endpoint.)
+# Azure AD is implemented manually against login.microsoftonline.com's
+# /oauth2/v2.0/token endpoint.
+sha2 = { workspace = true, optional = true }
+hex = { version = "0.4", optional = true }
+urlencoding = { version = "2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio_with_wasm = { workspace = true }
@@ -41,6 +81,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 schemars = { workspace = true }
 axum = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini"]
@@ -48,6 +89,44 @@ anthropic = []
 openai = []
 gemini = []
 integration-real-tests = []
+
+# Phase 4a feature flags. Non-wasm by construction (deps live under the
+# cfg(not(target_arch = "wasm32")) target).
+native-keyring = ["dep:keyring"]
+refresh-file-lock = ["dep:fs4"]
+oauth = ["dep:oauth2", "dep:jsonwebtoken", "dep:urlencoding", "dep:axum"]
+aws-auth = [
+    "dep:aws-sigv4",
+    "dep:aws-credential-types",
+    "dep:aws-config",
+    "dep:aws-types",
+    "dep:aws-smithy-runtime-api",
+    "dep:aws-smithy-eventstream",
+    "dep:aws-smithy-types",
+    "dep:http",
+    "dep:sha2",
+    "dep:hex",
+]
+google-oauth = ["dep:jsonwebtoken", "dep:urlencoding"]
+azure-auth = ["dep:urlencoding"]
+
+# cargo-machete false positives: these crates are feature-gated
+# (aws-auth) and cargo-machete doesn't inspect feature-activated deps.
+# `hex` and `sha2` are pulled in by the aws-sigv4 signing path at
+# runtime; `aws-config`, `aws-smithy-*`, and `aws-types` are required
+# at HTTP-client-construction time under aws-auth.
+[package.metadata.cargo-machete]
+ignored = [
+    "aws-config",
+    "aws-smithy-eventstream",
+    "aws-smithy-runtime-api",
+    "aws-smithy-types",
+    "aws-types",
+    "hex",
+    "sha2",
+    "getrandom",  # cfg(target_arch = "wasm32")
+    "slab",        # used in streaming block assembly
+]
 
 [[test]]
 name = "system_client_proxy"
@@ -58,12 +137,6 @@ required-features = ["integration-real-tests"]
 name = "live_client_provider_matrix"
 path = "tests/live_client_provider_matrix.rs"
 required-features = ["integration-real-tests"]
-
-[package.metadata.cargo-machete]
-ignored = [
-    "getrandom",  # cfg(target_arch = "wasm32")
-    "slab",        # used in streaming block assembly
-]
 
 [lints]
 workspace = true

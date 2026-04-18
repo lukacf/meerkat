@@ -2,6 +2,7 @@
 //!
 //! Each sub-module handles a group of JSON-RPC methods.
 
+pub mod auth;
 pub mod capabilities;
 #[cfg(feature = "comms")]
 pub mod comms;

@@ -51,6 +51,8 @@ pub use meerkat_core::{
     Config,
     ConfigDelta,
     ConfigError,
+    // Phase 3 provider-auth redesign — realm-scoped connection identity.
+    ConnectionRef,
     ContextStrategy,
     ForkBranch,
     ForkBudgetPolicy,
@@ -91,7 +93,6 @@ pub use meerkat_core::{
     OutputSchema,
     // Provider
     Provider,
-    ProviderConfig,
     ResponseStatus,
     ResultShape,
     RetryConfig,

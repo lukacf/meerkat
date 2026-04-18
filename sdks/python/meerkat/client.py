@@ -331,6 +331,162 @@ class MeerkatClient:
                 self._process.kill()
             self._process = None
 
+    # -- Auth (Phase 4c.11 wrapper over auth.* RPC methods) ---------------
+
+    async def list_realms(self) -> list[dict[str, Any]]:
+        """List realms in the active rkat config. Delegates to
+        `realm/list`. Returns a list of `{realm_id, default_binding,
+        backend_count, auth_profile_count, binding_count}`."""
+        result = await self._request("realm/list", {})
+        return list(result.get("realms", []))
+
+    async def get_realm(self, realm_id: str) -> dict[str, Any]:
+        """Fetch one realm's full WireRealmConnectionSet. Delegates to
+        `realm/get`."""
+        return await self._request("realm/get", {"realm_id": realm_id})
+
+    async def list_auth_profiles(self, realm_id: str = "dev") -> dict[str, Any]:
+        """List auth profiles / backend profiles / bindings for one
+        realm. Delegates to `auth/profile/list`."""
+        return await self._request("auth/profile/list", {"realm_id": realm_id})
+
+    async def get_auth_profile(
+        self, realm_id: str, profile_id: str
+    ) -> dict[str, Any]:
+        """Fetch a single auth profile via `auth/profile/get`."""
+        return await self._request(
+            "auth/profile/get", {"realm_id": realm_id, "profile_id": profile_id}
+        )
+
+    async def create_auth_profile(
+        self, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create an auth profile via `auth/profile/create`. The server
+        requires a full profile payload (`{realm_id, provider,
+        auth_method, source, storage?, ...}`) — Python passes it
+        through unchanged so the wire schema governs the contract."""
+        return await self._request("auth/profile/create", params)
+
+    async def delete_auth_profile(self, realm_id: str, profile_id: str) -> None:
+        """Clear a profile's persisted credentials via
+        `auth/profile/delete`."""
+        await self._request(
+            "auth/profile/delete",
+            {"realm_id": realm_id, "profile_id": profile_id},
+        )
+
+    async def test_auth_profile(
+        self, realm_id: str, binding_id: str
+    ) -> dict[str, Any]:
+        """Dry-run a provider binding via `auth/profile/test`. Returns
+        the resolved connection shape or a typed error."""
+        return await self._request(
+            "auth/profile/test",
+            {"realm_id": realm_id, "binding_id": binding_id},
+        )
+
+    async def auth_login_start(
+        self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
+    ) -> dict[str, Any]:
+        """Start an OAuth authorization-code login via
+        `auth/login/start`. Returns `{authorize_url, state,
+        pkce_verifier}`; client directs user to the URL then calls
+        `auth_login_complete` once the redirect carries a code."""
+        return await self._request(
+            "auth/login/start",
+            {"provider": provider, "redirect_uri": redirect_uri},
+        )
+
+    async def auth_login_complete(
+        self,
+        provider: str,
+        code: str,
+        pkce_verifier: str,
+        *,
+        realm_id: str = "dev",
+        profile_id: str | None = None,
+        redirect_uri: str = "http://127.0.0.1:0/callback",
+    ) -> dict[str, Any]:
+        """Exchange an authorization code for tokens via
+        `auth/login/complete`. Tokens land in the server's
+        TokenStore under `<realm_id>:<profile_id>`."""
+        params: dict[str, Any] = {
+            "provider": provider,
+            "code": code,
+            "pkce_verifier": pkce_verifier,
+            "realm_id": realm_id,
+            "redirect_uri": redirect_uri,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/complete", params)
+
+    async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
+        """Start an OAuth device-code flow via
+        `auth/login/device_start`. Returns the user_code to display +
+        verification_uri + interval."""
+        return await self._request(
+            "auth/login/device_start", {"provider": provider}
+        )
+
+    async def auth_login_device_complete(
+        self,
+        provider: str,
+        device_code: str,
+        *,
+        realm_id: str = "dev",
+        profile_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Poll once for device-code completion via
+        `auth/login/device_complete`. Returns `{state: "pending" |
+        "slow_down" | "access_denied" | "expired" | "ready", ...}`."""
+        params: dict[str, Any] = {
+            "provider": provider,
+            "device_code": device_code,
+            "realm_id": realm_id,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/device_complete", params)
+
+    async def auth_provision_api_key(
+        self,
+        access_token: str,
+        *,
+        realm_id: str = "dev",
+        profile_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Anthropic Console-OAuth → API key provisioning via
+        `auth/login/provision_api_key` (plan §4b.5). The caller runs
+        the Console-scope OAuth flow first; hands the resulting
+        access_token here; the server POSTs to Anthropic's
+        create_api_key endpoint and persists the returned key."""
+        params: dict[str, Any] = {
+            "access_token": access_token,
+            "realm_id": realm_id,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/provision_api_key", params)
+
+    async def auth_status(
+        self, realm_id: str, profile_id: str
+    ) -> dict[str, Any]:
+        """Report persisted-credential status for a profile via
+        `auth/status/get`."""
+        return await self._request(
+            "auth/status/get", {"realm_id": realm_id, "profile_id": profile_id}
+        )
+
+    async def auth_logout(
+        self, realm_id: str, profile_id: str
+    ) -> dict[str, Any]:
+        """Revoke + delete a profile's persisted credentials via
+        `auth/logout`."""
+        return await self._request(
+            "auth/logout", {"realm_id": realm_id, "profile_id": profile_id}
+        )
+
     # -- Session lifecycle -------------------------------------------------
 
     async def create_session(

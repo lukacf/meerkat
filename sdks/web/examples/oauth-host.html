@@ -1,0 +1,156 @@
+<!--
+  Browser OAuth host example — plan §4d.wasm.4.
+
+  Demonstrates how a browser host page runs an OAuth flow outside
+  Meerkat, keeps the refresh token in its own secure storage, and
+  hands Meerkat a resolved bearer token per session via the
+  `registerExternalAuthResolver` callback.
+
+  What this example does:
+    1. Initialize the meerkat WASM runtime with a single realm config
+       that declares an `external_resolver`-backed auth profile.
+    2. Register a JS callback the runtime invokes when it needs a
+       fresh bearer token for `realm:binding`.
+    3. Run a single turn with `connection_ref: "hosted:chatgpt"` —
+       the runtime consults the callback for credentials and never
+       touches the host's refresh token.
+
+  NOTE: This is a skeleton for hand-running / documentation; the
+  exact OAuth PKCE flow is provider-specific and intentionally left
+  as host-owned. Replace the `myOAuthClient` mock with a real
+  PKCE-implementing OAuth2 client library.
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meerkat — Host-owned OAuth example</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+        max-width: 720px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      pre {
+        background: #f4f4f5;
+        padding: 0.75rem;
+        border-radius: 6px;
+        overflow-x: auto;
+      }
+      button {
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+      #output {
+        border: 1px solid #e4e4e7;
+        border-radius: 6px;
+        padding: 0.75rem;
+        min-height: 6rem;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Meerkat — Host-owned OAuth</h1>
+    <p>
+      This page owns the OAuth flow and refresh-token storage. The
+      Meerkat WASM runtime never sees the refresh token — it asks the
+      page for a bearer token when it needs one.
+    </p>
+    <button id="start">Create session with host-resolved auth</button>
+    <h2>Stream output</h2>
+    <div id="output"></div>
+
+    <script type="module">
+      import {
+        MeerkatRuntime,
+        registerExternalAuthResolver,
+        withConnectionRef,
+      } from '../src/index.js';
+
+      // ---- Your OAuth client implementation (host-owned) ----
+      // Minimal stub showing where a real PKCE-backed OAuth client
+      // would plug in. For real usage, replace with (e.g.)
+      // `@openid-connect/oauth2-client` wired to your provider's
+      // authorize + token endpoints. The refresh token lives in the
+      // host's secure storage; only the short-lived access token
+      // crosses into Meerkat.
+      const myOAuthClient = {
+        async freshAccessToken(bindingKey) {
+          // bindingKey arrives as "hosted:chatgpt" — look up the
+          // matching OAuth session in your auth provider store,
+          // refresh if needed, return the access token string.
+          console.log(
+            '[oauth-host] runtime asked for bearer for',
+            bindingKey,
+          );
+          // Placeholder: real code fetches an access token here.
+          return 'sk-access-placeholder-from-host-oauth';
+        },
+      };
+
+      // ---- Bootstrap the runtime with a realm declaring a ----
+      // ---- single `external_resolver`-backed auth profile ----
+      const realmConfig = {
+        realm: {
+          hosted: {
+            backend: {
+              chatgpt: {
+                provider: 'openai',
+                backend_kind: 'openai_api',
+              },
+            },
+            auth: {
+              chatgpt: {
+                provider: 'openai',
+                auth_method: 'external_authorizer',
+                source: {
+                  kind: 'external_resolver',
+                  handle: 'host_oauth',
+                },
+              },
+            },
+            binding: {
+              chatgpt: {
+                backend_profile: 'chatgpt',
+                auth_profile: 'chatgpt',
+                default_model: 'gpt-5.2',
+              },
+            },
+            default_binding: 'chatgpt',
+          },
+        },
+      };
+
+      const rt = await MeerkatRuntime.loadFromConfig(realmConfig);
+
+      // ---- Wire the host's OAuth callback into the runtime ----
+      registerExternalAuthResolver(rt.wasm, (bindingKey) =>
+        myOAuthClient.freshAccessToken(bindingKey),
+      );
+
+      document.getElementById('start').addEventListener('click', async () => {
+        const out = document.getElementById('output');
+        out.textContent = '';
+
+        const cfg = withConnectionRef('hosted:chatgpt', {
+          model: 'gpt-5.2',
+          systemPrompt: 'You are concise.',
+        });
+
+        const session = await rt.createSession(cfg);
+        for await (const event of session.events()) {
+          if (event.type === 'delta' && event.text) {
+            out.textContent += event.text;
+          }
+          if (event.type === 'done') break;
+        }
+      });
+    </script>
+  </body>
+</html>

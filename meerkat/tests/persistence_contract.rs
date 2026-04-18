@@ -2,7 +2,6 @@
 
 #[cfg(all(feature = "session-store", feature = "memory-store"))]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use meerkat::{
@@ -41,10 +40,11 @@ mod tests {
 
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let mut config = Config::default();
-        config.providers.api_keys = Some(HashMap::from([(
-            "openai".to_string(),
-            "test-openai-key".to_string(),
-        )]));
+        let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+            "openai",
+            "test-openai-key",
+        )]);
+        config.realm.insert("default".to_string(), section);
 
         let service = build_persistent_service(factory, config, 4, persistence);
         let created = service
@@ -82,10 +82,11 @@ mod tests {
         );
 
         let mut config = Config::default();
-        config.providers.api_keys = Some(HashMap::from([(
-            "openai".to_string(),
-            "test-openai-key".to_string(),
-        )]));
+        let section = meerkat_core::RealmConfigSection::from_inline_api_keys(&[(
+            "openai",
+            "test-openai-key",
+        )]);
+        config.realm.insert("default".to_string(), section);
 
         let factory_a = AgentFactory::new(temp.path().join("sessions-a")).builtins(false);
         let factory_b = AgentFactory::new(temp.path().join("sessions-b")).builtins(false);

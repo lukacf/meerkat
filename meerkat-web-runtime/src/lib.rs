@@ -60,6 +60,12 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub use ::tokio;
 
+// Phase 4d.wasm.1 — External-auth resolver seam for browser-hosted
+// OAuth. Host pages register a JS callback that returns a bearer
+// token; the provider-runtime registry consults the handle when a
+// binding uses `CredentialSourceSpec::ExternalResolver`.
+pub mod external_auth;
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -177,22 +183,15 @@ struct MobDefinitionHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionConfig {
     model: String,
+    /// Optional realm-qualified binding reference in `realm:binding`
+    /// form (plan §4d.wasm.2). When set, overrides the default
+    /// provider-match from bootstrap-populated `config.realm`.
     #[serde(default)]
-    api_key: Option<String>,
+    connection_ref: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
     max_tokens: u32,
-    /// Backward-compat single base URL — mapped to the inferred provider.
-    #[serde(default)]
-    base_url: Option<String>,
-    /// Per-provider base URLs — take precedence over `base_url`.
-    #[serde(default)]
-    anthropic_base_url: Option<String>,
-    #[serde(default)]
-    openai_base_url: Option<String>,
-    #[serde(default)]
-    gemini_base_url: Option<String>,
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
@@ -220,10 +219,7 @@ fn default_max_tokens() -> u32 {
 
 #[derive(Debug, Deserialize)]
 struct Credentials {
-    /// Backward-compat single key (treated as anthropic fallback).
-    #[serde(default)]
-    api_key: Option<String>,
-    /// Per-provider API keys — preferred over `api_key`.
+    /// Per-provider API keys. At least one must be set.
     #[serde(default)]
     anthropic_api_key: Option<String>,
     #[serde(default)]
@@ -232,10 +228,7 @@ struct Credentials {
     gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
-    /// Backward-compat single base URL — mapped to the default model's provider.
-    #[serde(default)]
-    base_url: Option<String>,
-    /// Per-provider base URLs — take precedence over `base_url`.
+    /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
     anthropic_base_url: Option<String>,
     #[serde(default)]
@@ -254,10 +247,7 @@ fn default_model() -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 struct RuntimeConfig {
-    /// Backward-compat single key (treated as anthropic fallback).
-    #[serde(default)]
-    api_key: Option<String>,
-    /// Per-provider API keys — preferred over `api_key`.
+    /// Per-provider API keys. At least one must be set.
     #[serde(default)]
     anthropic_api_key: Option<String>,
     #[serde(default)]
@@ -266,10 +256,7 @@ struct RuntimeConfig {
     gemini_api_key: Option<String>,
     #[serde(default = "default_model")]
     model: Option<String>,
-    /// Backward-compat single base URL — mapped to the default model's provider.
-    #[serde(default)]
-    base_url: Option<String>,
-    /// Per-provider base URLs — take precedence over `base_url`.
+    /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
     anthropic_base_url: Option<String>,
     #[serde(default)]
@@ -322,13 +309,49 @@ struct RuntimeState {
     js_tools: Vec<JsToolEntry>,
 }
 
-/// Resolve per-provider API keys into a `Config.providers.api_keys` map.
+/// Populate `config.realm["default"]` with InlineSecret-backed bindings
+/// for each provider in `api_keys`. Plan §6.10 replacement for the
+/// deleted shared settings write path (plan §6.10).
+/// The first provider becomes the default binding; per-provider base
+/// URLs, when provided via `base_urls`, are applied to the matching
+/// backend profile.
+fn populate_realm_from_api_keys(
+    config: &mut meerkat_core::Config,
+    api_keys: &HashMap<String, String>,
+    base_urls: Option<&HashMap<String, String>>,
+) {
+    let mut entries: Vec<(&str, &str)> = api_keys
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    // Deterministic order: anthropic first (historical default), then
+    // openai, gemini, everything else alphabetically.
+    entries.sort_by_key(|(k, _)| match *k {
+        "anthropic" => 0,
+        "openai" => 1,
+        "gemini" | "google" => 2,
+        _ => 3,
+    });
+
+    let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
+    if let Some(urls) = base_urls {
+        for (provider, url) in urls {
+            let id = format!("default_{provider}");
+            if let Some(bp) = section.backend.get_mut(&id) {
+                bp.base_url = Some(url.clone());
+            }
+        }
+    }
+    config.realm.insert("default".to_string(), section);
+}
+
+/// Resolve per-provider API keys into a map consumed by
+/// [`populate_realm_from_api_keys`].
 ///
-/// `api_key` is the backward-compat single key (treated as anthropic fallback).
-/// Per-provider fields take precedence when set. Empty/whitespace-only keys are
-/// treated as missing so callers get a fast failure instead of a deferred auth error.
+/// Empty/whitespace-only keys are treated as missing so callers get a fast failure
+/// instead of a deferred auth error. Plan §6 dogma §5: typed per-provider fields
+/// only — no bare `api_key` folklore that means "anthropic by convention".
 fn build_provider_api_keys(
-    api_key: Option<&str>,
     anthropic_api_key: Option<&str>,
     openai_api_key: Option<&str>,
     gemini_api_key: Option<&str>,
@@ -342,9 +365,7 @@ fn build_provider_api_keys(
     }
 
     let mut keys = HashMap::new();
-    // Per-provider keys take precedence; api_key is anthropic fallback.
-    let anthropic = non_blank(anthropic_api_key).or(non_blank(api_key));
-    if let Some(k) = anthropic {
+    if let Some(k) = non_blank(anthropic_api_key) {
         keys.insert("anthropic".into(), k.to_string());
     }
     if let Some(k) = non_blank(openai_api_key) {
@@ -356,23 +377,21 @@ fn build_provider_api_keys(
     if keys.is_empty() {
         return Err(err_js(
             "invalid_config",
-            "at least one API key must be provided (api_key, anthropic_api_key, openai_api_key, or gemini_api_key)",
+            "at least one API key must be provided (anthropic_api_key, openai_api_key, or gemini_api_key)",
         ));
     }
     Ok(keys)
 }
 
-/// Resolve per-provider base URLs into a `Config.providers.base_urls` map.
+/// Resolve per-provider base URLs into a map keyed by provider name
+/// that `populate_realm_from_api_keys` applies to the backend profiles.
 ///
-/// Per-provider fields (`anthropic_base_url`, etc.) take precedence. The
-/// backward-compat single `base_url` is mapped to the default model's inferred
-/// provider as a fallback.
+/// Plan §6 dogma §5: typed per-provider fields only — no bare `base_url`
+/// folklore that maps to "whichever provider the default model infers to".
 fn build_provider_base_urls(
-    base_url: Option<&str>,
     anthropic_base_url: Option<&str>,
     openai_base_url: Option<&str>,
     gemini_base_url: Option<&str>,
-    model: &str,
 ) -> Option<HashMap<String, String>> {
     fn non_blank(s: Option<&str>) -> Option<&str> {
         match s {
@@ -391,49 +410,7 @@ fn build_provider_base_urls(
     if let Some(url) = non_blank(gemini_base_url) {
         urls.insert("gemini".into(), url.to_string());
     }
-    // Backward-compat: single base_url maps to the default model's provider,
-    // but only if no per-provider URL was set for that provider.
-    if let Some(url) = non_blank(base_url) {
-        if let Some(provider) = infer_provider_name(model) {
-            urls.entry(provider.to_string())
-                .or_insert_with(|| url.to_string());
-        } else {
-            tracing::warn!(model, "base_url ignored: cannot infer provider from model");
-        }
-    }
     if urls.is_empty() { None } else { Some(urls) }
-}
-
-/// Resolve the effective base URL for a single session's LLM client.
-///
-/// Per-provider fields take precedence; `base_url` is the backward-compat fallback
-/// for the model's inferred provider.
-fn resolve_session_base_url(
-    base_url: Option<&str>,
-    anthropic_base_url: Option<&str>,
-    openai_base_url: Option<&str>,
-    gemini_base_url: Option<&str>,
-    model: &str,
-) -> Option<String> {
-    let provider = infer_provider_name(model)?;
-    let per_provider = match provider {
-        "anthropic" => anthropic_base_url,
-        "openai" => openai_base_url,
-        "gemini" => gemini_base_url,
-        _ => None,
-    };
-    per_provider
-        .or(base_url)
-        .filter(|s| !s.trim().is_empty())
-        .map(ToString::to_string)
-}
-
-/// Infer the provider name from a model string.
-///
-/// Delegates to the canonical `Provider::infer_from_model` in meerkat-core.
-/// Returns `None` for unrecognized models (caller should error, not default).
-fn infer_provider_name(model: &str) -> Option<&'static str> {
-    meerkat_core::Provider::infer_from_model(model).map(|p| p.as_str())
 }
 
 /// Build the shared service infrastructure from a Config populated with provider keys.
@@ -441,11 +418,23 @@ fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
 ) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+    // Plan §4d.wasm.1 closure — wire the JS external-auth callback into
+    // the provider runtime registry. The resolver itself handles the
+    // "no callback registered" case by returning `MissingSecret`; we
+    // always register the bridge so realm bindings configured with
+    // `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
+    // work whether or not the host page has (yet) installed a callback.
+    #[cfg(target_arch = "wasm32")]
+    let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
+        "wasm_host",
+        std::sync::Arc::new(crate::external_auth::WasmExternalAuthResolver),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
     let factory = meerkat::AgentFactory::minimal();
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
 
     // NO default_llm_client — build_agent() resolves the correct provider per-model
-    // from Config.providers.api_keys. This is architecturally correct: per-agent
+    // from realm config bindings. This is architecturally correct: per-agent
     // provider agnosticity works the same way on WASM as on all other surfaces.
 
     let tools = build_wasm_tool_dispatcher().map_err(|e| err_str("tool_error", e))?;
@@ -784,40 +773,11 @@ fn looks_like_windows_absolute(path: &str) -> bool {
         && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
-// ═══════════════════════════════════════════════════════════
-// Provider Resolution
-// ═══════════════════════════════════════════════════════════
-
-fn create_llm_client(
-    model: &str,
-    api_key: &str,
-    base_url: Option<&str>,
-) -> Result<Arc<dyn meerkat_client::types::LlmClient>, String> {
-    if model.starts_with("claude") {
-        let mut builder = meerkat_client::anthropic::AnthropicClientBuilder::new(api_key.into());
-        if let Some(url) = base_url {
-            builder = builder.base_url(url.into());
-        }
-        let client = builder
-            .build()
-            .map_err(|e| format!("failed to create Anthropic client: {e}"))?;
-        Ok(Arc::new(client))
-    } else if model.starts_with("gpt") || model.starts_with("chatgpt") {
-        let client = if let Some(url) = base_url {
-            meerkat_client::openai::OpenAiClient::new_with_base_url(api_key.into(), url.into())
-        } else {
-            meerkat_client::openai::OpenAiClient::new(api_key.into())
-        };
-        Ok(Arc::new(client))
-    } else {
-        let client = if let Some(url) = base_url {
-            meerkat_client::gemini::GeminiClient::new_with_base_url(api_key.into(), url.into())
-        } else {
-            meerkat_client::gemini::GeminiClient::new(api_key.into())
-        };
-        Ok(Arc::new(client))
-    }
-}
+// Plan §6.14 deleted the legacy flat-path `create_llm_client` helper.
+// Per-session LlmClient construction now flows through AgentFactory::
+// build_agent via the provider runtime registry seeded at bootstrap
+// (init_runtime_from_config / init_runtime_from_mobpack populate
+// `config.realm` via `populate_realm_from_api_keys`).
 
 // ═══════════════════════════════════════════════════════════
 // JS Tool Callbacks — register tool implementations from JavaScript
@@ -1122,7 +1082,7 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 /// Primary bootstrap: parse a mobpack and create service infrastructure.
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive.
-/// `credentials_json`: `{ "api_key": "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5" }`
+/// `credentials_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5" }`
 ///
 /// Stores an `EphemeralSessionService<FactoryAgentBuilder>` and a `MobMcpState`
 /// in a `thread_local! RuntimeState` for subsequent mob/comms calls.
@@ -1135,7 +1095,6 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         serde_json::from_str(credentials_json).map_err(|e| err_str("invalid_credentials", e))?;
 
     let api_keys = build_provider_api_keys(
-        creds.api_key.as_deref(),
         creds.anthropic_api_key.as_deref(),
         creds.openai_api_key.as_deref(),
         creds.gemini_api_key.as_deref(),
@@ -1148,16 +1107,14 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
     });
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    config.providers.api_keys = Some(api_keys);
-    config.providers.base_urls = build_provider_base_urls(
-        creds.base_url.as_deref(),
+    let base_urls = build_provider_base_urls(
         creds.anthropic_base_url.as_deref(),
         creds.openai_base_url.as_deref(),
         creds.gemini_base_url.as_deref(),
-        &model,
     );
+    let mut config = Config::default();
+    config.agent.model.clone_from(&model);
+    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
 
     let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
@@ -1184,7 +1141,7 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
 
 /// Advanced bare-bones bootstrap without a mobpack.
 ///
-/// `config_json`: `{ "api_key"?: "sk-...", "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
+/// `config_json`: `{ "anthropic_api_key"?: "...", "openai_api_key"?: "...", "gemini_api_key"?: "...", "model"?: "claude-sonnet-4-5", "max_sessions"?: 64 }`
 #[wasm_bindgen]
 pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     init_tracing();
@@ -1193,7 +1150,6 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
 
     let api_keys = build_provider_api_keys(
-        rt_config.api_key.as_deref(),
         rt_config.anthropic_api_key.as_deref(),
         rt_config.openai_api_key.as_deref(),
         rt_config.gemini_api_key.as_deref(),
@@ -1207,16 +1163,14 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
     let max_sessions = rt_config.max_sessions;
 
     let providers: Vec<String> = api_keys.keys().cloned().collect();
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    config.providers.api_keys = Some(api_keys);
-    config.providers.base_urls = build_provider_base_urls(
-        rt_config.base_url.as_deref(),
+    let base_urls = build_provider_base_urls(
         rt_config.anthropic_base_url.as_deref(),
         rt_config.openai_base_url.as_deref(),
         rt_config.gemini_base_url.as_deref(),
-        &model,
     );
+    let mut config = Config::default();
+    config.agent.model.clone_from(&model);
+    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -1251,37 +1205,34 @@ fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
     handle
 }
 
-fn build_direct_session_request(
+fn build_session_request_with_connection_ref(
+    connection_ref: Option<&str>,
+    model: &str,
     config: &SessionConfig,
     system_prompt: Option<String>,
 ) -> Result<meerkat_core::service::CreateSessionRequest, JsValue> {
-    if config.model.trim().is_empty() {
+    // Plan §4d.wasm.2 real signature: (connection_ref, model, session_config,
+    // system_prompt). Credentials flow through bootstrap-populated
+    // `config.realm` (populate_realm_from_api_keys) or the host's
+    // registered external-auth resolver. No per-session api_key.
+    if model.trim().is_empty() {
         return Err(err_js("invalid_config", "model must not be empty"));
     }
-    let api_key = config.api_key.as_deref().unwrap_or("");
-    if api_key.is_empty() {
-        return Err(err_js("invalid_config", "api_key must not be empty"));
-    }
-
-    // Resolve effective base URL: per-provider fields take precedence over single base_url.
-    let effective_base_url = resolve_session_base_url(
-        config.base_url.as_deref(),
-        config.anthropic_base_url.as_deref(),
-        config.openai_base_url.as_deref(),
-        config.gemini_base_url.as_deref(),
-        &config.model,
-    );
 
     // Reject reserved mob labels in caller-supplied labels map.
     meerkat::surface::validate_raw_labels(config.labels.as_ref())
         .map_err(|e| err_js("invalid_config", &e))?;
 
-    // Create LLM client.
-    let llm_client = create_llm_client(&config.model, api_key, effective_base_url.as_deref())
-        .map_err(|e| err_str("provider_error", e))?;
-
-    let mut build_config = AgentBuildConfig::new(&config.model);
-    build_config.llm_client_override = Some(llm_client);
+    let mut build_config = AgentBuildConfig::new(model);
+    if let Some(conn) = connection_ref {
+        let parsed = meerkat_core::ConnectionRef::parse(conn).ok_or_else(|| {
+            err_js(
+                "invalid_config",
+                "connection_ref must be in `realm:binding` form",
+            )
+        })?;
+        build_config.connection_ref = Some(parsed);
+    }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
         build_config.keep_alive = config.keep_alive;
@@ -1312,7 +1263,13 @@ fn create_runtime_backed_session(
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
     let keep_alive = config.comms_name.is_some() && config.keep_alive;
-    let request = build_direct_session_request(&config, system_prompt)?;
+    let model = config.model.clone();
+    let request = build_session_request_with_connection_ref(
+        config.connection_ref.as_deref(),
+        &model,
+        &config,
+        system_prompt,
+    )?;
 
     let created = futures::executor::block_on(session_service.create_session(request))
         .map_err(err_session)?;
@@ -2482,8 +2439,6 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_arch = "wasm32"))]
-    use super::build_service_infrastructure;
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
         merge_runtime_system_context_state, poll_subscription,
@@ -2493,6 +2448,8 @@ mod tests {
         append_system_context, create_session_simple, destroy_session, get_session_state,
         init_runtime_from_config,
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::{build_service_infrastructure, populate_realm_from_api_keys};
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload, spawn_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
@@ -2605,10 +2562,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn mob_append_system_context_targets_member_session() {
         let mut config = Config::default();
-        config.providers.api_keys = Some(HashMap::from([(
-            "anthropic".to_string(),
-            "sk-test".to_string(),
-        )]));
+        populate_realm_from_api_keys(
+            &mut config,
+            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            None,
+        );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
 
@@ -2746,10 +2704,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn helper_result_payload_returns_identity_native_fields() {
         let mut config = Config::default();
-        config.providers.api_keys = Some(HashMap::from([(
-            "anthropic".to_string(),
-            "sk-test".to_string(),
-        )]));
+        populate_realm_from_api_keys(
+            &mut config,
+            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            None,
+        );
         let (_service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
 

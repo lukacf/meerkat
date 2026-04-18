@@ -864,6 +864,7 @@ impl SessionService for MockSessionService {
                 instance_id: build.and_then(|b| b.instance_id.clone()),
                 backend: build.and_then(|b| b.backend.clone()),
                 config_generation: build.and_then(|b| b.config_generation),
+                connection_ref: None,
             };
             session
                 .set_session_metadata(metadata)
@@ -8112,6 +8113,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
         })
         .expect("resume metadata");
 

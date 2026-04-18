@@ -1,6 +1,6 @@
 use meerkat_core::{
     CommsRuntimeConfig, CommsRuntimeMode, Config, ConfigDelta, ConfigScope, ConfigStore,
-    ProviderConfig, SecurityMode, SystemPromptConfig, ToolCallView, ToolResult,
+    SecurityMode, SystemPromptConfig, ToolCallView, ToolResult,
 };
 use serde_json::json;
 
@@ -71,12 +71,11 @@ fn test_config_env_contract() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::default();
     config.apply_env_overrides_from(|key| env.get(key).cloned())?;
     assert_eq!(config.agent.model, Config::default().agent.model);
-    match config.provider {
-        ProviderConfig::Anthropic { api_key, .. } => {
-            assert_eq!(api_key.as_deref(), Some("rkat-secret"));
-        }
-        _ => return Err("expected anthropic provider".into()),
-    }
+    // Plan §6.9 deleted the `config.provider = ProviderConfig::X { api_key }`
+    // mutable sink. apply_env_overrides_from is a no-op; this test now
+    // just verifies the call doesn't panic and the model default is
+    // preserved. RKAT_* env precedence for credentials is verified
+    // end-to-end by the resolver registry integration tests.
     Ok(())
 }
 
@@ -104,6 +103,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
 
     let json = serde_json::to_value(&metadata)?;
@@ -203,9 +203,7 @@ fn test_secrets_env_contract() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = Config::default();
     config.apply_env_overrides_from(|key| env.get(key).cloned())?;
-    if let ProviderConfig::Anthropic { .. } = config.provider {
-        // Default provider remains Anthropic; ensure no panic.
-    }
+    // Plan §6.9: `config.provider` enum deleted; nothing to pattern-match.
     Ok(())
 }
 
@@ -266,6 +264,7 @@ fn test_inv_003_resume_preserves_metadata() -> Result<(), Box<dyn std::error::Er
         instance_id: None,
         backend: None,
         config_generation: None,
+        connection_ref: None,
     };
 
     let encoded = serde_json::to_value(&metadata)?;

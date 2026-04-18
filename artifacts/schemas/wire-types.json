@@ -8522,6 +8522,444 @@
     ],
     "title": "WireAssistantBlock"
   },
+  "WireAuthError": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable wire kind for auth errors. Mirrors `meerkat_core::AuthErrorKind`\non the wire as a normalized string.",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "missing_secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "auth": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "unsupported_combination",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "backend",
+          "auth"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "field": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "missing_required_metadata",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "field"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "workspace_mismatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "expired",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "refresh_failed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "interactive_login_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "kind": {
+            "const": "host_owned_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "io",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "other",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireAuthError"
+  },
+  "WireAuthProfile": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+    "properties": {
+      "auth_method": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "provider": {
+        "type": "string"
+      },
+      "source_kind": {
+        "description": "Discriminator: \"inline_secret\" / \"env\" / \"managed_store\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
+        "type": "string"
+      },
+      "storage_kind": {
+        "description": "Discriminator for the storage variant:\n\"keyring\" / \"file\" / \"auto\" / \"ephemeral\" / \"host_managed\".",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "provider",
+      "auth_method",
+      "source_kind",
+      "storage_kind"
+    ],
+    "title": "WireAuthProfile",
+    "type": "object"
+  },
+  "WireAuthStatus": {
+    "$defs": {
+      "WireAuthError": {
+        "description": "Stable wire kind for auth errors. Mirrors `meerkat_core::AuthErrorKind`\non the wire as a normalized string.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "missing_secret",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "auth": {
+                "type": "string"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unsupported_combination",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "backend",
+              "auth"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "missing_required_metadata",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "field"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "workspace_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "expired",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "refresh_failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "interactive_login_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "host_owned_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "io",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of the auth-profile status. Returned from\n`auth.status.get` / `GET /auth/status/:id`.",
+    "properties": {
+      "account_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "auth_method": {
+        "type": "string"
+      },
+      "expires_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "last_error": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireAuthError"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Most recent auth error, if any."
+      },
+      "last_refresh_at": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "profile_id": {
+        "type": "string"
+      },
+      "provider": {
+        "type": "string"
+      },
+      "state": {
+        "description": "High-level health: \"valid\" / \"expiring\" / \"expired\" /\n\"reauth_required\" / \"refresh_failed\" / \"unknown\".",
+        "type": "string"
+      }
+    },
+    "required": [
+      "profile_id",
+      "provider",
+      "auth_method",
+      "state"
+    ],
+    "title": "WireAuthStatus",
+    "type": "object"
+  },
+  "WireBackendProfile": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::BackendProfile`].",
+    "properties": {
+      "backend_kind": {
+        "type": "string"
+      },
+      "base_url": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": {
+        "type": "string"
+      },
+      "options": true,
+      "provider": {
+        "description": "Provider as a normalized string: `\"openai\"` / `\"anthropic\"` /\n`\"gemini\"` / `\"self_hosted\"`. Wire types don't carry the strict\n`Provider` enum so consumers aren't forced to update their\nschema when we add new providers.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "provider",
+      "backend_kind"
+    ],
+    "title": "WireBackendProfile",
+    "type": "object"
+  },
+  "WireConnectionRef": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::ConnectionRef`].",
+    "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "realm_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "realm_id",
+      "binding_id"
+    ],
+    "title": "WireConnectionRef",
+    "type": "object"
+  },
   "WireContentBlock": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Wire-safe content block (no `source_path` — internal only).",
@@ -8974,6 +9412,46 @@
     "title": "WireInputStateHistoryEntry",
     "type": "object"
   },
+  "WireProviderBinding": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::ProviderBinding`].",
+    "properties": {
+      "allow_auth_override": {
+        "default": false,
+        "type": "boolean"
+      },
+      "auth_profile": {
+        "type": "string"
+      },
+      "backend_profile": {
+        "type": "string"
+      },
+      "default_model": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": {
+        "type": "string"
+      },
+      "require_metadata_account": {
+        "default": false,
+        "type": "boolean"
+      },
+      "require_metadata_workspace": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "id",
+      "backend_profile",
+      "auth_profile"
+    ],
+    "title": "WireProviderBinding",
+    "type": "object"
+  },
   "WireProviderMeta": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Provider continuity metadata for transcript blocks.",
@@ -9078,6 +9556,145 @@
       }
     ],
     "title": "WireProviderMeta"
+  },
+  "WireRealmConnectionSet": {
+    "$defs": {
+      "WireAuthProfile": {
+        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+        "properties": {
+          "auth_method": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source_kind": {
+            "description": "Discriminator: \"inline_secret\" / \"env\" / \"managed_store\" /\n\"external_resolver\" / \"platform_default\" / \"command\" /\n\"file_descriptor\".",
+            "type": "string"
+          },
+          "storage_kind": {
+            "description": "Discriminator for the storage variant:\n\"keyring\" / \"file\" / \"auto\" / \"ephemeral\" / \"host_managed\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "auth_method",
+          "source_kind",
+          "storage_kind"
+        ],
+        "type": "object"
+      },
+      "WireBackendProfile": {
+        "description": "Wire projection of [`meerkat_core::BackendProfile`].",
+        "properties": {
+          "backend_kind": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "options": true,
+          "provider": {
+            "description": "Provider as a normalized string: `\"openai\"` / `\"anthropic\"` /\n`\"gemini\"` / `\"self_hosted\"`. Wire types don't carry the strict\n`Provider` enum so consumers aren't forced to update their\nschema when we add new providers.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "backend_kind"
+        ],
+        "type": "object"
+      },
+      "WireProviderBinding": {
+        "description": "Wire projection of [`meerkat_core::ProviderBinding`].",
+        "properties": {
+          "allow_auth_override": {
+            "default": false,
+            "type": "boolean"
+          },
+          "auth_profile": {
+            "type": "string"
+          },
+          "backend_profile": {
+            "type": "string"
+          },
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "require_metadata_account": {
+            "default": false,
+            "type": "boolean"
+          },
+          "require_metadata_workspace": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "backend_profile",
+          "auth_profile"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned\nfrom the `realm/get` / `GET /realm/:id` endpoints.",
+    "properties": {
+      "auth_profiles": {
+        "additionalProperties": {
+          "$ref": "#/$defs/WireAuthProfile"
+        },
+        "type": "object"
+      },
+      "backends": {
+        "additionalProperties": {
+          "$ref": "#/$defs/WireBackendProfile"
+        },
+        "type": "object"
+      },
+      "bindings": {
+        "additionalProperties": {
+          "$ref": "#/$defs/WireProviderBinding"
+        },
+        "type": "object"
+      },
+      "default_binding": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "realm_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "realm_id",
+      "backends",
+      "auth_profiles",
+      "bindings"
+    ],
+    "title": "WireRealmConnectionSet",
+    "type": "object"
   },
   "WireRealtimeAttachmentStatus": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9194,14 +9811,23 @@
     "$defs": {
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
-        "enum": [
-          "generic",
-          "mcp_pending",
-          "background_job",
-          "tool_scope",
-          "tool_scope_warning"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "mcp_pending",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`connection_ref` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.",
@@ -9873,14 +10499,23 @@
     "$defs": {
       "SystemNoticeKind": {
         "description": "Typed system notice content carried in the transcript.",
-        "enum": [
-          "generic",
-          "mcp_pending",
-          "background_job",
-          "tool_scope",
-          "tool_scope_warning"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "generic",
+              "mcp_pending",
+              "background_job",
+              "tool_scope",
+              "tool_scope_warning"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "auth_reauth_required",
+            "description": "Auth lease transitioned to `reauth_required` — the active\n`connection_ref` needs manual re-authentication before the next LLM\ncall can proceed (Phase 1.5-rev).",
+            "type": "string"
+          }
+        ]
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.",

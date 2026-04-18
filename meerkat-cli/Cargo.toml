@@ -44,7 +44,8 @@ required-features = ["integration-real-tests"]
 meerkat = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-client = { workspace = true }
+meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }
+webbrowser = "1"
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }

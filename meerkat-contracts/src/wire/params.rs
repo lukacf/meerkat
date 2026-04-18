@@ -33,6 +33,11 @@ pub struct CoreCreateParams {
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Phase 4c — realm-scoped binding reference. When set, the session
+    /// is built through the realm connection set; when omitted, the
+    /// legacy flat `provider + api_key` path is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<super::connection::WireConnectionRef>,
 }
 
 /// Structured output parameters.
@@ -360,6 +365,7 @@ mod tests {
             ]),
             app_context: Some(serde_json::json!({"org_id": "acme", "tier": "premium"})),
             shell_env: None,
+            connection_ref: None,
         };
         let json = serde_json::to_string(&params)?;
         let parsed: CoreCreateParams = serde_json::from_str(&json)?;
@@ -400,12 +406,43 @@ mod tests {
             additional_instructions: None,
             app_context: None,
             shell_env: None,
+            connection_ref: None,
         };
         let json = serde_json::to_string(&params)?;
         assert!(!json.contains("\"labels\""));
         assert!(!json.contains("\"additional_instructions\""));
         assert!(!json.contains("\"app_context\""));
         assert!(!json.contains("\"shell_env\""));
+        assert!(!json.contains("\"connection_ref\""));
+        Ok(())
+    }
+
+    #[test]
+    fn test_core_create_params_with_connection_ref() -> Result<(), serde_json::Error> {
+        use crate::wire::WireConnectionRef;
+        let params = CoreCreateParams {
+            prompt: "hello".to_string(),
+            model: None,
+            provider: None,
+            max_tokens: None,
+            system_prompt: None,
+            labels: None,
+            additional_instructions: None,
+            app_context: None,
+            shell_env: None,
+            connection_ref: Some(WireConnectionRef {
+                realm_id: "dev".into(),
+                binding_id: "default_openai".into(),
+            }),
+        };
+        let json = serde_json::to_string(&params)?;
+        assert!(json.contains("\"connection_ref\""));
+        assert!(json.contains("\"realm_id\":\"dev\""));
+        let parsed: CoreCreateParams = serde_json::from_str(&json)?;
+        assert_eq!(
+            parsed.connection_ref.map(|r| r.binding_id),
+            Some("default_openai".to_string())
+        );
         Ok(())
     }
 }

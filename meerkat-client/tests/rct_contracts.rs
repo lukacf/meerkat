@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures::Stream;
+use meerkat_client::LlmClientAdapter;
 use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
-use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::{
     AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason,
 };
@@ -171,35 +171,27 @@ async fn test_llm_adapter_event_tap_mirrors_text_delta() -> Result<(), Box<dyn s
 
 #[test]
 fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        ProviderResolver::infer_from_model("claude-3"),
-        Provider::Anthropic
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("gpt-4"),
-        Provider::OpenAI
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("gemini-1.5"),
-        Provider::Gemini
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("unknown"),
-        Provider::Other
-    );
+    fn infer(m: &str) -> Provider {
+        Provider::infer_from_model(m).unwrap_or(Provider::Other)
+    }
+    assert_eq!(infer("claude-3"), Provider::Anthropic);
+    assert_eq!(infer("gpt-4"), Provider::OpenAI);
+    assert_eq!(infer("gemini-1.5"), Provider::Gemini);
+    assert_eq!(infer("unknown"), Provider::Other);
 
-    let env = std::collections::HashMap::from([
-        ("RKAT_OPENAI_API_KEY".to_string(), "rk-test".to_string()),
-        ("OPENAI_API_KEY".to_string(), "native-test".to_string()),
-    ]);
-    let key = ProviderResolver::api_key_for_with_env(Provider::OpenAI, |key| env.get(key).cloned());
-    assert_eq!(key.as_deref(), Some("rk-test"));
+    // Phase 6.6 removed the legacy env-precedence credential helpers
+    // from this struct. The RKAT_*-preferred env resolution now lives
+    // inside the factory's env-var fallback (meerkat/src/factory.rs)
+    // and inside the provider-runtime registry's env_lookup seam.
+    // This test stays focused on the infer_from_model contract above;
+    // env-precedence is covered by integration tests that exercise
+    // the registry.
 
     Ok(())
 }
 
 #[test]
 fn test_inv_006_provider_inference_uses_resolver() {
-    let provider = ProviderResolver::infer_from_model("claude-sonnet-4");
+    let provider = Provider::infer_from_model("claude-sonnet-4").unwrap_or(Provider::Other);
     assert_eq!(provider, Provider::Anthropic);
 }

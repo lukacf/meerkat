@@ -2,7 +2,7 @@
 
 import readline from "node:readline";
 
-const CONTRACT_VERSION = "0.5.1";
+const CONTRACT_VERSION = "0.6.0";
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);

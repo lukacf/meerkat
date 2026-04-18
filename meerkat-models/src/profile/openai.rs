@@ -1,44 +1,28 @@
-//! OpenAI model family detection, capabilities, and parameter schemas.
+//! OpenAI family detection and legacy fallback for non-catalog model IDs.
+//!
+//! All capability data for catalog models lives in
+//! [`crate::capabilities::openai`]. This module retains:
+//! - [`fallback_caps`] — synthesizes a [`ModelCapabilities`] for non-catalog
+//!   model IDs (e.g., `gpt-5.4-pro`, future prefixes) with heuristic family
+//!   detection matching the pre-refactor profile shape.
+//! - [`supports_temperature`] / [`supports_reasoning`] — public helpers
+//!   consumed by `meerkat-client` for request-shape decisions. They now route
+//!   through the capability table when a row exists and fall back to the
+//!   heuristic otherwise.
 
-use super::ModelProfile;
-use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use crate::capabilities::{ModelCapabilities, ThinkingSupport, capabilities_for};
+use crate::catalog::ModelTier;
 
-// ---------------------------------------------------------------------------
-// Family detection
-// ---------------------------------------------------------------------------
+const GPT5_REASONING_EFFORT: &[&str] = &["low", "medium", "high"];
 
-/// Returns `true` if the model belongs to the GPT-5 family.
-pub fn is_gpt5_family(model: &str) -> bool {
+/// Returns `true` if the model is in the GPT-5 family by prefix match.
+fn is_gpt5_family(model: &str) -> bool {
     model.to_ascii_lowercase().starts_with("gpt-5")
 }
 
-/// Returns `true` if the model is a Codex model.
-pub fn is_codex_family(model: &str) -> bool {
+/// Returns `true` if the model is a Codex model by substring match.
+fn is_codex_family(model: &str) -> bool {
     model.to_ascii_lowercase().contains("codex")
-}
-
-/// Returns `true` if the model accepts a `temperature` parameter.
-///
-/// GPT-5 and Codex models reject temperature.
-/// Extracted from `meerkat-client/src/openai.rs:26-30`.
-pub fn supports_temperature(model: &str) -> bool {
-    !(is_gpt5_family(model) || is_codex_family(model))
-}
-
-/// Returns `true` if the model supports explicit reasoning payload (reasoning_effort).
-///
-/// Only GPT-5 family models support this.
-/// Extracted from `meerkat-client/src/openai.rs:32-37`.
-pub fn supports_reasoning(model: &str) -> bool {
-    is_gpt5_family(model)
-}
-
-/// Returns `true` if the model supports thinking/reasoning.
-///
-/// GPT-5 family has built-in reasoning.
-pub fn supports_thinking(model: &str) -> bool {
-    is_gpt5_family(model)
 }
 
 fn detect_family(model: &str) -> Option<&'static str> {
@@ -54,207 +38,122 @@ fn detect_family(model: &str) -> Option<&'static str> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parameter schemas
-//
-// Two schemas: GPT-5 family (has reasoning_effort, no temperature) and
-// standard GPT (has seed/penalties only, temperature handled separately).
-// Matches what meerkat-client/src/openai.rs actually reads from
-// provider_params (lines 117-156).
-// ---------------------------------------------------------------------------
-
-/// OpenAI parameters for GPT-5 family models.
+/// Whether the model accepts a non-default `temperature`.
 ///
-/// These models support reasoning_effort but reject temperature.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct OpenAiGpt5Params {
-    /// Reasoning effort level. Only applied when model supports reasoning.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<OpenAiReasoningEffort>,
-    /// Random seed for reproducibility.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    /// Frequency penalty (-2.0 to 2.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
-    /// Presence penalty (-2.0 to 2.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
+/// Consumed by `meerkat-client` to decide whether to forward a caller's
+/// temperature request to the API. Catalog models project the
+/// [`ModelCapabilities.supports_temperature`] bit; unknown model IDs fall
+/// back to the pre-refactor heuristic (GPT-5 family and Codex models reject
+/// temperature).
+pub fn supports_temperature(model: &str) -> bool {
+    if let Some(caps) = capabilities_for("openai", model) {
+        return caps.supports_temperature;
+    }
+    !(is_gpt5_family(model) || is_codex_family(model))
 }
 
-/// OpenAI parameters for non-GPT-5 models.
-///
-/// These models do not support reasoning_effort.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct OpenAiStandardParams {
-    /// Random seed for reproducibility.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    /// Frequency penalty (-2.0 to 2.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
-    /// Presence penalty (-2.0 to 2.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
+/// Whether the model supports explicit reasoning effort control (OpenAI's
+/// `reasoning.effort`). Consumed by `meerkat-client` for request shaping.
+pub fn supports_reasoning(model: &str) -> bool {
+    if let Some(caps) = capabilities_for("openai", model) {
+        return caps.supports_reasoning;
+    }
+    is_gpt5_family(model)
 }
 
-/// Reasoning effort levels for OpenAI models.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum OpenAiReasoningEffort {
-    Low,
-    Medium,
-    High,
-}
-
-fn gpt5_params_schema() -> &'static serde_json::Value {
-    static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let schema = schemars::schema_for!(OpenAiGpt5Params);
-        serde_json::to_value(schema).unwrap_or_default()
-    })
-}
-
-fn standard_params_schema() -> &'static serde_json::Value {
-    static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let schema = schemars::schema_for!(OpenAiStandardParams);
-        serde_json::to_value(schema).unwrap_or_default()
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Profile
-// ---------------------------------------------------------------------------
-
-/// Build a profile for an OpenAI model, or `None` if unrecognized.
-pub fn profile(model: &str) -> Option<ModelProfile> {
+/// Synthesize capabilities for an OpenAI model ID that isn't in the catalog.
+pub fn fallback_caps(model: &str) -> Option<ModelCapabilities> {
     let family = detect_family(model)?;
-    let schema = if is_gpt5_family(model) {
-        gpt5_params_schema()
-    } else {
-        standard_params_schema()
-    };
-    // GPT-5 family models have reasoning and may take much longer per call.
-    // Pro variants (gpt-5.4-pro, gpt-5.2-pro) are heavy reasoning models that
-    // can legitimately take very long for a single call.
-    // Codex models are coding-oriented with extended reasoning.
-    let m_lower = model.to_ascii_lowercase();
-    let call_timeout_secs = if m_lower.contains("-pro") && is_gpt5_family(model) {
-        Some(7200) // 2 hours: heavy reasoning pro model
+    let m = model.to_ascii_lowercase();
+    let gpt5 = is_gpt5_family(model);
+    let codex = is_codex_family(model);
+    let reasoning = gpt5;
+    // Timeout: gpt-5 + "-pro" substring = 7200s; gpt-5 or codex = 600s;
+    // plain gpt = 90s; anything else in this module = None.
+    let call_timeout_secs = if m.contains("-pro") && gpt5 {
+        Some(7200)
     } else {
         match family {
-            "gpt-5" => Some(600), // 10 minutes: standard reasoning model
-            "codex" => Some(600), // 10 minutes: coding-oriented with reasoning
-            "gpt" => Some(90),    // 90 seconds: standard chat model
+            "gpt-5" => Some(600),
+            "codex" => Some(600),
+            "gpt" => Some(90),
             _ => None,
         }
     };
-    Some(ModelProfile {
-        provider: "openai".to_string(),
-        model_family: family.to_string(),
-        supports_temperature: supports_temperature(model),
-        supports_thinking: supports_thinking(model),
-        supports_reasoning: supports_reasoning(model),
-        supports_web_search: true,
-        inline_video: false,
+    // Effort levels: gpt-5 family gets reasoning_effort. Non-gpt5 non-codex
+    // gets no effort. Codex-only (no gpt-5 prefix) currently gets no effort
+    // either per the pre-refactor standard schema.
+    let effort_levels: &'static [&'static str] = if gpt5 { GPT5_REASONING_EFFORT } else { &[] };
+    Some(ModelCapabilities {
+        id: "",
+        provider: "openai",
+        display_name: "",
+        tier: ModelTier::Supported,
+        model_family: family,
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
         vision: true,
         image_tool_results: false,
-        params_schema: schema.clone(),
+        inline_video: false,
+        supports_temperature: !(gpt5 || codex),
+        supports_top_p: false,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: reasoning,
+        effort_levels,
+        supports_web_search: true,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: gpt5 || family == "gpt",
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
         call_timeout_secs,
     })
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn gpt5_family_detected() {
-        assert!(is_gpt5_family("gpt-5.2"));
-        assert!(is_gpt5_family("gpt-5.2-pro"));
-        assert!(is_gpt5_family("GPT-5.4"));
+    fn detect_family_known_prefixes() {
+        assert_eq!(detect_family("gpt-5.4-pro"), Some("gpt-5"));
+        assert_eq!(detect_family("gpt-5.3-codex"), Some("codex"));
+        assert_eq!(detect_family("gpt-4-turbo"), Some("gpt"));
+        assert_eq!(detect_family("chatgpt-4o"), Some("gpt"));
+        assert_eq!(detect_family("claude-opus-4-6"), None);
     }
 
     #[test]
-    fn codex_family_detected() {
-        assert!(is_codex_family("gpt-5.3-codex"));
+    fn helpers_reject_non_openai() {
+        assert!(!is_gpt5_family("claude-opus-4-6"));
         assert!(!is_codex_family("gpt-5.2"));
     }
 
     #[test]
-    fn gpt5_rejects_temperature() {
-        assert!(!supports_temperature("gpt-5.2"));
-        assert!(!supports_temperature("gpt-5.2-pro"));
+    fn supports_temperature_matches_catalog() {
+        // catalog row says false for gpt-5.4
+        assert!(!supports_temperature("gpt-5.4"));
+        // non-catalog fallback for "gpt-5.9" also says false (gpt-5 family)
+        assert!(!supports_temperature("gpt-5.9"));
+        // non-catalog fallback for "gpt-4" says true
+        assert!(supports_temperature("gpt-4"));
     }
 
     #[test]
-    fn codex_rejects_temperature() {
-        assert!(!supports_temperature("gpt-5.3-codex"));
-    }
-
-    #[test]
-    fn gpt5_supports_reasoning() {
-        assert!(supports_reasoning("gpt-5.2"));
+    fn supports_reasoning_matches_catalog() {
         assert!(supports_reasoning("gpt-5.4"));
+        assert!(supports_reasoning("gpt-5.9-future"));
+        assert!(!supports_reasoning("gpt-4"));
     }
 
     #[test]
-    fn gpt5_schema_includes_reasoning_effort() {
-        let schema = gpt5_params_schema();
-        let props = schema.get("properties").and_then(|p| p.as_object());
-        assert!(props.is_some(), "schema must have properties");
-        let props = props.unwrap_or(&serde_json::Map::new()).clone();
-        assert!(
-            props.contains_key("reasoning_effort"),
-            "must include reasoning_effort"
-        );
-        assert!(props.contains_key("seed"), "must include seed");
-        assert!(
-            props.contains_key("frequency_penalty"),
-            "must include frequency_penalty"
-        );
-        assert!(
-            props.contains_key("presence_penalty"),
-            "must include presence_penalty"
-        );
-    }
-
-    #[test]
-    fn standard_schema_no_reasoning_effort() {
-        let schema = standard_params_schema();
-        let props = schema.get("properties").and_then(|p| p.as_object());
-        assert!(props.is_some(), "schema must have properties");
-        let props = props.unwrap_or(&serde_json::Map::new()).clone();
-        assert!(
-            !props.contains_key("reasoning_effort"),
-            "standard must not include reasoning_effort"
-        );
-        assert!(props.contains_key("seed"), "must include seed");
-    }
-
-    #[test]
-    fn per_model_schema_differs() {
-        let gpt5 = profile("gpt-5.2");
-        // No non-gpt5 models in catalog, but test the function directly
-        let standard_schema = standard_params_schema();
-        let gpt5_schema = gpt5_params_schema();
-        assert_ne!(
-            standard_schema, gpt5_schema,
-            "gpt-5 and standard schemas must differ"
-        );
-        assert!(gpt5.is_some());
-    }
-
-    #[test]
-    fn non_openai_not_detected() {
-        assert_eq!(detect_family("claude-opus-4-6"), None);
-        assert!(!is_gpt5_family("claude-opus-4-6"));
-    }
-
-    #[test]
-    fn schemas_are_valid_objects() {
-        assert!(gpt5_params_schema().is_object());
-        assert!(standard_params_schema().is_object());
+    fn fallback_pro_timeout_is_very_long() {
+        let caps = fallback_caps("gpt-5.4-pro").unwrap();
+        assert_eq!(caps.call_timeout_secs, Some(7200));
     }
 }

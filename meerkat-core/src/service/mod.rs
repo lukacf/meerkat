@@ -212,6 +212,9 @@ pub struct SessionBuildOptions {
     pub instance_id: Option<String>,
     pub backend: Option<String>,
     pub config_generation: Option<u64>,
+    /// Realm-scoped connection binding (Phase 3 provider-auth redesign).
+    /// Flows into `AgentBuildConfig.connection_ref` via `FactoryAgentBuilder`.
+    pub connection_ref: Option<crate::ConnectionRef>,
     /// Whether this session runs as a keep-alive (long-running, interrupt-to-stop)
     /// agent. Surfaces use this to decide blocking vs fire-and-return semantics.
     pub keep_alive: bool,
@@ -604,6 +607,8 @@ impl Default for SessionBuildOptions {
             comms_name: None,
             peer_meta: None,
             resume_session: None,
+            // Phase 3 field — default None keeps the legacy flat path.
+            // Populated by surfaces that accept realm/binding inputs.
             budget_limits: None,
             provider_params: None,
             external_tools: None,
@@ -621,6 +626,7 @@ impl Default for SessionBuildOptions {
             instance_id: None,
             backend: None,
             config_generation: None,
+            connection_ref: None,
             keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),

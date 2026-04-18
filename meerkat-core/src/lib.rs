@@ -15,6 +15,7 @@ pub mod tokio {
 }
 
 pub mod agent;
+pub mod auth;
 pub mod blob;
 pub mod budget;
 pub mod checkpoint;
@@ -26,6 +27,7 @@ pub mod config;
 pub mod config_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_store;
+pub mod connection;
 pub mod error;
 pub mod event;
 pub mod event_injector;
@@ -96,9 +98,9 @@ pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
     HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
-    PlainEventSource, ProviderConfig, ProviderSettings, ProviderToolsConfig, RetryConfig,
-    SelfHostedApiStyle, SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig,
-    SelfHostedTransport, ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
+    PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
+    SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
+    StorageConfig, StoreConfig, ToolsConfig,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config_runtime::{
@@ -227,4 +229,19 @@ pub use types::{
     SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolProvenance, ToolResult, ToolSourceKind, Usage, UserMessage, VideoData, has_images,
     has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
+};
+
+// === Provider auth v2 (landed ahead of wiring — see
+// /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md) ===
+pub use auth::{
+    AnthropicAuthMetadata, AnthropicRouteHints, AuthConstraints, AuthError, AuthErrorKind,
+    AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
+    AuthRouteHints, AuthStatus, GoogleAuthMetadata, GoogleRouteHints, HttpAuthorizationRequest,
+    HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
+    ResolvedAuthEnvelope, ResolvedAuthKind,
+};
+pub use connection::{
+    AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingPolicy,
+    ConnectionRef, CredentialSourceSpec, CredentialStorageSpec, ProviderBinding,
+    ProviderBindingConfig, ProviderBindingError, RealmConfigSection, RealmConnectionSet,
 };

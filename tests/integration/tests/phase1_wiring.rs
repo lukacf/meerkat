@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use meerkat::AgentFactory;
-use meerkat_client::ProviderResolver;
-use meerkat_core::{AgentSessionStore, Message, Provider, Session, UserMessage};
+use meerkat_core::{AgentSessionStore, Message, Session, UserMessage};
 use meerkat_store::{MemoryStore, StoreAdapter};
 use meerkat_tools::builtin::{BuiltinToolConfig, MemoryTaskStore};
 
@@ -47,12 +46,7 @@ async fn test_store_adapter_roundtrip() {
     assert_eq!(loaded.messages().len(), 1);
 }
 
-#[test]
-fn test_provider_resolver_prefers_rkat_env() {
-    let env = std::collections::HashMap::from([
-        ("RKAT_OPENAI_API_KEY".to_string(), "rkat-key".to_string()),
-        ("OPENAI_API_KEY".to_string(), "openai-key".to_string()),
-    ]);
-    let key = ProviderResolver::api_key_for_with_env(Provider::OpenAI, |key| env.get(key).cloned());
-    assert_eq!(key.as_deref(), Some("rkat-key"));
-}
+// Phase 6.6 removed the legacy env-precedence credential helper. The
+// RKAT_*-preferred env resolution now lives inside the factory's
+// env-var fallback and will migrate fully into ResolverEnvironment's
+// env_lookup seam in later Phase 6 slices.

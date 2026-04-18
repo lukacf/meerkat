@@ -847,6 +847,13 @@ impl SessionRuntime {
             .clone()
     }
 
+    /// Persistent TokenStore used by OAuth-backed bindings (shared with
+    /// the AgentFactory so login writes + resolve reads see the same
+    /// credentials).
+    pub fn token_store(&self) -> Option<Arc<dyn meerkat_client::auth_store::TokenStore>> {
+        self.factory.token_store.clone()
+    }
+
     /// Override the shared default LLM client used by this runtime.
     pub fn set_default_llm_client(&mut self, client: Option<Arc<dyn LlmClient>>) {
         *self

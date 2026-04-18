@@ -15,7 +15,6 @@ pub mod block_assembler;
 pub mod error;
 pub mod factory;
 mod http;
-pub mod provider;
 pub mod realtime_session;
 mod streaming;
 mod test_client;
@@ -36,13 +35,29 @@ pub mod openai_realtime_attachment;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
+// === Provider runtime: typed backend + auth-method matrix routed through
+// AgentFactory when `AgentBuildConfig.connection_ref` is set. Single
+// canonical path for provider-client construction; the legacy flat
+// `build_llm_client(provider, api_key, base_url)` entry point was removed
+// in Phase 6. ===
+pub mod providers;
+pub mod runtime;
+
+// === Token storage + refresh coordination + OAuth helpers (Phase 4a) ===
+// Non-wasm by construction: filesystem, keyring, and OS lockfile primitives
+// are not available in the browser. WASM-facing auth uses the external
+// resolver seam (Phase 4d.wasm).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod auth_oauth;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod auth_store;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod authorizers;
+
 pub use adapter::LlmClientAdapter;
 pub use block_assembler::{BlockAssembler, BlockKey, StreamAssemblyError};
 pub use error::LlmError;
-pub use factory::{
-    DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClientFactory, LlmProvider,
-};
-pub use provider::ProviderResolver;
+pub use factory::FactoryError;
 pub use realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionEvent, RealtimeSessionFactory,
 };
@@ -70,3 +85,20 @@ pub use openai_realtime_attachment::{
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiClient;
+
+// Provider-runtime re-exports (Phase 2).
+pub use runtime::{
+    DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod, NormalizedBackendKind,
+    ProviderAuthError, ProviderBindingError, ProviderClientError, ProviderRuntime,
+    ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, StaticLease,
+    ValidatedBinding,
+};
+
+#[cfg(feature = "anthropic")]
+pub use providers::anthropic::{
+    AnthropicAuthMethod, AnthropicBackendKind, AnthropicProviderRuntime,
+};
+#[cfg(feature = "gemini")]
+pub use providers::google::{GoogleAuthMethod, GoogleBackendKind, GoogleProviderRuntime};
+#[cfg(feature = "openai")]
+pub use providers::openai::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};

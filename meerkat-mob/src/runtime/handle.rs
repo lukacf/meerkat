@@ -2521,8 +2521,50 @@ impl MobHandle {
 
     /// Wipe all runtime state and transition back to `Running`.
     ///
-    /// Like `destroy()` but keeps the actor alive and transitions to `Running`
-    /// instead of `Destroyed`. The handle remains usable after reset.
+    /// # Scope vs `destroy`
+    ///
+    /// `reset` and [`Self::destroy`] look similar (both wipe runtime
+    /// state, both teardown MCP servers, both append epoch-marker
+    /// events) but they have **deliberately different semantics**:
+    ///
+    /// | aspect               | `reset()`                                          | `destroy()`                                                 |
+    /// |----------------------|----------------------------------------------------|-------------------------------------------------------------|
+    /// | actor                | **stays alive**, transitions to `Running`          | terminates, transitions to `Destroyed`                      |
+    /// | member teardown      | `retire_all_members` (idempotent, all-or-retry)    | `destroy_all_members_for_destroy` (force-fallback, atomic)  |
+    /// | return               | `Result<(), MobError>` — clean or retry            | [`Result<MobDestroyReport, MobDestroyError>`]               |
+    /// | partial outcomes     | retire-idempotent → reissuing reset retries safely | structured report carries force-destroyed / orphaned / errs |
+    /// | event marker         | `MobCreated` + `MobReset` (new epoch, replayable)  | `MobDestroyed` (terminal)                                   |
+    /// | handle usable after? | yes                                                | no                                                          ||
+    ///
+    /// The `()` return is not hiding partial-state information: retire
+    /// is idempotent by construction (see `handle_retire` in
+    /// `actor.rs` — "cleanup errors are best-effort. If any member
+    /// fails to retire the operation is aborted — the caller can retry
+    /// since already-retired members are idempotent"), so on error
+    /// the contract is "retry `reset()`" rather than "read the partial
+    /// outcome from the report." `destroy`'s richer return exists
+    /// because force-fallback produces **genuinely new state**
+    /// (force-destroyed members, orphaned remote bindings that
+    /// couldn't be cleanly dismantled) that the caller needs to see;
+    /// `reset` by design avoids that regime and so has no equivalent
+    /// data to surface.
+    ///
+    /// # Dogma fit (B3)
+    ///
+    /// DELETE_ME finding B3 flagged the divergent return types as an
+    /// API asymmetry. After audit the asymmetry is load-bearing: the
+    /// return types match the underlying member-teardown shape
+    /// (idempotent retire vs force-fallback destroy). Per dogma
+    /// principle #5 ("typed truth, never string folklore") the reset
+    /// return does not need to pretend to carry a report it cannot
+    /// produce; and per principle #1 ("one semantic fact, one
+    /// owner") this matches the single underlying model: the
+    /// teardown path authors the outcome shape, the handle signature
+    /// reflects it. Regression coverage lives in
+    /// `test_reset_clears_roster_events_and_returns_to_running`,
+    /// `test_reset_allows_spawn_after_reset`, and the
+    /// supervisor-escalation reset tests in
+    /// `meerkat-mob/src/runtime/tests.rs`.
     pub async fn reset(&self) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::Reset)

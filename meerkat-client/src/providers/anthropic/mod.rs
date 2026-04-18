@@ -296,22 +296,42 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 }
                 Ok(Arc::new(client))
             }
-            // Bedrock static bearer (AWS_BEARER_TOKEN_BEDROCK) — works over
-            // the Messages API with `Authorization: Bearer`, base URL
-            // supplied by the BackendProfile. BedrockClient (event-stream)
-            // lands in a follow-up; native bearer auth is wire-compatible
-            // with AnthropicClient today.
+            // Bedrock static bearer (AWS_BEARER_TOKEN_BEDROCK) — per
+            // plan §Phase 4b.6 method `bedrock_bearer`, this path
+            // targets the Messages API via base_url override supplied
+            // by the BackendProfile and injects
+            // `Authorization: Bearer <token>`. AnthropicClient's
+            // authorizer seam accepts a StaticBearerAuthorizer for
+            // this pattern — no Bedrock-specific LlmClient needed for
+            // the bearer subpath (the SigV4 subpath uses
+            // AwsStsAuthorizer, which is a separate variant below).
             (AnthropicBackendKind::Bedrock, ShimCredential::Secret(secret)) => {
-                // The Bedrock native API uses an `AWS4-HMAC-SHA256` /
-                // `Bearer` dichotomy; for bearer mode we inject via
-                // Authorization header. AnthropicClient doesn't expose
-                // that directly; Bedrock event-stream parsing is a
-                // separate client. Until it lands, bearer-mode Bedrock
-                // falls through with a typed error.
-                let _ = secret; // intentionally unused until Bedrock client lands
-                Err(ProviderClientError::MissingFeature(
-                    "anthropic-bedrock-client (event-stream parser — tracked)",
-                ))
+                let base_url = connection
+                    .backend_profile
+                    .base_url
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| {
+                        ProviderClientError::InvalidBaseUrl(
+                            "bedrock backend requires BackendProfile.base_url \
+                             (e.g. https://bedrock-runtime.us-east-1.amazonaws.com)"
+                                .to_string(),
+                        )
+                    })?;
+                let authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer> =
+                    std::sync::Arc::new(crate::authorizers::StaticBearerAuthorizer::new(
+                        secret.clone(),
+                        "bedrock-bearer",
+                    ));
+                // Use a placeholder api_key — AnthropicClient with an
+                // authorizer suppresses x-api-key in favor of the
+                // authorizer-injected Authorization header.
+                let client = crate::anthropic::AnthropicClient::builder(String::new())
+                    .authorizer(authorizer)
+                    .base_url(base_url)
+                    .build()
+                    .map_err(ProviderClientError::ClientInit)?;
+                Ok(Arc::new(client))
             }
             // Dynamic authorizer flows: Vertex (Google Bearer), Foundry
             // Azure AD (Bearer), Bedrock SigV4. AnthropicClient supports

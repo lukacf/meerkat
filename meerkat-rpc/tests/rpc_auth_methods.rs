@@ -10,7 +10,7 @@
 //! and returns either a `result` or `error` envelope with a matching
 //! `id`.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_rpc::protocol::RpcRequest;
 use serde_json::{Value, json};

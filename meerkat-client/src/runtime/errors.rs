@@ -60,6 +60,8 @@ pub enum ProviderClientError {
     NoCredentialMaterial,
     #[error("dynamic authorizer requires Phase 3 owned HTTP path")]
     DynamicAuthorizerNotYetSupportedInShimMode,
+    #[error("invalid base_url: {0}")]
+    InvalidBaseUrl(String),
 }
 
 #[cfg(test)]

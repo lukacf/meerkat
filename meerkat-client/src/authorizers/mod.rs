@@ -20,6 +20,7 @@ pub mod aws;
 pub mod azure;
 #[cfg(feature = "google-oauth")]
 pub mod google;
+pub mod static_bearer;
 
 #[cfg(feature = "aws-auth")]
 pub use aws::{AwsAuthError, AwsCredentialProvider, AwsStsAuthorizer};
@@ -27,3 +28,4 @@ pub use aws::{AwsAuthError, AwsCredentialProvider, AwsStsAuthorizer};
 pub use azure::{AzureAdAuthorizer, AzureAuthError, AzureClientCredentials};
 #[cfg(feature = "google-oauth")]
 pub use google::{GoogleAuthAuthorizer, GoogleAuthChain, GoogleAuthError};
+pub use static_bearer::StaticBearerAuthorizer;

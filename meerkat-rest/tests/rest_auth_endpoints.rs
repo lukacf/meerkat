@@ -10,7 +10,12 @@
 //! dispatches, and returns a structured response.
 
 #![cfg(feature = "integration-real-tests")]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_clone,
+    clippy::map_unwrap_or
+)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -209,7 +214,7 @@ async fn create_auth_profile_accepts_valid_body() {
     if !bytes.is_empty() {
         // If the body looks like JSON, it must parse.
         let trimmed = bytes.iter().position(|b| !b.is_ascii_whitespace());
-        if trimmed.map_or(false, |i| matches!(bytes[i], b'{' | b'[' | b'"')) {
+        if trimmed.is_some_and(|i| matches!(bytes[i], b'{' | b'[' | b'"')) {
             let _parsed: Value =
                 serde_json::from_slice(&bytes).expect("JSON-shaped body must parse");
         }

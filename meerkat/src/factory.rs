@@ -1816,6 +1816,29 @@ impl AgentFactory {
                             }
                         })?;
                     provider = connection.provider;
+
+                    // Phase 1.5-rev loop closure — refresh-loop middle:
+                    // The DSL tracks per-binding auth lifecycle state.
+                    // On successful resolve, record the lease's expiry
+                    // in the DSL so the runner's CallingLlm arm can
+                    // observe `valid` / `expiring` / `reauth_required`
+                    // states for this binding. Connects the resolver
+                    // side to the state the agent runner consults.
+                    if let RuntimeBuildMode::SessionOwned(bindings) =
+                        &build_config.runtime_build_mode
+                    {
+                        let binding_key = format!("{}:{}", realm.realm_id, binding_id);
+                        let expires_at = connection
+                            .auth_lease
+                            .expires_at()
+                            .map(|ts| ts.timestamp().max(0) as u64)
+                            .unwrap_or(u64::MAX);
+                        // Ignore result: the DSL may reject if an earlier
+                        // hot-swap already transitioned this binding; the
+                        // lease state is orthogonal to error semantics.
+                        let _ = bindings.auth_lease.acquire_lease(&binding_key, expires_at);
+                    }
+
                     provider_registry
                         .build_client(connection)
                         .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?

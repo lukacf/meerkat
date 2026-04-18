@@ -14,11 +14,12 @@ pub enum FactoryError {
     #[error("Unsupported provider: {0}")]
     UnsupportedProvider(String),
 
-    /// API key is missing for the requested provider
-    #[error("Missing API key for provider: {0}")]
-    MissingApiKey(String),
-
-    /// Client creation failed
+    /// Client creation failed (including missing credentials).
+    ///
+    /// Phase 6.3 collapsed the legacy `MissingApiKey(provider)` variant
+    /// into this broader failure variant; producers emit a message of
+    /// the form "Missing API key for provider: <p>" when credentials
+    /// are absent, preserving downstream text-based error parsing.
     #[error("Failed to create client: {0}")]
     ClientCreationFailed(String),
 }
@@ -224,7 +225,11 @@ impl LlmClientFactory for DefaultClientFactory {
         match provider {
             #[cfg(feature = "anthropic")]
             LlmProvider::Anthropic => {
-                let key = key.ok_or_else(|| FactoryError::MissingApiKey("anthropic".into()))?;
+                let key = key.ok_or_else(|| {
+                    FactoryError::ClientCreationFailed(
+                        "Missing API key for provider: anthropic".into(),
+                    )
+                })?;
                 let mut client = crate::AnthropicClient::new(key)
                     .map_err(|e| FactoryError::UnsupportedProvider(e.to_string()))?;
                 if let Some(base_url) = self.config.get_base_url(provider) {
@@ -239,7 +244,11 @@ impl LlmClientFactory for DefaultClientFactory {
 
             #[cfg(feature = "openai")]
             LlmProvider::OpenAi => {
-                let key = key.ok_or_else(|| FactoryError::MissingApiKey("openai".into()))?;
+                let key = key.ok_or_else(|| {
+                    FactoryError::ClientCreationFailed(
+                        "Missing API key for provider: openai".into(),
+                    )
+                })?;
                 let mut client = crate::OpenAiClient::new(key);
                 if let Some(base_url) = self.config.get_base_url(provider) {
                     client = client.with_base_url(base_url.to_string());
@@ -253,7 +262,11 @@ impl LlmClientFactory for DefaultClientFactory {
 
             #[cfg(feature = "gemini")]
             LlmProvider::Gemini => {
-                let key = key.ok_or_else(|| FactoryError::MissingApiKey("gemini".into()))?;
+                let key = key.ok_or_else(|| {
+                    FactoryError::ClientCreationFailed(
+                        "Missing API key for provider: gemini".into(),
+                    )
+                })?;
                 let mut client = crate::GeminiClient::new(key);
                 if let Some(base_url) = self.config.get_base_url(provider) {
                     client = client.with_base_url(base_url.to_string());
@@ -390,7 +403,13 @@ mod tests {
         // In CI without keys, this should fail
         if std::env::var("ANTHROPIC_API_KEY").is_err() {
             #[cfg(feature = "anthropic")]
-            assert!(matches!(result, Err(FactoryError::MissingApiKey(_))));
+            match result {
+                Ok(_) => panic!("expected missing-key error"),
+                Err(FactoryError::ClientCreationFailed(ref m)) => {
+                    assert!(m.contains("Missing API key"), "unexpected message: {m}");
+                }
+                Err(other) => panic!("wrong error variant: {other}"),
+            }
         }
     }
 
@@ -412,8 +431,12 @@ mod tests {
         let err = FactoryError::UnsupportedProvider("test".into());
         assert_eq!(err.to_string(), "Unsupported provider: test");
 
-        let err = FactoryError::MissingApiKey("anthropic".into());
-        assert_eq!(err.to_string(), "Missing API key for provider: anthropic");
+        let err =
+            FactoryError::ClientCreationFailed("Missing API key for provider: anthropic".into());
+        assert_eq!(
+            err.to_string(),
+            "Failed to create client: Missing API key for provider: anthropic"
+        );
 
         let err = FactoryError::ClientCreationFailed("timeout".into());
         assert_eq!(err.to_string(), "Failed to create client: timeout");

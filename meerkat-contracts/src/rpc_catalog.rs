@@ -359,6 +359,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Rotate the supervisor bridge for all members of a mob",
             ),
             RpcMethodDescriptor::basic(
+                "mob/submit_work",
+                "Submit a unit of work to a mob member through the work lane",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/cancel_work",
+                "Cancel a previously submitted unit of work",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/cancel_all_work",
+                "Cancel all in-flight work for a mob member",
+            ),
+            RpcMethodDescriptor::basic(
                 "mob/wait_kickoff",
                 "Wait for kickoff completion for a member",
             ),

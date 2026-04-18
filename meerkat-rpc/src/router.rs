@@ -923,6 +923,18 @@ impl MethodRouter {
                 handlers::mob::handle_rotate_supervisor(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/submit_work" => {
+                handlers::mob::handle_submit_work(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/cancel_work" => {
+                handlers::mob::handle_cancel_work(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/cancel_all_work" => {
+                handlers::mob::handle_cancel_all_work(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/wait_kickoff" => {
                 handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
             }

@@ -1170,6 +1170,72 @@ export class MeerkatClient {
     return result;
   }
 
+  /**
+   * Submit a unit of work to a mob member through the work lane.
+   * Wraps the `mob/submit_work` RPC (DELETE_ME C4). Work lane was
+   * Rust-only prior to this; `origin` is `"external"` for
+   * user-originated turns and `"internal"` for mob-orchestration work.
+   * When `workRef` is omitted the server generates a fresh UUID.
+   */
+  async mobSubmitWork(args: {
+    mobId: string;
+    agentIdentity: string;
+    generation: number;
+    fenceToken: number;
+    content: unknown;
+    workRef?: string;
+    origin?: "external" | "internal";
+  }): Promise<{ mobId: string; workRef: string; agentRuntimeId: unknown }> {
+    const params: Record<string, unknown> = {
+      mob_id: args.mobId,
+      agent_identity: args.agentIdentity,
+      generation: args.generation,
+      fence_token: args.fenceToken,
+      content: args.content,
+      origin: args.origin ?? "external",
+    };
+    if (args.workRef !== undefined) {
+      params.work_ref = args.workRef;
+    }
+    const result = await this.request("mob/submit_work", params);
+    return {
+      mobId: String(result.mob_id ?? args.mobId),
+      workRef: String(result.work_ref ?? ""),
+      agentRuntimeId: result.agent_runtime_id,
+    };
+  }
+
+  /**
+   * Cancel a previously submitted unit of work.
+   * Wraps the `mob/cancel_work` RPC (DELETE_ME C4).
+   */
+  async mobCancelWork(mobId: string, workRef: string): Promise<{ ok: boolean }> {
+    const result = await this.request("mob/cancel_work", {
+      mob_id: mobId,
+      work_ref: workRef,
+    });
+    return { ok: Boolean(result.ok ?? false) };
+  }
+
+  /**
+   * Cancel all in-flight work for a specific mob member.
+   * Wraps the `mob/cancel_all_work` RPC (DELETE_ME C4).
+   */
+  async mobCancelAllWork(args: {
+    mobId: string;
+    agentIdentity: string;
+    generation: number;
+    fenceToken: number;
+  }): Promise<{ ok: boolean }> {
+    const result = await this.request("mob/cancel_all_work", {
+      mob_id: args.mobId,
+      agent_identity: args.agentIdentity,
+      generation: args.generation,
+      fence_token: args.fenceToken,
+    });
+    return { ok: Boolean(result.ok ?? false) };
+  }
+
   async waitMobKickoff(
     mobId: string,
     options?: MobKickoffWaitOptions,

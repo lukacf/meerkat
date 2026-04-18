@@ -95,6 +95,7 @@ pub use runtime::{
     MobHandle, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobSessionService, MobState, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport,
     SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;

@@ -818,6 +818,48 @@ impl MobMcpState {
             .await
     }
 
+    /// Submit a unit of work to a mob member through the work-lane.
+    ///
+    /// Thin wrapper over [`meerkat_mob::MobHandle::submit_work`] for the
+    /// mob-surface crate. Finding C4 — the work-lane Rust API
+    /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
+    /// this exposes it to RPC/HTTP consumers such as mobkit.
+    pub async fn mob_submit_work(
+        &self,
+        mob_id: &MobId,
+        runtime_id: meerkat_mob::AgentRuntimeId,
+        fence_token: meerkat_mob::FenceToken,
+        work_ref: meerkat_mob::WorkRef,
+        spec: meerkat_mob::WorkSpec,
+    ) -> Result<meerkat_mob::WorkDeliveryReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .submit_work(runtime_id, fence_token, work_ref, spec)
+            .await
+    }
+
+    /// Cancel a previously submitted unit of work. Finding C4.
+    pub async fn mob_cancel_work(
+        &self,
+        mob_id: &MobId,
+        work_ref: meerkat_mob::WorkRef,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id).await?.cancel_work(work_ref).await
+    }
+
+    /// Cancel all in-flight work for a specific mob member. Finding C4.
+    pub async fn mob_cancel_all_work(
+        &self,
+        mob_id: &MobId,
+        runtime_id: meerkat_mob::AgentRuntimeId,
+        fence_token: meerkat_mob::FenceToken,
+    ) -> Result<(), MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .cancel_all_work(runtime_id, fence_token)
+            .await
+    }
+
     pub async fn mob_list_flows(&self, mob_id: &MobId) -> Result<Vec<String>, MobError> {
         let flows = self.handle_for(mob_id).await?.list_flows();
         Ok(flows

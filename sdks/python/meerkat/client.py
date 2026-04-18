@@ -1553,6 +1553,67 @@ class MeerkatClient:
         """
         return await self._request("mob/rotate_supervisor", {"mob_id": mob_id})
 
+    async def mob_submit_work(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        generation: int,
+        fence_token: int,
+        content: Any,
+        *,
+        work_ref: str | None = None,
+        origin: str = "external",
+    ) -> dict[str, Any]:
+        """Submit a unit of work to a mob member through the work lane.
+
+        Wraps the ``mob/submit_work`` RPC (DELETE_ME C4). The work lane
+        was Rust-only prior to this; ``origin`` is ``"external"`` for
+        user-originated turns and ``"internal"`` for mob-orchestration
+        work. When ``work_ref`` is omitted the server generates a fresh
+        UUID.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "agent_identity": agent_identity,
+            "generation": generation,
+            "fence_token": fence_token,
+            "content": content,
+            "origin": origin,
+        }
+        if work_ref is not None:
+            params["work_ref"] = work_ref
+        return await self._request("mob/submit_work", params)
+
+    async def mob_cancel_work(self, mob_id: str, work_ref: str) -> dict[str, Any]:
+        """Cancel a previously submitted unit of work.
+
+        Wraps the ``mob/cancel_work`` RPC (DELETE_ME C4).
+        """
+        return await self._request(
+            "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}
+        )
+
+    async def mob_cancel_all_work(
+        self,
+        mob_id: str,
+        agent_identity: str,
+        generation: int,
+        fence_token: int,
+    ) -> dict[str, Any]:
+        """Cancel all in-flight work for a specific mob member.
+
+        Wraps the ``mob/cancel_all_work`` RPC (DELETE_ME C4).
+        """
+        return await self._request(
+            "mob/cancel_all_work",
+            {
+                "mob_id": mob_id,
+                "agent_identity": agent_identity,
+                "generation": generation,
+                "fence_token": fence_token,
+            },
+        )
+
     async def append_mob_system_context(
         self,
         mob_id: str,

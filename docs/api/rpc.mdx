@@ -107,6 +107,9 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/snapshot` | Mob | Point-in-time aggregate of mob status plus member list (mob feature) |
 | `mob/destroy` | Mob | Destroy a mob and surface the structured MobDestroyReport (mob feature) |
 | `mob/rotate_supervisor` | Mob | Rotate the supervisor bridge for all members of a mob (mob feature) |
+| `mob/submit_work` | Mob | Submit a unit of work to a mob member through the work lane (mob feature) |
+| `mob/cancel_work` | Mob | Cancel a previously submitted unit of work (mob feature) |
+| `mob/cancel_all_work` | Mob | Cancel all in-flight work for a mob member (mob feature) |
 | `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
 | `mob/profile/create` | Mob | Create a realm-scoped mob profile (mob feature) |
 | `mob/profile/get` | Mob | Read a realm-scoped mob profile (mob feature) |

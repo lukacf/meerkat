@@ -1117,6 +1117,152 @@ pub async fn handle_rotate_supervisor(
 }
 
 // ---------------------------------------------------------------------------
+// mob/submit_work, mob/cancel_work, mob/cancel_all_work (Finding C4)
+// ---------------------------------------------------------------------------
+//
+// Exposes the work lane (previously Rust-only) through JSON-RPC so mobkit
+// and other non-Rust consumers can submit / cancel work.
+
+#[derive(Debug, Deserialize)]
+pub struct MobSubmitWorkParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub generation: u64,
+    pub fence_token: u64,
+    /// Optional caller-supplied work reference. When absent the server
+    /// generates a fresh UUID.
+    #[serde(default)]
+    pub work_ref: Option<String>,
+    pub content: ContentInput,
+    /// One of `"external"` or `"internal"`. Defaults to `"external"` when
+    /// omitted — matches the dominant mob work-lane usage (user-originated
+    /// turns into a mob member).
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobCancelWorkParams {
+    pub mob_id: String,
+    pub work_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobCancelAllWorkParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub generation: u64,
+    pub fence_token: u64,
+}
+
+pub async fn handle_submit_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobSubmitWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    let generation = meerkat_mob::Generation::new(params.generation);
+    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity.clone(), generation);
+    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    let work_ref = match params.work_ref {
+        Some(ref s) if !s.is_empty() => match meerkat_mob::WorkRef::from_str(s) {
+            Ok(wr) => wr,
+            Err(err) => {
+                return invalid_params(id, format!("work_ref must be a valid UUID: {err}"));
+            }
+        },
+        _ => meerkat_mob::WorkRef::new(),
+    };
+    let origin = match params.origin.as_deref().unwrap_or("external") {
+        "external" => meerkat_mob::WorkOrigin::External,
+        "internal" => meerkat_mob::WorkOrigin::Internal,
+        other => {
+            return invalid_params(
+                id,
+                format!("origin must be 'external' or 'internal', got: {other}"),
+            );
+        }
+    };
+    let spec = meerkat_mob::WorkSpec::new(params.content, origin);
+    match state
+        .mob_submit_work(&mob_id, runtime_id, fence_token, work_ref, spec)
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "mob_id": mob_id,
+                "work_ref": receipt.work_ref.to_string(),
+                "agent_runtime_id": WireAgentRuntimeId {
+                    identity: receipt.runtime_id.identity.to_string(),
+                    generation: receipt.runtime_id.generation.get(),
+                },
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_cancel_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobCancelWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let work_ref = match meerkat_mob::WorkRef::from_str(&params.work_ref) {
+        Ok(wr) => wr,
+        Err(err) => {
+            return invalid_params(id, format!("work_ref must be a valid UUID: {err}"));
+        }
+    };
+    match state.mob_cancel_work(&mob_id, work_ref).await {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_cancel_all_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobCancelAllWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    let generation = meerkat_mob::Generation::new(params.generation);
+    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity, generation);
+    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    match state
+        .mob_cancel_all_work(&mob_id, runtime_id, fence_token)
+        .await
+    {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/member_status
 // ---------------------------------------------------------------------------
 

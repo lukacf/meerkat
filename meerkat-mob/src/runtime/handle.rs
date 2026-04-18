@@ -587,7 +587,14 @@ pub struct SpawnMemberSpec {
     /// Application-defined labels for this member.
     pub labels: Option<std::collections::BTreeMap<String, String>>,
     /// How this member should be launched (fresh, resume, or fork).
-    pub(crate) launch_mode: crate::launch::MemberLaunchMode,
+    ///
+    /// Public spawn-policy seam (DELETE_ME A3 + C1): external consumers
+    /// use [`Self::with_launch_mode`] /
+    /// [`Self::with_resume_bridge_session_id`] to configure session
+    /// adoption. See [`crate::launch::MemberLaunchMode`] for the
+    /// variants and [`crate::launch::ForkContext`] for fork
+    /// configuration.
+    pub launch_mode: crate::launch::MemberLaunchMode,
     /// Tool access policy for this member.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// How to split budget from the orchestrator to this member.
@@ -665,17 +672,28 @@ impl SpawnMemberSpec {
     }
 
     /// Set launch mode to resume an existing bridge session.
-    pub(crate) fn with_resume_bridge_session_id(
-        mut self,
-        id: meerkat_core::types::SessionId,
-    ) -> Self {
+    ///
+    /// DELETE_ME A3 + C1: public session-adoption seam. Callers holding
+    /// a bridge session id (for example from a prior
+    /// [`crate::runtime::MobHandle::resolve_bridge_session_id`] lookup
+    /// or from durable mob-event replay) use this builder method to
+    /// spawn a member whose backing session continues that binding
+    /// instead of starting fresh.
+    pub fn with_resume_bridge_session_id(mut self, id: meerkat_core::types::SessionId) -> Self {
         self.launch_mode = crate::launch::MemberLaunchMode::Resume {
             bridge_session_id: id,
         };
         self
     }
 
-    pub(crate) fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
+    /// Set an explicit [`crate::launch::MemberLaunchMode`].
+    ///
+    /// DELETE_ME A3 + C1: public session-adoption seam for callers that
+    /// construct their own `MemberLaunchMode` value (e.g. fork-from-
+    /// sibling with a caller-chosen [`crate::launch::ForkContext`]).
+    /// For the common "resume a specific bridge session" case prefer
+    /// [`Self::with_resume_bridge_session_id`].
+    pub fn with_launch_mode(mut self, mode: crate::launch::MemberLaunchMode) -> Self {
         self.launch_mode = mode;
         self
     }

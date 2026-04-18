@@ -66,7 +66,7 @@ pub use ids::{
     LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin, WorkRef,
     WorkSpec,
 };
-pub use launch::{BudgetSplitPolicy, ForkContext};
+pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
 pub use mob_machine::canonical_mob_machine_command_manifest;
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};

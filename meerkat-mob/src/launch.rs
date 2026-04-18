@@ -12,10 +12,25 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 
 /// How a mob member should be launched.
+///
+/// Public spawn-policy enum exposed so that external consumers of
+/// [`crate::runtime::SpawnMemberSpec`] can configure session adoption
+/// (resume an existing bridge session, fork from a sibling member's
+/// history) without reaching into `pub(crate)` internals.
+///
+/// `Fork::source_member_id` is typed as [`MeerkatId`] to match the
+/// legacy DSL identifier carried inside
+/// [`crate::mob_machine::MobMachineCommand`] variants. End-user code
+/// holding an `AgentIdentity` can convert directly via
+/// `MeerkatId::from(&identity)` — see DELETE_ME A5 (identity-first
+/// hot-path conversions). Full DSL-schema migration to
+/// `AgentIdentity` is tracked separately; until then, the public
+/// spawn-policy surface accepts `MeerkatId` for consistency with
+/// every other DSL-command-bearing field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
-pub(crate) enum MemberLaunchMode {
+pub enum MemberLaunchMode {
     /// Start with a brand-new session (default).
     #[default]
     Fresh,
@@ -33,7 +48,9 @@ pub(crate) enum MemberLaunchMode {
 }
 
 impl MemberLaunchMode {
-    pub(crate) fn resume_bridge_session_id(&self) -> Option<&SessionId> {
+    /// If this launch mode resumes an existing bridge session, return
+    /// the session id. Returns `None` for `Fresh` and `Fork` modes.
+    pub fn resume_bridge_session_id(&self) -> Option<&SessionId> {
         match self {
             Self::Resume { bridge_session_id } => Some(bridge_session_id),
             _ => None,
@@ -95,5 +112,56 @@ mod tests {
             serde_json::from_value(payload).expect("resume launch mode should deserialize");
 
         assert_eq!(mode.resume_bridge_session_id(), Some(&sid));
+    }
+
+    /// DELETE_ME A3 + C1 regression: `MemberLaunchMode` and its variants
+    /// (Fresh, Resume, Fork) must be reachable from outside the crate
+    /// so external consumers can configure session adoption without
+    /// reaching into `pub(crate)` internals. This test exercises each
+    /// variant at the public API level — if anyone ever re-hides the
+    /// enum or its constructors, this fails to compile instead of
+    /// breaking downstream crates silently.
+    #[test]
+    fn member_launch_mode_public_seam_covers_all_variants() {
+        use crate::ids::MeerkatId;
+
+        // Fresh is the default.
+        let fresh = MemberLaunchMode::default();
+        assert!(fresh.resume_bridge_session_id().is_none());
+
+        // Resume carries a SessionId; accessor exposed as pub.
+        let sid = SessionId::new();
+        let resume = MemberLaunchMode::Resume {
+            bridge_session_id: sid.clone(),
+        };
+        assert_eq!(resume.resume_bridge_session_id(), Some(&sid));
+
+        // Fork carries a source member id (+ fork context). ForkContext
+        // variants are both reachable — FullHistory (default) and
+        // LastMessages { count }.
+        let fork_full = MemberLaunchMode::Fork {
+            source_member_id: MeerkatId::from("lead"),
+            fork_context: ForkContext::default(),
+        };
+        assert!(fork_full.resume_bridge_session_id().is_none());
+
+        let fork_last = MemberLaunchMode::Fork {
+            source_member_id: MeerkatId::from("lead"),
+            fork_context: ForkContext::LastMessages { count: 5 },
+        };
+        assert!(fork_last.resume_bridge_session_id().is_none());
+
+        // Round-trip serde on all three shapes to catch accidental
+        // `#[serde(skip)]` or visibility regressions on constructor
+        // fields.
+        for mode in [fresh, resume, fork_full, fork_last] {
+            let encoded = serde_json::to_value(&mode).expect("mode serializes");
+            let decoded: MemberLaunchMode =
+                serde_json::from_value(encoded).expect("mode roundtrips");
+            assert_eq!(
+                mode.resume_bridge_session_id().is_some(),
+                decoded.resume_bridge_session_id().is_some(),
+            );
+        }
     }
 }

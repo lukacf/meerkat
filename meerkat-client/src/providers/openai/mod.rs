@@ -271,10 +271,35 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                  — registry dispatch invariant violated"
             ),
         };
+        // Authorizer-backed path (ExternalAuthorizer→DynamicAuthorizer
+        // envelope). Wire through OpenAiClient.with_authorizer so the
+        // request uses HttpAuthorizer::authorize for headers rather
+        // than Authorization: Bearer <api_key>.
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(connection.shim_credential, ShimCredential::Authorizer) {
+            let authorizer = match connection.auth_lease.kind() {
+                meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => auth.clone(),
+                other => unreachable!(
+                    "OpenAi ShimCredential::Authorizer requires DynamicAuthorizer \
+                     lease kind, got {other:?} — resolver invariant violated"
+                ),
+            };
+            let base_url = connection
+                .backend_profile
+                .base_url
+                .clone()
+                .unwrap_or_else(|| backend_kind.default_base_url().into());
+            let client =
+                crate::openai::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
+                    .with_authorizer(authorizer);
+            return Ok(Arc::new(client));
+        }
         let secret = match connection.shim_credential {
             ShimCredential::Secret(s) => s,
             ShimCredential::Authorizer => {
-                return Err(ProviderClientError::DynamicAuthorizerNotYetSupportedInShimMode);
+                return Err(ProviderClientError::MissingFeature(
+                    "openai-authorizer-backed auth not available on wasm32",
+                ));
             }
             ShimCredential::None => return Err(ProviderClientError::NoCredentialMaterial),
         };

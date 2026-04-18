@@ -27,6 +27,11 @@ pub struct OpenAiClient {
     /// backend is the ChatGPT backend and the OAuth token's JWT carries
     /// identity claims per Codex `bearer_auth_provider.rs:23-38`.
     extra_headers: Vec<(String, String)>,
+    /// Dynamic authorizer — when set, replaces the `Authorization:
+    /// Bearer <api_key>` header path with `HttpAuthorizer::authorize`
+    /// invocation. Used for ExternalAuthorizer flows that produce a
+    /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
+    authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
 impl OpenAiClient {
@@ -85,6 +90,7 @@ impl OpenAiClient {
             base_url,
             http,
             extra_headers: Vec::new(),
+            authorizer: None,
         }
     }
 
@@ -94,6 +100,18 @@ impl OpenAiClient {
     /// `X-OpenAI-Fedramp` here.
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
+        self
+    }
+
+    /// Attach a dynamic authorizer. When set, overrides the
+    /// `Authorization: Bearer <api_key>` path on every request with
+    /// `HttpAuthorizer::authorize`. Extra headers (ChatGPT-Account-ID
+    /// etc.) still flow through unchanged.
+    pub fn with_authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
         self
     }
 
@@ -409,11 +427,28 @@ impl LlmClient for OpenAiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
 
+            let endpoint = format!("{}/v1/responses", self.base_url);
             let mut request_builder = self
                 .http
-                .post(format!("{}/v1/responses", self.base_url))
+                .post(&endpoint)
                 .header("Content-Type", "application/json");
-            if let Some(api_key) = &self.api_key {
+            // Auth path: authorizer overrides Bearer<api_key>.
+            if let Some(authorizer) = &self.authorizer {
+                let mut extra: Vec<(String, String)> = Vec::new();
+                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                    method: "POST",
+                    url: &endpoint,
+                    headers: &mut extra,
+                };
+                authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                    LlmError::AuthenticationFailed {
+                        message: format!("openai authorizer failed: {e}"),
+                    }
+                })?;
+                for (name, value) in extra {
+                    request_builder = request_builder.header(name, value);
+                }
+            } else if let Some(api_key) = &self.api_key {
                 request_builder =
                     request_builder.header("Authorization", format!("Bearer {api_key}"));
             }

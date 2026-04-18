@@ -445,9 +445,36 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     "vertex-backend with authorizer-backed auth not available on wasm32",
                 ))
             }
-            (_, ShimCredential::Authorizer) => {
-                Err(ProviderClientError::DynamicAuthorizerNotYetSupportedInShimMode)
+            // AnthropicApi + ExternalAuthorizer producing a
+            // DynamicAuthorizer envelope lands here. Wire through the
+            // authorizer seam same as Vertex/Foundry.
+            #[cfg(not(target_arch = "wasm32"))]
+            (AnthropicBackendKind::AnthropicApi, ShimCredential::Authorizer) => {
+                let authorizer = match connection.auth_lease.kind() {
+                    meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => auth.clone(),
+                    other => unreachable!(
+                        "AnthropicApi ShimCredential::Authorizer requires DynamicAuthorizer \
+                         lease kind, got {other:?} — resolver invariant violated"
+                    ),
+                };
+                let base_url = connection
+                    .backend_profile
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| {
+                        AnthropicBackendKind::AnthropicApi.default_base_url().into()
+                    });
+                let client = crate::anthropic::AnthropicClient::builder(String::new())
+                    .authorizer(authorizer)
+                    .base_url(base_url)
+                    .build()
+                    .map_err(ProviderClientError::ClientInit)?;
+                Ok(Arc::new(client))
             }
+            #[cfg(target_arch = "wasm32")]
+            (_, ShimCredential::Authorizer) => Err(ProviderClientError::MissingFeature(
+                "authorizer-backed auth not available on wasm32",
+            )),
             (_, ShimCredential::None) => Err(ProviderClientError::NoCredentialMaterial),
         }
     }

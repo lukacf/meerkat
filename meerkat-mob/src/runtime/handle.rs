@@ -471,12 +471,9 @@ pub enum PeerTarget {
     External(TrustedPeerSpec),
 }
 
-impl From<MeerkatId> for PeerTarget {
-    fn from(value: MeerkatId) -> Self {
-        Self::Local(AgentIdentity::from(value.as_str()))
-    }
-}
-
+// DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias
+// for `AgentIdentity`, so the two `From<...> for PeerTarget` impls
+// that used to exist collapse into one.
 impl From<AgentIdentity> for PeerTarget {
     fn from(value: AgentIdentity) -> Self {
         Self::Local(value)

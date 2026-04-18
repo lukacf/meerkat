@@ -113,10 +113,28 @@ string_newtype!(
     TaskId
 );
 
-string_newtype!(
-    /// Unique identifier for a meerkat (agent instance) within a mob.
-    MeerkatId
-);
+/// Legacy carrier-name alias for [`AgentIdentity`].
+///
+/// DELETE_ME A5 DSL-schema migration: the 0.6 identity-first cascade
+/// unifies the "member identifier string" fact under a single type.
+/// `MeerkatId` was a separate `string_newtype!` wrapper over `String`,
+/// structurally identical to `AgentIdentity` but nominally distinct —
+/// that was parallel truth under dogma principle #1 ("one semantic
+/// fact, one owner").
+///
+/// Collapsing the type (`pub type MeerkatId = AgentIdentity;`) unifies
+/// the ownership without forcing a rename of every generated DSL
+/// command variant field (`Retire { meerkat_id }`, `Wire { local }`,
+/// etc.) in a single pass — those field names are now just aliases
+/// that read as `AgentIdentity`. Follow-up passes can rename the
+/// fields to `agent_identity` incrementally without breaking the
+/// type-level invariant.
+///
+/// Existing call sites that used `MeerkatId::from(s)` still work
+/// (forwarded to `AgentIdentity::from(s)`). Existing
+/// `impl From<AgentIdentity> for MeerkatId` / `From<&AgentIdentity>`
+/// impls become reflexive conversions that rustc auto-provides.
+pub type MeerkatId = AgentIdentity;
 
 string_newtype!(
     /// Profile name within a mob definition.
@@ -155,43 +173,18 @@ string_newtype!(
     AgentIdentity
 );
 
-/// Bridge conversion from legacy MeerkatId to AgentIdentity.
-impl From<MeerkatId> for AgentIdentity {
-    fn from(id: MeerkatId) -> Self {
-        Self::from(id.as_str())
-    }
-}
-
-/// Bridge conversion from identity-first [`AgentIdentity`] to the legacy
-/// [`MeerkatId`] carrier used by generated DSL commands.
-///
-/// Both types wrap the same underlying `String`; conversion is a single
-/// reallocation via [`string_newtype!`]'s `From<&str>` impl. This impl
-/// exists so hot-path shell code can write
-/// `MeerkatId::from(&agent_identity)` directly instead of the
-/// `.as_str()` round-trip pattern that DELETE_ME finding A5 flagged.
-///
-/// # Migration status (A5)
-///
-/// `MeerkatId` is still the identifier carried inside generated
-/// [`MobMachineCommand`](crate::mob_machine::MobMachineCommand) variants
-/// (`Retire { meerkat_id }`, `Wire { local, … }`, `InternalTurn`,
-/// `ExternalTurn`, `RecordOperatorActionProvenance`, etc.) because the
-/// DSL schema has not yet been flipped to `AgentIdentity`. The full
-/// migration — schema update + kernel regeneration + handler retyping —
-/// is tracked for a dedicated cycle per the 0.6 identity-first plan.
-/// Until then, both types are load-bearing representations of the same
-/// member-identifier string fact; this impl keeps the shell code free
-/// of `.as_str()` string gymnastics and lets future migration replace
-/// call sites one at a time without rewriting every caller.
-impl From<&AgentIdentity> for MeerkatId {
+// DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias
+// for `AgentIdentity` (declared above the `AgentIdentity` definition
+// at the top of the "identity-first" section). The previous explicit
+// `From<MeerkatId> for AgentIdentity` / `From<AgentIdentity> for
+// MeerkatId` bridges become reflexive `impl<T> From<T> for T`
+// (auto-provided by core), so they are no longer defined here.
+// Shell-hot-path borrowed conversion `MeerkatId::from(&identity)` is
+// preserved because `AgentIdentity: From<&AgentIdentity>` is an impl
+// we provide below (via the shared string-newtype macro's `From<&str>`
+// plus `AsRef<str>`).
+impl From<&AgentIdentity> for AgentIdentity {
     fn from(identity: &AgentIdentity) -> Self {
-        Self::from(identity.as_str())
-    }
-}
-
-impl From<AgentIdentity> for MeerkatId {
-    fn from(identity: AgentIdentity) -> Self {
         Self::from(identity.as_str())
     }
 }
@@ -462,20 +455,26 @@ mod tests {
         assert_eq!(decoded, id);
     }
 
-    /// DELETE_ME A5 regression: identity-first hot paths must not
-    /// string-round-trip through `.as_str()` to get from
-    /// `AgentIdentity` to the legacy `MeerkatId` carried by generated
-    /// DSL commands. The `From<AgentIdentity>` and `From<&AgentIdentity>`
-    /// impls are the migration boundary; this test pins that they
-    /// preserve the underlying string-identity fact so future callers
-    /// can trust the conversion to be a representation change, not a
-    /// semantic transformation.
+    /// DELETE_ME A5 regression: identity-first hot paths and the
+    /// DSL-schema migration unify under a single type.
+    ///
+    /// Originally `MeerkatId` and `AgentIdentity` were two distinct
+    /// `string_newtype!` wrappers, and this test pinned that the
+    /// shell conversion between them preserved the underlying string
+    /// without semantic change. Post-A5-DSL-migration `MeerkatId` is
+    /// a type alias for `AgentIdentity`, so "conversion" is now a
+    /// no-op at the type level — there is only one owner of the
+    /// member-identifier-string fact. The test stays to pin the
+    /// invariant that `MeerkatId::from("…").as_str()` round-trips to
+    /// the expected string on both the owned and borrowed shell-hot
+    /// paths (`MeerkatId::from(&identity)`) and that the two names
+    /// continue to refer to the same value identity.
     #[test]
     fn agent_identity_to_meerkat_id_conversion_preserves_identity_string() {
         let identity = AgentIdentity::from("singer");
 
-        // Owned conversion.
-        let by_owned: MeerkatId = identity.clone().into();
+        // Owned conversion (now a type-level no-op).
+        let by_owned: MeerkatId = identity.clone();
         assert_eq!(by_owned.as_str(), "singer");
 
         // Borrowed conversion — the hot-path shape used by
@@ -483,9 +482,10 @@ mod tests {
         let by_borrow: MeerkatId = (&identity).into();
         assert_eq!(by_borrow.as_str(), "singer");
 
-        // Round trip through MeerkatId → AgentIdentity must return the
-        // same identity string.
-        let back: AgentIdentity = by_owned.into();
+        // Round trip: MeerkatId and AgentIdentity are the same type
+        // post-A5-DSL-migration, so equality compares the shared
+        // newtype value.
+        let back: AgentIdentity = by_owned;
         assert_eq!(back, identity);
     }
 

@@ -968,7 +968,7 @@ impl MobHandle {
                 work_ref,
                 spec,
             } => {
-                let meerkat_id = MeerkatId::from(runtime_id.identity.as_str());
+                let meerkat_id = MeerkatId::from(&runtime_id.identity);
                 let entry = self
                     .roster
                     .read()
@@ -1015,7 +1015,7 @@ impl MobHandle {
                 runtime_id,
                 fence_token,
             } => {
-                let meerkat_id = MeerkatId::from(runtime_id.identity.as_str());
+                let meerkat_id = MeerkatId::from(&runtime_id.identity);
                 let entry = self
                     .roster
                     .read()
@@ -1371,7 +1371,7 @@ impl MobHandle {
         let mut unreachable_peers = Vec::new();
 
         for wired_peer in &entry.wired_to {
-            let wired_peer_meerkat = MeerkatId::from(wired_peer.as_str());
+            let wired_peer_meerkat = MeerkatId::from(wired_peer);
             let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
                 peers_by_id
                     .get(spec.peer_id.as_str())
@@ -1751,7 +1751,7 @@ impl MobHandle {
 
     /// Get a specific member entry by identity.
     pub async fn get_member(&self, identity: &AgentIdentity) -> Option<RosterEntry> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(identity);
         match self
             .execute_machine_command(MobMachineCommand::GetMember { meerkat_id })
             .await
@@ -1819,7 +1819,7 @@ impl MobHandle {
 
     /// Acquire a capability-bearing handle for a specific active member.
     pub async fn member(&self, identity: &AgentIdentity) -> Result<MemberHandle, MobError> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(identity);
         if let Some(diag) = self.restore_failure_for(&meerkat_id).await {
             return Err(Self::restore_failure_error(&meerkat_id, diag));
         }
@@ -1879,7 +1879,7 @@ impl MobHandle {
     ) -> Result<EventStream, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::SubscribeAgentEvents {
-                meerkat_id: MeerkatId::from(identity.as_str()),
+                meerkat_id: MeerkatId::from(identity),
             })
             .await?
         {
@@ -2192,7 +2192,7 @@ impl MobHandle {
 
     /// Retire a member, archiving its session and removing trust.
     pub async fn retire(&self, identity: AgentIdentity) -> Result<(), MobError> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(&identity);
         match self
             .execute_machine_command(MobMachineCommand::Retire { meerkat_id })
             .await?
@@ -2214,7 +2214,7 @@ impl MobHandle {
         identity: AgentIdentity,
         initial_message: Option<ContentInput>,
     ) -> Result<MemberRespawnReceipt, MobRespawnError> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(&identity);
         let reply = match self
             .execute_machine_command(MobMachineCommand::Respawn {
                 meerkat_id,
@@ -2309,7 +2309,7 @@ impl MobHandle {
     {
         match self
             .execute_machine_command(MobMachineCommand::Wire {
-                local: MeerkatId::from(local.as_str()),
+                local: MeerkatId::from(&local),
                 target: target.into(),
             })
             .await?
@@ -2328,7 +2328,7 @@ impl MobHandle {
     {
         match self
             .execute_machine_command(MobMachineCommand::Unwire {
-                local: MeerkatId::from(local.as_str()),
+                local: MeerkatId::from(&local),
                 target: target.into(),
             })
             .await?
@@ -2363,7 +2363,7 @@ impl MobHandle {
         identity: AgentIdentity,
         message: impl Into<meerkat_core::types::ContentInput>,
     ) -> Result<MemberDeliveryReceipt, MobError> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(&identity);
         self.internal_turn_for_member(meerkat_id.clone(), message.into())
             .await?;
         let material = self.canonical_member_list_material(&meerkat_id).await;
@@ -2742,7 +2742,7 @@ impl MobHandle {
     pub async fn force_cancel_member(&self, identity: AgentIdentity) -> Result<(), MobError> {
         match self
             .execute_machine_command(MobMachineCommand::ForceCancel {
-                meerkat_id: MeerkatId::from(identity.as_str()),
+                meerkat_id: MeerkatId::from(&identity),
             })
             .await?
         {
@@ -2837,7 +2837,7 @@ impl MobHandle {
     ) -> Result<MobMemberSnapshot, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::MemberStatus {
-                meerkat_id: MeerkatId::from(identity.as_str()),
+                meerkat_id: MeerkatId::from(identity),
             })
             .await?
         {
@@ -2853,7 +2853,7 @@ impl MobHandle {
     pub async fn realtime_attach(&self, identity: AgentIdentity) -> Result<bool, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::RealtimeAttach {
-                meerkat_id: MeerkatId::from(identity.as_str()),
+                meerkat_id: MeerkatId::from(&identity),
             })
             .await?
         {
@@ -2869,7 +2869,7 @@ impl MobHandle {
     pub async fn realtime_detach(&self, identity: AgentIdentity) -> Result<bool, MobError> {
         match self
             .execute_machine_command(MobMachineCommand::RealtimeDetach {
-                meerkat_id: MeerkatId::from(identity.as_str()),
+                meerkat_id: MeerkatId::from(&identity),
             })
             .await?
         {
@@ -2919,8 +2919,7 @@ impl MobHandle {
         ids: &[AgentIdentity],
         timeout: Option<Duration>,
     ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
-        let target_meerkat_ids: Vec<MeerkatId> =
-            ids.iter().map(|id| MeerkatId::from(id.as_str())).collect();
+        let target_meerkat_ids: Vec<MeerkatId> = ids.iter().map(MeerkatId::from).collect();
         self.wait_for_kickoff_resolution(&target_meerkat_ids, timeout)
             .await?;
 
@@ -2935,7 +2934,7 @@ impl MobHandle {
     ///
     /// Polls canonical member classification until terminal.
     pub async fn wait_one(&self, identity: &AgentIdentity) -> Result<MobMemberSnapshot, MobError> {
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(identity);
         let material = self.wait_one_material(&meerkat_id).await?;
         Ok(material.to_snapshot())
     }
@@ -2945,10 +2944,7 @@ impl MobHandle {
         &self,
         identities: &[AgentIdentity],
     ) -> Result<Vec<MobMemberSnapshot>, MobError> {
-        let meerkat_ids: Vec<MeerkatId> = identities
-            .iter()
-            .map(|id| MeerkatId::from(id.as_str()))
-            .collect();
+        let meerkat_ids: Vec<MeerkatId> = identities.iter().map(MeerkatId::from).collect();
         let futs = meerkat_ids
             .iter()
             .map(|mid| self.wait_one_material(mid))
@@ -2992,7 +2988,7 @@ impl MobHandle {
                 MobError::Internal("no profile specified and definition has no profiles".into())
             })?;
         let task_text = task.into();
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let meerkat_id = MeerkatId::from(&identity);
         let mut spec = SpawnMemberSpec::new(profile_name, identity.clone());
         spec.initial_message = Some(task_text.into());
         spec.runtime_mode = Some(
@@ -3030,8 +3026,8 @@ impl MobHandle {
                 MobError::Internal("no profile specified and definition has no profiles".into())
             })?;
         let task_text = task.into();
-        let meerkat_id = MeerkatId::from(identity.as_str());
-        let source_member_id = MeerkatId::from(source_identity.as_str());
+        let meerkat_id = MeerkatId::from(&identity);
+        let source_member_id = MeerkatId::from(source_identity);
         let mut spec = SpawnMemberSpec::new(profile_name, identity.clone());
         spec.initial_message = Some(task_text.into());
         spec.runtime_mode = Some(

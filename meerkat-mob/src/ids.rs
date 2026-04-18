@@ -162,6 +162,40 @@ impl From<MeerkatId> for AgentIdentity {
     }
 }
 
+/// Bridge conversion from identity-first [`AgentIdentity`] to the legacy
+/// [`MeerkatId`] carrier used by generated DSL commands.
+///
+/// Both types wrap the same underlying `String`; conversion is a single
+/// reallocation via [`string_newtype!`]'s `From<&str>` impl. This impl
+/// exists so hot-path shell code can write
+/// `MeerkatId::from(&agent_identity)` directly instead of the
+/// `.as_str()` round-trip pattern that DELETE_ME finding A5 flagged.
+///
+/// # Migration status (A5)
+///
+/// `MeerkatId` is still the identifier carried inside generated
+/// [`MobMachineCommand`](crate::mob_machine::MobMachineCommand) variants
+/// (`Retire { meerkat_id }`, `Wire { local, … }`, `InternalTurn`,
+/// `ExternalTurn`, `RecordOperatorActionProvenance`, etc.) because the
+/// DSL schema has not yet been flipped to `AgentIdentity`. The full
+/// migration — schema update + kernel regeneration + handler retyping —
+/// is tracked for a dedicated cycle per the 0.6 identity-first plan.
+/// Until then, both types are load-bearing representations of the same
+/// member-identifier string fact; this impl keeps the shell code free
+/// of `.as_str()` string gymnastics and lets future migration replace
+/// call sites one at a time without rewriting every caller.
+impl From<&AgentIdentity> for MeerkatId {
+    fn from(identity: &AgentIdentity) -> Self {
+        Self::from(identity.as_str())
+    }
+}
+
+impl From<AgentIdentity> for MeerkatId {
+    fn from(identity: AgentIdentity) -> Self {
+        Self::from(identity.as_str())
+    }
+}
+
 /// Monotonically increasing generation counter for a mob member.
 ///
 /// Starts at 0 on first spawn, advances on each reset. The generation is
@@ -426,6 +460,33 @@ mod tests {
         let encoded = serde_json::to_string(&id).unwrap();
         let decoded: LoopId = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, id);
+    }
+
+    /// DELETE_ME A5 regression: identity-first hot paths must not
+    /// string-round-trip through `.as_str()` to get from
+    /// `AgentIdentity` to the legacy `MeerkatId` carried by generated
+    /// DSL commands. The `From<AgentIdentity>` and `From<&AgentIdentity>`
+    /// impls are the migration boundary; this test pins that they
+    /// preserve the underlying string-identity fact so future callers
+    /// can trust the conversion to be a representation change, not a
+    /// semantic transformation.
+    #[test]
+    fn agent_identity_to_meerkat_id_conversion_preserves_identity_string() {
+        let identity = AgentIdentity::from("singer");
+
+        // Owned conversion.
+        let by_owned: MeerkatId = identity.clone().into();
+        assert_eq!(by_owned.as_str(), "singer");
+
+        // Borrowed conversion — the hot-path shape used by
+        // `MobHandle::wire`, `internal_turn`, `realtime_attach`, etc.
+        let by_borrow: MeerkatId = (&identity).into();
+        assert_eq!(by_borrow.as_str(), "singer");
+
+        // Round trip through MeerkatId → AgentIdentity must return the
+        // same identity string.
+        let back: AgentIdentity = by_owned.into();
+        assert_eq!(back, identity);
     }
 
     #[test]

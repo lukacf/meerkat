@@ -4118,6 +4118,7 @@ meerkat_ReleaseAuthLeaseStopped(arg_binding_key) ==
 meerkat_fence_requires_bound_runtime == ((meerkat_active_fence_token = None) \/ (meerkat_active_runtime_id # None))
 meerkat_running_has_current_run == ((meerkat_phase # "Running") \/ (meerkat_current_run_id # None))
 meerkat_current_run_only_while_running_or_retired == ((meerkat_current_run_id = None) \/ (meerkat_phase = "Running") \/ (meerkat_phase = "Retired"))
+meerkat_auth_state_is_exclusive == ((\A k \in meerkat_auth_valid_leases : (~((k \in meerkat_auth_expiring_leases)) /\ ~((k \in meerkat_auth_refreshing_leases)) /\ ~((k \in meerkat_auth_reauth_required_leases)))) /\ (\A k \in meerkat_auth_expiring_leases : (~((k \in meerkat_auth_refreshing_leases)) /\ ~((k \in meerkat_auth_reauth_required_leases)))) /\ (\A k \in meerkat_auth_refreshing_leases : ~((k \in meerkat_auth_reauth_required_leases))))
 
 mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable) ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -6274,5 +6275,6 @@ WitnessRouteObserved_destroy_runtime_path_runtime_destroyed_reaches_mob == <> Ro
 THEOREM Spec => []meerkat_fence_requires_bound_runtime
 THEOREM Spec => []meerkat_running_has_current_run
 THEOREM Spec => []meerkat_current_run_only_while_running_or_retired
+THEOREM Spec => []meerkat_auth_state_is_exclusive
 
 =============================================================================

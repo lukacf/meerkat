@@ -60,6 +60,12 @@ pub mod tokio {
 #[cfg(not(target_arch = "wasm32"))]
 pub use ::tokio;
 
+// Phase 4d.wasm.1 — External-auth resolver seam for browser-hosted
+// OAuth. Host pages register a JS callback that returns a bearer
+// token; the provider-runtime registry consults the handle when a
+// binding uses `CredentialSourceSpec::ExternalResolver`.
+pub mod external_auth;
+
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};

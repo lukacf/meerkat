@@ -268,6 +268,52 @@ machine! {
             || self.lifecycle_phase == Phase::Retired
         }
 
+        // Auth lease invariants (Phase 1.5-rev.12):
+        //
+        // (a) Every binding_key is in at most one of the per-state sets.
+        //     Pairwise exclusion across { valid, expiring, refreshing,
+        //     reauth_required }. At-most-one state per binding is what
+        //     makes `BeginAuthRefresh` dedup correct — if a key could be
+        //     in both `valid` AND `refreshing`, a second BeginAuthRefresh
+        //     from the `valid` side would still land in `refreshing`
+        //     without rejection.
+        invariant auth_state_is_exclusive {
+            for_all(
+                k in self.auth_valid_leases,
+                !self.auth_expiring_leases.contains(k)
+                && !self.auth_refreshing_leases.contains(k)
+                && !self.auth_reauth_required_leases.contains(k)
+            )
+            && for_all(
+                k in self.auth_expiring_leases,
+                !self.auth_refreshing_leases.contains(k)
+                && !self.auth_reauth_required_leases.contains(k)
+            )
+            && for_all(
+                k in self.auth_refreshing_leases,
+                !self.auth_reauth_required_leases.contains(k)
+            )
+        }
+
+        // (c) Refresh dedup: every binding_key in `auth_refreshing_leases`
+        //     reached that set via `BeginAuthRefresh` (guarded on valid
+        //     or expiring, so never concurrent). The DSL guards enforce
+        //     this at transition time; the invariant simply restates the
+        //     post-condition "refreshing keys are not simultaneously in
+        //     another state" which is a consequence of (a).
+        //
+        // (b) `EmitAuthReauthNotice` fires iff state becomes
+        //     reauth_required — verified structurally by transition
+        //     construction: only the two `AuthRefreshFailedPermanent`
+        //     and `MarkReauthRequired` transitions emit the effect, and
+        //     both land in `auth_reauth_required_leases`. No other
+        //     transition writes to that set. No additional TLC
+        //     invariant is declarable without an effect-log primitive;
+        //     this structural guarantee is covered by the
+        //     `auth_reauth_notice.rs` test's
+        //     `refresh_path_terminates_in_reauth_required_on_permanent_failure`
+        //     check.
+
         // =====================================================================
         // Direct transitions
         // =====================================================================

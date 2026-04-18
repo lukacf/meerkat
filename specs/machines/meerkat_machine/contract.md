@@ -147,6 +147,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `fence_requires_bound_runtime`
 - `running_has_current_run`
 - `current_run_only_while_running_or_retired`
+- `auth_state_is_exclusive`
 
 ## Transitions
 ### `Initialize`

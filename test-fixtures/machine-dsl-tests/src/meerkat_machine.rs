@@ -266,6 +266,25 @@ machine! {
             || self.lifecycle_phase == Phase::Retired
         }
 
+        // Auth lease invariants (Phase 1.5-rev.12) — mirror of canonical.
+        invariant auth_state_is_exclusive {
+            for_all(
+                k in self.auth_valid_leases,
+                !self.auth_expiring_leases.contains(k)
+                && !self.auth_refreshing_leases.contains(k)
+                && !self.auth_reauth_required_leases.contains(k)
+            )
+            && for_all(
+                k in self.auth_expiring_leases,
+                !self.auth_refreshing_leases.contains(k)
+                && !self.auth_reauth_required_leases.contains(k)
+            )
+            && for_all(
+                k in self.auth_refreshing_leases,
+                !self.auth_reauth_required_leases.contains(k)
+            )
+        }
+
         // =====================================================================
         // Direct transitions
         // =====================================================================

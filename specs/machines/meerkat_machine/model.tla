@@ -2008,6 +2008,7 @@ Next ==
 fence_requires_bound_runtime == ((active_fence_token = None) \/ (active_runtime_id # None))
 running_has_current_run == ((phase # "Running") \/ (current_run_id # None))
 current_run_only_while_running_or_retired == ((current_run_id = None) \/ (phase = "Running") \/ (phase = "Retired"))
+auth_state_is_exclusive == ((\A k \in auth_valid_leases : (~((k \in auth_expiring_leases)) /\ ~((k \in auth_refreshing_leases)) /\ ~((k \in auth_reauth_required_leases)))) /\ (\A k \in auth_expiring_leases : (~((k \in auth_refreshing_leases)) /\ ~((k \in auth_reauth_required_leases)))) /\ (\A k \in auth_refreshing_leases : ~((k \in auth_reauth_required_leases))))
 
 CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(silent_intent_overrides) <= 1 /\ Cardinality(auth_valid_leases) <= 1 /\ Cardinality(auth_expiring_leases) <= 1 /\ Cardinality(auth_refreshing_leases) <= 1 /\ Cardinality(auth_reauth_required_leases) <= 1 /\ Cardinality(DOMAIN auth_expires_at) <= 1
 DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(silent_intent_overrides) <= 2 /\ Cardinality(auth_valid_leases) <= 2 /\ Cardinality(auth_expiring_leases) <= 2 /\ Cardinality(auth_refreshing_leases) <= 2 /\ Cardinality(auth_reauth_required_leases) <= 2 /\ Cardinality(DOMAIN auth_expires_at) <= 2
@@ -2017,5 +2018,6 @@ Spec == Init /\ [][Next]_vars
 THEOREM Spec => []fence_requires_bound_runtime
 THEOREM Spec => []running_has_current_run
 THEOREM Spec => []current_run_only_while_running_or_retired
+THEOREM Spec => []auth_state_is_exclusive
 
 =============================================================================

@@ -949,6 +949,50 @@ pub async fn handle_realtime_detach(
 }
 
 // ---------------------------------------------------------------------------
+// mob/rotate_supervisor (Finding C10)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/rotate_supervisor` — rotate the supervisor bridge for all
+/// members of a mob, surfacing the structured rotation report so operators
+/// can inspect per-member outcomes instead of getting a bare ok:true.
+pub async fn handle_rotate_supervisor(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_rotate_supervisor(&mob_id).await {
+        Ok(report) => {
+            let report_value = match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("failed to serialize SupervisorRotationReport: {err}"),
+                    );
+                }
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "ok": true,
+                    "report": report_value,
+                }),
+            )
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/member_status
 // ---------------------------------------------------------------------------
 

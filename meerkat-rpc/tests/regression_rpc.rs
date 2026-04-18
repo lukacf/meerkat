@@ -865,6 +865,7 @@ async fn initialize_methods_list_complete() {
             "mob/fork_helper",
             "mob/force_cancel",
             "mob/member_status",
+            "mob/rotate_supervisor",
             "mob/stream_open",
             "mob/stream_close",
         ];
@@ -991,6 +992,33 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["ok"], true);
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
+
+    // mob/rotate_supervisor must exist (DELETE_ME C10) and project the
+    // SupervisorRotationReport on success, or return a typed error when the
+    // mob has no supervisor to rotate. For a freshly created mob with no
+    // members there are no supervisor bridges to rotate; the handler should
+    // either report success with an empty rotation summary or return a
+    // specific MobError — both are acceptable and both indicate the RPC
+    // surface is wired end-to-end. Either way, the response MUST NOT be
+    // "method not found".
+    let rotate_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 42,
+        "method": "mob/rotate_supervisor",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &rotate_req).await;
+    let rotate_resp = read_response(&mut reader).await;
+    let is_success = rotate_resp["error"].is_null();
+    let is_method_specific_failure = rotate_resp
+        .get("error")
+        .and_then(|e| e["code"].as_i64())
+        .map(|c| c != -32601) // JSON-RPC "Method not found"
+        .unwrap_or(false);
+    assert!(
+        is_success || is_method_specific_failure,
+        "mob/rotate_supervisor must be a registered method; got: {rotate_resp}",
+    );
 
     // mob/lifecycle destroy must surface the structured MobDestroyReport
     // (Finding A1 regression: previously the report was dropped on the

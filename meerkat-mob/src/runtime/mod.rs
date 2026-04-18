@@ -131,6 +131,7 @@ pub use handle::{
     MobDestroyError, MobDestroyReport, MobEventsView, MobHandle, MobMemberListEntry,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
     MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult,
+    SupervisorRotationReport,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};

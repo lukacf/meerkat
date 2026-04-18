@@ -483,6 +483,18 @@ impl MobMcpState {
         self.handle_for(mob_id).await?.stop().await
     }
 
+    /// Rotate the supervisor bridge for the mob, returning the structured
+    /// rotation report so RPC/MCP clients can inspect per-member outcomes
+    /// instead of guessing from a bare success signal. Finding C10:
+    /// `MobHandle::rotate_supervisor()` existed in the Rust API but had no
+    /// operator-facing RPC surface.
+    pub async fn mob_rotate_supervisor(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<meerkat_mob::SupervisorRotationReport, MobError> {
+        self.handle_for(mob_id).await?.rotate_supervisor().await
+    }
+
     pub async fn mob_resume(&self, mob_id: &MobId) -> Result<(), MobError> {
         self.handle_for(mob_id).await?.resume().await
     }

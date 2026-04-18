@@ -915,6 +915,10 @@ impl MethodRouter {
                 handlers::mob::handle_member_status(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/rotate_supervisor" => {
+                handlers::mob::handle_rotate_supervisor(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/wait_kickoff" => {
                 handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
             }

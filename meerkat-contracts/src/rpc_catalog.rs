@@ -347,6 +347,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
             RpcMethodDescriptor::basic(
+                "mob/rotate_supervisor",
+                "Rotate the supervisor bridge for all members of a mob",
+            ),
+            RpcMethodDescriptor::basic(
                 "mob/wait_kickoff",
                 "Wait for kickoff completion for a member",
             ),

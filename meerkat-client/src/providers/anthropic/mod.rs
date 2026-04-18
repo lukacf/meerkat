@@ -307,6 +307,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             // this pattern — no Bedrock-specific LlmClient needed for
             // the bearer subpath (the SigV4 subpath uses
             // AwsStsAuthorizer, which is a separate variant below).
+            #[cfg(not(target_arch = "wasm32"))]
             (AnthropicBackendKind::Bedrock, ShimCredential::Secret(secret)) => {
                 let base_url = connection
                     .backend_profile
@@ -335,6 +336,10 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     .map_err(ProviderClientError::ClientInit)?;
                 Ok(Arc::new(client))
             }
+            #[cfg(target_arch = "wasm32")]
+            (AnthropicBackendKind::Bedrock, ShimCredential::Secret(_)) => Err(
+                ProviderClientError::MissingFeature("bedrock-backend not available on wasm32"),
+            ),
             // Dynamic authorizer flows: Vertex (Google Bearer), Foundry
             // Azure AD (Bearer), Bedrock SigV4. AnthropicClient supports
             // Bearer-style authorizers (Vertex + Foundry AzureAd) via
@@ -405,6 +410,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     .map_err(ProviderClientError::ClientInit)?;
                 Ok(Arc::new(client))
             }
+            #[cfg(not(target_arch = "wasm32"))]
             (AnthropicBackendKind::Vertex, ShimCredential::Secret(secret)) => {
                 // Vertex with a pre-resolved bearer secret (e.g.
                 // ExternalAuthorizer produced an envelope carrying a
@@ -432,6 +438,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                     .build()
                     .map_err(ProviderClientError::ClientInit)?;
                 Ok(Arc::new(client))
+            }
+            #[cfg(target_arch = "wasm32")]
+            (AnthropicBackendKind::Vertex, ShimCredential::Secret(_)) => {
+                Err(ProviderClientError::MissingFeature(
+                    "vertex-backend with authorizer-backed auth not available on wasm32",
+                ))
             }
             (_, ShimCredential::Authorizer) => {
                 Err(ProviderClientError::DynamicAuthorizerNotYetSupportedInShimMode)

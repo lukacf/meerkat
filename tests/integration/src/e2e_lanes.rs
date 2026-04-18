@@ -437,22 +437,18 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
 fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
     let cargo_target_dir = cargo_target_dir()?;
-    // macOS 26.3.1+ `codeSigningMonitor=2` SIGKILLs adhoc/linker-signed
-    // binaries whose signature is invalidated while dyld is loading them.
-    // Smoke scenarios spawn nested `cargo test` children that perform
-    // incremental relinking, which can overwrite test-fixture binaries
-    // (`rkat-rest`, `rkat-rpc`, ...) mid-exec. Two mitigations combined:
-    //   1. Disable incremental compilation in the nested invocation.
-    //   2. Redirect the nested cargo to its own `CARGO_TARGET_DIR` so
-    //      its build actions cannot overwrite the binaries that the
-    //      smoke scenario is about to `exec`. The scenario continues
-    //      to resolve binaries via `CARGO_BIN_EXE_*` pointing at the
-    //      outer target dir, which is the "frozen" copy.
+    // macOS 26.3.1+ `codeSigningMonitor=2` can SIGKILL adhoc/linker-signed
+    // binaries whose signature is invalidated while dyld is loading them,
+    // which happens when the outer `cargo test` or sibling scenarios
+    // incrementally re-link the binary between signing and scenario
+    // spawn. `CARGO_INCREMENTAL=0` discourages such re-links without
+    // altering the target-dir layout (scenarios with `cp` pre-commands
+    // assume `{cargo_target_dir}/debug/` holds the built binaries).
+    // The primary repair — stripping xattrs + re-signing — lives in
+    // [`ensure_binary_signatures_fresh`] and is applied just before
+    // the scenario's main command runs.
     env.entry("CARGO_INCREMENTAL".to_string())
         .or_insert_with(|| "0".to_string());
-    let nested_target_dir = cargo_target_dir.join("nested-scenario-target");
-    env.entry("CARGO_TARGET_DIR".to_string())
-        .or_insert_with(|| nested_target_dir.display().to_string());
     for (key, value) in spec.env {
         env.insert(
             (*key).to_string(),
@@ -460,24 +456,13 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
         );
     }
     for binary in spec.cargo_bin_env {
-        let source = cargo_target_dir
-            .join("debug")
-            .join(platform_binary_name(binary));
-        // macOS 26.3.1+ `codeSigningMonitor=2` kills adhoc/linker-signed
-        // binaries whose on-disk content changes after the signature was
-        // verified at dyld load. The nested cargo invocations spawned by
-        // smoke scenarios sometimes re-link these binaries even when we
-        // point CARGO_TARGET_DIR at a separate nested location, because
-        // cargo's workspace-wide freshness check can find a stale build
-        // graph entry and rewrite the file. Resolving this robustly on
-        // macOS requires giving the scenario a path that no cargo owns —
-        // a hard-copy of the current binary to a lane-local snapshot
-        // directory that cargo will never touch.
-        let resolved_path =
-            snapshot_binary_for_scenario(&source, binary, &cargo_target_dir).unwrap_or(source);
         env.insert(
             format!("CARGO_BIN_EXE_{binary}"),
-            resolved_path.display().to_string(),
+            cargo_target_dir
+                .join("debug")
+                .join(platform_binary_name(binary))
+                .display()
+                .to_string(),
         );
     }
     if matches!(spec.command, CommandSpec::Pytest { .. })
@@ -503,51 +488,6 @@ fn platform_binary_name(name: &str) -> String {
     } else {
         name.to_string()
     }
-}
-
-/// Copy a cargo-built test binary to a lane-local snapshot path that
-/// no cargo invocation owns, and return the snapshot path. Used on
-/// macOS to avoid the `codeSigningMonitor=2` SIGKILL that fires when
-/// the on-disk binary content changes between signing and
-/// `exec`. A no-op on other platforms (returns `None` so the caller
-/// falls back to the original path).
-fn snapshot_binary_for_scenario(
-    source: &Path,
-    binary: &str,
-    cargo_target_dir: &Path,
-) -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    if !source.exists() {
-        return None;
-    }
-    let snapshot_dir = cargo_target_dir.join("scenario-bin-snapshots");
-    std::fs::create_dir_all(&snapshot_dir).ok()?;
-    let snapshot_path = snapshot_dir.join(platform_binary_name(binary));
-
-    // Copy if the source is newer than the snapshot (or snapshot
-    // absent). `std::fs::copy` overwrites atomically on macOS APFS,
-    // so concurrent scenarios asking for the same snapshot are safe:
-    // at worst they race to produce identical content.
-    let source_mtime = source.metadata().ok()?.modified().ok()?;
-    let snapshot_stale = snapshot_path
-        .metadata()
-        .and_then(|m| m.modified())
-        .map(|snap_mtime| source_mtime > snap_mtime)
-        .unwrap_or(true);
-    if snapshot_stale {
-        std::fs::copy(source, &snapshot_path).ok()?;
-        // Ensure the snapshot carries a fresh adhoc signature matching
-        // the copy's content. `codesign --force` re-hashes and embeds.
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(&snapshot_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    Some(snapshot_path)
 }
 
 /// Sanitize every advertised test binary (`CARGO_BIN_EXE_*` and

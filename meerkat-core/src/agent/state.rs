@@ -745,9 +745,17 @@ where
                                     SystemNoticeKind::AuthReauthRequired,
                                     notice.clone(),
                                 ));
-                                self.pending_fatal_diagnostic = Some(AgentError::InternalError(
-                                    format!("auth_reauth_required: {notice}"),
-                                ));
+                                // Typed terminal — the machine decided
+                                // this binding cannot proceed. Surfaces
+                                // can pattern-match on
+                                // AgentError::AuthReauthRequired rather
+                                // than parsing a string prefix out of
+                                // InternalError (dogma §5).
+                                self.pending_fatal_diagnostic =
+                                    Some(AgentError::AuthReauthRequired {
+                                        binding_key: binding_key.to_string(),
+                                        message: notice,
+                                    });
                                 self.apply_turn_input(TurnExecutionInput::FatalFailure {
                                     run_id: run_id.clone(),
                                 })?;

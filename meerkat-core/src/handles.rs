@@ -365,6 +365,19 @@ pub struct AuthLeaseSnapshot {
     pub expires_at: Option<u64>,
 }
 
+/// Window (in seconds) before `expires_at` at which a `valid` lease is
+/// eligible to transition into `expiring` at the next CallingLlm
+/// boundary. Owned here — on the handle trait module — rather than in
+/// shell code, per dogma §9 ("policy composes at the facade/factory
+/// seam, not in random helpers") and §20 ("every important behavior
+/// reduces to one clear owner").
+///
+/// The actual state transition is gated by the MeerkatMachine DSL's
+/// `MarkAuthExpiring` input (which enforces the `valid → expiring`
+/// legality); this constant only controls *when* the runner fires
+/// that input, not whether the transition is legal.
+pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
+
 /// Auth lease lifecycle DSL handle.
 ///
 /// Covers the auth-lifecycle inputs on the MeerkatMachine DSL. Each method

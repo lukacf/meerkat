@@ -698,12 +698,15 @@ where
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
-                            // Leases within 60s of expiry (or already
-                            // past) trigger expiring. Max sentinel
-                            // (u64::MAX) means "no expiry" —
-                            // api_key/env-var leases land here and
-                            // never expire.
-                            if expires_at != u64::MAX && expires_at <= now.saturating_add(60) {
+                            // Policy constant is owned by the
+                            // handle-trait module (dogma §9/§20).
+                            // Leases within AUTH_LEASE_TTL_REFRESH_WINDOW_SECS
+                            // of expiry (or already past) trigger
+                            // expiring. Max sentinel (u64::MAX) means
+                            // "no expiry" — api_key/env-var leases
+                            // land here and never expire.
+                            let window = crate::handles::AUTH_LEASE_TTL_REFRESH_WINDOW_SECS;
+                            if expires_at != u64::MAX && expires_at <= now.saturating_add(window) {
                                 let _ = handle.mark_expiring(binding_key);
                             }
                         }

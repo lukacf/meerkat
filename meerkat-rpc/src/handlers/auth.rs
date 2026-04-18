@@ -701,6 +701,72 @@ pub async fn handle_auth_login_device_complete(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ProvisionApiKeyParams {
+    /// Access token acquired from a prior Console-OAuth flow.
+    access_token: String,
+    #[serde(default = "default_dev_realm")]
+    realm_id: String,
+    /// Defaults to `anthropic_oauth_to_api_key` so the resolver's
+    /// `OauthToApiKey` path can find the persisted api_key.
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+/// Plan §4b.5 closure: Console OAuth → API key provisioning. The
+/// caller runs a Console-scope OAuth flow (scope
+/// `org:create_api_key user:profile`), then hands the resulting
+/// access_token to this method. We POST to
+/// `https://api.anthropic.com/api/oauth/claude_cli/create_api_key`
+/// and persist the returned API key as a stable credential under
+/// `<realm_id>:<profile_id>` with auth_mode=OauthToApiKey — so
+/// future `resolve_binding` for the `oauth_to_api_key` method reads
+/// the provisioned api_key without needing any refresh.
+pub async fn handle_auth_login_provision_api_key(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    use meerkat_client::providers::anthropic::oauth as a_oauth;
+    let parsed: ProvisionApiKeyParams = match parse_params(params) {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
+    let profile_id = parsed
+        .profile_id
+        .unwrap_or_else(|| "anthropic_oauth_to_api_key".to_string());
+    let store = match require_token_store(runtime, id.clone()) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let key = TokenKey::new(parsed.realm_id.clone(), profile_id.clone());
+    // Console endpoints drive `scope = org:create_api_key user:profile`.
+    // The runtime wrapper's `provision_api_key` POSTs to
+    // API_KEY_CREATE_URL with `Authorization: Bearer <access_token>`
+    // and persists the returned api_key via `save_persisted`.
+    let endpoints = a_oauth::console_endpoints(a_oauth::MANUAL_REDIRECT_URL);
+    let oauth_runtime =
+        a_oauth::AnthropicOAuthRuntime::new_with_default_coordinator(store, endpoints, key);
+    match oauth_runtime.provision_api_key(&parsed.access_token).await {
+        Ok(tokens) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "realm_id": parsed.realm_id,
+                "profile_id": profile_id,
+                "provider": "anthropic",
+                "auth_mode": "oauth_to_api_key",
+                "has_api_key": tokens.primary_secret.is_some(),
+                "scopes": tokens.scopes,
+            }),
+        ),
+        Err(e) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("provision_api_key failed: {e}"),
+        ),
+    }
+}
+
 pub async fn handle_auth_status_get(
     id: Option<RpcId>,
     params: Option<&RawValue>,

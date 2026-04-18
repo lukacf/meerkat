@@ -437,6 +437,26 @@ class MeerkatClient:
             params["profile_id"] = profile_id
         return await self._request("auth/login/device_complete", params)
 
+    async def auth_provision_api_key(
+        self,
+        access_token: str,
+        *,
+        realm_id: str = "dev",
+        profile_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Anthropic Console-OAuth → API key provisioning via
+        `auth/login/provision_api_key` (plan §4b.5). The caller runs
+        the Console-scope OAuth flow first; hands the resulting
+        access_token here; the server POSTs to Anthropic's
+        create_api_key endpoint and persists the returned key."""
+        params: dict[str, Any] = {
+            "access_token": access_token,
+            "realm_id": realm_id,
+        }
+        if profile_id is not None:
+            params["profile_id"] = profile_id
+        return await self._request("auth/login/provision_api_key", params)
+
     async def auth_status(
         self, realm_id: str, profile_id: str
     ) -> dict[str, Any]:

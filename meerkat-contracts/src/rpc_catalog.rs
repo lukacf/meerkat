@@ -135,6 +135,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "auth/login/device_complete",
             "Single-poll completion for a device-code OAuth login; returns pending / slow_down / access_denied / expired / ready",
         ),
+        RpcMethodDescriptor::basic(
+            "auth/login/provision_api_key",
+            "Console-OAuth → API key provisioning (Anthropic oauth_to_api_key): POST access_token to create_api_key endpoint, persist returned api_key",
+        ),
         RpcMethodDescriptor::basic("auth/status/get", "Get auth status for a profile"),
         RpcMethodDescriptor::basic("auth/logout", "Revoke + remove persisted credentials"),
         RpcMethodDescriptor::basic("realm/list", "List realms with binding summaries"),

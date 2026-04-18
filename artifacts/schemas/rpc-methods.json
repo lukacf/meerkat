@@ -90,6 +90,10 @@
       "name": "auth/login/device_complete"
     },
     {
+      "description": "Console-OAuth → API key provisioning (Anthropic oauth_to_api_key): POST access_token to create_api_key endpoint, persist returned api_key",
+      "name": "auth/login/provision_api_key"
+    },
+    {
       "description": "Get auth status for a profile",
       "name": "auth/status/get"
     },

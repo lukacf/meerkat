@@ -135,6 +135,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
 | `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
 | `auth/login/device_complete` | Auth | Single-poll completion for a device-code OAuth login |
+| `auth/login/provision_api_key` | Auth | Console-OAuth → API key provisioning (Anthropic oauth_to_api_key) |
 | `auth/status/get` | Auth | Get auth status for a profile |
 | `auth/logout` | Auth | Revoke + remove persisted credentials |
 | `realm/list` | Realm | List realm summaries |

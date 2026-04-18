@@ -54,6 +54,7 @@ fn every_auth_rpc_method_round_trips_through_envelope() {
         "auth.login.complete",
         "auth.login.device_start",
         "auth.login.device_complete",
+        "auth.login.provision_api_key",
         "auth.status.get",
         "auth.logout",
     ];

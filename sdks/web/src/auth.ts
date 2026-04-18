@@ -194,6 +194,31 @@ export class Auth {
     );
   }
 
+  /** `auth.login.provision_api_key` — Anthropic Console-OAuth → API
+   * key provisioning (plan §4b.5). The caller runs a Console-scope
+   * OAuth flow first (`org:create_api_key user:profile`), hands the
+   * resulting `access_token` to this method, and the server POSTs to
+   * Anthropic's create_api_key endpoint + persists the returned key
+   * as an `oauth_to_api_key`-mode entry under
+   * `<realmId>:<profileId>`. */
+  async loginProvisionApiKey(params: {
+    accessToken: string;
+    realmId?: string;
+    profileId?: string;
+  }): Promise<{
+    realmId: string;
+    profileId: string;
+    provider: 'anthropic';
+    authMode: 'oauth_to_api_key';
+    hasApiKey: boolean;
+    scopes: string[];
+  }> {
+    return this.transport.request(
+      'auth.login.provision_api_key',
+      params,
+    );
+  }
+
   /** `auth.status.get` — current status for a stored profile. */
   async status(profileId: string): Promise<AuthStatus> {
     return this.transport.request<{ profileId: string }, AuthStatus>(

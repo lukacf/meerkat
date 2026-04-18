@@ -351,6 +351,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Point-in-time aggregate of mob status plus member list",
             ),
             RpcMethodDescriptor::basic(
+                "mob/destroy",
+                "Destroy a mob and surface the structured MobDestroyReport",
+            ),
+            RpcMethodDescriptor::basic(
                 "mob/rotate_supervisor",
                 "Rotate the supervisor bridge for all members of a mob",
             ),

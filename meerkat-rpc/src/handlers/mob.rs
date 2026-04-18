@@ -988,6 +988,52 @@ pub async fn handle_realtime_detach(
 }
 
 // ---------------------------------------------------------------------------
+// mob/destroy (Finding C3)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/destroy` — dedicated destroy endpoint that always returns the
+/// structured `MobDestroyReport`. `mob/lifecycle action=destroy` already
+/// surfaces the report (A1), but callers often want an explicit destroy
+/// endpoint so the response body shape is predictable without branching on
+/// `action`. Finding C3.
+pub async fn handle_destroy(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_destroy(&mob_id).await {
+        Ok(report) => {
+            let report_value = match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("failed to serialize MobDestroyReport: {err}"),
+                    );
+                }
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "ok": true,
+                    "destroy_report": report_value,
+                }),
+            )
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/snapshot (Finding C2)
 // ---------------------------------------------------------------------------
 

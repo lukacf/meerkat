@@ -866,6 +866,7 @@ async fn initialize_methods_list_complete() {
             "mob/force_cancel",
             "mob/member_status",
             "mob/snapshot",
+            "mob/destroy",
             "mob/rotate_supervisor",
             "mob/stream_open",
             "mob/stream_close",
@@ -1080,6 +1081,89 @@ async fn mob_create_status_list_lifecycle() {
     // force_destroyed_members / orphaned_remote_members are omitted when
     // empty, so we only assert the object exists, not that a specific
     // field is present.
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 15b. mob_destroy_rpc_surfaces_report (DELETE_ME C3)
+// ---------------------------------------------------------------------------
+
+/// Dedicated `mob/destroy` RPC must exist and project the structured
+/// `MobDestroyReport` onto the response body without forcing callers to
+/// pass `action: "destroy"` through the generic `mob/lifecycle` endpoint.
+/// Finding C3 — explicit endpoint with predictable shape.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_destroy_rpc_surfaces_report() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // Create a minimal mob so we have something to destroy.
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "destroy_target_mob",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }
+        }
+    });
+    send_request(&mut writer, &create_req).await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "mob/create failed: {create_resp}"
+    );
+    let mob_id = create_resp["result"]["mob_id"]
+        .as_str()
+        .expect("mob_id should be string")
+        .to_string();
+
+    // Call the explicit mob/destroy endpoint. Result must carry mob_id,
+    // ok: true, and a destroy_report object even when destroy is clean.
+    let destroy_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "mob/destroy",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &destroy_req).await;
+    let destroy_resp = read_response(&mut reader).await;
+    assert!(
+        destroy_resp["error"].is_null(),
+        "mob/destroy failed: {destroy_resp}"
+    );
+    assert_eq!(destroy_resp["result"]["ok"], true);
+    assert_eq!(destroy_resp["result"]["mob_id"], mob_id);
+    assert!(
+        destroy_resp["result"]["destroy_report"].is_object(),
+        "mob/destroy must surface a destroy_report object: {destroy_resp}",
+    );
+
+    // After destroy the mob must be gone from mob/list.
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "mob/list"
+    });
+    send_request(&mut writer, &list_req).await;
+    let list_resp = read_response(&mut reader).await;
+    let mobs = list_resp["result"]["mobs"]
+        .as_array()
+        .expect("mobs should be array");
+    let mob_ids: Vec<&str> = mobs.iter().filter_map(|m| m["mob_id"].as_str()).collect();
+    assert!(
+        !mob_ids.contains(&mob_id.as_str()),
+        "mob must not appear in mob/list after mob/destroy: {list_resp}",
+    );
 
     drop(writer);
     handle.await.unwrap().unwrap();

@@ -76,9 +76,14 @@ pub struct NewMobEvent {
 /// Legacy bridge-level identity retained for internal dispatch. Not part of
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
+///
+/// Finding A7: this enum was previously `#[doc(hidden)] pub` with only
+/// `pub(crate)` constructors, making it reachable in the crate's public
+/// namespace but effectively useless externally. Making it `pub(crate)` both
+/// enforces that (no external reachability) and matches the reality that no
+/// public `MobHandle` method uses it as a parameter or return type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[doc(hidden)]
-pub enum MemberRef {
+pub(crate) enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
     Session {
         /// Compatibility carrier for the canonical bridge session ID.

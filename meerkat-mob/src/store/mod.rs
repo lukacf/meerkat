@@ -118,7 +118,11 @@ pub struct ExternalBindingOverlayRecord {
     /// Generation the overlay applies to.
     pub generation: Generation,
     /// Peer-only runtime binding when normalization succeeds.
-    pub normalized_member_ref: Option<MemberRef>,
+    ///
+    /// Crate-private alongside `MemberRef` itself (finding A7): the pre-0.6
+    /// bridge identity is never surfaced to external callers. Serde still
+    /// carries the value through the persisted overlay record.
+    pub(crate) normalized_member_ref: Option<MemberRef>,
     /// Optional bootstrap proof for re-establishing supervisor control.
     pub bootstrap_token: Option<BridgeBootstrapToken>,
     /// Current normalization status.

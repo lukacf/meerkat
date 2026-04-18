@@ -2264,6 +2264,20 @@ impl MobHandle {
     ///
     /// Prefer [`MobHandle::member`] plus [`MemberHandle::internal_turn`] for
     /// the target 0.5 API shape.
+    ///
+    /// DELETE_ME B5: three operations that sometimes get mistaken for the
+    /// same thing are actually three distinct slices of "deliver content to
+    /// a member". [`MobHandle::internal_turn`] / [`MemberHandle::internal_turn`]
+    /// (this) is Rust in-process direct write into the member's pending
+    /// turn slot — no peer comms, no handling-mode selection. `mob/turn_start`
+    /// (RPC) resolves the identity to the bridge session and delegates to
+    /// the canonical `turn/start` handler with turn-level overrides.
+    /// `mob/member_send` (RPC) is peer-delivery shape over comms with
+    /// `HandlingMode` + `RenderMetadata`; it lands in the member's comms
+    /// inbox, not as a new turn. The three surfaces share a name fragment
+    /// but diverge on who authorizes the delivery, what the member's
+    /// runtime does with it, and what the caller gets back. Keep them
+    /// separate — collapsing them would erase real policy distinctions.
     pub async fn internal_turn(
         &self,
         identity: AgentIdentity,

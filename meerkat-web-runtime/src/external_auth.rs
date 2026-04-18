@@ -154,7 +154,7 @@ impl meerkat_client::ExternalAuthResolverHandle for WasmExternalAuthResolver {
 fn js_value_display(v: &JsValue) -> String {
     v.as_string()
         .or_else(|| v.dyn_ref::<js_sys::Error>().map(|e| e.message().into()))
-        .unwrap_or_else(|| format!("{:?}", v))
+        .unwrap_or_else(|| format!("{v:?}"))
 }
 
 // ---------------------------------------------------------------------------

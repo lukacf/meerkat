@@ -86,6 +86,10 @@
       "name": "auth/login/device_start"
     },
     {
+      "description": "Single-poll completion for a device-code OAuth login; returns pending / slow_down / access_denied / expired / ready",
+      "name": "auth/login/device_complete"
+    },
+    {
       "description": "Get auth status for a profile",
       "name": "auth/status/get"
     },

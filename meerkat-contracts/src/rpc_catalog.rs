@@ -131,6 +131,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "auth/login/device_start",
             "Begin a device-code OAuth login; returns user-code + verification URL",
         ),
+        RpcMethodDescriptor::basic(
+            "auth/login/device_complete",
+            "Single-poll completion for a device-code OAuth login; returns pending / slow_down / access_denied / expired / ready",
+        ),
         RpcMethodDescriptor::basic("auth/status/get", "Get auth status for a profile"),
         RpcMethodDescriptor::basic("auth/logout", "Revoke + remove persisted credentials"),
         RpcMethodDescriptor::basic("realm/list", "List realms with binding summaries"),

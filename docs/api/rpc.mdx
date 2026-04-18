@@ -131,11 +131,12 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `auth/profile/create` | Auth | Create an auth profile (CLI-driven for now) |
 | `auth/profile/delete` | Auth | Delete an auth profile (CLI-driven for now) |
 | `auth/profile/test` | Auth | Dry-run a binding's resolve path |
-| `auth/login/start` | Auth | Begin interactive OAuth (follow-up commit) |
-| `auth/login/complete` | Auth | Finish interactive OAuth (follow-up commit) |
-| `auth/login/device_start` | Auth | Begin device-code OAuth (follow-up commit) |
+| `auth/login/start` | Auth | Begin interactive authorization-code OAuth (returns authorize_url + pkce_verifier) |
+| `auth/login/complete` | Auth | Exchange authorization code for tokens; persists to TokenStore |
+| `auth/login/device_start` | Auth | Begin device-code OAuth; returns user_code + verification URL |
+| `auth/login/device_complete` | Auth | Single-poll completion for a device-code OAuth login |
 | `auth/status/get` | Auth | Get auth status for a profile |
-| `auth/logout` | Auth | Revoke + remove persisted credentials (CLI-driven for now) |
+| `auth/logout` | Auth | Revoke + remove persisted credentials |
 | `realm/list` | Realm | List realm summaries |
 | `realm/get` | Realm | Get full realm connection set |
 

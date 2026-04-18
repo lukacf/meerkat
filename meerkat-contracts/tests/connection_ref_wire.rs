@@ -42,6 +42,7 @@ fn sample_auth_profile() -> meerkat_core::AuthProfile {
         auth_method: "api_key".to_string(),
         source: meerkat_core::CredentialSourceSpec::Env {
             env: "OPENAI_API_KEY".to_string(),
+            fallback: Vec::new(),
         },
         storage: meerkat_core::CredentialStorageSpec::Ephemeral,
         constraints: Default::default(),

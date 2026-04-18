@@ -88,6 +88,13 @@ pub enum CredentialSourceSpec {
     },
     Env {
         env: String,
+        /// Ordered fallback env var names consulted when `env` is
+        /// unset. Used for providers with multiple well-known names
+        /// (e.g. Gemini falls back to `GOOGLE_API_KEY` when
+        /// `GEMINI_API_KEY` is absent). The resolver's RKAT_*-prefix
+        /// precedence applies to each name in turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fallback: Vec<String>,
     },
     ManagedStore {
         profile: String,
@@ -293,12 +300,16 @@ impl RealmConnectionSet {
     }
 
     fn synthesize_default(provider: Provider, inline_secret: Option<String>) -> Self {
-        let (backend_kind, env_var) = match provider {
-            Provider::Anthropic => ("anthropic_api", "ANTHROPIC_API_KEY"),
-            Provider::OpenAI => ("openai_api", "OPENAI_API_KEY"),
-            Provider::Gemini => ("google_genai", "GEMINI_API_KEY"),
-            Provider::SelfHosted => ("self_hosted", "RKAT_SELF_HOSTED_API_KEY"),
-            Provider::Other => ("other_api", "RKAT_OTHER_API_KEY"),
+        let (backend_kind, env_var, fallback) = match provider {
+            Provider::Anthropic => ("anthropic_api", "ANTHROPIC_API_KEY", vec![]),
+            Provider::OpenAI => ("openai_api", "OPENAI_API_KEY", vec![]),
+            Provider::Gemini => (
+                "google_genai",
+                "GEMINI_API_KEY",
+                vec!["GOOGLE_API_KEY".to_string()],
+            ),
+            Provider::SelfHosted => ("self_hosted", "RKAT_SELF_HOSTED_API_KEY", vec![]),
+            Provider::Other => ("other_api", "RKAT_OTHER_API_KEY", vec![]),
         };
         let backend = BackendProfile {
             id: "default".to_string(),
@@ -311,6 +322,7 @@ impl RealmConnectionSet {
             Some(secret) => CredentialSourceSpec::InlineSecret { secret },
             None => CredentialSourceSpec::Env {
                 env: env_var.to_string(),
+                fallback,
             },
         };
         let auth = AuthProfile {
@@ -560,6 +572,7 @@ mod tests {
             },
             CredentialSourceSpec::Env {
                 env: "OPENAI_API_KEY".into(),
+                fallback: Vec::new(),
             },
             CredentialSourceSpec::ManagedStore {
                 profile: "default".into(),

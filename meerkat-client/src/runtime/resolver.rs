@@ -27,10 +27,25 @@ pub async fn resolve_simple_secret(
 ) -> Result<String, ProviderAuthError> {
     match source {
         CredentialSourceSpec::InlineSecret { secret } => Ok(secret.clone()),
-        CredentialSourceSpec::Env { env: var } => match (env.env_lookup)(var) {
-            Some(value) => Ok(value),
-            None => Err(ProviderAuthError::Auth(AuthError::MissingSecret)),
-        },
+        CredentialSourceSpec::Env { env: var, fallback } => {
+            // Single canonical owner of env-var credential resolution
+            // policy (dogma §1). For each var name (primary + ordered
+            // fallback chain), `RKAT_<VAR>` overrides `<VAR>`. The
+            // factory body no longer encodes this policy inline.
+            let candidates =
+                std::iter::once(var.as_str()).chain(fallback.iter().map(String::as_str));
+            for candidate in candidates {
+                let rkat_override = if candidate.starts_with("RKAT_") {
+                    None
+                } else {
+                    (env.env_lookup)(&format!("RKAT_{candidate}"))
+                };
+                if let Some(value) = rkat_override.or_else(|| (env.env_lookup)(candidate)) {
+                    return Ok(value);
+                }
+            }
+            Err(ProviderAuthError::Auth(AuthError::MissingSecret))
+        }
         CredentialSourceSpec::ExternalResolver { handle } => {
             let resolver = env
                 .external_resolvers

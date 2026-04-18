@@ -108,7 +108,8 @@ fn canonical_toml_populates_config_realm_without_regressing_flat_provider() {
     assert_eq!(
         auth.source,
         CredentialSourceSpec::Env {
-            env: "OPENAI_API_KEY".into()
+            env: "OPENAI_API_KEY".into(),
+            fallback: Vec::new(),
         }
     );
 }
@@ -185,6 +186,7 @@ fn from_config_rejects_binding_pointing_at_missing_backend() {
             auth_method: "api_key".into(),
             source: CredentialSourceSpec::Env {
                 env: "OPENAI_API_KEY".into(),
+                fallback: Vec::new(),
             },
             storage: None,
             constraints: Default::default(),
@@ -261,6 +263,7 @@ fn from_config_detects_provider_mismatch() {
             auth_method: "api_key".into(),
             source: CredentialSourceSpec::Env {
                 env: "ANTHROPIC_API_KEY".into(),
+                fallback: Vec::new(),
             },
             storage: None,
             constraints: Default::default(),

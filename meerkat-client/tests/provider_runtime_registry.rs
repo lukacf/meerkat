@@ -168,6 +168,7 @@ async fn env_lookup_missing_surfaces_missing_secret() {
     // Swap the OpenAI auth to require env lookup that won't resolve.
     realm.auth_profiles.get_mut("openai_key").unwrap().source = CredentialSourceSpec::Env {
         env: "MEERKAT_TEST_NEVER_SET".into(),
+        fallback: Vec::new(),
     };
 
     let registry = ProviderRuntimeRegistry::default();

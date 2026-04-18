@@ -658,39 +658,25 @@ pub fn provider_key(provider: Provider) -> &'static str {
 }
 
 /// Project a [`Config`] + `provider` tuple into a [`RealmConnectionSet`]
-/// for runtime resolution (Phase 6.1 replacement for the deleted
-/// legacy credential-precedence helper).
+/// for runtime resolution. This is a pure config projection, not a
+/// policy owner (dogma §1/§20).
 ///
-/// Precedence (post plan §6.9/§6.10 cutover):
-///   1. env var `RKAT_<P>_API_KEY` -> `<P>_API_KEY` -> `GOOGLE_API_KEY` (Gemini only).
-///
-/// The env-var layer synthesizes a realm with `CredentialSourceSpec::Env`,
-/// which the resolver's `env_lookup` seam reads at resolve time.
-/// Dogma §1: one canonical owner for "env-var credential fallback" —
-/// this projection — instead of a helper in the factory body.
+/// Precedence (post plan §6.9/§6.10 + §1.5r cleanup):
+///   1. `Config.realm[_]`: if any realm has a binding whose
+///      backend_profile provider matches the inferred provider, promote
+///      that binding. Preserves "realm-populates-creds" behavior for
+///      surfaces that bootstrap a single-provider realm (notably WASM).
+///   2. `RealmConnectionSet::synthesize_env_default(provider)`: a
+///      synthesized realm with `CredentialSourceSpec::Env { env, fallback }`.
+///      The var names + fallback chain live in meerkat-core (single
+///      canonical owner); the `RKAT_*`-prefix precedence lives in the
+///      resolver's env_lookup arm (`meerkat-client::runtime::resolver`).
+///      This helper does not encode any env-var policy itself.
 fn synthesize_realm_from_config(
     config: &Config,
     provider: Provider,
 ) -> meerkat_core::RealmConnectionSet {
-    // Alias kept so internal access names are stable through the §6.9/§6.10
-    // cut without touching the whole body.
-    let _config = config;
-    // Plan §6.9 + §6.10 deleted the legacy `config.provider` enum and
-    // the `providers.{api_keys,base_urls}` shared maps. Precedence for
-    // connection_ref-less builds is:
-    //   1. Config.realm: if the user has a `[realm.default]` block
-    //      containing a binding for this provider, reuse it so users
-    //      don't need to also pass connection_ref when the realm maps
-    //      one-to-one onto the inferred provider.
-    //   2. env vars (RKAT_*-prefixed overrides + native `<P>_API_KEY`).
-    // Surfaces with multi-binding realms should pass connection_ref
-    // explicitly through AgentBuildConfig.
-
-    // Layer 1: realm config match. If any realm has a binding whose
-    // backend_profile provider matches, promote it to the synthesized
-    // realm for this resolution. Preserves "realm-populates-creds"
-    // behavior WASM and multi-provider factories depend on.
-    let realm_match = _config.realm.iter().find_map(|(realm_id, section)| {
+    let realm_match = config.realm.iter().find_map(|(realm_id, section)| {
         let provider_str = provider.as_str();
         for (binding_id, binding) in &section.binding {
             if let Some(backend) = section.backend.get(&binding.backend_profile)
@@ -704,39 +690,10 @@ fn synthesize_realm_from_config(
     if let Some((realm_id, binding_id, section)) = realm_match
         && let Ok(mut set) = meerkat_core::RealmConnectionSet::from_config(&realm_id, section)
     {
-        // Re-target default_binding so downstream code uses the
-        // matched binding even when the user's section had a
-        // different default.
         set.default_binding = Some(binding_id);
         return set;
     }
-
-    let mut api_key: Option<String> = None;
-
-    if api_key.is_none() {
-        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
-            api_key = Some("test-key".to_string());
-        } else {
-            let (rkat_var, native_vars): (&str, &[&str]) = match provider {
-                Provider::Anthropic => ("RKAT_ANTHROPIC_API_KEY", &["ANTHROPIC_API_KEY"]),
-                Provider::OpenAI => ("RKAT_OPENAI_API_KEY", &["OPENAI_API_KEY"]),
-                Provider::Gemini => ("RKAT_GEMINI_API_KEY", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
-                Provider::SelfHosted | Provider::Other => ("", &[]),
-            };
-            if !rkat_var.is_empty() {
-                api_key = std::env::var(rkat_var)
-                    .ok()
-                    .or_else(|| native_vars.iter().find_map(|k| std::env::var(k).ok()));
-            }
-        }
-    }
-
-    match api_key {
-        Some(secret) => {
-            meerkat_core::RealmConnectionSet::synthesize_inline_default(provider, secret)
-        }
-        None => meerkat_core::RealmConnectionSet::synthesize_env_default(provider),
-    }
+    meerkat_core::RealmConnectionSet::synthesize_env_default(provider)
 }
 
 /// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.

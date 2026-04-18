@@ -544,7 +544,19 @@ impl MobMcpState {
                 Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
                 Ok(report)
             }
-            Err(error) => {
+            Err(meerkat_mob::MobDestroyError::Incomplete { report }) => {
+                // Partial cleanup is a successful destroy with non-empty
+                // errors. Finding A9: callers shouldn't have to match on an
+                // Err variant to read the report — every consumer either
+                // ignored the report or did the match dance. Keep the
+                // storage file cleanup as-is (destroy attempt reached the
+                // reporting stage, so the storage side is considered
+                // finalised) and surface the report with its errors
+                // populated.
+                Self::maybe_remove_storage_file(managed.storage_path.as_deref()).await;
+                Ok(report)
+            }
+            Err(meerkat_mob::MobDestroyError::Mob(error)) => {
                 let mut mobs = self.mobs.write().await;
                 match mobs.entry(mob_id.clone()) {
                     Entry::Vacant(entry) => {
@@ -557,7 +569,25 @@ impl MobMcpState {
                         );
                     }
                 }
-                Err(MobError::Internal(format!("mob destroy failed: {error}")))
+                Err(error)
+            }
+            Err(other) => {
+                // MobDestroyError is #[non_exhaustive]; future variants we
+                // haven't coded for fall through to a generic internal
+                // error so the caller still gets a readable message.
+                let mut mobs = self.mobs.write().await;
+                match mobs.entry(mob_id.clone()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(managed);
+                    }
+                    Entry::Occupied(_) => {
+                        tracing::warn!(
+                            mob_id = %mob_id,
+                            "mob destroy failed after a replacement mob with the same id was inserted; preserving replacement"
+                        );
+                    }
+                }
+                Err(MobError::Internal(format!("mob destroy failed: {other}")))
             }
         }
     }

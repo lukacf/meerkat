@@ -1452,8 +1452,25 @@ impl AgentFactory {
         }
 
         // Env fallback remains last for secrets when config omits keys.
+        // RKAT_* precedence over native env var name.
         if api_key.is_none() {
-            api_key = ProviderResolver::api_key_for(provider);
+            if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+                api_key = Some("test-key".to_string());
+            } else {
+                let (rkat_var, native_var): (&str, &[&str]) = match provider {
+                    Provider::Anthropic => ("RKAT_ANTHROPIC_API_KEY", &["ANTHROPIC_API_KEY"]),
+                    Provider::OpenAI => ("RKAT_OPENAI_API_KEY", &["OPENAI_API_KEY"]),
+                    Provider::Gemini => {
+                        ("RKAT_GEMINI_API_KEY", &["GEMINI_API_KEY", "GOOGLE_API_KEY"])
+                    }
+                    Provider::SelfHosted | Provider::Other => ("", &[]),
+                };
+                if !rkat_var.is_empty() {
+                    api_key = std::env::var(rkat_var)
+                        .ok()
+                        .or_else(|| native_var.iter().find_map(|k| std::env::var(k).ok()));
+                }
+            }
         }
 
         (api_key, base_url)

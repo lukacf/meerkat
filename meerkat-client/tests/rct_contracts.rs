@@ -188,12 +188,13 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
         Provider::Other
     );
 
-    let env = std::collections::HashMap::from([
-        ("RKAT_OPENAI_API_KEY".to_string(), "rk-test".to_string()),
-        ("OPENAI_API_KEY".to_string(), "native-test".to_string()),
-    ]);
-    let key = ProviderResolver::api_key_for_with_env(Provider::OpenAI, |key| env.get(key).cloned());
-    assert_eq!(key.as_deref(), Some("rk-test"));
+    // Phase 6.6 removed the legacy env-precedence credential helpers
+    // from this struct. The RKAT_*-preferred env resolution now lives
+    // inside the factory's env-var fallback (meerkat/src/factory.rs)
+    // and inside the provider-runtime registry's env_lookup seam.
+    // This test stays focused on the infer_from_model contract above;
+    // env-precedence is covered by integration tests that exercise
+    // the registry.
 
     Ok(())
 }

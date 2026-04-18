@@ -716,27 +716,25 @@ where
                         }
 
                         // Re-read state — may have moved to `expiring`
-                        // via the TTL check above; the match arm then
-                        // drives begin_refresh on this same iteration.
+                        // via the TTL check above.
                         let snapshot = handle.snapshot(binding_key);
                         match snapshot.state.as_deref() {
-                            // expiring → drive BeginAuthRefresh input so
-                            // the DSL transitions into `refreshing`.
-                            // The refresh HTTP round-trip itself is driven
-                            // by the provider-runtime registry on the next
-                            // LLM call (which sees the `refreshing` state
-                            // and re-resolves fresh credentials). Failure
-                            // routes back via refresh_failed(permanent) →
-                            // `reauth_required`, which the next CallingLlm
-                            // iteration picks up via this same arm.
-                            Some("expiring") => {
-                                // Silently swallow the transition error if
-                                // the guard rejects (e.g. a concurrent
-                                // refresh already drove the state past
-                                // `expiring`); that's legal per-DSL and
-                                // this path isn't load-bearing correctness.
-                                let _ = handle.begin_refresh(binding_key);
-                            }
+                            // expiring → observable state only. Plan
+                            // §1.5r.9's "call provider resolver refresh
+                            // → complete_refresh or refresh_failed" leg
+                            // is architecturally blocked on mid-session
+                            // client hot-swap (plan §Explicit deferrals),
+                            // so driving into `refreshing` from here
+                            // would create a state the production flow
+                            // has no path out of. Dogma §19 forbids that
+                            // theater. The TTL-expiry signal is still
+                            // useful to external observers (CLI status,
+                            // REST AuthStatus), which is why
+                            // `mark_expiring` fires above; the machine's
+                            // `refreshing` state remains reachable from
+                            // tests and — when the refresh driver lands
+                            // — from a session-scoped driver task.
+                            Some("expiring") => {}
                             // reauth_required → project the DSL state into a
                             // synthetic session-level system notice, then
                             // terminate the run. The DSL has already

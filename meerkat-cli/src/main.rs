@@ -3040,6 +3040,7 @@ async fn noninteractive_login(
     Ok(())
 }
 
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn interactive_login(
     provider_hint: Option<&str>,
     _scope: &RuntimeScope,

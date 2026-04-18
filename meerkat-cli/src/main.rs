@@ -1001,10 +1001,12 @@ enum Commands {
     /// Check local setup and common prerequisites
     Doctor,
 
-    /// Auth profile management — list, inspect, test, and log out of
-    /// realm-scoped auth profiles. Interactive OAuth login lands in a
-    /// follow-up commit; existing env-var auth (ANTHROPIC_API_KEY /
-    /// OPENAI_API_KEY / GOOGLE_API_KEY) continues to work unchanged.
+    /// Auth profile management — list, inspect, test, log in, log out,
+    /// delete, and check status of realm-scoped auth profiles.
+    /// `login` runs the interactive OAuth flow by default, or writes an
+    /// inline api_key when `--non-interactive --secret <S>` is passed.
+    /// Env-var auth (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY)
+    /// continues to work as a fallback for callers that haven't migrated.
     Auth {
         #[command(subcommand)]
         command: AuthCommands,

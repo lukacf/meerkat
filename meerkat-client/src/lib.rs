@@ -31,9 +31,11 @@ pub mod openai_compatible;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
-// === Provider runtime (Phase 2 — parallel stack, not yet wired to
-// AgentFactory — see
-// /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md) ===
+// === Provider runtime: typed backend + auth-method matrix routed through
+// AgentFactory when `AgentBuildConfig.connection_ref` is set. Single
+// canonical path for provider-client construction; the legacy flat
+// `build_llm_client(provider, api_key, base_url)` entry point was removed
+// in Phase 6. ===
 pub mod providers;
 pub mod runtime;
 

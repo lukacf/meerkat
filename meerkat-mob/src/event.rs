@@ -445,6 +445,15 @@ pub struct MemberSpawnedEvent {
     /// Profile name used to spawn.
     pub role: ProfileName,
     /// Runtime mode for this spawned member.
+    ///
+    /// `#[serde(default)]` is load-bearing and intentional: pre-0.6 persisted
+    /// events predate the `runtime_mode` field entirely. The default
+    /// [`MobRuntimeMode::AutonomousHost`] matches pre-field semantics (the
+    /// only mode that existed then), so replay on legacy data coerces to
+    /// the historically correct value. Finding B7 (DELETE_ME) flagged this
+    /// as "silent semantic coercion"; the coercion is deliberate and the
+    /// regression test `mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host`
+    /// pins it so a future schema change cannot silently flip the default.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Application-defined labels for this member.
@@ -1014,6 +1023,47 @@ mod tests {
             assert!(new_generation > previous_generation);
         } else {
             panic!("expected MemberReset");
+        }
+    }
+
+    #[test]
+    fn mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host() {
+        // Finding B7 (DELETE_ME): MemberSpawnedEvent.runtime_mode carries
+        // `#[serde(default)]` so pre-0.6 persisted events without the field
+        // deserialize to MobRuntimeMode::AutonomousHost. That matches the
+        // pre-field semantics (AutonomousHost was the only mode that
+        // existed). Lock this coercion in so a future schema change cannot
+        // silently flip the default to TurnDriven and corrupt replay of
+        // legacy data.
+        // MobEventKind uses `#[serde(tag = "type", rename_all = "snake_case")]`
+        // so MemberSpawned lands as `{"type": "member_spawned", ...}` with the
+        // wrapped MemberSpawnedEvent's fields at the same level.
+        let legacy_json = serde_json::json!({
+            "type": "member_spawned",
+            "agent_identity": "legacy-worker",
+            "generation": 0,
+            "fence_token": 0,
+            "agent_runtime_id": {
+                "identity": "legacy-worker",
+                "generation": 0
+            },
+            "role": "worker",
+            // runtime_mode intentionally omitted — the whole point of this
+            // regression is "missing field" replay.
+            "labels": {}
+        });
+        let parsed: MobEventKind =
+            serde_json::from_value(legacy_json).expect("legacy event must deserialize");
+        match parsed {
+            MobEventKind::MemberSpawned(event) => {
+                assert_eq!(
+                    event.runtime_mode,
+                    MobRuntimeMode::AutonomousHost,
+                    "legacy MemberSpawnedEvent without runtime_mode must coerce to AutonomousHost",
+                );
+                assert_eq!(event.agent_identity, AgentIdentity::from("legacy-worker"));
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
         }
     }
 }

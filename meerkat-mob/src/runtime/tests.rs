@@ -7029,6 +7029,70 @@ async fn test_realtime_attach_and_detach_update_durable_intent_and_runtime_statu
     );
 }
 
+/// DELETE_ME C7 regression: `realtime_attach_many` / `_detach_many` are
+/// pure iterate-and-collect wrappers over single-member attach/detach.
+/// They must preserve input order, report per-member outcomes, and
+/// not offer atomicity across members (single-member attach remains
+/// the one owner of per-member voice-intent truth). This test exercises
+/// the mixed outcome: a spawned member succeeds; a non-existent
+/// identity fails with `MemberNotFound`.
+#[tokio::test]
+async fn realtime_attach_many_reports_per_member_outcomes_without_atomicity() {
+    let (handle, _service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-voice-1"),
+            None,
+        )
+        .await
+        .expect("spawn worker w-voice-1");
+
+    let requested = vec![
+        AgentIdentity::from("w-voice-1"),
+        AgentIdentity::from("nonexistent-member"),
+    ];
+    let results = handle.realtime_attach_many(requested.clone()).await;
+
+    // Order-preserving: each result lines up with its input identity.
+    assert_eq!(results.len(), 2);
+    assert_eq!(&results[0].0, &requested[0]);
+    assert_eq!(&results[1].0, &requested[1]);
+
+    // Spawned member: attach succeeds.
+    assert!(
+        results[0].1.is_ok(),
+        "attach on spawned member must succeed: {:?}",
+        results[0].1
+    );
+
+    // Non-existent identity: attach fails with MemberNotFound. The
+    // batch MUST NOT roll back the successful attach above — C7's
+    // dogma-fit explicitly rejects cross-member atomicity so that
+    // single-member attach remains the one owner of voice-intent.
+    assert!(
+        matches!(&results[1].1, Err(MobError::MemberNotFound(_))),
+        "attach on missing identity must surface MemberNotFound: {:?}",
+        results[1].1
+    );
+
+    // Now detach_many. The first member should still be attached
+    // (proving no rollback happened on the partial-failure above);
+    // detach returns Ok(true) for it.
+    let detach_results = handle.realtime_detach_many(requested.clone()).await;
+    assert_eq!(detach_results.len(), 2);
+    assert!(
+        detach_results[0].1.is_ok(),
+        "detach on previously-attached member must succeed: {:?}",
+        detach_results[0].1
+    );
+    assert!(
+        matches!(&detach_results[1].1, Err(MobError::MemberNotFound(_))),
+        "detach on missing identity must surface MemberNotFound: {:?}",
+        detach_results[1].1
+    );
+}
+
 #[tokio::test]
 async fn test_turn_driven_realtime_attach_keeps_peer_ingress_drain_alive_until_detach() {
     let mut definition = sample_definition();

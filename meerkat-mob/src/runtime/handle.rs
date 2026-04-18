@@ -2880,6 +2880,65 @@ impl MobHandle {
         }
     }
 
+    /// Attach durable voice intent to many members in one call.
+    ///
+    /// Convenience wrapper over [`Self::realtime_attach`] that iterates
+    /// the provided identities sequentially and returns the per-member
+    /// outcome. No atomicity is promised across members: if member A
+    /// attaches and member B fails, A stays attached and the caller
+    /// sees both results in the returned vector. Each element is the
+    /// identity paired with the `Result<bool, MobError>` the
+    /// single-member call would have produced.
+    ///
+    /// # Dogma fit (C7)
+    ///
+    /// DELETE_ME finding C7 asked for a mob-wide or many-members batch
+    /// because single-member attach/detach forces callers to roll their
+    /// own loop for the common "enable voice on these N members" use
+    /// case. A transactional batch would introduce new atomicity
+    /// semantics across multiple DSL transitions (every attach is its
+    /// own `MobMachineCommand::RealtimeAttach` transition owned by
+    /// [`MobMachine`]); this would duplicate voice-intent ownership and
+    /// contradict dogma principle #2 ("machines own semantics") by
+    /// inventing a new batch-attach fact. Instead, this is a pure
+    /// convenience wrapper: single-member attach stays the one owner of
+    /// per-member voice-intent truth, and the batch API is a shell-level
+    /// iterate-and-collect helper that surfaces per-member outcomes
+    /// without introducing a new semantic owner. Per-member call
+    /// ordering matches input order so tests and error reporting are
+    /// deterministic.
+    pub async fn realtime_attach_many(
+        &self,
+        identities: Vec<AgentIdentity>,
+    ) -> Vec<(AgentIdentity, Result<bool, MobError>)> {
+        let mut results = Vec::with_capacity(identities.len());
+        for identity in identities {
+            let outcome = self.realtime_attach(identity.clone()).await;
+            results.push((identity, outcome));
+        }
+        results
+    }
+
+    /// Clear durable voice intent from many members in one call.
+    ///
+    /// Convenience wrapper over [`Self::realtime_detach`] with the same
+    /// shape and semantics as [`Self::realtime_attach_many`]: no
+    /// atomicity, per-member outcomes returned in input order, batch
+    /// API is a shell iterate-and-collect that does not introduce a
+    /// new semantic owner. See [`Self::realtime_attach_many`] for the
+    /// full dogma-fit rationale.
+    pub async fn realtime_detach_many(
+        &self,
+        identities: Vec<AgentIdentity>,
+    ) -> Vec<(AgentIdentity, Result<bool, MobError>)> {
+        let mut results = Vec::with_capacity(identities.len());
+        for identity in identities {
+            let outcome = self.realtime_detach(identity.clone()).await;
+            results.push((identity, outcome));
+        }
+        results
+    }
+
     /// Wait until all current autonomous members resolve their initial kickoff.
     ///
     /// In 0.6 autonomous members no longer run a synthetic second kickoff turn,

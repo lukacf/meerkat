@@ -36,6 +36,7 @@ members = [
     "test-fixtures/machine-dsl-tests",
     "xtask",
 ]
+exclude = ["vendor/oai-rt-rs"]
 
 [workspace.package]
 version = "0.5.2"
@@ -147,6 +148,7 @@ meerkat-machine-derive = { version = "0.5.2", path = "meerkat-machine-derive" }
 meerkat-machine-dsl = { version = "0.5.2", path = "meerkat-machine-dsl" }
 meerkat-machine-dsl-core = { version = "0.5.2", path = "meerkat-machine-dsl-core" }
 meerkat-store = { version = "0.5.2", path = "meerkat-store", default-features = false }
+oai-rt-rs = { version = "0.2.1", path = "vendor/oai-rt-rs" }
 
 [profile.dev]
 split-debuginfo = "off"

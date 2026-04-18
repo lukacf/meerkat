@@ -13,6 +13,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `current_run_id`: `Option<RunId>`
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
+- `realtime_intent_present`: `Bool`
+- `realtime_binding_state`: `String`
+- `realtime_binding_authority_epoch`: `Option<u64>`
+- `realtime_reattach_required`: `Bool`
+- `realtime_next_authority_epoch`: `u64`
+- `live_topology_phase`: `String`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -45,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: String)
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
+- `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
@@ -52,6 +59,19 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
 - `Recycle`
+- `ProjectRealtimeIntent`(present: Bool)
+- `BeginRealtimeBinding`
+- `ReplaceRealtimeBinding`
+- `DetachRealtimeBinding`
+- `RequireRealtimeReattach`
+- `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: String)
+- `BeginLiveTopologyReconfigure`(authority_epoch: u64)
+- `MarkLiveTopologyDetached`
+- `ApplyLiveTopologyIdentity`
+- `ApplyLiveTopologyVisibility`
+- `CompleteLiveTopology`
+- `AbortLiveTopologyBeforeDetach`
+- `FailLiveTopologyAfterDetach`
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -61,6 +81,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InputState`
 - `ListActiveInputs`
 - `RuntimeState`
+- `RuntimeRealtimeAttachmentStatus`
 - `LoadBoundaryReceipt`
 - `Recover`
 
@@ -127,11 +148,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitExternalToolDelta`
 - `CloseSurfaceConnection`
 - `RejectSurfaceCall`
+- `RealtimeIntentProjected`(present: Bool)
+- `RealtimeBindingRotated`(authority_epoch: u64)
+- `LiveTopologyPhaseChanged`
 
 ## Invariants
 - `fence_requires_bound_runtime`
 - `running_has_current_run`
 - `current_run_only_while_running_or_retired`
+- `realtime_binding_epoch_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -1180,6 +1205,576 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `runtime_is_bound`
 - Emits: `InitiateRecycle`
 - To: `Attached`
+
+### `ProjectRealtimeIntentIdle`
+- From: `Idle`
+- On: `ProjectRealtimeIntent`(present)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeIntentProjected`
+- To: `Idle`
+
+### `ProjectRealtimeIntentAttached`
+- From: `Attached`
+- On: `ProjectRealtimeIntent`(present)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeIntentProjected`
+- To: `Attached`
+
+### `ProjectRealtimeIntentRunning`
+- From: `Running`
+- On: `ProjectRealtimeIntent`(present)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeIntentProjected`
+- To: `Running`
+
+### `ProjectRealtimeIntentRetired`
+- From: `Retired`
+- On: `ProjectRealtimeIntent`(present)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeIntentProjected`
+- To: `Retired`
+
+### `ProjectRealtimeIntentStopped`
+- From: `Stopped`
+- On: `ProjectRealtimeIntent`(present)
+- Guards:
+  - `session_registered`
+- Emits: `RealtimeIntentProjected`
+- To: `Stopped`
+
+### `BeginRealtimeBindingIdle`
+- From: `Idle`
+- On: `BeginRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Idle`
+
+### `BeginRealtimeBindingAttached`
+- From: `Attached`
+- On: `BeginRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Attached`
+
+### `BeginRealtimeBindingRunning`
+- From: `Running`
+- On: `BeginRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Running`
+
+### `BeginRealtimeBindingRetired`
+- From: `Retired`
+- On: `BeginRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Retired`
+
+### `BeginRealtimeBindingStopped`
+- From: `Stopped`
+- On: `BeginRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Stopped`
+
+### `ReplaceRealtimeBindingIdle`
+- From: `Idle`
+- On: `ReplaceRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Idle`
+
+### `ReplaceRealtimeBindingAttached`
+- From: `Attached`
+- On: `ReplaceRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Attached`
+
+### `ReplaceRealtimeBindingRunning`
+- From: `Running`
+- On: `ReplaceRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Running`
+
+### `ReplaceRealtimeBindingRetired`
+- From: `Retired`
+- On: `ReplaceRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Retired`
+
+### `ReplaceRealtimeBindingStopped`
+- From: `Stopped`
+- On: `ReplaceRealtimeBinding`()
+- Guards:
+  - `session_registered`
+  - `no_topology_reconfigure_in_progress`
+- Emits: `RealtimeBindingRotated`
+- To: `Stopped`
+
+### `DetachRealtimeBindingIdle`
+- From: `Idle`
+- On: `DetachRealtimeBinding`()
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `DetachRealtimeBindingAttached`
+- From: `Attached`
+- On: `DetachRealtimeBinding`()
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `DetachRealtimeBindingRunning`
+- From: `Running`
+- On: `DetachRealtimeBinding`()
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `DetachRealtimeBindingRetired`
+- From: `Retired`
+- On: `DetachRealtimeBinding`()
+- Guards:
+  - `session_registered`
+- To: `Retired`
+
+### `DetachRealtimeBindingStopped`
+- From: `Stopped`
+- On: `DetachRealtimeBinding`()
+- Guards:
+  - `session_registered`
+- To: `Stopped`
+
+### `RequireRealtimeReattachIdle`
+- From: `Idle`
+- On: `RequireRealtimeReattach`()
+- Guards:
+  - `session_registered`
+- To: `Idle`
+
+### `RequireRealtimeReattachAttached`
+- From: `Attached`
+- On: `RequireRealtimeReattach`()
+- Guards:
+  - `session_registered`
+- To: `Attached`
+
+### `RequireRealtimeReattachRunning`
+- From: `Running`
+- On: `RequireRealtimeReattach`()
+- Guards:
+  - `session_registered`
+- To: `Running`
+
+### `RequireRealtimeReattachRetired`
+- From: `Retired`
+- On: `RequireRealtimeReattach`()
+- Guards:
+  - `session_registered`
+- To: `Retired`
+
+### `RequireRealtimeReattachStopped`
+- From: `Stopped`
+- On: `RequireRealtimeReattach`()
+- Guards:
+  - `session_registered`
+- To: `Stopped`
+
+### `PublishRealtimeSignalIdle`
+- From: `Idle`
+- On: `PublishRealtimeSignal`(authority_epoch, next_binding_state)
+- Guards:
+  - `authority_matches_current`
+  - `no_topology_reconfigure_in_progress`
+  - `valid_next_state`
+- To: `Idle`
+
+### `PublishRealtimeSignalAttached`
+- From: `Attached`
+- On: `PublishRealtimeSignal`(authority_epoch, next_binding_state)
+- Guards:
+  - `authority_matches_current`
+  - `no_topology_reconfigure_in_progress`
+  - `valid_next_state`
+- To: `Attached`
+
+### `PublishRealtimeSignalRunning`
+- From: `Running`
+- On: `PublishRealtimeSignal`(authority_epoch, next_binding_state)
+- Guards:
+  - `authority_matches_current`
+  - `no_topology_reconfigure_in_progress`
+  - `valid_next_state`
+- To: `Running`
+
+### `PublishRealtimeSignalRetired`
+- From: `Retired`
+- On: `PublishRealtimeSignal`(authority_epoch, next_binding_state)
+- Guards:
+  - `authority_matches_current`
+  - `no_topology_reconfigure_in_progress`
+  - `valid_next_state`
+- To: `Retired`
+
+### `PublishRealtimeSignalStopped`
+- From: `Stopped`
+- On: `PublishRealtimeSignal`(authority_epoch, next_binding_state)
+- Guards:
+  - `authority_matches_current`
+  - `no_topology_reconfigure_in_progress`
+  - `valid_next_state`
+- To: `Stopped`
+
+### `BeginLiveTopologyReconfigureIdle`
+- From: `Idle`
+- On: `BeginLiveTopologyReconfigure`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+  - `topology_idle`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `BeginLiveTopologyReconfigureAttached`
+- From: `Attached`
+- On: `BeginLiveTopologyReconfigure`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+  - `topology_idle`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `BeginLiveTopologyReconfigureRunning`
+- From: `Running`
+- On: `BeginLiveTopologyReconfigure`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+  - `topology_idle`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `BeginLiveTopologyReconfigureRetired`
+- From: `Retired`
+- On: `BeginLiveTopologyReconfigure`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+  - `topology_idle`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `BeginLiveTopologyReconfigureStopped`
+- From: `Stopped`
+- On: `BeginLiveTopologyReconfigure`(authority_epoch)
+- Guards:
+  - `session_registered`
+  - `authority_matches_current`
+  - `topology_idle`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `MarkLiveTopologyDetachedIdle`
+- From: `Idle`
+- On: `MarkLiveTopologyDetached`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+  - `no_active_run`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `MarkLiveTopologyDetachedAttached`
+- From: `Attached`
+- On: `MarkLiveTopologyDetached`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+  - `no_active_run`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `MarkLiveTopologyDetachedRunning`
+- From: `Running`
+- On: `MarkLiveTopologyDetached`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+  - `no_active_run`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `MarkLiveTopologyDetachedRetired`
+- From: `Retired`
+- On: `MarkLiveTopologyDetached`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+  - `no_active_run`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `MarkLiveTopologyDetachedStopped`
+- From: `Stopped`
+- On: `MarkLiveTopologyDetached`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+  - `no_active_run`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `ApplyLiveTopologyIdentityIdle`
+- From: `Idle`
+- On: `ApplyLiveTopologyIdentity`()
+- Guards:
+  - `session_registered`
+  - `topology_detached`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `ApplyLiveTopologyIdentityAttached`
+- From: `Attached`
+- On: `ApplyLiveTopologyIdentity`()
+- Guards:
+  - `session_registered`
+  - `topology_detached`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `ApplyLiveTopologyIdentityRunning`
+- From: `Running`
+- On: `ApplyLiveTopologyIdentity`()
+- Guards:
+  - `session_registered`
+  - `topology_detached`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `ApplyLiveTopologyIdentityRetired`
+- From: `Retired`
+- On: `ApplyLiveTopologyIdentity`()
+- Guards:
+  - `session_registered`
+  - `topology_detached`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `ApplyLiveTopologyIdentityStopped`
+- From: `Stopped`
+- On: `ApplyLiveTopologyIdentity`()
+- Guards:
+  - `session_registered`
+  - `topology_detached`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `ApplyLiveTopologyVisibilityIdle`
+- From: `Idle`
+- On: `ApplyLiveTopologyVisibility`()
+- Guards:
+  - `session_registered`
+  - `host_identity_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `ApplyLiveTopologyVisibilityAttached`
+- From: `Attached`
+- On: `ApplyLiveTopologyVisibility`()
+- Guards:
+  - `session_registered`
+  - `host_identity_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `ApplyLiveTopologyVisibilityRunning`
+- From: `Running`
+- On: `ApplyLiveTopologyVisibility`()
+- Guards:
+  - `session_registered`
+  - `host_identity_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `ApplyLiveTopologyVisibilityRetired`
+- From: `Retired`
+- On: `ApplyLiveTopologyVisibility`()
+- Guards:
+  - `session_registered`
+  - `host_identity_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `ApplyLiveTopologyVisibilityStopped`
+- From: `Stopped`
+- On: `ApplyLiveTopologyVisibility`()
+- Guards:
+  - `session_registered`
+  - `host_identity_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `CompleteLiveTopologyIdle`
+- From: `Idle`
+- On: `CompleteLiveTopology`()
+- Guards:
+  - `session_registered`
+  - `host_visibility_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `CompleteLiveTopologyAttached`
+- From: `Attached`
+- On: `CompleteLiveTopology`()
+- Guards:
+  - `session_registered`
+  - `host_visibility_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `CompleteLiveTopologyRunning`
+- From: `Running`
+- On: `CompleteLiveTopology`()
+- Guards:
+  - `session_registered`
+  - `host_visibility_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `CompleteLiveTopologyRetired`
+- From: `Retired`
+- On: `CompleteLiveTopology`()
+- Guards:
+  - `session_registered`
+  - `host_visibility_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `CompleteLiveTopologyStopped`
+- From: `Stopped`
+- On: `CompleteLiveTopology`()
+- Guards:
+  - `session_registered`
+  - `host_visibility_applied`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `AbortLiveTopologyBeforeDetachIdle`
+- From: `Idle`
+- On: `AbortLiveTopologyBeforeDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `AbortLiveTopologyBeforeDetachAttached`
+- From: `Attached`
+- On: `AbortLiveTopologyBeforeDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `AbortLiveTopologyBeforeDetachRunning`
+- From: `Running`
+- On: `AbortLiveTopologyBeforeDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `AbortLiveTopologyBeforeDetachRetired`
+- From: `Retired`
+- On: `AbortLiveTopologyBeforeDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `AbortLiveTopologyBeforeDetachStopped`
+- From: `Stopped`
+- On: `AbortLiveTopologyBeforeDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_reconfiguring`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `FailLiveTopologyAfterDetachIdle`
+- From: `Idle`
+- On: `FailLiveTopologyAfterDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_past_detach`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Idle`
+
+### `FailLiveTopologyAfterDetachAttached`
+- From: `Attached`
+- On: `FailLiveTopologyAfterDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_past_detach`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Attached`
+
+### `FailLiveTopologyAfterDetachRunning`
+- From: `Running`
+- On: `FailLiveTopologyAfterDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_past_detach`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Running`
+
+### `FailLiveTopologyAfterDetachRetired`
+- From: `Retired`
+- On: `FailLiveTopologyAfterDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_past_detach`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Retired`
+
+### `FailLiveTopologyAfterDetachStopped`
+- From: `Stopped`
+- On: `FailLiveTopologyAfterDetach`()
+- Guards:
+  - `session_registered`
+  - `topology_past_detach`
+- Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
 
 ## Coverage
 ### Code Anchors

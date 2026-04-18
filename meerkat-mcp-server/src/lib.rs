@@ -710,6 +710,11 @@ impl MeerkatMcpState {
         self.expose_paths
     }
 
+    #[cfg(feature = "mob")]
+    pub fn set_realtime_rpc_tcp_addr(&mut self, addr: Option<String>) {
+        self.mob_state.set_realtime_rpc_tcp_addr(addr);
+    }
+
     async fn upsert_mcp_adapter(
         &self,
         session_id: &meerkat::SessionId,

@@ -326,4 +326,262 @@ impl MeerkatMachine {
             rollback_occurred: false,
         })
     }
+
+    /// Orchestrate a live-topology reconfigure under DSL-owned phase truth.
+    ///
+    /// The DSL tracks `live_topology_phase` across `Idle → Reconfiguring →
+    /// Detached → HostIdentityApplied → HostVisibilityApplied → Idle`, with
+    /// guards that (a) reject realtime publishes/attaches while not `Idle`,
+    /// (b) gate `MarkLiveTopologyDetached` on `turn_phase ∈ {Ready,
+    /// DrainingBoundary, Completed, Failed, Cancelled}`. A shell retry loop
+    /// re-applies `MarkLiveTopologyDetached` until the DSL accepts, encoding
+    /// "wait for next natural boundary" at the DSL layer rather than polling
+    /// shell state.
+    ///
+    /// Error paths: pre-detach host failures return `AbortLiveTopologyBeforeDetach`
+    /// (binding preserved, caller may retry). Post-detach host failures return
+    /// `FailLiveTopologyAfterDetach` (binding gone, reattach required).
+    pub async fn reconfigure_live_topology(
+        &self,
+        authority: crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority,
+        request: SessionLlmReconfigureRequest,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        let session_id = authority.session_id.clone();
+        let authority_epoch = authority.authority_epoch;
+
+        // 1. Begin: DSL rejects if phase != Idle or epoch mismatch.
+        self.stage_session_dsl_input(
+            &session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::BeginLiveTopologyReconfigure {
+                authority_epoch,
+            },
+            "BeginLiveTopologyReconfigure",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+
+        // 1b. Drive any in-flight turn into DrainingBoundary via the control
+        // plane. Do this eagerly, before host hydration, so the executor's
+        // cancel-after-boundary control command is observed even when
+        // hydration is fast relative to run completion. cancel_after_boundary
+        // is a no-op when the runtime loop has no control channel (Idle /
+        // disattached), so we call it unconditionally when a control channel
+        // is live; its send is idempotent.
+        {
+            let sessions = self.sessions.read().await;
+            let has_control = sessions
+                .get(&session_id)
+                .and_then(super::RuntimeSessionEntry::control_sender)
+                .is_some();
+            drop(sessions);
+            if has_control && let Err(error) = self.cancel_after_boundary_inner(&session_id).await {
+                let _ = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                        "AbortLiveTopologyBeforeDetach:cancel_after_boundary_failed",
+                    )
+                    .await;
+                return Err(error);
+            }
+        }
+
+        // 2. Prepare: may fail (host hydrate / resolve); if so, abort cleanly.
+        let prepared = match self
+            .prepare_reconfigure_session_llm_command(&session_id, request)
+            .await
+        {
+            Ok(cmd) => cmd,
+            Err(prepare_error) => {
+                let _ = self
+                    .stage_session_dsl_input(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                        "AbortLiveTopologyBeforeDetach:prepare_failed",
+                    )
+                    .await;
+                return Err(prepare_error);
+            }
+        };
+
+        let MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
+            target_identity,
+            target_capability_surface,
+            next_visibility_state,
+            ..
+        } = prepared
+        else {
+            let _ = self
+                .stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                    "AbortLiveTopologyBeforeDetach:unexpected_command",
+                )
+                .await;
+            return Err(RuntimeDriverError::Internal(
+                "expected prepared live topology reconfigure command".to_string(),
+            ));
+        };
+
+        // 3. Mark detached: retry loop until DSL accepts. The DSL guard
+        // `turn_at_safe_boundary` enforces "wait for next natural boundary";
+        // the shell's only job here is retry mechanics, not semantic waiting.
+        // Step 1b already drove any Running turn toward DrainingBoundary.
+        let detach_deadline =
+            meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match self
+                .stage_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::MarkLiveTopologyDetached,
+                    "MarkLiveTopologyDetached",
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(reason) if meerkat_core::time_compat::Instant::now() < detach_deadline => {
+                    tracing::trace!(
+                        %session_id,
+                        reason = %reason,
+                        "DSL rejected MarkLiveTopologyDetached; retrying"
+                    );
+                    crate::tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(reason) => {
+                    let _ = self
+                        .stage_session_dsl_input(
+                            &session_id,
+                            crate::meerkat_machine::dsl::MeerkatMachineInput::AbortLiveTopologyBeforeDetach,
+                            "AbortLiveTopologyBeforeDetach:boundary_timeout",
+                        )
+                        .await;
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "timed out waiting for live topology boundary: {reason}"
+                    )));
+                }
+            }
+        }
+
+        // 4. Host identity apply + DSL ApplyLiveTopologyIdentity.
+        let host = match self.llm_reconfigure_host() {
+            Ok(host) => host,
+            Err(error) => {
+                return self
+                    .fail_live_topology_past_detach(&session_id, None, error)
+                    .await;
+            }
+        };
+
+        if let Err(error) = host
+            .apply_live_session_llm_identity(&session_id, &target_identity)
+            .await
+        {
+            return self
+                .fail_live_topology_past_detach(&session_id, Some(&host), error)
+                .await;
+        }
+        self.stage_session_dsl_input(
+            &session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyLiveTopologyIdentity,
+            "ApplyLiveTopologyIdentity",
+        )
+        .await
+        .map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "DSL rejected ApplyLiveTopologyIdentity (guard regression): {reason}"
+            ))
+        })?;
+
+        // 5. Host visibility + persist, then DSL ApplyLiveTopologyVisibility.
+        if let Err(error) = host
+            .apply_live_session_tool_visibility_state(
+                &session_id,
+                Some((*next_visibility_state).clone()),
+            )
+            .await
+        {
+            return self
+                .fail_live_topology_past_detach(&session_id, Some(&host), error)
+                .await;
+        }
+        if let Err(error) = host.persist_live_session(&session_id).await {
+            return self
+                .fail_live_topology_past_detach(&session_id, Some(&host), error)
+                .await;
+        }
+        self.stage_session_dsl_input(
+            &session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ApplyLiveTopologyVisibility,
+            "ApplyLiveTopologyVisibility",
+        )
+        .await
+        .map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "DSL rejected ApplyLiveTopologyVisibility (guard regression): {reason}"
+            ))
+        })?;
+
+        // 6. Shell-side caches: replace visibility + cache new llm state.
+        self.replace_machine_visibility_state(&session_id, (*next_visibility_state).clone())
+            .await?;
+        self.set_cached_session_llm_state(
+            &session_id,
+            Some((*target_identity).clone()),
+            Some((*target_capability_surface).clone()),
+            SessionLlmCapabilitySurfaceStatus::Resolved,
+        )
+        .await;
+
+        // 7. Complete topology reconfigure and re-attach to mint a new
+        // authority epoch for the caller.
+        self.stage_session_dsl_input(
+            &session_id,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::CompleteLiveTopology,
+            "CompleteLiveTopology",
+        )
+        .await
+        .map_err(|reason| {
+            RuntimeDriverError::Internal(format!(
+                "DSL rejected CompleteLiveTopology (guard regression): {reason}"
+            ))
+        })?;
+
+        self.attach_live(&session_id).await
+    }
+
+    /// Post-detach failure recovery: discard live session on the host, reset
+    /// cached llm state, and surface `FailLiveTopologyAfterDetach` through the
+    /// DSL (which sets `reattach_required = true` and rotates the epoch).
+    async fn fail_live_topology_past_detach(
+        &self,
+        session_id: &SessionId,
+        host: Option<&Arc<dyn SessionLlmReconfigureHost>>,
+        original_error: RuntimeDriverError,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        if let Some(host) = host {
+            let _ = host.discard_live_session(session_id).await;
+        }
+        let _ = self
+            .replace_machine_visibility_state(session_id, SessionToolVisibilityState::default())
+            .await;
+        self.set_cached_session_llm_state(
+            session_id,
+            None,
+            None,
+            SessionLlmCapabilitySurfaceStatus::Unresolved,
+        )
+        .await;
+        let _ = self
+            .stage_session_dsl_input(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::FailLiveTopologyAfterDetach,
+                "FailLiveTopologyAfterDetach",
+            )
+            .await;
+        Err(RuntimeDriverError::Internal(format!(
+            "live topology reconfigure failed after detach: {original_error}"
+        )))
+    }
 }

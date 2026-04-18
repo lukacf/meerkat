@@ -196,7 +196,15 @@ pub fn admission_plan_from_policy(
 /// Derive the handling mode from a resolved policy decision.
 pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
     match policy.routing_disposition {
-        crate::policy::RoutingDisposition::Steer => HandlingMode::Steer,
+        crate::policy::RoutingDisposition::Steer | crate::policy::RoutingDisposition::Immediate => {
+            // Immediate routing must use the steer lane so runtime-owned
+            // semantic facts (for example terminal peer responses) cannot get
+            // stranded behind ordinary queued prompts before their immediate
+            // apply boundary is drained. This preserves the checked-in policy
+            // contract without upgrading WakeIfIdle into an active-turn
+            // interrupt on this branch.
+            HandlingMode::Steer
+        }
         _ => HandlingMode::Queue,
     }
 }
@@ -363,5 +371,22 @@ mod tests {
             let parsed: RejectReason = serde_json::from_value(json).unwrap();
             assert_eq!(parsed, reason);
         }
+    }
+
+    #[test]
+    fn immediate_routing_uses_steer_handling_mode() {
+        let policy = PolicyDecision {
+            apply_mode: ApplyMode::InjectNow,
+            wake_mode: WakeMode::WakeIfIdle,
+            queue_mode: QueueMode::None,
+            consume_point: ConsumePoint::OnApply,
+            drain_policy: DrainPolicy::Immediate,
+            routing_disposition: RoutingDisposition::Immediate,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: PolicyVersion(1),
+        };
+
+        assert_eq!(handling_mode_from_policy(&policy), HandlingMode::Steer);
     }
 }

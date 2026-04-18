@@ -87,6 +87,7 @@ fn make_progress_input(label: &str) -> Input {
             phase: crate::input::ResponseProgressPhase::InProgress,
         }),
         body: format!("progress-{label}"),
+        payload: Some(serde_json::json!({ "label": label })),
         blocks: None,
         handling_mode: None,
     })
@@ -418,6 +419,303 @@ async fn meerkat_machine_spine_snapshot_tracks_queued_prompt_input() {
     assert_eq!(input_snapshot.last_boundary_sequence, None);
     assert!(input_snapshot.terminal_outcome.is_none());
     assert!(input_snapshot.is_prompt);
+}
+
+#[tokio::test]
+async fn realtime_attachment_status_defaults_to_unattached() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+
+    assert_eq!(status, crate::RealtimeAttachmentStatus::Unattached);
+}
+
+#[tokio::test]
+async fn realtime_attachment_status_reports_intent_present_unbound() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+
+    assert_eq!(
+        status,
+        crate::RealtimeAttachmentStatus::IntentPresentUnbound
+    );
+}
+
+#[tokio::test]
+async fn realtime_attachment_status_reports_binding_not_ready_and_ready() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+
+    let not_ready_status =
+        <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("registered session should expose live attachment status");
+    assert_eq!(
+        not_ready_status,
+        crate::RealtimeAttachmentStatus::BindingNotReady
+    );
+
+    adapter
+        .publish_realtime_attachment_signal(
+            authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    let ready_status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+    assert_eq!(ready_status, crate::RealtimeAttachmentStatus::BindingReady);
+}
+
+#[tokio::test]
+async fn realtime_attachment_status_reports_replacement_pending_and_reattach_required() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let initial_authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+
+    adapter
+        .publish_realtime_attachment_signal(
+            initial_authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    let replacement_authority = adapter
+        .replace_realtime_attachment(&session_id)
+        .await
+        .expect("replacement should mint fresh authority");
+
+    let replacement_pending =
+        <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("registered session should expose live attachment status");
+    assert_eq!(
+        replacement_pending,
+        crate::RealtimeAttachmentStatus::ReplacementPending
+    );
+
+    adapter
+        .require_realtime_attachment_reattach(&session_id)
+        .await
+        .expect("reattach requirement should succeed");
+
+    let reattach_required =
+        <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+            &adapter,
+            &session_id,
+        )
+        .await
+        .expect("registered session should expose live attachment status");
+    assert_eq!(
+        reattach_required,
+        crate::RealtimeAttachmentStatus::ReattachRequired
+    );
+
+    let stale_replacement = adapter
+        .publish_realtime_attachment_signal(
+            replacement_authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect_err("reattach should invalidate replacement authority");
+    assert!(
+        matches!(
+            stale_replacement,
+            RuntimeDriverError::ValidationFailed { .. }
+        ),
+        "expected ValidationFailed, got {stale_replacement:?}"
+    );
+}
+
+#[tokio::test]
+async fn realtime_attachment_signal_rejects_stale_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+
+    adapter
+        .require_realtime_attachment_reattach(&session_id)
+        .await
+        .expect("reattach requirement should invalidate current authority");
+
+    let err = adapter
+        .publish_realtime_attachment_signal(
+            authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect_err("stale authority should be rejected");
+    assert!(
+        matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_live_rejects_sessions_without_executor_and_preserves_unbound_status() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let err = adapter
+        .attach_live(&session_id)
+        .await
+        .expect_err("attach should require a live executor attachment");
+    assert!(
+        matches!(
+            err,
+            RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle
+            }
+        ),
+        "expected NotReady(Idle), got {err:?}"
+    );
+
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist");
+    assert!(
+        !snapshot.binding.attachment_live,
+        "failed attach must not change the runtime attachment discriminant"
+    );
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+    assert_eq!(
+        status,
+        crate::RealtimeAttachmentStatus::IntentPresentUnbound
+    );
+}
+
+#[tokio::test]
+async fn detach_live_clears_binding_but_preserves_intent_projection() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    adapter
+        .detach_live(&session_id)
+        .await
+        .expect("detach should clear runtime binding state");
+
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist");
+    assert!(
+        snapshot.binding.attachment_live,
+        "detaching voice must not tear down the runtime executor attachment"
+    );
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("registered session should expose live attachment status");
+    assert_eq!(
+        status,
+        crate::RealtimeAttachmentStatus::IntentPresentUnbound
+    );
 }
 
 #[tokio::test]
@@ -2662,6 +2960,7 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
         },
         convention: Some(crate::input::PeerConvention::Message),
         body: "interrupt while running".into(),
+        payload: None,
         blocks: None,
         handling_mode: None,
     });
@@ -11229,6 +11528,426 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
     );
 }
 
+#[tokio::test]
+async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebinds() {
+    struct BlockingExecutor {
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+        boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
+                self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+    let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+                boundary_cancel_calls: Arc::clone(&boundary_cancel_calls),
+            }),
+        )
+        .await;
+
+    let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
+        model: "claude-sonnet-4-5".to_string(),
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+    }));
+    let current_visibility_state = Arc::new(std::sync::Mutex::new(
+        meerkat_core::SessionToolVisibilityState::default(),
+    ));
+    adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
+        current_identity: Arc::clone(&current_identity),
+        current_visibility_state: Arc::clone(&current_visibility_state),
+        target_identity: meerkat_core::SessionLlmIdentity {
+            model: "gpt-5.2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+        },
+        current_capability_surface: Some(test_llm_capability_surface(true)),
+        target_capability_surface: test_llm_capability_surface(false),
+        base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+            .into_iter()
+            .collect(),
+        fail_persist: false,
+    }));
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    let (outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("hold topology change"))
+        .await
+        .expect("running input should be accepted");
+    assert!(outcome.is_accepted());
+    let completion_handle = completion_handle.expect("running input should expose completion");
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("executor should enter apply");
+
+    let expected_previous_epoch = authority.authority_epoch;
+    let task = {
+        let adapter = Arc::clone(&adapter);
+        let authority = authority.clone();
+        tokio::spawn(async move {
+            adapter
+                .reconfigure_live_topology(
+                    authority,
+                    SessionLlmReconfigureRequest {
+                        model: Some("gpt-5.2".to_string()),
+                        provider: Some("openai".to_string()),
+                        provider_params: None,
+                    },
+                )
+                .await
+        })
+    };
+
+    allow_finish.notify_waiters();
+    let completion = completion_handle.wait().await;
+    assert!(
+        matches!(completion, CompletionOutcome::CompletedWithoutResult),
+        "running input should complete before topology rebind settles: {completion:?}"
+    );
+
+    let new_authority = task
+        .await
+        .expect("topology task should join")
+        .expect("topology reconfigure should succeed");
+    assert_ne!(
+        new_authority.authority_epoch, expected_previous_epoch,
+        "topology success should mint fresh authority"
+    );
+    assert_eq!(
+        boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "running topology change should drive cancel_after_boundary before detach"
+    );
+
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        adapter.as_ref(),
+        &session_id,
+    )
+    .await
+    .expect("status should remain readable");
+    assert_eq!(status, crate::RealtimeAttachmentStatus::BindingNotReady);
+    assert_eq!(
+        current_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .model,
+        "gpt-5.2",
+        "topology success should install the target identity"
+    );
+}
+
+#[tokio::test]
+async fn reconfigure_live_topology_failure_before_detach_restores_prior_binding() {
+    struct ResolveFailingHost;
+
+    #[async_trait::async_trait]
+    impl SessionLlmReconfigureHost for ResolveFailingHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: meerkat_core::SessionLlmIdentity {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                },
+                current_visibility_state: meerkat_core::SessionToolVisibilityState::default(),
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                    .into_iter()
+                    .collect(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Err(RuntimeDriverError::ValidationFailed {
+                reason: "injected pre-detach resolution failure".to_string(),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter.set_session_llm_reconfigure_host(Arc::new(ResolveFailingHost));
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    let err = adapter
+        .reconfigure_live_topology(
+            authority.clone(),
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect_err("pre-detach failure should abort without tearing down binding");
+    assert!(
+        matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {err:?}"
+    );
+
+    adapter
+        .publish_realtime_attachment_signal(
+            authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("old authority should remain valid after pre-detach failure");
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("status should remain readable");
+    assert_eq!(status, crate::RealtimeAttachmentStatus::BindingReady);
+}
+
+#[tokio::test]
+async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_reattach() {
+    struct PersistFailingTopologyHost {
+        discarded: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionLlmReconfigureHost for PersistFailingTopologyHost {
+        async fn hydrate_session_llm_state(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
+            Ok(HydratedSessionLlmState {
+                current_identity: meerkat_core::SessionLlmIdentity {
+                    model: "claude-sonnet-4-5".to_string(),
+                    provider: meerkat_core::Provider::Anthropic,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                },
+                current_visibility_state: meerkat_core::SessionToolVisibilityState::default(),
+                current_capability_surface: Some(test_llm_capability_surface(true)),
+                capability_surface_status: SessionLlmCapabilitySurfaceStatus::Resolved,
+                base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
+                    .into_iter()
+                    .collect(),
+            })
+        }
+
+        async fn resolve_target_session_llm_identity(
+            &self,
+            _request: &SessionLlmReconfigureRequest,
+            _current_identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<crate::ResolvedSessionLlmReconfigure, RuntimeDriverError> {
+            Ok(crate::ResolvedSessionLlmReconfigure {
+                target_identity: meerkat_core::SessionLlmIdentity {
+                    model: "gpt-5.2".to_string(),
+                    provider: meerkat_core::Provider::OpenAI,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                },
+                target_capability_surface: test_llm_capability_surface(false),
+            })
+        }
+
+        async fn apply_live_session_llm_identity(
+            &self,
+            _session_id: &SessionId,
+            _identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn apply_live_session_tool_visibility_state(
+            &self,
+            _session_id: &SessionId,
+            _visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
+        ) -> Result<(), RuntimeDriverError> {
+            Ok(())
+        }
+
+        async fn persist_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            Err(RuntimeDriverError::Internal(
+                "injected post-detach persist failure".to_string(),
+            ))
+        }
+
+        async fn discard_live_session(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), RuntimeDriverError> {
+            self.discarded.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    let host = Arc::new(PersistFailingTopologyHost {
+        discarded: AtomicBool::new(false),
+    });
+    adapter.set_session_llm_reconfigure_host(host.clone());
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority.clone(),
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    let err = adapter
+        .reconfigure_live_topology(
+            authority,
+            SessionLlmReconfigureRequest {
+                model: Some("gpt-5.2".to_string()),
+                provider: Some("openai".to_string()),
+                provider_params: None,
+            },
+        )
+        .await
+        .expect_err("post-detach failure should discard and require reattach");
+    assert!(
+        matches!(err, RuntimeDriverError::Internal(ref message) if message.contains("failed after detach")),
+        "expected post-detach failure, got {err:?}"
+    );
+    assert!(
+        host.discarded.load(Ordering::SeqCst),
+        "post-detach failure should discard the live session"
+    );
+    let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("status should remain readable");
+    assert_eq!(status, crate::RealtimeAttachmentStatus::ReattachRequired);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RuntimeParityClassification {
@@ -12381,6 +13100,7 @@ fn runtime_parity_peer_message(text: &str) -> Input {
         },
         convention: Some(crate::input::PeerConvention::Message),
         body: text.into(),
+        payload: None,
         blocks: None,
         handling_mode: None,
     })
@@ -13423,6 +14143,9 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         }
         MeerkatMachineCommandResult::BoundaryReceipt(receipt) => {
             format!("boundary_receipt:{}", receipt.is_some())
+        }
+        MeerkatMachineCommandResult::RealtimeAttachmentStatus(status) => {
+            format!("realtime_attachment_status:{status:?}")
         }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }

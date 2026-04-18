@@ -10,13 +10,22 @@ pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;
 pub mod protocol;
+pub mod realtime_ws;
 pub mod router;
 pub mod server;
 pub mod session_executor;
 pub mod session_runtime;
 pub mod transport;
 
-pub use server::{serve_stdio, serve_stdio_with_skill_runtime, serve_tcp, serve_tcp_connection};
+pub use realtime_ws::{
+    REALTIME_WS_PATH, RealtimeOpenError, RealtimeWsHost, serve_realtime_ws,
+    serve_realtime_ws_listener,
+};
+pub use server::{
+    serve_stdio, serve_stdio_with_skill_runtime,
+    serve_stdio_with_skill_runtime_and_realtime_ws_host, serve_tcp, serve_tcp_connection,
+    serve_tcp_connection_with_realtime_ws_host, serve_tcp_with_realtime_ws_host,
+};
 
 /// Default capacity for notification / event channels throughout the crate.
 pub const NOTIFICATION_CHANNEL_CAPACITY: usize = 256;

@@ -647,4 +647,231 @@ impl MeerkatMachine {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
     }
+
+    // =====================================================================
+    // Realtime-attachment public API
+    //
+    // Each method applies the corresponding DSL input; the shell holds no
+    // realtime-binding state. Authority epochs, reattach flags, and the
+    // binding-state transitions all live in the MeerkatMachine DSL, and the
+    // shell's job is pure dispatch + projecting the DSL's returned state
+    // back into the token/status types the shell-facing API exposes.
+    // =====================================================================
+
+    /// Project durable live-attachment intent onto the session's DSL authority.
+    pub async fn project_realtime_attachment_intent(
+        &self,
+        session_id: &SessionId,
+        intent_present: bool,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ProjectRealtimeIntent {
+                present: intent_present,
+            },
+            "ProjectRealtimeIntent",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Begin a live attachment and return the authority token minted by the
+    /// DSL transition. Subsequent provider callbacks present this token and
+    /// the DSL validates their `authority_epoch` before mutating state.
+    ///
+    /// Shell precondition: the session must have a live executor binding
+    /// (runtime state == Attached or Running). Callers hitting Idle sessions
+    /// get `RuntimeDriverError::NotReady`, matching the pre-DSL contract used
+    /// by the realtime attachment host.
+    pub async fn attach_live(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        self.require_live_executor_for_realtime(session_id).await?;
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::BeginRealtimeBinding,
+            "BeginRealtimeBinding",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.read_session_realtime_authority(session_id, "attach_live")
+            .await
+    }
+
+    /// Replace the current live binding and mint a fresh authority token.
+    pub async fn replace_realtime_attachment(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        self.require_live_executor_for_realtime(session_id).await?;
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ReplaceRealtimeBinding,
+            "ReplaceRealtimeBinding",
+        )
+        .await
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        self.read_session_realtime_authority(session_id, "replace_realtime_attachment")
+            .await
+    }
+
+    async fn require_live_executor_for_realtime(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        if !entry.attachment_is_live() {
+            return Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle,
+            });
+        }
+        Ok(())
+    }
+
+    /// Detach the runtime-owned binding. Preserves the durable intent bit so
+    /// `realtime_attachment_status` can still project `IntentPresentUnbound`.
+    pub async fn detach_live(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::DetachRealtimeBinding,
+            "DetachRealtimeBinding",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Require the session to reattach live voice, discarding any outstanding
+    /// authority token.
+    pub async fn require_realtime_attachment_reattach(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::RequireRealtimeReattach,
+            "RequireRealtimeReattach",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Require reattach only if the caller still holds the current authority.
+    /// A stale authority surfaces as a DSL guard rejection (wrong epoch) and
+    /// returns `ValidationFailed` without mutating state.
+    pub async fn require_realtime_attachment_reattach_for_authority(
+        &self,
+        authority: crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority,
+    ) -> Result<(), RuntimeDriverError> {
+        // Phase-guarded: we use PublishRealtimeSignal with the
+        // next_binding_state the authority already represents, and the DSL
+        // guard enforces authority epoch match. We piggy-back on the existing
+        // DSL input because adding a dedicated "reattach-if-authority" input
+        // would duplicate the epoch check.
+        //
+        // Actually simpler: rely on the shell to read current epoch, compare,
+        // then apply RequireRealtimeReattach. Keep it as a direct apply.
+        let current = self
+            .read_session_realtime_authority_if_any(&authority.session_id)
+            .await?;
+        match current {
+            Some(live) if live.authority_epoch == authority.authority_epoch => {
+                self.require_realtime_attachment_reattach(&authority.session_id)
+                    .await
+            }
+            _ => Err(RuntimeDriverError::ValidationFailed {
+                reason: "stale realtime attachment authority".to_string(),
+            }),
+        }
+    }
+
+    /// Apply a provider-callback realtime signal through the DSL's authority-
+    /// epoch guard. The DSL rejects stale tokens, reconfigures-in-progress,
+    /// and projection-only statuses.
+    pub async fn publish_realtime_attachment_signal(
+        &self,
+        authority: crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority,
+        status: crate::meerkat_machine_types::RealtimeAttachmentStatus,
+    ) -> Result<(), RuntimeDriverError> {
+        let next_binding_state = match status {
+            crate::meerkat_machine_types::RealtimeAttachmentStatus::BindingNotReady => {
+                "BindingNotReady"
+            }
+            crate::meerkat_machine_types::RealtimeAttachmentStatus::BindingReady => "BindingReady",
+            crate::meerkat_machine_types::RealtimeAttachmentStatus::ReplacementPending => {
+                "ReplacementPending"
+            }
+            other => {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "realtime signal cannot publish projection-only status {other:?}"
+                    ),
+                });
+            }
+        };
+        self.stage_session_dsl_input(
+            &authority.session_id,
+            dsl::MeerkatMachineInput::PublishRealtimeSignal {
+                authority_epoch: authority.authority_epoch,
+                next_binding_state: next_binding_state.to_string(),
+            },
+            "PublishRealtimeSignal",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    // ---- Projection helpers (read DSL state) ----
+
+    async fn read_session_realtime_authority(
+        &self,
+        session_id: &SessionId,
+        context: &'static str,
+    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
+    {
+        self.read_session_realtime_authority_if_any(session_id)
+            .await?
+            .ok_or_else(|| RuntimeDriverError::Internal(format!(
+                "DSL did not surface a binding authority epoch after {context}; guard regression"
+            )))
+    }
+
+    async fn read_session_realtime_authority_if_any(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority>,
+        RuntimeDriverError,
+    > {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(authority
+            .state
+            .realtime_binding_authority_epoch
+            .map(
+                |epoch| crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority {
+                    session_id: session_id.clone(),
+                    authority_epoch: epoch,
+                },
+            ))
+    }
 }

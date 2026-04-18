@@ -119,12 +119,31 @@ enum SessionCommand {
     ToolScopeSnapshot {
         reply_tx: oneshot::Sender<Option<meerkat_core::ToolScopeSnapshot>>,
     },
+    VisibleToolDefs {
+        reply_tx: oneshot::Sender<Vec<meerkat_core::ToolDef>>,
+    },
     ExternalToolSurfaceSnapshot {
         reply_tx: oneshot::Sender<Option<meerkat_core::ExternalToolSurfaceSnapshot>>,
     },
     ApplyRuntimeSystemContext {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
+    },
+    AppendExternalUserContent {
+        content: ContentInput,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    AppendExternalAssistantOutput {
+        blocks: Vec<meerkat_core::types::AssistantBlock>,
+        stop_reason: meerkat_core::types::StopReason,
+        usage: Usage,
+        reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    DispatchExternalToolCall {
+        call: meerkat_core::ToolCall,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError>,
+        >,
     },
     /// Update the keep_alive flag in durable session metadata.
     UpdateKeepAlive {
@@ -321,6 +340,16 @@ pub trait SessionAgent: Send {
         ))
     }
 
+    /// Dispatch an external tool call through the session's canonical dispatcher.
+    async fn dispatch_external_tool_call(
+        &mut self,
+        _call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "external live tool dispatch is not supported by this session agent".to_string(),
+        ))
+    }
+
     /// Cancel the currently running turn.
     fn cancel(&mut self);
 
@@ -343,6 +372,11 @@ pub trait SessionAgent: Send {
     /// Take a diagnostic snapshot of the live tool-scope state, if supported.
     fn tool_scope_snapshot(&self) -> Option<meerkat_core::ToolScopeSnapshot> {
         None
+    }
+
+    /// Snapshot the canonical visible tool definitions for the live session.
+    fn visible_tool_defs(&self) -> Vec<meerkat_core::ToolDef> {
+        Vec::new()
     }
 
     /// Take a diagnostic snapshot of the live external tool-surface state, if supported.
@@ -394,6 +428,28 @@ pub trait SessionAgent: Send {
 
     /// Apply runtime-owned system-context blocks immediately to the canonical session.
     fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]);
+
+    /// Append externally-produced user content into the canonical transcript.
+    fn append_external_user_content(
+        &mut self,
+        _content: ContentInput,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "external user content append is not supported by this session agent".to_string(),
+        ))
+    }
+
+    /// Append externally-produced assistant output into the canonical transcript.
+    fn append_external_assistant_output(
+        &mut self,
+        _blocks: Vec<meerkat_core::types::AssistantBlock>,
+        _stop_reason: meerkat_core::types::StopReason,
+        _usage: Usage,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(
+            "external assistant output append is not supported by this session agent".to_string(),
+        ))
+    }
 
     /// Get shared runtime control state for system-context append requests.
     fn system_context_state(
@@ -755,6 +811,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    /// Get the canonical visible tool definitions for a live session.
+    pub async fn live_visible_tool_defs(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<meerkat_core::ToolDef>, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle.command_tx.clone()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::VisibleToolDefs { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
     /// Get a diagnostic snapshot of the live external tool-surface state for a session.
     pub async fn external_tool_surface_snapshot(
         &self,
@@ -783,6 +869,40 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    /// Dispatch an external tool call through the live session task.
+    pub async fn dispatch_external_tool_call(
+        &self,
+        id: &SessionId,
+        call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, SessionError> {
+        let command_tx = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(id)
+                .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+            handle.command_tx.clone()
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::DispatchExternalToolCall { call, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     /// Get shared deferred-turn control state for a session, if available.
@@ -844,6 +964,73 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    /// Append externally-produced user content into the canonical transcript.
+    pub async fn append_external_user_content(
+        &self,
+        id: &SessionId,
+        content: ContentInput,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::AppendExternalUserContent { content, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
+    /// Append externally-produced assistant output into the canonical transcript.
+    pub async fn append_external_assistant_output(
+        &self,
+        id: &SessionId,
+        blocks: Vec<meerkat_core::types::AssistantBlock>,
+        stop_reason: meerkat_core::types::StopReason,
+        usage: Usage,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::AppendExternalAssistantOutput {
+                blocks,
+                stop_reason,
+                usage,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
     }
 
     pub(crate) async fn sync_system_context_state(
@@ -1041,6 +1228,36 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 }
             }
         })))
+    }
+
+    /// Wait until the session summary reflects a mutation newer than `after`.
+    ///
+    /// This is intentionally summary-backed rather than agent-event-backed:
+    /// runtime-owned context-only appends mutate canonical session state but do
+    /// not necessarily produce user-visible agent events. Callers that need an
+    /// authoritative "session changed" witness, such as realtime projection
+    /// refresh, should follow this mutation boundary instead of the event lane.
+    pub async fn wait_for_session_mutation_after(
+        &self,
+        id: &SessionId,
+        after: SystemTime,
+    ) -> Result<SystemTime, meerkat_core::comms::StreamError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| meerkat_core::comms::StreamError::NotFound(format!("session {id}")))?;
+        let mut rx = handle.summary_rx.clone();
+        drop(sessions);
+
+        loop {
+            let current = rx.borrow().updated_at;
+            if current > after {
+                return Ok(current);
+            }
+            rx.changed()
+                .await
+                .map_err(|_| meerkat_core::comms::StreamError::Closed)?;
+        }
     }
 
     /// Get a raw broadcast receiver for a session's events.
@@ -1890,6 +2107,36 @@ fn stamp_event_envelope(
     EventEnvelope::new(source_id, *next_seq, None, event)
 }
 
+fn render_runtime_system_context_event_prompt(
+    appends: &[PendingSystemContextAppend],
+) -> Option<String> {
+    if appends.is_empty() {
+        return None;
+    }
+
+    // Mirror the canonical session rendering closely so public session/mob
+    // event subscribers can observe runtime-owned ImmediateContextAppend work
+    // without inventing a second helper-local witness. The machine already
+    // models these appends as real run lifecycle transitions; this prompt is
+    // the session-stream projection of that runtime-owned fact.
+    let rendered = appends
+        .iter()
+        .map(|append| {
+            let mut text = String::from("[Runtime System Context]");
+            if let Some(source) = &append.source {
+                text.push_str("\nsource: ");
+                text.push_str(source);
+            }
+            text.push_str("\n\n");
+            text.push_str(&append.text);
+            text
+        })
+        .collect::<Vec<_>>()
+        .join(meerkat_core::SYSTEM_CONTEXT_SEPARATOR);
+
+    Some(rendered)
+}
+
 fn lock_deferred_turn_state(
     state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
 ) -> std::sync::MutexGuard<'_, SessionDeferredTurnState> {
@@ -2349,6 +2596,9 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ToolScopeSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.tool_scope_snapshot());
             }
+            SessionCommand::VisibleToolDefs { reply_tx } => {
+                let _ = reply_tx.send(agent.visible_tool_defs());
+            }
             SessionCommand::ExternalToolSurfaceSnapshot { reply_tx } => {
                 let _ = reply_tx.send(agent.external_tool_surface_snapshot());
             }
@@ -2362,7 +2612,106 @@ async fn session_task<A: SessionAgent>(
                     usage: snap.usage,
                     last_assistant_text: snap.last_assistant_text,
                 });
+                if let Some(prompt) = render_runtime_system_context_event_prompt(&appends) {
+                    let session_id = agent.session_id();
+                    let started = stamp_event_envelope(
+                        &mut next_seq,
+                        &source_id,
+                        AgentEvent::RunStarted {
+                            session_id: session_id.clone(),
+                            prompt,
+                        },
+                    );
+                    let _ = control.session_event_tx.send(started);
+
+                    let completed = stamp_event_envelope(
+                        &mut next_seq,
+                        &source_id,
+                        AgentEvent::RunCompleted {
+                            session_id,
+                            result: String::new(),
+                            usage: Usage::default(),
+                        },
+                    );
+                    let _ = control.session_event_tx.send(completed);
+                }
                 let _ = reply_tx.send(());
+            }
+            SessionCommand::AppendExternalUserContent { content, reply_tx } => {
+                let result = agent.append_external_user_content(content);
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.summary_tx.send_replace(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::AppendExternalAssistantOutput {
+                blocks,
+                stop_reason,
+                usage,
+                reply_tx,
+            } => {
+                let text_content = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<String>();
+                let usage_for_event = usage.clone();
+                let result = agent.append_external_assistant_output(blocks, stop_reason, usage);
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.summary_tx.send_replace(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                    if !text_content.is_empty() {
+                        let envelope = stamp_event_envelope(
+                            &mut next_seq,
+                            &source_id,
+                            AgentEvent::TextComplete {
+                                content: text_content,
+                            },
+                        );
+                        let _ = control.session_event_tx.send(envelope);
+                    }
+                    let envelope = stamp_event_envelope(
+                        &mut next_seq,
+                        &source_id,
+                        AgentEvent::TurnCompleted {
+                            stop_reason,
+                            usage: usage_for_event,
+                        },
+                    );
+                    let _ = control.session_event_tx.send(envelope);
+                }
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::DispatchExternalToolCall { call, reply_tx } => {
+                let result = agent.dispatch_external_tool_call(call).await;
+                if result.is_ok() {
+                    let snap = agent.snapshot();
+                    control.summary_tx.send_replace(SessionSummaryCache {
+                        updated_at: snap.updated_at,
+                        message_count: snap.message_count,
+                        total_tokens: snap.total_tokens,
+                        usage: snap.usage,
+                        last_assistant_text: snap.last_assistant_text,
+                    });
+                }
+                let _ = reply_tx.send(result);
             }
             SessionCommand::UpdateKeepAlive {
                 keep_alive,

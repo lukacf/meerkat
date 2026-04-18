@@ -11,6 +11,7 @@ use crate::ids::{
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
 use chrono::{DateTime, Utc};
+use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
@@ -75,6 +76,12 @@ pub struct NewMobEvent {
 /// Legacy bridge-level identity retained for internal dispatch. Not part of
 /// the public 0.6 mob contract — use [`AgentIdentity`] and [`AgentRuntimeId`]
 /// for all public surfaces.
+///
+/// Finding A7: this enum was previously `#[doc(hidden)] pub` with only
+/// `pub(crate)` constructors, making it reachable in the crate's public
+/// namespace but effectively useless externally. Making it `pub(crate)` both
+/// enforces that (no external reachability) and matches the reality that no
+/// public `MobHandle` method uses it as a parameter or return type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemberRef {
     /// Session-backed member identity for the current bridge binding.
@@ -88,6 +95,11 @@ pub(crate) enum MemberRef {
         peer_id: String,
         /// Backend-provided address string.
         address: String,
+        /// Optional bootstrap proof for re-establishing supervisor control.
+        /// Not serialized on the wire (intentionally elided from `Serialize`
+        /// below); kept in memory as a redacting newtype so it does not leak
+        /// through `Debug` or `tracing` fields.
+        bootstrap_token: Option<BridgeBootstrapToken>,
         /// Optional bridge session binding when this member is bridged to a
         /// local session. Serialized additively as both `session_id` and
         /// `bridge_session_id` for compatibility.
@@ -125,6 +137,7 @@ impl Serialize for MemberRef {
                 peer_id,
                 address,
                 session_id,
+                ..
             } => {
                 let mut map =
                     serializer.serialize_map(Some(if session_id.is_some() { 5 } else { 3 }))?;
@@ -160,6 +173,8 @@ enum MemberRefCanonical {
         peer_id: String,
         address: String,
         #[serde(default)]
+        bootstrap_token: Option<BridgeBootstrapToken>,
+        #[serde(default)]
         session_id: Option<SessionId>,
         #[serde(default)]
         bridge_session_id: Option<SessionId>,
@@ -186,11 +201,13 @@ impl<'de> Deserialize<'de> for MemberRef {
             MemberRefWire::Canonical(MemberRefCanonical::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id,
                 bridge_session_id,
             }) => Self::BackendPeer {
                 peer_id,
                 address,
+                bootstrap_token,
                 session_id: bridge_session_id.or(session_id),
             },
         })
@@ -226,6 +243,21 @@ pub enum MobEventKind {
     /// Replaces `MeerkatSpawned` in the public contract. Carries
     /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
     /// [`AgentRuntimeId`] instead of [`MeerkatId`] / [`MemberRef`].
+    ///
+    /// Unlike the other `Member*` variants which use inline struct fields,
+    /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
+    /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries a
+    /// `#[serde(skip)] pub(crate) bridge_member_ref: Option<MemberRef>`
+    /// field used by in-crate event replay (see
+    /// [`encode_stored_mob_event`] / [`decode_stored_mob_event`]) that is
+    /// deliberately omitted from the public wire shape. A named struct
+    /// keeps the internal replay pointer, its `#[serde(skip)]` attribute,
+    /// and the constructor/`with_*` helpers self-contained. Inline variant
+    /// fields would force the replay plumbing into this enum and leak
+    /// "shell owns mechanics, not meaning" internal state into the public
+    /// event contract. Finding A6 (DELETE_ME) flagged the shape difference;
+    /// the difference is intentional and regression-pinned by
+    /// `member_spawned_public_wire_shape_excludes_bridge_member_ref`.
     MemberSpawned(MemberSpawnedEvent),
     /// A member was retired.
     ///
@@ -261,6 +293,16 @@ pub enum MobEventKind {
         member: AgentIdentity,
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
+    },
+    /// Durable intent that this member should have voice attached.
+    MemberVoiceIntentSet {
+        /// Member whose durable voice intent is now present.
+        agent_identity: AgentIdentity,
+    },
+    /// Durable voice intent was cleared for this member.
+    MemberVoiceIntentCleared {
+        /// Member whose durable voice intent is now absent.
+        agent_identity: AgentIdentity,
     },
     /// Bidirectional trust was established between two members.
     MembersWired {
@@ -418,6 +460,15 @@ pub struct MemberSpawnedEvent {
     /// Profile name used to spawn.
     pub role: ProfileName,
     /// Runtime mode for this spawned member.
+    ///
+    /// `#[serde(default)]` is load-bearing and intentional: pre-0.6 persisted
+    /// events predate the `runtime_mode` field entirely. The default
+    /// [`MobRuntimeMode::AutonomousHost`] matches pre-field semantics (the
+    /// only mode that existed then), so replay on legacy data coerces to
+    /// the historically correct value. Finding B7 (DELETE_ME) flagged this
+    /// as "silent semantic coercion"; the coercion is deliberate and the
+    /// regression test `mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host`
+    /// pins it so a future schema change cannot silently flip the default.
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Application-defined labels for this member.
@@ -629,6 +680,16 @@ mod tests {
     }
 
     #[test]
+    fn test_member_voice_intent_variants_roundtrip() {
+        roundtrip(&MobEventKind::MemberVoiceIntentSet {
+            agent_identity: AgentIdentity::from("agent-1"),
+        });
+        roundtrip(&MobEventKind::MemberVoiceIntentCleared {
+            agent_identity: AgentIdentity::from("agent-1"),
+        });
+    }
+
+    #[test]
     fn test_flow_variants_roundtrip() {
         let run_id = RunId::new();
         let flow_id = FlowId::from("flow-a");
@@ -765,6 +826,7 @@ mod tests {
         let member_ref = MemberRef::BackendPeer {
             peer_id: "peer-123".to_string(),
             address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: None,
             session_id: Some(SessionId::from_uuid(Uuid::nil())),
         };
 
@@ -776,6 +838,25 @@ mod tests {
         );
         let parsed: MemberRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, member_ref);
+    }
+
+    #[test]
+    fn test_member_ref_backend_peer_omits_bootstrap_token_in_serialized_output() {
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: "peer-123".to_string(),
+            address: "https://backend.example/peers/peer-123".to_string(),
+            bootstrap_token: Some("secret-bootstrap-proof".into()),
+            session_id: None,
+        };
+
+        let value = serde_json::to_value(&member_ref).unwrap();
+        assert_eq!(value["kind"], "backend_peer");
+        assert_eq!(value["peer_id"], "peer-123");
+        assert_eq!(value["address"], "https://backend.example/peers/peer-123");
+        assert!(
+            value.get("bootstrap_token").is_none(),
+            "bootstrap proof must not be exposed through serialized member refs"
+        );
     }
 
     #[test]
@@ -812,6 +893,55 @@ mod tests {
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
+    }
+
+    /// DELETE_ME A6 regression: `MemberSpawned(MemberSpawnedEvent)` uses
+    /// a named struct variant while every other `Member*` variant uses
+    /// inline fields. The reason is load-bearing: `bridge_member_ref` is
+    /// crate-internal replay metadata gated by `#[serde(skip)]` that must
+    /// never leak onto the public wire shape. This test pins the public
+    /// `MobEventKind::MemberSpawned` serialized form to exclude
+    /// `bridge_member_ref` so a future refactor cannot silently promote
+    /// the internal replay pointer into the public event contract.
+    #[test]
+    fn member_spawned_public_wire_shape_excludes_bridge_member_ref() {
+        let identity = AgentIdentity::from("researcher");
+        let sid = SessionId::from_uuid(Uuid::nil());
+        let kind = MobEventKind::MemberSpawned(
+            MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::INITIAL,
+                FenceToken::new(1),
+                AgentRuntimeId::initial(identity),
+                ProfileName::from("worker"),
+            )
+            // set the internal pointer so we know the exclusion is real,
+            // not a side-effect of it being None.
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid))),
+        );
+
+        let value = serde_json::to_value(&kind).expect("serialize mob event kind");
+        let object = value
+            .as_object()
+            .expect("MemberSpawned serializes as an object");
+
+        // The public wire shape is {"type":"MemberSpawned", ...fields...}.
+        // We don't assert the exact tag convention (that may be internally
+        // tagged or adjacent); we assert the inner payload does NOT carry
+        // bridge_member_ref under any key path.
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(
+            !serialized.contains("bridge_member_ref"),
+            "public MemberSpawned wire shape must never expose bridge_member_ref; got: {serialized}",
+        );
+
+        // And the standard struct fields ARE present.
+        let payload_carrier = object.values().find(|v| v.is_object()).unwrap_or(&value);
+        let payload_object = payload_carrier.as_object().unwrap_or(object);
+        assert!(
+            payload_object.contains_key("agent_identity") || serialized.contains("agent_identity"),
+            "public MemberSpawned must carry agent_identity: {serialized}",
+        );
     }
 
     #[test]
@@ -957,6 +1087,47 @@ mod tests {
             assert!(new_generation > previous_generation);
         } else {
             panic!("expected MemberReset");
+        }
+    }
+
+    #[test]
+    fn mob_event_legacy_member_spawned_runtime_mode_defaults_to_autonomous_host() {
+        // Finding B7 (DELETE_ME): MemberSpawnedEvent.runtime_mode carries
+        // `#[serde(default)]` so pre-0.6 persisted events without the field
+        // deserialize to MobRuntimeMode::AutonomousHost. That matches the
+        // pre-field semantics (AutonomousHost was the only mode that
+        // existed). Lock this coercion in so a future schema change cannot
+        // silently flip the default to TurnDriven and corrupt replay of
+        // legacy data.
+        // MobEventKind uses `#[serde(tag = "type", rename_all = "snake_case")]`
+        // so MemberSpawned lands as `{"type": "member_spawned", ...}` with the
+        // wrapped MemberSpawnedEvent's fields at the same level.
+        let legacy_json = serde_json::json!({
+            "type": "member_spawned",
+            "agent_identity": "legacy-worker",
+            "generation": 0,
+            "fence_token": 0,
+            "agent_runtime_id": {
+                "identity": "legacy-worker",
+                "generation": 0
+            },
+            "role": "worker",
+            // runtime_mode intentionally omitted — the whole point of this
+            // regression is "missing field" replay.
+            "labels": {}
+        });
+        let parsed: MobEventKind =
+            serde_json::from_value(legacy_json).expect("legacy event must deserialize");
+        match parsed {
+            MobEventKind::MemberSpawned(event) => {
+                assert_eq!(
+                    event.runtime_mode,
+                    MobRuntimeMode::AutonomousHost,
+                    "legacy MemberSpawnedEvent without runtime_mode must coerce to AutonomousHost",
+                );
+                assert_eq!(event.agent_identity, AgentIdentity::from("legacy-worker"));
+            }
+            other => panic!("expected MemberSpawned, got {other:?}"),
         }
     }
 }

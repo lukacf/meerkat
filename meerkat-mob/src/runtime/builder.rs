@@ -1,7 +1,9 @@
 use super::*;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "runtime-adapter")]
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // MobBuilder
@@ -12,7 +14,8 @@ pub struct MobBuilder {
     mode: BuilderMode,
     storage: MobStorage,
     session_service: Option<Arc<dyn MobSessionService>>,
-    runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+    #[cfg(feature = "runtime-adapter")]
+    runtime_adapter: RuntimeAdapterOption,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -30,6 +33,8 @@ struct RuntimeWiring {
     task_board: Arc<RwLock<TaskBoard>>,
     state: Arc<AtomicU8>,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
+    runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+    supervisor_bridge: Arc<MobSupervisorBridge>,
     mcp_servers: Arc<tokio::sync::Mutex<BTreeMap<String, actor::McpServerEntry>>>,
     command_tx: mpsc::Sender<MobCommand>,
     command_rx: mpsc::Receiver<MobCommand>,
@@ -42,6 +47,7 @@ impl MobBuilder {
             mode: BuilderMode::Create(Arc::new(definition)),
             storage,
             session_service: None,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -84,6 +90,7 @@ impl MobBuilder {
             mode: BuilderMode::Resume,
             storage,
             session_service: None,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -100,6 +107,7 @@ impl MobBuilder {
     /// runtime adapter override has been set yet, the builder seeds its
     /// canonical runtime adapter from `service.runtime_adapter()`.
     pub fn with_session_service(mut self, service: Arc<dyn MobSessionService>) -> Self {
+        #[cfg(feature = "runtime-adapter")]
         if self.runtime_adapter.is_none() {
             self.runtime_adapter = service.runtime_adapter();
         }
@@ -112,6 +120,7 @@ impl MobBuilder {
     /// When set, this override is used consistently by both provisioning and
     /// autonomous-host comms-drain ingress instead of re-deriving an adapter
     /// from the session service at runtime.
+    #[cfg(feature = "runtime-adapter")]
     pub fn with_runtime_adapter(mut self, adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
         self.runtime_adapter = Some(adapter);
         self
@@ -161,11 +170,13 @@ impl MobBuilder {
     }
 
     /// Create the mob: emit MobCreated event, start the actor, return handle.
+    #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
             mode,
             storage,
             session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume: _,
@@ -173,6 +184,8 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
         } = self;
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter: RuntimeAdapterOption = None;
 
         let definition = match mode {
             BuilderMode::Create(definition) => definition,
@@ -209,18 +222,21 @@ impl MobBuilder {
         // §8: AutonomousHost profiles require a runtime adapter. Validate at
         // build time so Option<adapter> on the trait doesn't hide an ownership
         // requirement that only surfaces at spawn time.
-        let has_autonomous = definition
-            .profiles
-            .values()
-            .filter_map(|b| b.as_inline())
-            .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
-        if has_autonomous && runtime_adapter.is_none() {
-            return Err(MobError::Internal(
-                "definition contains AutonomousHost profiles but no runtime adapter is available; \
-                 provide one via with_runtime_adapter() or use a session service that implements \
-                 runtime_adapter()"
-                    .to_string(),
-            ));
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let has_autonomous = definition
+                .profiles
+                .values()
+                .filter_map(|b| b.as_inline())
+                .any(|p| p.runtime_mode == crate::MobRuntimeMode::AutonomousHost);
+            if has_autonomous && runtime_adapter.is_none() {
+                return Err(MobError::Internal(
+                    "definition contains AutonomousHost profiles but no runtime adapter is available; \
+                     provide one via with_runtime_adapter() or use a session service that implements \
+                     runtime_adapter()"
+                        .to_string(),
+                ));
+            }
         }
 
         // Emit MobCreated event first
@@ -241,6 +257,22 @@ impl MobBuilder {
             definition.as_ref(),
         )
         .await?;
+        Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
+            .await?;
+        let supervisor_authority = storage
+            .runtime_metadata
+            .load_supervisor_authority(&definition.id)
+            .await?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "missing supervisor runtime metadata for newly created mob '{}'",
+                    definition.id
+                ))
+            })?;
+        let supervisor_bridge = Arc::new(MobSupervisorBridge::new(
+            &definition.id,
+            supervisor_authority,
+        )?);
 
         Ok(Self::start_runtime(
             definition,
@@ -249,6 +281,8 @@ impl MobBuilder {
             MobState::Running,
             storage.events.clone(),
             storage.runs.clone(),
+            storage.runtime_metadata.clone(),
+            supervisor_bridge,
             session_service,
             runtime_adapter,
             tool_bundles,
@@ -264,11 +298,13 @@ impl MobBuilder {
     /// - Recover definition from `MobCreated`.
     /// - Rebuild roster by replaying structural events.
     /// - Start actor/runtime in Running state.
+    #[cfg(feature = "runtime-adapter")]
     pub async fn resume(self) -> Result<MobHandle, MobError> {
         let MobBuilder {
             mode,
             storage,
             session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume,
@@ -276,6 +312,8 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
         } = self;
+        #[cfg(not(feature = "runtime-adapter"))]
+        let runtime_adapter: RuntimeAdapterOption = None;
 
         if !matches!(mode, BuilderMode::Resume) {
             return Err(MobError::Internal(
@@ -347,10 +385,43 @@ impl MobBuilder {
                 warning.message
             );
         }
-        let mob_events: Vec<_> = all_events
+        #[allow(unused_mut)]
+        let mut mob_events: Vec<_> = all_events
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
+        // Runtime metadata is authoritative for supervisor and external-binding
+        // normalization state. Older mobs created before bridge metadata
+        // existed will not have a supervisor record yet, so resume must seed
+        // one before treating absence as corruption.
+        Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
+            .await?;
+        let supervisor_authority = storage
+            .runtime_metadata
+            .load_supervisor_authority(&definition.id)
+            .await?
+            .ok_or_else(|| {
+                MobError::Internal(format!(
+                    "cannot resume mob '{}': missing supervisor runtime metadata",
+                    definition.id
+                ))
+            })?;
+        let supervisor_bridge = Arc::new(MobSupervisorBridge::new(
+            &definition.id,
+            supervisor_authority,
+        )?);
+        #[cfg(not(target_arch = "wasm32"))]
+        let seeded_restore_diagnostics = {
+            let binding_overlays = storage
+                .runtime_metadata
+                .list_external_binding_overlays(&definition.id)
+                .await?;
+            Self::apply_external_binding_overlays(&mut mob_events, &binding_overlays)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let seeded_restore_diagnostics = HashMap::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        Self::normalize_sessionless_backend_runtime_modes(&mut mob_events);
         let mut roster = Roster::project(&mob_events);
         let task_board = TaskBoard::project(&mob_events);
         // Determine resumed state from events in the current epoch (after the
@@ -390,12 +461,14 @@ impl MobBuilder {
                 .collect::<BTreeMap<_, _>>(),
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
-        let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
+        let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             state: state.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
+            runtime_metadata: storage.runtime_metadata.clone(),
+            supervisor_bridge: supervisor_bridge.clone(),
             mcp_servers: mcp_servers.clone(),
             command_tx: command_tx.clone(),
             command_rx,
@@ -408,6 +481,7 @@ impl MobBuilder {
             events: storage.events.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: session_service.clone(),
+            runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
@@ -418,6 +492,7 @@ impl MobBuilder {
                 &mut roster,
                 &session_service,
                 runtime_adapter.clone(),
+                supervisor_bridge.clone(),
                 notify_orchestrator_on_resume,
                 default_llm_client.clone(),
                 &tool_bundles,
@@ -463,12 +538,178 @@ impl MobBuilder {
         }
     }
 
+    async fn ensure_supervisor_authority(
+        runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        mob_id: MobId,
+    ) -> Result<(), MobError> {
+        const MOB_RUNTIME_BRIDGE_PROTOCOL_VERSION: u32 = 1;
+
+        if runtime_metadata
+            .load_supervisor_authority(&mob_id)
+            .await?
+            .is_none()
+        {
+            let record = crate::store::SupervisorAuthorityRecord::generate(
+                MOB_RUNTIME_BRIDGE_PROTOCOL_VERSION,
+            );
+            runtime_metadata
+                .put_supervisor_authority_if_absent(&mob_id, &record)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_external_binding_overlays(
+        mob_events: &mut [crate::event::MobEvent],
+        overlays: &[crate::store::ExternalBindingOverlayRecord],
+    ) -> HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic> {
+        let overlay_index = overlays
+            .iter()
+            .map(|overlay| {
+                (
+                    (overlay.agent_identity.clone(), overlay.generation),
+                    overlay.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut diagnostics = HashMap::new();
+
+        for event in mob_events {
+            let Some(member_spawned) = event.kind.member_spawned_mut() else {
+                continue;
+            };
+            let Some(overlay) = overlay_index.get(&(
+                member_spawned.agent_identity.clone(),
+                member_spawned.generation,
+            )) else {
+                continue;
+            };
+
+            let original_member_ref = member_spawned.bridge_member_ref.clone();
+            match &overlay.status {
+                crate::store::ExternalBindingOverlayStatus::Normalized => {
+                    if let Some(normalized_member_ref) = overlay.normalized_member_ref.clone() {
+                        member_spawned.bridge_member_ref =
+                            Some(Self::member_ref_with_bootstrap_token(
+                                normalized_member_ref,
+                                overlay.bootstrap_token.clone(),
+                            ));
+                    }
+                }
+                crate::store::ExternalBindingOverlayStatus::Failed { reason } => {
+                    let normalized_member_ref =
+                        overlay.normalized_member_ref.clone().or_else(|| {
+                            original_member_ref
+                                .as_ref()
+                                .and_then(Self::sessionless_member_ref)
+                        });
+                    member_spawned.bridge_member_ref = normalized_member_ref.map(|member_ref| {
+                        Self::member_ref_with_bootstrap_token(
+                            member_ref,
+                            overlay.bootstrap_token.clone(),
+                        )
+                    });
+                    diagnostics.insert(
+                        MeerkatId::from(member_spawned.agent_identity.as_str()),
+                        super::handle::RestoreFailureDiagnostic {
+                            bridge_session_id: original_member_ref
+                                .as_ref()
+                                .and_then(crate::event::MemberRef::bridge_session_id)
+                                .cloned(),
+                            reason: reason.clone(),
+                        },
+                    );
+                }
+            }
+
+            member_spawned.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
+                member_spawned.runtime_mode,
+                member_spawned.bridge_member_ref.as_ref(),
+            );
+        }
+
+        diagnostics
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn normalize_sessionless_backend_runtime_modes(mob_events: &mut [crate::event::MobEvent]) {
+        for event in mob_events {
+            let Some(member_spawned) = event.kind.member_spawned_mut() else {
+                continue;
+            };
+            member_spawned.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
+                member_spawned.runtime_mode,
+                member_spawned.bridge_member_ref.as_ref(),
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn normalize_runtime_mode_for_member_ref(
+        runtime_mode: crate::MobRuntimeMode,
+        member_ref: Option<&crate::event::MemberRef>,
+    ) -> crate::MobRuntimeMode {
+        match member_ref {
+            Some(crate::event::MemberRef::BackendPeer {
+                session_id: None, ..
+            }) => crate::MobRuntimeMode::TurnDriven,
+            _ => runtime_mode,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sessionless_member_ref(
+        member_ref: &crate::event::MemberRef,
+    ) -> Option<crate::event::MemberRef> {
+        match member_ref {
+            crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address,
+                bootstrap_token,
+                session_id: _,
+            } => Some(crate::event::MemberRef::BackendPeer {
+                peer_id: peer_id.clone(),
+                address: super::bridge_protocol::canonicalize_bridge_address(address),
+                bootstrap_token: bootstrap_token.clone(),
+                session_id: None,
+            }),
+            crate::event::MemberRef::Session { .. } => None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn member_ref_with_bootstrap_token(
+        member_ref: crate::event::MemberRef,
+        bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
+    ) -> crate::event::MemberRef {
+        match member_ref {
+            crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address,
+                session_id,
+                ..
+            } => crate::event::MemberRef::BackendPeer {
+                peer_id,
+                address: super::bridge_protocol::canonicalize_bridge_address(&address),
+                bootstrap_token,
+                session_id,
+            },
+            crate::event::MemberRef::Session { session_id } => {
+                crate::event::MemberRef::Session { session_id }
+            }
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     async fn reconcile_resume(
         definition: &Arc<MobDefinition>,
         roster: &mut Roster,
         session_service: &Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
+        supervisor_bridge: Arc<MobSupervisorBridge>,
         notify_orchestrator_on_resume: bool,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         tool_bundles: &BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
@@ -476,11 +717,11 @@ impl MobBuilder {
         default_external_tools_provider: &Option<crate::ExternalToolsProvider>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
     ) -> Result<(), MobError> {
-        tool_handle.restore_diagnostics.write().await.clear();
         let provisioner = MultiBackendProvisioner::new(
             session_service.clone(),
-            runtime_adapter,
+            runtime_adapter.clone(),
             definition.backend.external.clone(),
+            supervisor_bridge,
         );
         let listed_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
@@ -521,13 +762,19 @@ impl MobBuilder {
                 continue;
             };
             if active_ids.contains(&bridge_session_id) {
+                Self::restore_realtime_attachment_intent_if_needed(
+                    runtime_adapter.as_ref(),
+                    entry,
+                    &bridge_session_id,
+                )
+                .await;
                 continue;
             }
             let record_restore_failure = |reason: String| async {
                 tool_handle.restore_diagnostics.write().await.insert(
                     entry.meerkat_id.clone(),
                     super::handle::RestoreFailureDiagnostic {
-                        bridge_session_id: bridge_session_id.clone(),
+                        bridge_session_id: Some(bridge_session_id.clone()),
                         reason,
                     },
                 );
@@ -603,13 +850,21 @@ impl MobBuilder {
                 match session_service.create_session(req).await {
                     Ok(created) => {
                         let created_bridge_session_id = created.session_id;
-                        let _ = roster
-                            .set_bridge_session_id(&entry.meerkat_id, created_bridge_session_id);
+                        let _ = roster.set_bridge_session_id(
+                            &entry.meerkat_id,
+                            created_bridge_session_id.clone(),
+                        );
                         tool_handle
                             .restore_diagnostics
                             .write()
                             .await
                             .remove(&entry.meerkat_id);
+                        Self::restore_realtime_attachment_intent_if_needed(
+                            runtime_adapter.as_ref(),
+                            entry,
+                            &created_bridge_session_id,
+                        )
+                        .await;
                     }
                     Err(error) => {
                         record_restore_failure(format!(
@@ -662,12 +917,19 @@ impl MobBuilder {
             let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let created_bridge_session_id = created.session_id;
-            let _ = roster.set_bridge_session_id(&entry.meerkat_id, created_bridge_session_id);
+            let _ =
+                roster.set_bridge_session_id(&entry.meerkat_id, created_bridge_session_id.clone());
             tool_handle
                 .restore_diagnostics
                 .write()
                 .await
                 .remove(&entry.meerkat_id);
+            Self::restore_realtime_attachment_intent_if_needed(
+                runtime_adapter.as_ref(),
+                entry,
+                &created_bridge_session_id,
+            )
+            .await;
         }
 
         // Re-establish trust from projected wiring and prune stale trust so
@@ -685,24 +947,59 @@ impl MobBuilder {
                 let _ = roster.set_peer_id(&entry.meerkat_id, None);
                 continue;
             }
-            let comms_a = match provisioner.comms_runtime(&entry.member_ref).await {
-                Some(comms) => comms,
-                None if entry.wired_to.is_empty() => continue,
-                None => {
-                    return Err(MobError::WiringError(format!(
-                        "resume requires comms runtime for wired member '{}'",
+            let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
+            if let Some(comms_a) = &local_comms {
+                let key_a = comms_a.public_key().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume requires public key for wired member '{}'",
                         entry.meerkat_id
-                    )));
-                }
-            };
-            let key_a = comms_a.public_key().ok_or_else(|| {
-                MobError::WiringError(format!(
-                    "resume requires public key for wired member '{}'",
-                    entry.meerkat_id
-                ))
-            })?;
-            let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
+                    ))
+                })?;
+                let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
+            } else if entry.wired_to.is_empty() {
+                continue;
+            }
             let mut desired_specs = Vec::new();
+            let mut candidate_specs = Vec::new();
+
+            for peer_entry in &entries {
+                if peer_entry.meerkat_id == entry.meerkat_id
+                    || broken_members.contains(&peer_entry.meerkat_id)
+                {
+                    continue;
+                }
+                let name_b = format!(
+                    "{}/{}/{}",
+                    definition.id, peer_entry.role, peer_entry.meerkat_id
+                );
+                let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
+                {
+                    Some(comms_b) => comms_b.public_key().ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "resume requires public key for '{}' -> '{}'",
+                            entry.meerkat_id, peer_entry.meerkat_id
+                        ))
+                    })?,
+                    None => match &peer_entry.member_ref {
+                        crate::event::MemberRef::BackendPeer {
+                            peer_id,
+                            session_id: None,
+                            ..
+                        } => peer_id.clone(),
+                        _ => {
+                            return Err(MobError::WiringError(format!(
+                                "resume requires comms runtime for '{}' -> '{}'",
+                                entry.meerkat_id, peer_entry.meerkat_id
+                            )));
+                        }
+                    },
+                };
+                candidate_specs.push(
+                    provisioner
+                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &fallback_peer_id)
+                        .await?,
+                );
+            }
 
             for peer_identity in &entry.wired_to {
                 let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
@@ -719,44 +1016,42 @@ impl MobBuilder {
                 if broken_members.contains(&peer_meerkat_id) {
                     continue;
                 }
-                let comms_b = provisioner
-                    .comms_runtime(&peer_entry.member_ref)
-                    .await
-                    .ok_or_else(|| {
-                        MobError::WiringError(format!(
-                            "resume requires comms runtime for '{}' -> '{}'",
-                            entry.meerkat_id, peer_identity
-                        ))
-                    })?;
-                let key_b = comms_b.public_key().ok_or_else(|| {
-                    MobError::WiringError(format!(
-                        "resume requires public key for '{}' -> '{}'",
-                        entry.meerkat_id, peer_identity
-                    ))
-                })?;
                 let name_b = format!(
                     "{}/{}/{}",
                     definition.id, peer_entry.role, peer_entry.meerkat_id
                 );
+                let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
+                {
+                    Some(comms_b) => comms_b.public_key().ok_or_else(|| {
+                        MobError::WiringError(format!(
+                            "resume requires public key for '{}' -> '{}'",
+                            entry.meerkat_id, peer_identity
+                        ))
+                    })?,
+                    None => match &peer_entry.member_ref {
+                        crate::event::MemberRef::BackendPeer {
+                            peer_id,
+                            session_id: None,
+                            ..
+                        } => peer_id.clone(),
+                        _ => {
+                            return Err(MobError::WiringError(format!(
+                                "resume requires comms runtime for '{}' -> '{}'",
+                                entry.meerkat_id, peer_identity
+                            )));
+                        }
+                    },
+                };
                 desired_specs.push(
                     provisioner
-                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &key_b)
+                        .trusted_peer_spec(&peer_entry.member_ref, &name_b, &fallback_peer_id)
                         .await?,
                 );
             }
 
-            let desired_peer_ids = desired_specs
-                .iter()
-                .map(|spec| spec.peer_id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            for peer in comms_a.peers().await {
-                if !desired_peer_ids.contains(&peer.peer_id) {
-                    let _ = comms_a.remove_trusted_peer(&peer.peer_id).await?;
-                }
-            }
-            for spec in desired_specs {
-                comms_a.add_trusted_peer(spec).await?;
-            }
+            provisioner
+                .reconcile_member_trust(&entry.member_ref, &desired_specs, &candidate_specs)
+                .await?;
         }
         // Notify orchestrator that the mob resumed.
         if notify_orchestrator_on_resume
@@ -833,6 +1128,44 @@ impl MobBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "runtime-adapter")]
+    async fn restore_realtime_attachment_intent_if_needed(
+        runtime_adapter: Option<&Arc<meerkat_runtime::MeerkatMachine>>,
+        entry: &crate::roster::RosterEntry,
+        bridge_session_id: &SessionId,
+    ) {
+        let Some(runtime_adapter) = runtime_adapter else {
+            return;
+        };
+
+        if let Err(error) = runtime_adapter
+            .project_realtime_attachment_intent(bridge_session_id, entry.voice_intent_present)
+            .await
+        {
+            tracing::warn!(
+                member = %entry.meerkat_id,
+                session_id = %bridge_session_id,
+                error = %error,
+                "failed to project durable live attachment intent during resume"
+            );
+            return;
+        }
+
+        if !entry.voice_intent_present {
+            return;
+        }
+
+        if let Err(error) = runtime_adapter.attach_live(bridge_session_id).await {
+            tracing::warn!(
+                member = %entry.meerkat_id,
+                session_id = %bridge_session_id,
+                error = %error,
+                "failed to reattach live voice during resume"
+            );
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     fn start_runtime(
         definition: Arc<MobDefinition>,
@@ -841,8 +1174,10 @@ impl MobBuilder {
         initial_state: MobState,
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
+        runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
+        supervisor_bridge: Arc<MobSupervisorBridge>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -874,6 +1209,8 @@ impl MobBuilder {
             task_board,
             state,
             restore_diagnostics,
+            runtime_metadata,
+            supervisor_bridge,
             mcp_servers,
             command_tx,
             command_rx,
@@ -893,6 +1230,7 @@ impl MobBuilder {
         )
     }
 
+    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     fn start_runtime_with_components(
         definition: Arc<MobDefinition>,
@@ -900,7 +1238,7 @@ impl MobBuilder {
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
         session_service: Arc<dyn MobSessionService>,
-        runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
+        runtime_adapter: RuntimeAdapterOption,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
@@ -911,6 +1249,8 @@ impl MobBuilder {
             task_board,
             state,
             restore_diagnostics,
+            runtime_metadata,
+            supervisor_bridge,
             mcp_servers,
             command_tx,
             command_rx,
@@ -925,13 +1265,22 @@ impl MobBuilder {
             events: events.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: handle_session_service.clone(),
+            runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
         };
-        let provisioner: Arc<dyn MobProvisioner> = Arc::new(MultiBackendProvisioner::new(
-            session_service,
-            runtime_adapter.clone(),
-            external_backend,
-        ));
+        let provisioner: Arc<dyn MobProvisioner> = Arc::new(
+            MultiBackendProvisioner::new(
+                session_service,
+                runtime_adapter.clone(),
+                external_backend,
+                supervisor_bridge.clone(),
+            )
+            .with_binding_persistence(
+                definition.id.clone(),
+                runtime_metadata.clone(),
+                roster.clone(),
+            ),
+        );
         let max_orphaned_turns = definition
             .limits
             .as_ref()
@@ -1007,8 +1356,11 @@ impl MobBuilder {
             edge_locks: Arc::new(super::edge_locks::EdgeLockRegistry::new()),
             lifecycle_tasks: tokio::task::JoinSet::new(),
             session_service: handle_session_service,
+            #[cfg(feature = "runtime-adapter")]
             runtime_adapter,
             restore_diagnostics,
+            runtime_metadata,
+            supervisor_bridge,
             task_board_service,
             spawn_policy,
             dsl_authority: crate::machines::mob_machine::MobMachineAuthority::new(),

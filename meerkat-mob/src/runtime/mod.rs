@@ -42,6 +42,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
+/// Conditional type alias for the runtime adapter.
+///
+/// When `runtime-adapter` is enabled, this resolves to the concrete
+/// `MeerkatMachine` adapter. Otherwise it is a zero-sized unit so callsites
+/// that thread this through builder/actor plumbing can compile unconditionally.
+#[cfg(feature = "runtime-adapter")]
+pub(crate) type RuntimeAdapterOption = Option<Arc<meerkat_runtime::MeerkatMachine>>;
+#[cfg(not(feature = "runtime-adapter"))]
+pub(crate) type RuntimeAdapterOption = Option<()>;
+
 const FLOW_SYSTEM_STEP_ID_RAW: &str = "__flow__";
 const FLOW_SYSTEM_MEMBER_ID_RAW: &str = "__flow_system_member__";
 pub(crate) const FLOW_SYSTEM_MEMBER_ID_PREFIX: &str = "__flow_system_";
@@ -56,6 +66,9 @@ pub(crate) fn flow_system_member_id() -> MeerkatId {
 
 mod actor;
 mod actor_turn_executor;
+pub mod bridge;
+mod bridge_fallback;
+pub mod bridge_protocol;
 mod builder;
 pub mod conditions;
 mod disposal;
@@ -67,6 +80,8 @@ pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
 mod flow_run_kernel;
 mod handle;
+#[cfg(feature = "runtime-adapter")]
+pub mod local_bridge;
 pub(crate) mod loop_iteration_authority;
 mod mob_member_lifecycle_authority;
 mod mob_runtime_bridge_authority;
@@ -83,6 +98,7 @@ mod session_service;
 mod spawn_policy;
 mod state;
 mod supervisor;
+mod supervisor_bridge;
 mod terminalization;
 mod tools;
 pub mod topology;
@@ -93,10 +109,14 @@ pub mod turn_executor;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests;
 
+#[cfg(feature = "runtime-adapter")]
 use actor::MobActor;
+#[cfg(feature = "runtime-adapter")]
 use actor_turn_executor::ActorFlowTurnExecutor;
 use flow::FlowEngine;
-use provisioner::{MobProvisioner, MultiBackendProvisioner, ProvisionMemberRequest};
+#[cfg(feature = "runtime-adapter")]
+use provisioner::MultiBackendProvisioner;
+use provisioner::{MobProvisioner, ProvisionMemberRequest};
 use state::MobCommand;
 use tools::compose_external_tools_for_profile;
 
@@ -108,9 +128,10 @@ pub use flow_run_kernel::{FlowRunKernel, FlowRunMutator};
 pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobEventsView, MobHandle, MobMemberListEntry, MobMemberSnapshot, MobMemberStatus,
-    MobPeerConnectivitySnapshot, MobRespawnError, MobUnreachablePeer, PeerTarget, SpawnMemberSpec,
-    SpawnResult,
+    MobDestroyError, MobDestroyReport, MobEventsView, MobHandle, MobMemberListEntry,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult,
+    SupervisorRotationReport, WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};
@@ -122,6 +143,7 @@ pub use spawn_policy::{SpawnPolicy, SpawnSpec};
 pub(crate) use state::MobLifecycleSnapshot;
 pub use state::MobOrchestratorSnapshot;
 pub use state::MobState;
+pub(crate) use supervisor_bridge::MobSupervisorBridge;
 pub use turn_executor::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

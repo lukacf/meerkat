@@ -140,6 +140,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
             sessions_jsonl_dir: String::new(),
         },
         expose_paths: false,
+        realtime_rpc_tcp_addr: None,
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,

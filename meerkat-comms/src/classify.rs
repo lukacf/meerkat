@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
+const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &["supervisor.bridge"];
+
 /// Receiver-owned context for synchronous ingress classification.
 ///
 /// Cloned into `InboxSender` so classification runs in the sending task
@@ -42,6 +44,7 @@ pub(crate) struct PreparedIngressItem {
     pub(crate) raw_item_id: String,
     pub(crate) raw_kind: RawPeerKind,
     pub(crate) class: PeerInputClass,
+    pub(crate) auth_exempt: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
     pub(crate) from_peer: Option<String>,
@@ -107,80 +110,91 @@ impl IngressClassificationContext {
                         .unwrap_or_else(|| envelope.from.to_peer_id())
                 });
 
-                let (raw_kind, class, lifecycle_peer, request_id) = match &envelope.kind {
-                    MessageKind::Message { .. } => (
-                        RawPeerKind::Message,
-                        PeerInputClass::ActionableMessage,
-                        None,
-                        None,
-                    ),
-                    MessageKind::Request { intent, params, .. } => {
-                        let typed_intent = MessageIntent::from(intent.as_str());
-                        match typed_intent {
-                            MessageIntent::PeerAdded => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleAdded,
-                                    PeerInputClass::PeerLifecycleAdded,
-                                    Some(peer),
+                let (raw_kind, class, lifecycle_peer, request_id, auth_exempt) =
+                    match &envelope.kind {
+                        MessageKind::Message { .. } => (
+                            RawPeerKind::Message,
+                            PeerInputClass::ActionableMessage,
+                            None,
+                            None,
+                            false,
+                        ),
+                        MessageKind::Request { intent, params, .. } => {
+                            let typed_intent = MessageIntent::from(intent.as_str());
+                            let auth_exempt = AUTH_EXEMPT_REQUEST_INTENTS
+                                .iter()
+                                .any(|candidate| *candidate == intent);
+                            match typed_intent {
+                                MessageIntent::PeerAdded => {
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(from_name.as_str())
+                                        .to_string();
+                                    (
+                                        RawPeerKind::PeerLifecycleAdded,
+                                        PeerInputClass::PeerLifecycleAdded,
+                                        Some(peer),
+                                        Some(envelope.id.to_string()),
+                                        auth_exempt,
+                                    )
+                                }
+                                MessageIntent::PeerRetired => {
+                                    let peer = params
+                                        .get("peer")
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(from_name.as_str())
+                                        .to_string();
+                                    (
+                                        RawPeerKind::PeerLifecycleRetired,
+                                        PeerInputClass::PeerLifecycleRetired,
+                                        Some(peer),
+                                        Some(envelope.id.to_string()),
+                                        auth_exempt,
+                                    )
+                                }
+                                _ if self.silent_intents.contains(intent.as_str()) => (
+                                    RawPeerKind::SilentRequest,
+                                    PeerInputClass::SilentRequest,
+                                    None,
                                     Some(envelope.id.to_string()),
-                                )
-                            }
-                            MessageIntent::PeerRetired => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleRetired,
-                                    PeerInputClass::PeerLifecycleRetired,
-                                    Some(peer),
+                                    auth_exempt,
+                                ),
+                                _ => (
+                                    RawPeerKind::Request,
+                                    PeerInputClass::ActionableRequest,
+                                    None,
                                     Some(envelope.id.to_string()),
-                                )
+                                    auth_exempt,
+                                ),
                             }
-                            _ if self.silent_intents.contains(intent.as_str()) => (
-                                RawPeerKind::SilentRequest,
-                                PeerInputClass::SilentRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                            ),
-                            _ => (
-                                RawPeerKind::Request,
-                                PeerInputClass::ActionableRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                            ),
                         }
-                    }
-                    MessageKind::Response {
-                        in_reply_to,
-                        status,
-                        ..
-                    } => (
-                        match status {
-                            crate::types::Status::Accepted => RawPeerKind::ResponseProgress,
-                            crate::types::Status::Completed | crate::types::Status::Failed => {
-                                RawPeerKind::ResponseTerminal
-                            }
-                        },
-                        PeerInputClass::Response,
-                        None,
-                        Some(in_reply_to.to_string()),
-                    ),
-                    MessageKind::Ack { in_reply_to } => (
-                        RawPeerKind::Ack,
-                        PeerInputClass::Ack,
-                        None,
-                        Some(in_reply_to.to_string()),
-                    ),
-                };
+                        MessageKind::Response {
+                            in_reply_to,
+                            status,
+                            ..
+                        } => (
+                            match status {
+                                crate::types::Status::Accepted => RawPeerKind::ResponseProgress,
+                                crate::types::Status::Completed | crate::types::Status::Failed => {
+                                    RawPeerKind::ResponseTerminal
+                                }
+                            },
+                            PeerInputClass::Response,
+                            None,
+                            Some(in_reply_to.to_string()),
+                            false,
+                        ),
+                        MessageKind::Ack { in_reply_to } => (
+                            RawPeerKind::Ack,
+                            PeerInputClass::Ack,
+                            None,
+                            Some(in_reply_to.to_string()),
+                            false,
+                        ),
+                    };
 
                 let text_projection = match &envelope.kind {
                     MessageKind::Message { body, .. } => {
@@ -207,6 +221,7 @@ impl IngressClassificationContext {
                     raw_item_id: envelope.id.to_string(),
                     raw_kind,
                     class,
+                    auth_exempt,
                     trusted_sender,
                     from_peer: Some(from_name),
                     lifecycle_peer,
@@ -234,6 +249,7 @@ impl IngressClassificationContext {
                     raw_item_id: interaction_id.to_string(),
                     raw_kind: RawPeerKind::PlainEvent,
                     class: PeerInputClass::PlainEvent,
+                    auth_exempt: false,
                     trusted_sender: true,
                     from_peer: None,
                     lifecycle_peer: None,
@@ -260,7 +276,8 @@ impl IngressClassificationContext {
         self.prepare(item.clone()).and_then(|prepared| {
             let drop_untrusted_external = matches!(prepared.item, InboxItem::External { .. })
                 && self.require_peer_auth
-                && !prepared.trusted_sender;
+                && !prepared.trusted_sender
+                && !prepared.auth_exempt;
             if drop_untrusted_external {
                 return None;
             }
@@ -487,6 +504,59 @@ mod tests {
         assert!(
             result.is_none(),
             "untrusted input must be dropped at ingress"
+        );
+    }
+
+    #[test]
+    fn classify_untrusted_supervisor_bridge_request_remains_admissible() {
+        let sender = make_keypair();
+        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let ctx = make_context(true, trusted, vec![]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "supervisor.bridge".to_string(),
+                params: serde_json::json!({
+                    "command": "bind_member",
+                    "supervisor": {
+                        "name": "mob/__mob_supervisor__",
+                        "peer_id": sender.public_key().to_peer_id(),
+                        "address": "inproc://mob/__mob_supervisor__"
+                    },
+                    "epoch": 1,
+                    "protocol_version": 1,
+                    "expected_peer_id": "peer-id",
+                    "expected_address": "inproc://peer"
+                }),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx
+            .classify(&item)
+            .expect("bind_member should remain admissible");
+        assert_eq!(result.class, PeerInputClass::ActionableRequest);
+        assert_eq!(result.from_peer, Some(sender.public_key().to_peer_id()));
+    }
+
+    #[test]
+    fn classify_untrusted_legacy_bridge_intent_drops_at_ingress() {
+        let sender = make_keypair();
+        let trusted = TrustedPeers::new(); // sender NOT trusted yet
+        let ctx = make_context(true, trusted, vec![]);
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "mob.runtime.bind_member".to_string(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx.classify(&item);
+        assert!(
+            result.is_none(),
+            "legacy bridge intents should no longer bypass auth at ingress"
         );
     }
 

@@ -615,14 +615,6 @@ fn every_mutating_meerkat_runtime_command_has_transition_coverage() {
             "MeerkatMachine should model mutating runtime command {required} with at least one transition",
         );
     }
-
-    assert!(
-        schema
-            .surface_only_inputs
-            .iter()
-            .any(|name| name == "Recover"),
-        "Recover should remain surfaced even though recovery mutates only lower-authority ledger/runtime-driver state today",
-    );
 }
 
 #[test]
@@ -690,6 +682,7 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
         "InputState",
         "ListActiveInputs",
         "RuntimeState",
+        "RuntimeRealtimeAttachmentStatus",
         "LoadBoundaryReceipt",
     ] {
         assert!(

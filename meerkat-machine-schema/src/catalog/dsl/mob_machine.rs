@@ -13,6 +13,11 @@ machine! {
             active_run_count: u64,
             pending_spawn_count: u64,
             coordinator_bound: bool,
+            // Durable per-member realtime voice intent. Keyed on AgentIdentity
+            // so the fact survives respawn (new AgentRuntimeId) for the same
+            // identity. The shell reconciles this into the runtime
+            // MeerkatMachine's realtime-attachment authority.
+            member_voice_intent: Set<AgentIdentity>,
         }
 
         init(Running) {
@@ -22,6 +27,7 @@ machine! {
             active_run_count = 0,
             pending_spawn_count = 0,
             coordinator_bound = true,
+            member_voice_intent = EmptySet,
         }
 
         terminal [Destroyed]
@@ -73,6 +79,11 @@ machine! {
             SetSpawnPolicy,
             Shutdown,
             ForceCancel,
+            // Per-member realtime attachment inputs. These are the public
+            // mob/realtime_attach / mob/realtime_detach surface names and
+            // must match the MobMachineCommand runtime manifest variants.
+            RealtimeAttach { agent_identity: AgentIdentity },
+            RealtimeDetach { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -139,6 +150,11 @@ machine! {
             AdmitPeerInput,
             EmitProgressNote,
             EmitTaskNotice,
+            // Per-member realtime voice intent effects: shell-side reconciler
+            // catches these to drive the runtime MeerkatMachine's realtime
+            // attachment authority.
+            MemberVoiceIntentSet { agent_identity: AgentIdentity },
+            MemberVoiceIntentCleared { agent_identity: AgentIdentity },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -157,6 +173,8 @@ machine! {
         disposition AdmitPeerInput => external,
         disposition EmitProgressNote => external,
         disposition EmitTaskNotice => external,
+        disposition MemberVoiceIntentSet => external,
+        disposition MemberVoiceIntentCleared => external,
 
         // =====================================================================
         // Direct transitions
@@ -1011,6 +1029,30 @@ machine! {
             }
             to Running
             emit FlowTerminalized
+        }
+
+        // =====================================================================
+        // Per-member realtime voice intent
+        // =====================================================================
+
+        transition RealtimeAttach {
+            on input RealtimeAttach { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_voice_intent.insert(agent_identity);
+            }
+            to Running
+            emit MemberVoiceIntentSet { agent_identity: agent_identity }
+        }
+
+        transition RealtimeDetach {
+            on input RealtimeDetach { agent_identity }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_voice_intent.remove(agent_identity);
+            }
+            to Running
+            emit MemberVoiceIntentCleared { agent_identity: agent_identity }
         }
     }
 }

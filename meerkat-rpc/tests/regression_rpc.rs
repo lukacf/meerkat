@@ -865,6 +865,12 @@ async fn initialize_methods_list_complete() {
             "mob/fork_helper",
             "mob/force_cancel",
             "mob/member_status",
+            "mob/snapshot",
+            "mob/destroy",
+            "mob/rotate_supervisor",
+            "mob/submit_work",
+            "mob/cancel_work",
+            "mob/cancel_all_work",
             "mob/stream_open",
             "mob/stream_close",
         ];
@@ -991,6 +997,252 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["ok"], true);
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
+
+    // mob/snapshot (DELETE_ME C2): point-in-time aggregate of mob status +
+    // member list so consumers don't have to compose mob/status + mob/members
+    // manually (or subscribe to events and run their own projection).
+    let snapshot_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 41,
+        "method": "mob/snapshot",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &snapshot_req).await;
+    let snapshot_resp = read_response(&mut reader).await;
+    assert!(
+        snapshot_resp["error"].is_null(),
+        "mob/snapshot must succeed for an existing mob: {snapshot_resp}",
+    );
+    assert_eq!(snapshot_resp["result"]["mob_id"], mob_id);
+    assert!(
+        snapshot_resp["result"]["status"].is_string(),
+        "mob/snapshot must carry a status string: {snapshot_resp}",
+    );
+    assert!(
+        snapshot_resp["result"]["members"].is_array(),
+        "mob/snapshot must carry a members array: {snapshot_resp}",
+    );
+
+    // mob/rotate_supervisor must exist (DELETE_ME C10) and project the
+    // SupervisorRotationReport on success, or return a typed error when the
+    // mob has no supervisor to rotate. For a freshly created mob with no
+    // members there are no supervisor bridges to rotate; the handler should
+    // either report success with an empty rotation summary or return a
+    // specific MobError — both are acceptable and both indicate the RPC
+    // surface is wired end-to-end. Either way, the response MUST NOT be
+    // "method not found".
+    let rotate_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 42,
+        "method": "mob/rotate_supervisor",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &rotate_req).await;
+    let rotate_resp = read_response(&mut reader).await;
+    let is_success = rotate_resp["error"].is_null();
+    let is_method_specific_failure = rotate_resp
+        .get("error")
+        .and_then(|e| e["code"].as_i64())
+        .map(|c| c != -32601) // JSON-RPC "Method not found"
+        .unwrap_or(false);
+    assert!(
+        is_success || is_method_specific_failure,
+        "mob/rotate_supervisor must be a registered method; got: {rotate_resp}",
+    );
+
+    // mob/lifecycle destroy must surface the structured MobDestroyReport
+    // (Finding A1 regression: previously the report was dropped on the
+    // floor and the RPC client saw only `ok: true` even when partial
+    // cleanup errors had occurred).
+    let destroy_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "mob/lifecycle",
+        "params": {"mob_id": &mob_id, "action": "destroy"}
+    });
+    send_request(&mut writer, &destroy_req).await;
+    let destroy_resp = read_response(&mut reader).await;
+    assert!(
+        destroy_resp["error"].is_null(),
+        "mob/lifecycle(destroy) failed: {destroy_resp}"
+    );
+    assert_eq!(destroy_resp["result"]["ok"], true);
+    assert_eq!(destroy_resp["result"]["action"], "destroy");
+    assert_eq!(destroy_resp["result"]["mob_id"], mob_id);
+    // destroy_report is always present on a destroy success even when
+    // cleanup is clean (all structured fields will be defaults), so
+    // clients can distinguish a destroy response from a stop/reset one
+    // and can always introspect force_destroyed_members, errors, etc.
+    let destroy_report = &destroy_resp["result"]["destroy_report"];
+    assert!(
+        destroy_report.is_object(),
+        "destroy response must carry a `destroy_report` object: {destroy_resp}",
+    );
+    // serde's #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // means an empty clean destroy projects as `{}` — the presence of the
+    // object is what matters; fields only appear on non-default values.
+    // force_destroyed_members / orphaned_remote_members are omitted when
+    // empty, so we only assert the object exists, not that a specific
+    // field is present.
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 15b. mob_destroy_rpc_surfaces_report (DELETE_ME C3)
+// ---------------------------------------------------------------------------
+
+/// Dedicated `mob/destroy` RPC must exist and project the structured
+/// `MobDestroyReport` onto the response body without forcing callers to
+/// pass `action: "destroy"` through the generic `mob/lifecycle` endpoint.
+/// Finding C3 — explicit endpoint with predictable shape.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_destroy_rpc_surfaces_report() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // Create a minimal mob so we have something to destroy.
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/create",
+        "params": {
+            "definition": {
+                "id": "destroy_target_mob",
+                "profiles": {
+                    "worker": {
+                        "model": "claude-sonnet-4-6",
+                        "tools": { "comms": true }
+                    }
+                }
+            }
+        }
+    });
+    send_request(&mut writer, &create_req).await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "mob/create failed: {create_resp}"
+    );
+    let mob_id = create_resp["result"]["mob_id"]
+        .as_str()
+        .expect("mob_id should be string")
+        .to_string();
+
+    // Call the explicit mob/destroy endpoint. Result must carry mob_id,
+    // ok: true, and a destroy_report object even when destroy is clean.
+    let destroy_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "mob/destroy",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &destroy_req).await;
+    let destroy_resp = read_response(&mut reader).await;
+    assert!(
+        destroy_resp["error"].is_null(),
+        "mob/destroy failed: {destroy_resp}"
+    );
+    assert_eq!(destroy_resp["result"]["ok"], true);
+    assert_eq!(destroy_resp["result"]["mob_id"], mob_id);
+    assert!(
+        destroy_resp["result"]["destroy_report"].is_object(),
+        "mob/destroy must surface a destroy_report object: {destroy_resp}",
+    );
+
+    // After destroy the mob must be gone from mob/list.
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "mob/list"
+    });
+    send_request(&mut writer, &list_req).await;
+    let list_resp = read_response(&mut reader).await;
+    let mobs = list_resp["result"]["mobs"]
+        .as_array()
+        .expect("mobs should be array");
+    let mob_ids: Vec<&str> = mobs.iter().filter_map(|m| m["mob_id"].as_str()).collect();
+    assert!(
+        !mob_ids.contains(&mob_id.as_str()),
+        "mob must not appear in mob/list after mob/destroy: {list_resp}",
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 15c. mob_work_lane_rpcs_are_registered_and_validate_params (DELETE_ME C4)
+// ---------------------------------------------------------------------------
+
+/// The work-lane RPCs (`mob/submit_work`, `mob/cancel_work`,
+/// `mob/cancel_all_work`) must be registered on the router AND must
+/// surface typed error responses for invalid params instead of
+/// `-32601 Method not found` or silently accepting bad input. Finding
+/// C4 — work lane was Rust-only; exposing it through RPC means the
+/// input-validation boundary has to be real.
+#[cfg(feature = "mob")]
+#[tokio::test]
+async fn mob_work_lane_rpcs_validate_params() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    // mob/submit_work with no mob_id should fail parse_params.
+    let bad_submit = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "mob/submit_work",
+        "params": {}
+    });
+    send_request(&mut writer, &bad_submit).await;
+    let resp = read_response(&mut reader).await;
+    let err_code = resp.get("error").and_then(|e| e["code"].as_i64());
+    assert!(
+        err_code.is_some() && err_code.unwrap() != -32601,
+        "mob/submit_work must be registered and reject empty params with a params error (not method-not-found): {resp}",
+    );
+
+    // mob/cancel_work with non-UUID work_ref must return invalid_params
+    // (typed-UUID parse boundary exists on the handler).
+    let bad_cancel = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "mob/cancel_work",
+        "params": {
+            "mob_id": "some-mob",
+            "work_ref": "not-a-uuid"
+        }
+    });
+    send_request(&mut writer, &bad_cancel).await;
+    let resp = read_response(&mut reader).await;
+    let err_code = resp.get("error").and_then(|e| e["code"].as_i64());
+    let err_msg = resp
+        .get("error")
+        .and_then(|e| e["message"].as_str())
+        .unwrap_or("");
+    assert!(
+        err_code.is_some() && err_code.unwrap() != -32601,
+        "mob/cancel_work must be registered and validate UUID shape: {resp}",
+    );
+    assert!(
+        err_msg.to_lowercase().contains("uuid") || err_msg.to_lowercase().contains("work_ref"),
+        "mob/cancel_work error must mention the UUID/work_ref validation: {err_msg}",
+    );
+
+    // mob/cancel_all_work with missing params fails validation too.
+    let bad_cancel_all = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "mob/cancel_all_work",
+        "params": { "mob_id": "some-mob" }
+    });
+    send_request(&mut writer, &bad_cancel_all).await;
+    let resp = read_response(&mut reader).await;
+    let err_code = resp.get("error").and_then(|e| e["code"].as_i64());
+    assert!(
+        err_code.is_some() && err_code.unwrap() != -32601,
+        "mob/cancel_all_work must be registered and reject incomplete params: {resp}",
+    );
 
     drop(writer);
     handle.await.unwrap().unwrap();

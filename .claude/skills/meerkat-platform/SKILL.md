@@ -101,6 +101,69 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
+- Public realtime attachment capability is named `realtime`, not `voice`: surfaces should describe `runtime/realtime_attachment_status`, `mob/realtime_attach`, `mob/realtime_detach`, and `mob/member_status.realtime_attachment_status`.
+- OpenAI realtime integration is an internal runtime-backed companion, not a
+  public protocol authority: host/facade composition may wire it, but RPC/REST
+  methods should continue to expose only the canonical `runtime/*` and `mob/*`
+  realtime attachment surfaces above.
+
+### Realtime voice attachment
+
+Realtime is a live audio/voice overlay on an existing session, not a parallel
+conversation model. The session remains the source of conversational truth;
+the realtime attachment is a separately-managed binding to an OpenAI Realtime
+transport whose lifecycle and authority are enforced by the `MeerkatMachine`
+DSL.
+
+User-facing entry point: `docs/guides/realtime.mdx`.
+Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`.
+
+**Public API surface (all surfaces):**
+
+| Surface | Attach | Detach | Status |
+|---------|--------|--------|--------|
+| JSON-RPC | `mob/realtime_attach` | `mob/realtime_detach` | `runtime/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` |
+| REST | `POST /mob/{id}/members/{agent_identity}/realtime/attach` | `POST /mob/{id}/members/{agent_identity}/realtime/detach` | `GET /runtime/{id}/realtime_attachment_status` |
+| MCP (public) | (not exposed) | (not exposed) | `meerkat_realtime_open_info`, `meerkat_realtime_status`, `meerkat_realtime_capabilities` |
+| Python SDK | `Mob.realtime_attach(agent_identity)` | `Mob.realtime_detach(agent_identity)` | `Mob.member_status(...).realtime_attachment_status` |
+| TypeScript SDK | `client.attachMobMemberLive(mobId, agentIdentity)` | `client.detachMobMemberLive(mobId, agentIdentity)` | `mobMemberStatus(...).liveAttachmentStatus` (the wire field is `realtime_attachment_status`) |
+| Rust | `MeerkatMachine::attach_live` | `MeerkatMachine::detach_live` | `MeerkatMachine::realtime_attachment_status` |
+
+**Identity-first attachment.** Per-member intent is durable and keyed on
+`AgentIdentity` (mob-owned, survives respawn). The per-binding authority
+epoch is per-runtime, keyed on `SessionId`, and rotates on every attach /
+replace / detach / reconfigure.
+
+**Attachment states** (`RealtimeAttachmentStatus` enum):
+`Unattached`, `IntentPresentUnbound`, `BindingNotReady`, `BindingReady`
+(stable, audio flowing), `ReplacementPending`, `ReattachRequired` (stable,
+requires caller action). Intent and binding state are orthogonal: detach
+drops the binding; `mob/realtime_detach` additionally clears mob-level
+intent.
+
+**Authority token.** `RealtimeAttachmentSignalAuthority { session_id,
+authority_epoch }` is minted by `attach_live` / `replace_realtime_attachment`
+and required on every provider callback. The DSL `PublishRealtimeSignal`
+guard validates the epoch against the current binding — stale tokens are
+rejected before any mutation.
+
+**Live-topology reconfigure.** `MeerkatMachine::reconfigure_live_topology`
+swaps provider/model on a realtime-attached session via a 6-phase
+DSL-guarded flow (Idle → Reconfiguring → Detached → HostIdentityApplied →
+HostVisibilityApplied → Idle, then `attach_live` to mint fresh authority).
+Two typed failure modes: `AbortLiveTopologyBeforeDetach` (pre-detach failure,
+binding preserved) and `FailLiveTopologyAfterDetach` (post-detach failure,
+binding gone, reattach required).
+
+**Known limitations:**
+- OpenAI Realtime is the only supported provider in the current branch.
+- Single realtime binding per session; mob orchestrates per-member attachment.
+- `MobMachine.member_voice_intent` DSL field is currently inert; shell roster
+  is the source of truth for mob-level intent. Full parity requires wrapping
+  `MobActor.dsl_authority` in `Arc<Mutex<_>>` (tracked in the architecture
+  reference).
+- `attach_live` / `replace_realtime_attachment` are gated on live executor
+  binding; idle sessions return `RuntimeDriverError::NotReady`.
 
 ### Mob lifecycle (standard/default usage)
 

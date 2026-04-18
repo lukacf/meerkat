@@ -215,10 +215,34 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     if options.runtime_available {
         methods.extend([
             RpcMethodDescriptor::typed(
+                "realtime/open_info",
+                "Get bootstrap metadata for opening a realtime channel",
+                "RealtimeOpenRequest",
+                "RealtimeOpenInfo",
+            ),
+            RpcMethodDescriptor::typed(
+                "realtime/status",
+                "Get product-layer realtime channel status for a target",
+                "RealtimeStatusParams",
+                "RealtimeStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "realtime/capabilities",
+                "Get product-layer realtime capabilities for a target",
+                "RealtimeCapabilitiesParams",
+                "RealtimeCapabilitiesResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "runtime/state",
                 "Get a session runtime's current state",
                 "RuntimeStateParams",
                 "RuntimeStateResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "runtime/realtime_attachment_status",
+                "Get a session runtime's realtime attachment status",
+                "RuntimeRealtimeAttachmentStatusParams",
+                "RuntimeRealtimeAttachmentStatusResult",
             ),
             RpcMethodDescriptor::typed(
                 "runtime/accept",
@@ -305,11 +329,47 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Fork a helper member and wait for completion",
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
+            RpcMethodDescriptor::typed(
+                "mob/realtime_attach",
+                "Attach live voice intent to a mob member",
+                "MobRealtimeAttachParams",
+                "MobRealtimeAttachResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/realtime_detach",
+                "Detach live voice intent from a mob member",
+                "MobRealtimeDetachParams",
+                "MobRealtimeDetachResult",
+            ),
             RpcMethodDescriptor::basic(
                 "mob/turn_start",
                 "Start a turn on a mob member by identity",
             ),
             RpcMethodDescriptor::basic("mob/member_status", "Get live status for a mob member"),
+            RpcMethodDescriptor::basic(
+                "mob/snapshot",
+                "Point-in-time aggregate of mob status plus member list",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/destroy",
+                "Destroy a mob and surface the structured MobDestroyReport",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/rotate_supervisor",
+                "Rotate the supervisor bridge for all members of a mob",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/submit_work",
+                "Submit a unit of work to a mob member through the work lane",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/cancel_work",
+                "Cancel a previously submitted unit of work",
+            ),
+            RpcMethodDescriptor::basic(
+                "mob/cancel_all_work",
+                "Cancel all in-flight work for a mob member",
+            ),
             RpcMethodDescriptor::basic(
                 "mob/wait_kickoff",
                 "Wait for kickoff completion for a member",

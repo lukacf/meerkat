@@ -127,6 +127,26 @@ export interface RuntimeStateParams {
   session_id: string;
 }
 
+export interface RuntimeRealtimeAttachmentStatusParams {
+  session_id: string;
+}
+
+export interface RealtimeOpenRequest {
+  channel_config?: Record<string, unknown>;
+  reconnect_policy?: Record<string, unknown>;
+  role: "primary" | "observer";
+  target: Record<string, unknown>;
+  turning_mode: "provider_managed" | "explicit_commit";
+}
+
+export interface RealtimeStatusParams {
+  target: Record<string, unknown>;
+}
+
+export interface RealtimeCapabilitiesParams {
+  target: Record<string, unknown>;
+}
+
 export interface RuntimeAcceptParams {
   input: unknown;
   session_id: string;
@@ -208,6 +228,30 @@ export type WireRenderSalience = "background" | "normal" | "important" | "urgent
 
 export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
+export type WireRealtimeAttachmentStatus = "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
+
+export type RealtimeChannelTarget = Record<string, unknown>;
+
+export type RealtimeChannelRole = "primary" | "observer";
+
+export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
+
+export type RealtimeInputKind = "text" | "audio" | "video";
+
+export type RealtimeOutputKind = "text" | "audio" | "video";
+
+export type RealtimeChannelState = "opening" | "ready" | "interrupted" | "reconnecting" | "closed" | "error";
+
+export type RealtimeInputChunk = Record<string, unknown>;
+
+export type RealtimeOutputChunk = Record<string, unknown>;
+
+export type RealtimeEvent = Record<string, unknown>;
+
+export type RealtimeClientFrame = Record<string, unknown>;
+
+export type RealtimeServerFrame = Record<string, unknown>;
+
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
 export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applied" | "applied_pending_consumption" | "consumed" | "superseded" | "coalesced" | "abandoned";
@@ -239,6 +283,111 @@ export interface MobUnwireResult {
 
 export interface RuntimeStateResult {
   state: "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
+}
+
+export interface RuntimeRealtimeAttachmentStatusResult {
+  status: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
+}
+
+export interface RealtimeReconnectPolicy {
+  initial_backoff_ms: number;
+  max_attempts: number;
+  max_backoff_ms: number;
+  max_total_ms: number;
+}
+
+export interface RealtimeCapabilities {
+  audio_input_format?: Record<string, unknown>;
+  audio_output_format?: Record<string, unknown>;
+  input_kinds?: "text" | "audio" | "video"[];
+  interrupt_supported: boolean;
+  output_kinds?: "text" | "audio" | "video"[];
+  tool_lifecycle_events_supported: boolean;
+  transcript_supported: boolean;
+  turning_modes?: "provider_managed" | "explicit_commit"[];
+  video_supported: boolean;
+}
+
+export interface RealtimeChannelStatus {
+  attempt_count?: number;
+  deadline_at?: string;
+  next_retry_at?: string;
+  reason?: string;
+  state: "opening" | "ready" | "interrupted" | "reconnecting" | "closed" | "error";
+}
+
+export interface RealtimeOpenInfo {
+  capabilities: Record<string, unknown>;
+  default_protocol_version: string;
+  expires_at: string;
+  open_token: string;
+  supported_protocol_versions?: string[];
+  target: Record<string, unknown>;
+  ws_url: string;
+}
+
+export interface RealtimeStatusResult {
+  status: Record<string, unknown>;
+}
+
+export interface RealtimeCapabilitiesResult {
+  capabilities: Record<string, unknown>;
+}
+
+export interface RealtimeTextChunk {
+  text: string;
+}
+
+export interface RealtimeTextDelta {
+  delta: string;
+}
+
+export interface RealtimeAudioChunk {
+  channels: number;
+  data: string;
+  mime_type: string;
+  sample_rate_hz: number;
+}
+
+export interface RealtimeVideoChunk {
+  data: string;
+  mime_type: string;
+}
+
+export interface RealtimeChannelOpenFrame {
+  open_token: string;
+  protocol_version: string;
+  role: "primary" | "observer";
+  turning_mode: "provider_managed" | "explicit_commit";
+}
+
+export interface RealtimeChannelInputFrame {
+  chunk: Record<string, unknown>;
+}
+
+export interface RealtimeChannelOpenedFrame {
+  capabilities: Record<string, unknown>;
+  protocol_version: string;
+  role: "primary" | "observer";
+  status: Record<string, unknown>;
+}
+
+export interface RealtimeChannelStatusFrame {
+  status: Record<string, unknown>;
+}
+
+export interface RealtimeChannelEventFrame {
+  event: Record<string, unknown>;
+}
+
+export interface RealtimeChannelErrorFrame {
+  code: string;
+  details?: Record<string, unknown>;
+  message: string;
+}
+
+export interface RealtimeChannelClosedFrame {
+  reason?: string;
 }
 
 export interface RuntimeAcceptResult {

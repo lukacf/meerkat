@@ -4,6 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import packageJson from "../package.json" with { type: "json" };
 import {
   CONTRACT_VERSION,
@@ -36,6 +37,19 @@ describe("Contract Version", () => {
 
   it("matches the published package version", () => {
     assert.equal(CONTRACT_VERSION, packageJson.version);
+  });
+
+  it("generated realtime type inventory includes open-info and protocol frames", () => {
+    const generated = fs.readFileSync(
+      new URL("../src/generated/types.ts", import.meta.url),
+      "utf8",
+    );
+
+    assert.match(generated, /export interface RealtimeOpenInfo/);
+    assert.match(generated, /supported_protocol_versions\??: string\[]/);
+    assert.match(generated, /default_protocol_version: string/);
+    assert.match(generated, /export interface RealtimeChannelOpenFrame/);
+    assert.match(generated, /protocol_version: string/);
   });
 });
 
@@ -1207,6 +1221,72 @@ describe("Mob kickoff wait wrappers", () => {
     assert.equal(legacy[0].agentRuntimeId, "lead:1");
     assert.equal(fromHandle[0].agentIdentity, "lead");
     assert.equal(fromHandle[0].agentRuntimeId, "lead:1");
+  });
+});
+
+describe("Live attachment wrappers", () => {
+  it("routes live attach/detach and runtime live status through explicit methods", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "mob/member_status") {
+        return {
+          status: "active",
+          agent_runtime_id: "agent-a:1",
+          fence_token: 7,
+          tokens_used: 5,
+          is_final: false,
+          realtime_attachment_status: "binding_ready",
+        };
+      }
+      if (method === "runtime/realtime_attachment_status") {
+        return {
+          status: "binding_ready",
+        };
+      }
+      return {};
+    };
+
+    await client.attachMobMemberLive("mob-1", "agent-a");
+    await client.detachMobMemberLive("mob-1", "agent-a");
+
+    const runtimeStatus = await client.runtimeRealtimeAttachmentStatus("session-1");
+    const memberStatus = await client.mobMemberStatus("mob-1", "agent-a");
+
+    const mob = new Mob(client, "mob-1");
+    await mob.liveAttach("agent-b");
+    await mob.liveDetach("agent-b");
+
+    assert.equal(runtimeStatus.status, "binding_ready");
+    assert.equal(memberStatus.liveAttachmentStatus, "binding_ready");
+    assert.deepEqual(calls.map((call) => call.method), [
+      "mob/realtime_attach",
+      "mob/realtime_detach",
+      "runtime/realtime_attachment_status",
+      "mob/member_status",
+      "mob/realtime_attach",
+      "mob/realtime_detach",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      mob_id: "mob-1",
+      agent_identity: "agent-a",
+    });
+    assert.deepEqual(calls[1].params, {
+      mob_id: "mob-1",
+      agent_identity: "agent-a",
+    });
+    assert.deepEqual(calls[2].params, {
+      session_id: "session-1",
+    });
+    assert.deepEqual(calls[4].params, {
+      mob_id: "mob-1",
+      agent_identity: "agent-b",
+    });
+    assert.deepEqual(calls[5].params, {
+      mob_id: "mob-1",
+      agent_identity: "agent-b",
+    });
   });
 });
 

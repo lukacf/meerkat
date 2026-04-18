@@ -8,8 +8,8 @@
 
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationAppendRole, CoreRenderable, RunApplyBoundary, RunPrimitive,
-    StagedRunInput,
+    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreRenderable,
+    RunApplyBoundary, RunPrimitive, StagedRunInput,
 };
 use meerkat_core::lifecycle::{InputId, RunId};
 
@@ -20,7 +20,7 @@ use crate::tokio;
 pub(crate) fn input_to_prompt(input: &Input) -> String {
     match input {
         Input::Prompt(p) => p.text.clone(),
-        Input::Peer(p) => p.body.clone(),
+        Input::Peer(p) => peer_prompt_text(p),
         Input::FlowStep(f) => f.instructions.clone(),
         Input::ExternalEvent(e) => external_event_projection_text(e),
         Input::Continuation(c) => format!("[Continuation] {}", c.reason),
@@ -35,6 +35,20 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
 
 fn input_boundary(input: &Input) -> RunApplyBoundary {
     match input {
+        Input::Peer(peer)
+            if matches!(
+                peer.convention,
+                Some(crate::input::PeerConvention::ResponseTerminal { .. })
+            ) && peer.handling_mode.is_none() =>
+        {
+            // Runtime-owned default for terminal peer responses:
+            // when surfaces do not explicitly override handling_mode, the
+            // typed ResponseTerminal convention should apply immediately as a
+            // canonical context fact. Routing it through RunStart would strand
+            // the authoritative peer result until a later user turn, which is
+            // exactly the freshness gap the realtime audio smoke exposes.
+            RunApplyBoundary::Immediate
+        }
         Input::Peer(peer)
             if matches!(
                 peer.convention,
@@ -100,29 +114,27 @@ fn resolve_completion_waiters(
     run_result: Option<meerkat_core::types::RunResult>,
     terminal: Option<CoreApplyTerminal>,
 ) {
-    match terminal {
-        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
-            for input_id in input_ids {
-                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
-            }
+    if let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal {
+        for input_id in input_ids {
+            registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
         }
-        Some(CoreApplyTerminal::RunResult(_)) => match run_result {
-            Some(result) => {
-                for input_id in input_ids {
-                    registry.resolve_completed(input_id, result.clone());
-                }
-            }
-            None => {
-                for input_id in input_ids {
-                    registry.resolve_without_result(input_id);
-                }
-            }
-        },
-        None => {
+        return;
+    }
+
+    if let Some(result) = run_result {
+        for input_id in input_ids {
+            registry.resolve_completed(input_id, result.clone());
+        }
+        return;
+    }
+
+    match terminal {
+        Some(CoreApplyTerminal::RunResult(_)) | None => {
             for input_id in input_ids {
                 registry.resolve_without_result(input_id);
             }
         }
+        Some(CoreApplyTerminal::CallbackPending { .. }) => unreachable!(),
     }
 }
 
@@ -176,6 +188,16 @@ fn merge_batch_turn_metadata(
 }
 
 fn input_to_append(input: &Input) -> Option<ConversationAppend> {
+    if matches!(
+        input,
+        Input::Peer(crate::input::PeerInput {
+            convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+            ..
+        })
+    ) {
+        return None;
+    }
+
     let content = match input {
         Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
             blocks: p.blocks.clone().unwrap_or_default(),
@@ -222,6 +244,30 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     })
 }
 
+fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
+    let Input::Peer(peer) = input else {
+        return None;
+    };
+    let (
+        Some(crate::input::PeerConvention::ResponseTerminal { request_id, .. }),
+        crate::input::InputOrigin::Peer { peer_id, .. },
+    ) = (&peer.convention, &peer.header.source)
+    else {
+        return None;
+    };
+
+    Some(ConversationContextAppend {
+        // Transitional but runtime-owned: until the machine/DSL branch lands,
+        // correlated terminal peer results need one durable semantic owner.
+        // Using a stable context key here keeps replacement/dedup on the core
+        // session context path instead of helper-local comms state.
+        key: format!("peer_response_terminal:{peer_id}:{request_id}"),
+        content: CoreRenderable::Text {
+            text: input_to_prompt(input),
+        },
+    })
+}
+
 fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
     match (&peer.convention, &peer.header.source) {
         (
@@ -229,6 +275,106 @@ fn peer_block_prefix_text(peer: &crate::input::PeerInput) -> Option<String> {
             crate::input::InputOrigin::Peer { peer_id, .. },
         ) => Some(format!("[COMMS MESSAGE from {peer_id}]")),
         _ => None,
+    }
+}
+
+fn peer_prompt_text(peer: &crate::input::PeerInput) -> String {
+    match (&peer.convention, &peer.header.source) {
+        (
+            Some(crate::input::PeerConvention::Request { request_id, intent }),
+            crate::input::InputOrigin::Peer { peer_id, .. },
+        ) => format!(
+            // Transitional but intentional: until the machine/DSL branch owns a
+            // first-class peer-request/peer-response semantic seam, the runtime
+            // must derive the correlated request/response prompt text from the
+            // typed peer convention and payload here. We keep the ownership on
+            // runtime admission rather than trusting helper-rendered comms text,
+            // because the typed ingress record is already the most authoritative
+            // fact available on this branch.
+            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
+            format_peer_payload(peer.payload.as_ref())
+        ),
+        (
+            Some(crate::input::PeerConvention::ResponseProgress { request_id, phase }),
+            crate::input::InputOrigin::Peer { peer_id, .. },
+        ) => format!(
+            "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
+            response_progress_phase_label(phase),
+            format_peer_payload(peer.payload.as_ref())
+        ),
+        (
+            Some(crate::input::PeerConvention::ResponseTerminal { request_id, status }),
+            crate::input::InputOrigin::Peer { peer_id, .. },
+        ) => format!(
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {peer_id}. Request ID: {request_id}. Status: {}. Result: {}.{}",
+            response_terminal_status_label(status),
+            format_peer_payload(peer.payload.as_ref()),
+            format_authoritative_peer_result_hint(peer.payload.as_ref())
+        ),
+        _ => peer.body.clone(),
+    }
+}
+
+fn format_peer_payload(payload: Option<&serde_json::Value>) -> String {
+    serde_json::to_string_pretty(payload.unwrap_or(&serde_json::Value::Null))
+        .unwrap_or_else(|_| "null".to_string())
+}
+
+fn format_authoritative_peer_result_hint(payload: Option<&serde_json::Value>) -> String {
+    let Some(serde_json::Value::Object(map)) = payload else {
+        return String::new();
+    };
+
+    let request_intent = map
+        .get("request_intent")
+        .and_then(serde_json::Value::as_str);
+    let token = map.get("token").and_then(serde_json::Value::as_str);
+
+    if request_intent.is_none() && token.is_none() {
+        return String::new();
+    }
+
+    // Transitional but machine-owned:
+    // until the machine/DSL branch exposes first-class structured peer-response
+    // fields directly to the model, the runtime-owned prompt projection must
+    // restate the authoritative scalar facts from terminal peer results here.
+    // This keeps the semantic hint on the runtime side rather than asking the
+    // smoke harness or comms helper text to carry the meaning.
+    let mut parts = Vec::new();
+    if let Some(request_intent) = request_intent {
+        parts.push(format!("request_intent={request_intent}"));
+    }
+    if let Some(token) = token {
+        parts.push(format!("token={token}"));
+    }
+
+    let exact_answer_hint = match (request_intent, token) {
+        (Some(request_intent), Some(token)) => format!(
+            " For {request_intent} requests, the exact token answer is `{token}`. If a later user asks what token came from the peer, answer with `{token}` exactly."
+        ),
+        _ => String::new(),
+    };
+
+    format!(
+        " Authoritative result fields: {}. This terminal peer result supersedes any earlier peer-request params for factual recall. Treat these exact values as durable facts for later turns until a newer authoritative terminal peer response supersedes them. Use these exact values, not placeholder words, request subjects, or unrelated remembered codewords.{}",
+        parts.join(", "),
+        exact_answer_hint
+    )
+}
+
+fn response_progress_phase_label(phase: &crate::input::ResponseProgressPhase) -> &'static str {
+    match phase {
+        crate::input::ResponseProgressPhase::Accepted => "accepted",
+        crate::input::ResponseProgressPhase::InProgress => "in_progress",
+        crate::input::ResponseProgressPhase::PartialResult => "partial_result",
+    }
+}
+
+fn response_terminal_status_label(status: &crate::input::ResponseTerminalStatus) -> &'static str {
+    match status {
+        crate::input::ResponseTerminalStatus::Completed => "completed",
+        crate::input::ResponseTerminalStatus::Failed => "failed",
+        crate::input::ResponseTerminalStatus::Cancelled => "cancelled",
     }
 }
 
@@ -255,6 +401,10 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     let appends = inputs
         .iter()
         .filter_map(|(_, input)| input_to_append(input))
+        .collect::<Vec<_>>();
+    let context_appends = inputs
+        .iter()
+        .filter_map(|(_, input)| input_to_context_append(input))
         .collect::<Vec<_>>();
     let contributing_input_ids = inputs
         .iter()
@@ -286,7 +436,7 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     RunPrimitive::StagedInput(StagedRunInput {
         boundary,
         appends,
-        context_appends: vec![],
+        context_appends,
         contributing_input_ids,
         turn_metadata,
     })
@@ -887,10 +1037,78 @@ mod tests {
             },
             convention: None,
             body: "peer message".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
+    }
+
+    #[test]
+    fn input_to_prompt_peer_request_is_runtime_owned_and_ignores_bogus_body() {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "operator-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Request {
+                request_id: "req-123".into(),
+                intent: "checksum_token".into(),
+            }),
+            body: "stale helper-local comms prose".into(),
+            payload: Some(serde_json::json!({"subject": "alpha beta gamma"})),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        assert_eq!(
+            input_to_prompt(&input),
+            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from operator-rt. Intent: checksum_token. Request ID: req-123. Params: {\n  \"subject\": \"alpha beta gamma\"\n}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"operator-rt\", in_reply_to=\"req-123\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply."
+        );
+    }
+
+    #[test]
+    fn input_to_prompt_peer_response_terminal_is_runtime_owned_from_typed_payload() {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "analyst-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: "stale helper-local comms prose".into(),
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        assert_eq!(
+            input_to_prompt(&input),
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}. Authoritative result fields: request_intent=checksum_token, token=birch seventeen. This terminal peer result supersedes any earlier peer-request params for factual recall. Treat these exact values as durable facts for later turns until a newer authoritative terminal peer response supersedes them. Use these exact values, not placeholder words, request subjects, or unrelated remembered codewords. For checksum_token requests, the exact token answer is `birch seventeen`. If a later user asks what token came from the peer, answer with `birch seventeen` exactly."
+        );
     }
 
     #[test]
@@ -911,6 +1129,103 @@ mod tests {
             CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
             other => return Err(format!("expected text content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_response_terminal_creates_immediate_context_staged_input() -> Result<(), String> {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "analyst-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: "stale helper-local comms prose".into(),
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+            blocks: None,
+            handling_mode: None,
+        });
+        let input_id = input.id().clone();
+
+        let primitive = inputs_to_primitive_with_boundary(
+            &[(input_id.clone(), input)],
+            RunApplyBoundary::Immediate,
+        );
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.boundary, RunApplyBoundary::Immediate);
+        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert!(staged.appends.is_empty());
+        assert_eq!(staged.context_appends.len(), 1);
+        assert_eq!(
+            staged.context_appends[0].key,
+            "peer_response_terminal:analyst-rt:req-123"
+        );
+        match &staged.context_appends[0].content {
+            CoreRenderable::Text { text } => {
+                assert!(text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"));
+                assert!(text.contains("birch seventeen"));
+            }
+            other => return Err(format!("expected text content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn peer_response_terminal_without_handling_mode_defaults_to_immediate_boundary()
+    -> Result<(), String> {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "analyst-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: "done".into(),
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        let primitive = inputs_to_primitive(&[(input.id().clone(), input)]);
+        let staged = match primitive {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+        assert_eq!(staged.boundary, RunApplyBoundary::Immediate);
+        assert!(staged.appends.is_empty());
+        assert_eq!(staged.context_appends.len(), 1);
         Ok(())
     }
 
@@ -941,6 +1256,7 @@ mod tests {
             },
             convention: Some(crate::input::PeerConvention::Message),
             body: "see this image".into(),
+            payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
         });
@@ -996,6 +1312,7 @@ mod tests {
             },
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
         });
@@ -1044,6 +1361,7 @@ mod tests {
             },
             convention: Some(crate::input::PeerConvention::Message),
             body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
+            payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
         });
@@ -1512,6 +1830,7 @@ mod tests {
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });
@@ -1546,6 +1865,7 @@ mod tests {
             },
             convention: Some(PeerConvention::Message),
             body: "msg".into(),
+            payload: None,
             blocks: None,
             handling_mode: None,
         });

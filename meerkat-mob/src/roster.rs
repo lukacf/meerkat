@@ -20,6 +20,10 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Lifecycle state for a roster member.
 ///
 /// `Retiring` is runtime-only — event projection never produces it
@@ -86,6 +90,9 @@ pub struct RosterEntry {
     /// Projected kickoff state for autonomous initial turn resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    /// Durable voice intent projected from the mob event log.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) voice_intent_present: bool,
 
     // --- Internal bridge fields (pub(crate)) ---
     /// Legacy meerkat identifier for bridge dispatch.
@@ -123,6 +130,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) peer_id: Option<String>,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
+    pub(crate) voice_intent_present: bool,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -176,6 +184,7 @@ impl Roster {
                     peer_id: None,
                     labels: member_spawned.labels.clone(),
                     effective_profile_override: None,
+                    voice_intent_present: false,
                 });
             }
             MobEventKind::MemberRetired { agent_identity, .. } => {
@@ -213,6 +222,12 @@ impl Roster {
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));
             }
+            MobEventKind::MemberVoiceIntentSet { agent_identity } => {
+                self.set_voice_intent_by_identity(agent_identity, true);
+            }
+            MobEventKind::MemberVoiceIntentCleared { agent_identity } => {
+                self.set_voice_intent_by_identity(agent_identity, false);
+            }
             MobEventKind::MobReset => {
                 self.entries.clear();
                 self.meerkat_index.clear();
@@ -244,6 +259,7 @@ impl Roster {
                     external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
                     kickoff: None,
+                    voice_intent_present: entry.voice_intent_present,
                     effective_profile_override: entry.effective_profile_override,
                 },
             )
@@ -259,6 +275,18 @@ impl Roster {
                 entry.wired_to.remove(identity);
             }
         }
+    }
+
+    pub(crate) fn set_voice_intent_by_identity(
+        &mut self,
+        identity: &AgentIdentity,
+        present: bool,
+    ) -> bool {
+        let Some(entry) = self.entries.get_mut(identity) else {
+            return false;
+        };
+        entry.voice_intent_present = present;
+        true
     }
 
     /// Remove a member by legacy MeerkatId (bridge lookup).
@@ -470,10 +498,14 @@ impl Roster {
             entry.member_ref = match &entry.member_ref {
                 MemberRef::Session { .. } => MemberRef::from_bridge_session_id(bridge_session_id),
                 MemberRef::BackendPeer {
-                    peer_id, address, ..
+                    peer_id,
+                    address,
+                    bootstrap_token,
+                    ..
                 } => MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    bootstrap_token: bootstrap_token.clone(),
                     session_id: Some(bridge_session_id),
                 },
             };
@@ -515,6 +547,37 @@ impl Roster {
             return true;
         }
         false
+    }
+
+    /// Replace the projected peer-only binding for all entries currently using a
+    /// given remote peer id. Returns the identities and generations that changed.
+    pub fn replace_backend_peer_binding_by_peer_id(
+        &mut self,
+        prior_peer_id: &str,
+        next_peer_id: &str,
+        next_address: &str,
+        bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
+    ) -> Vec<(AgentIdentity, Generation)> {
+        let mut updated = Vec::new();
+        for entry in self.entries.values_mut() {
+            match &entry.member_ref {
+                MemberRef::BackendPeer {
+                    peer_id,
+                    session_id: None,
+                    ..
+                } if peer_id == prior_peer_id => {
+                    entry.member_ref = MemberRef::BackendPeer {
+                        peer_id: next_peer_id.to_string(),
+                        address: next_address.to_string(),
+                        bootstrap_token: bootstrap_token.clone(),
+                        session_id: None,
+                    };
+                    updated.push((entry.agent_identity.clone(), entry.generation));
+                }
+                _ => {}
+            }
+        }
+        updated
     }
 
     /// List active roster entries (excludes `Retiring`).
@@ -672,6 +735,7 @@ mod tests {
             peer_id: None,
             labels,
             effective_profile_override: None,
+            voice_intent_present: false,
         }
     }
 
@@ -737,6 +801,18 @@ mod tests {
         }
     }
 
+    fn voice_intent_set_kind(identity: &str) -> MobEventKind {
+        MobEventKind::MemberVoiceIntentSet {
+            agent_identity: AgentIdentity::from(identity),
+        }
+    }
+
+    fn voice_intent_cleared_kind(identity: &str) -> MobEventKind {
+        MobEventKind::MemberVoiceIntentCleared {
+            agent_identity: AgentIdentity::from(identity),
+        }
+    }
+
     #[test]
     fn test_roster_add_and_get() {
         let mut roster = Roster::new();
@@ -783,6 +859,45 @@ mod tests {
     }
 
     #[test]
+    fn test_roster_projects_voice_intent_set_clear_and_replace() {
+        let mut roster = Roster::new();
+        add_member(
+            &mut roster,
+            MeerkatId::from("agent-1"),
+            ProfileName::from("worker"),
+            MobRuntimeMode::AutonomousHost,
+            MemberRef::from_bridge_session_id(session_id()),
+        );
+
+        roster.apply(&make_event(1, voice_intent_set_kind("agent-1")));
+        assert!(
+            roster
+                .get(&MeerkatId::from("agent-1"))
+                .expect("member entry")
+                .voice_intent_present,
+            "set event should project durable voice intent"
+        );
+
+        roster.apply(&make_event(2, voice_intent_cleared_kind("agent-1")));
+        assert!(
+            !roster
+                .get(&MeerkatId::from("agent-1"))
+                .expect("member entry")
+                .voice_intent_present,
+            "clear event should remove projected durable voice intent"
+        );
+
+        roster.apply(&make_event(3, voice_intent_set_kind("agent-1")));
+        assert!(
+            roster
+                .get(&MeerkatId::from("agent-1"))
+                .expect("member entry")
+                .voice_intent_present,
+            "later set event should restore projected durable voice intent"
+        );
+    }
+
+    #[test]
     fn test_roster_remove_nonexistent_is_noop() {
         let mut roster = Roster::new();
         roster.remove(&MeerkatId::from("nonexistent"));
@@ -801,6 +916,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                bootstrap_token: None,
                 session_id: Some(old_sid),
             },
         );
@@ -815,6 +931,7 @@ mod tests {
                 peer_id,
                 address,
                 session_id,
+                ..
             } => {
                 assert_eq!(peer_id, "peer-ext-1");
                 assert_eq!(address, "https://backend.example.invalid/mesh/ext-1");
@@ -1086,6 +1203,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            voice_intent_present: false,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -1261,6 +1379,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            voice_intent_present: false,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -1296,6 +1415,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                bootstrap_token: None,
                 session_id: Some(sid.clone()),
             },
         );
@@ -1314,6 +1434,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-2".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-2".to_string(),
+                bootstrap_token: None,
                 session_id: None,
             },
         );

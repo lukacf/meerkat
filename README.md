@@ -151,6 +151,8 @@ Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider l
 
 **Multi-agent.** Sub-agents with budget and tool isolation. Peer-to-peer inter-agent messaging with cryptographic identity. Mobs for orchestrating teams of agents with role-based coordination, shared task boards, and DAG-based flows. Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
 
+**Realtime voice.** Attach an OpenAI Realtime audio channel to any session or mob member while keeping the session as the canonical source of conversational truth. Identity-first attach/detach (`mob/realtime_attach` / `mob/realtime_detach`) keyed on `AgentIdentity` survives respawn; per-binding authority-epoch tokens guard provider callbacks against races and stale transports. Hot-swap provider/model mid-call via the DSL-guarded live-topology reconfigure flow. See the [realtime voice guide](https://docs.rkat.ai/guides/realtime).
+
 **Packaging and targets.** Build once as a signed `.mobpack`, then choose runtime target: direct deploy, embedded native binary, optimized compile, or browser WASM bundle.
 
 **Modularity.** Every subsystem is opt-in via Cargo features. Default: three providers and nothing else. Add `session-store`, `mcp`, `comms`, or `skills` as needed. Disabled features return typed errors, not panics. See the [capability matrix](https://docs.rkat.ai/reference/capability-matrix) for the full feature map.
@@ -351,7 +353,7 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration, realms |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, structured output |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, realtime voice, structured output |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, session contracts |

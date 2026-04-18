@@ -8,9 +8,12 @@
 //! These catch silent renames and accidental field removals.
 
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, WireError, WireEvent,
-    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
-    WireUsage,
+    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
+    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
+    RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
+    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy,
+    RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent, WireRunResult,
+    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
     AgentEvent, BudgetType, HookPatch, HookPoint, HookReasonCode, RunResult, SessionId, StopReason,
@@ -798,4 +801,189 @@ fn wire_usage_from_usage_conversion() {
     assert_eq!(wire.total_tokens, 750); // 500 + 250
     assert_eq!(wire.cache_creation_tokens, Some(100));
     assert_eq!(wire.cache_read_tokens, Some(75));
+}
+
+// ---------------------------------------------------------------------------
+// 13. RealtimeOpenInfo required fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn realtime_open_info_required_fields() {
+    let info = RealtimeOpenInfo {
+        ws_url: "ws://localhost:9999/realtime/ws".to_string(),
+        open_token: "token-1".to_string(),
+        expires_at: "2026-04-15T12:00:00Z".to_string(),
+        target: RealtimeChannelTarget::SessionTarget {
+            session_id: "session-1".to_string(),
+        },
+        supported_protocol_versions: vec!["1".to_string()],
+        default_protocol_version: "1".to_string(),
+        capabilities: RealtimeCapabilities {
+            input_kinds: vec![
+                RealtimeInputKind::Text,
+                RealtimeInputKind::Audio,
+                RealtimeInputKind::Video,
+            ],
+            output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+            turning_modes: vec![
+                RealtimeTurningMode::ProviderManaged,
+                RealtimeTurningMode::ExplicitCommit,
+            ],
+            interrupt_supported: true,
+            transcript_supported: true,
+            tool_lifecycle_events_supported: true,
+            video_supported: true,
+            audio_input_format: None,
+            audio_output_format: None,
+        },
+    };
+    let value = serde_json::to_value(&info).unwrap();
+
+    assert!(value.get("ws_url").is_some(), "missing ws_url");
+    assert!(value.get("open_token").is_some(), "missing open_token");
+    assert!(value.get("expires_at").is_some(), "missing expires_at");
+    assert!(value.get("target").is_some(), "missing target");
+    assert!(
+        value.get("supported_protocol_versions").is_some(),
+        "missing supported_protocol_versions"
+    );
+    assert!(
+        value.get("default_protocol_version").is_some(),
+        "missing default_protocol_version"
+    );
+    assert!(value.get("capabilities").is_some(), "missing capabilities");
+}
+
+// ---------------------------------------------------------------------------
+// 14. RealtimeOpenRequest roundtrip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn realtime_open_request_roundtrip() {
+    let request = RealtimeOpenRequest {
+        target: RealtimeChannelTarget::MobMemberTarget {
+            mob_id: "mob-1".to_string(),
+            agent_identity: "researcher".to_string(),
+        },
+        role: RealtimeChannelRole::Primary,
+        turning_mode: RealtimeTurningMode::ExplicitCommit,
+        reconnect_policy: Some(RealtimeReconnectPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 500,
+            max_backoff_ms: 5_000,
+            max_total_ms: 30_000,
+        }),
+        channel_config: None,
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    let roundtrip: RealtimeOpenRequest = serde_json::from_value(json).unwrap();
+
+    assert_eq!(roundtrip.role, RealtimeChannelRole::Primary);
+    assert_eq!(roundtrip.turning_mode, RealtimeTurningMode::ExplicitCommit);
+    assert_eq!(
+        roundtrip.reconnect_policy.as_ref().unwrap().max_total_ms,
+        30_000
+    );
+    assert!(
+        matches!(
+            roundtrip.target,
+            RealtimeChannelTarget::MobMemberTarget {
+                ref mob_id,
+                ref agent_identity,
+            } if mob_id == "mob-1" && agent_identity == "researcher"
+        ),
+        "unexpected realtime target roundtrip: {:?}",
+        roundtrip.target
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. Realtime client open frame pins protocol-version negotiation shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn realtime_client_open_frame_pins_protocol_version_field() {
+    let frame = RealtimeClientFrame::ChannelOpen(meerkat_contracts::RealtimeChannelOpenFrame {
+        protocol_version: "1".to_string(),
+        open_token: "token-1".to_string(),
+        role: RealtimeChannelRole::Observer,
+        turning_mode: RealtimeTurningMode::ProviderManaged,
+    });
+
+    let value = serde_json::to_value(&frame).unwrap();
+
+    assert_eq!(
+        value.get("type").and_then(|v| v.as_str()),
+        Some("channel.open")
+    );
+    assert_eq!(
+        value.get("protocol_version").and_then(|v| v.as_str()),
+        Some("1")
+    );
+    assert_eq!(
+        value.get("open_token").and_then(|v| v.as_str()),
+        Some("token-1")
+    );
+    assert_eq!(value.get("role").and_then(|v| v.as_str()), Some("observer"));
+    assert_eq!(
+        value.get("turning_mode").and_then(|v| v.as_str()),
+        Some("provider_managed")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. Realtime chunk and event envelopes stay tagged and modality-neutral
+// ---------------------------------------------------------------------------
+
+#[test]
+fn realtime_chunks_and_events_roundtrip() {
+    let input_chunk = RealtimeInputChunk::AudioChunk(meerkat_contracts::RealtimeAudioChunk {
+        mime_type: "audio/pcm".to_string(),
+        sample_rate_hz: 24_000,
+        channels: 1,
+        data: "AQID".to_string(),
+    });
+    let output_chunk = RealtimeOutputChunk::VideoChunk(meerkat_contracts::RealtimeVideoChunk {
+        mime_type: "video/h264".to_string(),
+        data: "BAUG".to_string(),
+    });
+    let status = RealtimeChannelStatus {
+        state: RealtimeChannelState::Reconnecting,
+        attempt_count: 2,
+        next_retry_at: Some("2026-04-15T12:00:01Z".to_string()),
+        deadline_at: None,
+        reason: None,
+    };
+    let event = RealtimeEvent::StatusChanged {
+        status: status.clone(),
+    };
+
+    let input_value = serde_json::to_value(&input_chunk).unwrap();
+    let output_value = serde_json::to_value(&output_chunk).unwrap();
+    let event_value = serde_json::to_value(&event).unwrap();
+    let server_frame =
+        RealtimeServerFrame::ChannelEvent(meerkat_contracts::RealtimeChannelEventFrame { event });
+    let server_value = serde_json::to_value(&server_frame).unwrap();
+
+    assert_eq!(
+        input_value.get("kind").and_then(|v| v.as_str()),
+        Some("audio_chunk")
+    );
+    assert_eq!(
+        output_value.get("kind").and_then(|v| v.as_str()),
+        Some("video_chunk")
+    );
+    assert_eq!(
+        event_value.get("type").and_then(|v| v.as_str()),
+        Some("status_changed")
+    );
+    assert_eq!(
+        server_value.get("type").and_then(|v| v.as_str()),
+        Some("channel.event")
+    );
+
+    let roundtrip_status: RealtimeChannelStatus =
+        serde_json::from_value(event_value.get("status").cloned().unwrap()).unwrap();
+    assert_eq!(roundtrip_status, status);
 }

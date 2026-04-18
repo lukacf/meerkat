@@ -51,6 +51,7 @@
         "guides/comms",
         "guides/mobs",
         "guides/mobpack",
+        "guides/realtime",
               "guides/scheduling"
             ]
           },

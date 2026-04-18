@@ -148,13 +148,14 @@ pub(super) enum MobCommand {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     InternalTurn {
         meerkat_id: MeerkatId,
         content: ContentInput,
-        reply_tx: oneshot::Sender<Result<SessionId, MobError>>,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
         meerkat_id: MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
@@ -202,7 +203,9 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Destroy {
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
+        reply_tx: oneshot::Sender<
+            Result<super::handle::MobDestroyReport, super::handle::MobDestroyError>,
+        >,
     },
     Reset {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -234,7 +237,10 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<EventStream, MobError>>,
     },
     SubscribeAllAgentEvents {
-        reply_tx: oneshot::Sender<Vec<(MeerkatId, EventStream)>>,
+        reply_tx: oneshot::Sender<Result<Vec<(MeerkatId, EventStream)>, MobError>>,
+    },
+    RotateSupervisor {
+        reply_tx: oneshot::Sender<Result<super::handle::SupervisorRotationReport, MobError>>,
     },
     PollEvents {
         after_cursor: u64,
@@ -252,6 +258,14 @@ pub(super) enum MobCommand {
     ForceCancel {
         meerkat_id: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    RealtimeAttach {
+        meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
+    RealtimeDetach {
+        meerkat_id: MeerkatId,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,

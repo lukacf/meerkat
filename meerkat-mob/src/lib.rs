@@ -66,7 +66,7 @@ pub use ids::{
     LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin, WorkRef,
     WorkSpec,
 };
-pub use launch::{BudgetSplitPolicy, ForkContext};
+pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
 pub use mob_machine::canonical_mob_machine_command_manifest;
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
@@ -76,13 +76,26 @@ pub use run::{
     LoopIterationLedgerEntry, LoopSnapshot, MobRun, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
 pub use runtime::RestoreIncompatible;
+pub use runtime::bridge::{
+    MobBoundMemberRuntimeBridge, MobMemberRuntimeBridge, observation_is_terminal,
+};
+pub use runtime::bridge_protocol::{
+    BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
+    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+};
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::local_bridge::LocalMobRuntimeBridge;
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobBuilder, MobEventRouterConfig, MobEventRouterHandle, MobHandle, MobMemberSnapshot,
-    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobState,
-    MobUnreachablePeer, PeerTarget, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec,
+    MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle,
+    MobHandle, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport,
+    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 pub use runtime::{SchedulerGrant, pump_schedulers_to_exhaustion};
 pub use runtime_mode::MobRuntimeMode;
@@ -90,13 +103,15 @@ pub use snapshot::ParentToolScopeSnapshot;
 pub use spec::SpecValidator;
 pub use storage::MobStorage;
 pub use store::{
-    InMemoryMobEventStore, InMemoryMobRunStore, InMemoryMobSpecStore, InMemoryRealmProfileStore,
-    MobEventStore, MobRunStore, MobSpecStore, MobStoreError, RealmProfileStore, StoredRealmProfile,
+    ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
+    InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
+    InMemoryRealmProfileStore, MobEventStore, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
+    MobStoreError, RealmProfileStore, StoredRealmProfile, SupervisorAuthorityRecord,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{
-    SqliteMobEventStore, SqliteMobRunStore, SqliteMobSpecStore, SqliteMobStores,
-    SqliteRealmProfileStore,
+    SqliteMobEventStore, SqliteMobRunStore, SqliteMobRuntimeMetadataStore, SqliteMobSpecStore,
+    SqliteMobStores, SqliteRealmProfileStore,
 };
 pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{

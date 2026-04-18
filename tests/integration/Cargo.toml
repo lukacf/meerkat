@@ -52,4 +52,6 @@ ignored = [
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
+base64.workspace = true
+sha2.workspace = true

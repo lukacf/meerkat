@@ -41,7 +41,11 @@ use meerkat::{
     encode_llm_client_override_for_service, handle_schedule_tools_call, open_realm_persistence_in,
     schedule_tools_list,
 };
-use meerkat_contracts::{SessionLocator, SkillsParams, format_session_ref};
+use meerkat_contracts::{
+    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
+    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget, RealtimeOpenRequest,
+    RealtimeStatusParams, RealtimeStatusResult, SessionLocator, SkillsParams, format_session_ref,
+};
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
@@ -69,6 +73,8 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "mcp")]
@@ -126,6 +132,7 @@ pub struct AppState {
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
     pub expose_paths: bool,
+    pub realtime_rpc_tcp_addr: Option<String>,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
@@ -324,6 +331,7 @@ impl AppState {
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
             expose_paths,
+            realtime_rpc_tcp_addr: None,
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
@@ -475,8 +483,13 @@ async fn apply_runtime_turn(
     primitive: &RunPrimitive,
     prompt: ContentInput,
 ) -> Result<CoreApplyOutput, SessionError> {
-    if primitive.is_context_only_immediate()
-        && let RunPrimitive::StagedInput(staged) = primitive
+    // Context-only staged primitive (e.g. peer_response_terminal). Runtime
+    // boundary is Steer-derived (RunCheckpoint); the stricter
+    // `is_context_only_immediate` gate doesn't match, so use the
+    // appends-empty + context-appends-nonempty criterion directly.
+    if let RunPrimitive::StagedInput(staged) = primitive
+        && staged.appends.is_empty()
+        && !staged.context_appends.is_empty()
     {
         return context
             .session_service
@@ -1084,8 +1097,15 @@ pub fn router(state: AppState) -> Router {
         .route("/skills/{id}", get(inspect_skill))
         .route("/capabilities", get(get_capabilities))
         .route("/models/catalog", get(get_models_catalog))
+        .route("/realtime/open_info", post(realtime_open_info))
+        .route("/realtime/status", post(realtime_status))
+        .route("/realtime/capabilities", post(realtime_capabilities))
         // v9 runtime/input endpoints
         .route("/runtime/{id}/state", get(runtime_state))
+        .route(
+            "/runtime/{id}/realtime_attachment_status",
+            get(runtime_realtime_attachment_status),
+        )
         .route("/runtime/{id}/accept", post(runtime_accept))
         .route("/runtime/{id}/retire", post(runtime_retire))
         .route("/runtime/{id}/reset", post(runtime_reset))
@@ -1101,6 +1121,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/mob/{id}/members/{agent_identity}/status",
             get(mob_member_status),
+        )
+        .route(
+            "/mob/{id}/members/{agent_identity}/realtime/attach",
+            post(mob_realtime_attach),
+        )
+        .route(
+            "/mob/{id}/members/{agent_identity}/realtime/detach",
+            post(mob_realtime_detach),
         )
         .route(
             "/mob/{id}/members/{agent_identity}/cancel",
@@ -1207,6 +1235,442 @@ async fn runtime_state(
         (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
     })?;
     Ok(Json(json!({"session_id": sid.to_string(), "state": rs})))
+}
+
+/// GET /runtime/{id}/realtime_attachment_status
+async fn runtime_realtime_attachment_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Response> {
+    let sid = SessionId::parse(&id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()
+    })?;
+    ensure_runtime_session_registered(&state, &sid).await?;
+    let adapter = get_runtime_adapter(&state);
+    let status = adapter
+        .realtime_attachment_status(&sid)
+        .await
+        .map_err(|e| {
+            (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))).into_response()
+        })?;
+    Ok(Json(
+        json!({"session_id": sid.to_string(), "status": status}),
+    ))
+}
+
+fn conservative_phase_one_realtime_capabilities() -> RealtimeCapabilities {
+    RealtimeCapabilities {
+        input_kinds: vec![
+            meerkat_contracts::RealtimeInputKind::Text,
+            meerkat_contracts::RealtimeInputKind::Audio,
+        ],
+        output_kinds: vec![
+            meerkat_contracts::RealtimeOutputKind::Text,
+            meerkat_contracts::RealtimeOutputKind::Audio,
+        ],
+        turning_modes: vec![meerkat_contracts::RealtimeTurningMode::ProviderManaged],
+        interrupt_supported: true,
+        transcript_supported: true,
+        tool_lifecycle_events_supported: false,
+        video_supported: false,
+        audio_input_format: None,
+        audio_output_format: None,
+    }
+}
+
+async fn proxy_realtime_open_info_over_tcp(
+    addr: &str,
+    request: &RealtimeOpenRequest,
+) -> Result<Value, String> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|err| format!("failed to connect to realtime rpc host at {addr}: {err}"))?;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half).lines();
+
+    for (id, method, params) in [
+        (1_u64, "initialize", json!({})),
+        (
+            2_u64,
+            "realtime/open_info",
+            serde_json::to_value(request)
+                .map_err(|err| format!("failed to serialize realtime open request: {err}"))?,
+        ),
+    ] {
+        let request_line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        })
+        .to_string();
+        write_half
+            .write_all(request_line.as_bytes())
+            .await
+            .map_err(|err| format!("failed to write `{method}` to realtime rpc host: {err}"))?;
+        write_half
+            .write_all(b"\n")
+            .await
+            .map_err(|err| format!("failed to terminate `{method}` request: {err}"))?;
+        write_half
+            .flush()
+            .await
+            .map_err(|err| format!("failed to flush `{method}` request: {err}"))?;
+
+        loop {
+            let Some(line) = reader
+                .next_line()
+                .await
+                .map_err(|err| format!("failed to read realtime rpc `{method}` response: {err}"))?
+            else {
+                return Err(format!(
+                    "realtime rpc host closed before responding to `{method}`"
+                ));
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(trimmed).map_err(|err| {
+                format!("failed to parse realtime rpc `{method}` response as json: {err}")
+            })?;
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = value.get("error")
+                && !error.is_null()
+            {
+                return Err(format!("realtime rpc `{method}` failed: {error}"));
+            }
+            if method == "realtime/open_info" {
+                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
+            break;
+        }
+    }
+
+    Err("realtime rpc host did not return realtime/open_info".to_string())
+}
+
+fn realtime_channel_status(
+    state: RealtimeChannelState,
+    reason: Option<&str>,
+    attempt_count: u32,
+) -> RealtimeChannelStatus {
+    RealtimeChannelStatus {
+        state,
+        attempt_count,
+        next_retry_at: None,
+        deadline_at: None,
+        reason: reason.map(str::to_string),
+    }
+}
+
+fn realtime_status_from_runtime(
+    status: meerkat_runtime::RealtimeAttachmentStatus,
+) -> RealtimeChannelStatus {
+    match status {
+        meerkat_runtime::RealtimeAttachmentStatus::Unattached => realtime_channel_status(
+            RealtimeChannelState::Closed,
+            Some("no realtime channel is open for this target"),
+            0,
+        ),
+        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound
+        | meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => realtime_channel_status(
+            RealtimeChannelState::Opening,
+            Some("realtime attachment is pending"),
+            0,
+        ),
+        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
+            realtime_channel_status(RealtimeChannelState::Ready, None, 0)
+        }
+        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => realtime_channel_status(
+            RealtimeChannelState::Reconnecting,
+            Some("realtime attachment replacement is pending"),
+            1,
+        ),
+        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => realtime_channel_status(
+            RealtimeChannelState::Reconnecting,
+            Some("realtime attachment requires reattach"),
+            1,
+        ),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+#[cfg(feature = "mob")]
+fn realtime_status_from_mob_serialized(status: &Value) -> Result<RealtimeChannelStatus, Response> {
+    let Some(status) = status.as_str() else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "mob live attachment status should serialize as a string"})),
+        )
+            .into_response());
+    };
+    let projected = match status {
+        "unattached" => realtime_channel_status(
+            RealtimeChannelState::Closed,
+            Some("no realtime channel is open for this target"),
+            0,
+        ),
+        "intent_present_unbound" | "binding_not_ready" => realtime_channel_status(
+            RealtimeChannelState::Opening,
+            Some("realtime attachment is pending"),
+            0,
+        ),
+        "binding_ready" => realtime_channel_status(RealtimeChannelState::Ready, None, 0),
+        "replacement_pending" => realtime_channel_status(
+            RealtimeChannelState::Reconnecting,
+            Some("realtime attachment replacement is pending"),
+            1,
+        ),
+        "reattach_required" => realtime_channel_status(
+            RealtimeChannelState::Reconnecting,
+            Some("realtime attachment requires reattach"),
+            1,
+        ),
+        other => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("unsupported mob live attachment status '{other}'")})),
+            )
+                .into_response());
+        }
+    };
+    Ok(projected)
+}
+
+#[cfg(feature = "mob")]
+async fn ensure_realtime_mob_member_target_available(
+    state: &AppState,
+    mob_id: &str,
+    agent_identity: &str,
+) -> Result<(), Response> {
+    state
+        .mob_state
+        .mob_member_status(
+            &meerkat_mob::MobId::from(mob_id),
+            &meerkat_mob::AgentIdentity::from(agent_identity),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": err.to_string()})),
+            )
+                .into_response()
+        })
+}
+
+#[cfg(not(feature = "mob"))]
+async fn ensure_realtime_mob_member_target_available(
+    _state: &AppState,
+    _mob_id: &str,
+    _agent_identity: &str,
+) -> Result<(), Response> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "mob-target realtime control requires the REST mob feature"})),
+    )
+        .into_response())
+}
+
+#[cfg(feature = "mob")]
+async fn realtime_status_from_mob_target(
+    state: &AppState,
+    mob_id: &str,
+    agent_identity: &str,
+) -> Result<RealtimeChannelStatus, Response> {
+    let snapshot = state
+        .mob_state
+        .mob_member_status(
+            &meerkat_mob::MobId::from(mob_id),
+            &meerkat_mob::AgentIdentity::from(agent_identity),
+        )
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": err.to_string()})),
+            )
+                .into_response()
+        })?;
+    let serialized = serde_json::to_value(snapshot.realtime_attachment_status).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response()
+    })?;
+    realtime_status_from_mob_serialized(&serialized)
+}
+
+#[cfg(not(feature = "mob"))]
+async fn realtime_status_from_mob_target(
+    _state: &AppState,
+    _mob_id: &str,
+    _agent_identity: &str,
+) -> Result<RealtimeChannelStatus, Response> {
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "mob-target realtime status requires the REST mob feature"})),
+    )
+        .into_response())
+}
+
+async fn realtime_status(
+    State(state): State<AppState>,
+    Json(body): Json<RealtimeStatusParams>,
+) -> Result<Json<RealtimeStatusResult>, Response> {
+    let status = match body.target {
+        RealtimeChannelTarget::SessionTarget { session_id } => {
+            let sid = SessionId::parse(&session_id).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": err.to_string()})),
+                )
+                    .into_response()
+            })?;
+            ensure_runtime_session_registered(&state, &sid).await?;
+            let adapter = get_runtime_adapter(&state);
+            let live_status = adapter
+                .realtime_attachment_status(&sid)
+                .await
+                .map_err(|err| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": err.to_string()})),
+                    )
+                        .into_response()
+                })?;
+            realtime_status_from_runtime(live_status)
+        }
+        RealtimeChannelTarget::MobMemberTarget {
+            mob_id,
+            agent_identity,
+        } => {
+            if mob_id.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "mob_id must not be empty"})),
+                )
+                    .into_response());
+            }
+            if agent_identity.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "agent_identity must not be empty"})),
+                )
+                    .into_response());
+            }
+            realtime_status_from_mob_target(&state, mob_id.as_str(), agent_identity.as_str())
+                .await?
+        }
+    };
+
+    Ok(Json(RealtimeStatusResult { status }))
+}
+
+async fn realtime_capabilities(
+    State(state): State<AppState>,
+    Json(body): Json<RealtimeCapabilitiesParams>,
+) -> Result<Json<RealtimeCapabilitiesResult>, Response> {
+    match &body.target {
+        RealtimeChannelTarget::SessionTarget { session_id } => {
+            let sid = SessionId::parse(session_id).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": err.to_string()})),
+                )
+                    .into_response()
+            })?;
+            ensure_runtime_session_registered(&state, &sid).await?;
+        }
+        RealtimeChannelTarget::MobMemberTarget {
+            mob_id,
+            agent_identity,
+        } => {
+            if mob_id.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "mob_id must not be empty"})),
+                )
+                    .into_response());
+            }
+            if agent_identity.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "agent_identity must not be empty"})),
+                )
+                    .into_response());
+            }
+            ensure_realtime_mob_member_target_available(&state, mob_id, agent_identity).await?;
+        }
+    }
+
+    Ok(Json(RealtimeCapabilitiesResult {
+        capabilities: conservative_phase_one_realtime_capabilities(),
+    }))
+}
+
+async fn realtime_open_info(
+    State(state): State<AppState>,
+    Json(body): Json<RealtimeOpenRequest>,
+) -> Result<Json<Value>, Response> {
+    match &body.target {
+        RealtimeChannelTarget::SessionTarget { session_id } => {
+            let sid = SessionId::parse(session_id).map_err(|err| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": err.to_string()})),
+                )
+                    .into_response()
+            })?;
+            ensure_runtime_session_registered(&state, &sid).await?;
+        }
+        RealtimeChannelTarget::MobMemberTarget {
+            mob_id,
+            agent_identity,
+        } => {
+            if mob_id.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "mob_id must not be empty"})),
+                )
+                    .into_response());
+            }
+            if agent_identity.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "agent_identity must not be empty"})),
+                )
+                    .into_response());
+            }
+            ensure_realtime_mob_member_target_available(&state, mob_id, agent_identity).await?;
+        }
+    }
+
+    if let Some(addr) = state.realtime_rpc_tcp_addr.as_deref() {
+        let payload = proxy_realtime_open_info_over_tcp(addr, &body)
+            .await
+            .map_err(|err| {
+                (StatusCode::BAD_GATEWAY, Json(json!({"error": err}))).into_response()
+            })?;
+        return Ok(Json(payload));
+    }
+
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "error": "realtime/open_info is unavailable until the realtime websocket host ships"
+        })),
+    )
+        .into_response())
 }
 
 /// POST /runtime/{id}/accept
@@ -1621,6 +2085,38 @@ async fn mob_member_status(
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok(Json(json!(snapshot)))
+}
+
+/// POST /mob/{id}/members/{agent_identity}/realtime/attach — stage live voice intent.
+#[cfg(feature = "mob")]
+async fn mob_realtime_attach(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+    let attached = state
+        .mob_state
+        .mob_realtime_attach(&mob_id, identity)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"attached": attached})))
+}
+
+/// POST /mob/{id}/members/{agent_identity}/realtime/detach — clear live voice intent.
+#[cfg(feature = "mob")]
+async fn mob_realtime_detach(
+    State(state): State<AppState>,
+    Path((id, agent_identity)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let mob_id = meerkat_mob::MobId::from(id.as_str());
+    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
+    let detached = state
+        .mob_state
+        .mob_realtime_detach(&mob_id, identity)
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    Ok(Json(json!({"detached": detached})))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -4110,6 +4606,109 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    async fn spawn_realtime_open_info_stub(
+        open_info: Value,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind realtime rpc stub");
+        let addr = listener
+            .local_addr()
+            .expect("realtime rpc stub local addr")
+            .to_string();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept realtime rpc stub");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half).lines();
+            let mut captured_tx = Some(captured_tx);
+            while let Some(line) = reader
+                .next_line()
+                .await
+                .expect("read realtime rpc stub line")
+            {
+                let value: Value =
+                    serde_json::from_str(&line).expect("parse realtime rpc stub request");
+                let id = value["id"].clone();
+                let method = value["method"]
+                    .as_str()
+                    .expect("realtime rpc stub request method");
+                let response = match method {
+                    "initialize" => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "server": "realtime-stub",
+                        }
+                    }),
+                    "realtime/open_info" => {
+                        if let Some(tx) = captured_tx.take() {
+                            let _ = tx.send(value["params"].clone());
+                        }
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": open_info,
+                        })
+                    }
+                    other => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!("unexpected method: {other}"),
+                        }
+                    }),
+                };
+                write_half
+                    .write_all(response.to_string().as_bytes())
+                    .await
+                    .expect("write realtime rpc stub response");
+                write_half
+                    .write_all(b"\n")
+                    .await
+                    .expect("terminate realtime rpc stub response");
+                write_half
+                    .flush()
+                    .await
+                    .expect("flush realtime rpc stub response");
+                if method == "realtime/open_info" {
+                    break;
+                }
+            }
+        });
+        (addr, captured_rx, task)
+    }
+
+    fn live_test_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            meerkat_mob::ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::profile::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::profile::ToolConfig::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: meerkat_mob::MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mut definition = meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from(mob_id));
+        definition.profiles = profiles;
+        definition
+    }
+
     struct MockLlmClient;
 
     struct ErrorLlmClient;
@@ -4140,6 +4739,21 @@ mod tests {
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
         }
+    }
+
+    fn install_mock_mob_llm_client(
+        state: &mut AppState,
+        runtime_root: &std::path::Path,
+        mock_client: Arc<dyn LlmClient>,
+    ) {
+        state.mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
+                state.session_service.clone(),
+                Some(state.runtime_adapter.clone()),
+            )
+            .with_persistent_storage_root(Some(runtime_root.to_path_buf()))
+            .with_default_llm_client(Some(mock_client)),
+        );
     }
 
     #[async_trait]
@@ -4759,6 +5373,488 @@ mod tests {
             "runtime state request failed: {}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_realtime_attachment_status_route_reads_runtime_owned_status() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let create_result = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        state
+            .runtime_adapter
+            .project_realtime_attachment_intent(&create_result.session_id, true)
+            .await
+            .expect("intent projection should succeed");
+
+        let app = router(state);
+        let session_id = create_result.session_id.to_string();
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/runtime/{session_id}/realtime_attachment_status"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "runtime live-attachment-status request failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(payload["status"], "intent_present_unbound");
+    }
+
+    #[tokio::test]
+    async fn test_realtime_status_route_projects_member_realtime_attachment_state() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        state.llm_client_override = Some(mock_client.clone());
+        install_mock_mob_llm_client(&mut state, temp.path(), mock_client);
+        let mob_id = state
+            .mob_state
+            .mob_create_definition(live_test_definition("mob-realtime-rest"))
+            .await
+            .expect("create realtime test mob");
+        state
+            .mob_state
+            .mob_spawn(
+                &mob_id,
+                meerkat_mob::ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+        state
+            .mob_state
+            .mob_realtime_attach(&mob_id, meerkat_mob::AgentIdentity::from("worker-1"))
+            .await
+            .expect("live attach should succeed");
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/status")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": mob_id.to_string(),
+                        "agent_identity": "worker-1",
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "realtime status route failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(payload["status"]["state"], "opening");
+    }
+
+    #[tokio::test]
+    async fn test_realtime_capabilities_route_returns_conservative_metadata() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/capabilities")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": created.session_id.to_string(),
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "realtime capabilities route failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(
+            payload["capabilities"]["turning_modes"],
+            serde_json::json!(["provider_managed"])
+        );
+        assert_eq!(payload["capabilities"]["video_supported"], false);
+    }
+
+    #[tokio::test]
+    async fn test_realtime_open_info_route_reports_transport_unavailable() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+
+        let app = router(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/open_info")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": created.session_id.to_string(),
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "realtime open-info should stay unavailable until websocket host lands: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_realtime_open_info_route_proxies_to_realtime_rpc_host() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+
+        let expected = json!({
+            "ws_url": "ws://127.0.0.1:43210/realtime/ws",
+            "open_token": "rest-proxy-token",
+            "expires_at": "2026-04-15T12:00:00Z",
+            "target": {
+                "type": "session_target",
+                "session_id": created.session_id.to_string(),
+            },
+            "supported_protocol_versions": ["2026-04-01"],
+            "default_protocol_version": "2026-04-01",
+            "capabilities": {
+                "input_kinds": ["text", "audio"],
+                "output_kinds": ["text", "audio"],
+                "turning_modes": ["provider_managed"],
+                "interrupt_supported": true,
+                "transcript_supported": true,
+                "tool_lifecycle_events_supported": false,
+                "video_supported": false,
+            }
+        });
+        let (addr, captured_rx, task) = spawn_realtime_open_info_stub(expected.clone()).await;
+        state.realtime_rpc_tcp_addr = Some(addr);
+
+        let app = router(state);
+        let request_body = json!({
+            "target": {
+                "type": "session_target",
+                "session_id": created.session_id.to_string(),
+            },
+            "role": "primary",
+            "turning_mode": "provider_managed",
+        });
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/realtime/open_info")
+            .header("content-type", "application/json")
+            .body(Body::from(request_body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "realtime open-info proxy should succeed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response body should be valid json");
+        assert_eq!(payload, expected);
+
+        let forwarded = captured_rx
+            .await
+            .expect("realtime proxy request should be captured");
+        assert_eq!(forwarded, request_body);
+        task.await.expect("realtime rpc stub should join");
+    }
+
+    #[tokio::test]
+    async fn test_mob_realtime_attach_and_detach_routes_drive_member_status() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        state.llm_client_override = Some(mock_client.clone());
+        install_mock_mob_llm_client(&mut state, temp.path(), mock_client);
+        let mob_id = state
+            .mob_state
+            .mob_create_definition(live_test_definition("mob-live-rest"))
+            .await
+            .expect("create voice test mob");
+        state
+            .mob_state
+            .mob_spawn(
+                &mob_id,
+                meerkat_mob::ProfileName::from("worker"),
+                meerkat_mob::AgentIdentity::from("worker-1"),
+                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+
+        let app = router(state);
+
+        let attach_request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/members/worker-1/realtime/attach"))
+            .body(Body::empty())
+            .unwrap();
+        let attach_response = app.clone().oneshot(attach_request).await.unwrap();
+        let attach_status = attach_response.status();
+        let attach_body = attach_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            attach_status,
+            StatusCode::OK,
+            "live attach route failed: {}",
+            String::from_utf8_lossy(&attach_body)
+        );
+
+        let status_request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/mob/{mob_id}/members/worker-1/status"))
+            .body(Body::empty())
+            .unwrap();
+        let attached_status_response = app.clone().oneshot(status_request).await.unwrap();
+        let attached_status = attached_status_response.status();
+        let attached_body = attached_status_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            attached_status,
+            StatusCode::OK,
+            "member status route failed after live attach: {}",
+            String::from_utf8_lossy(&attached_body)
+        );
+        let attached_payload: serde_json::Value =
+            serde_json::from_slice(&attached_body).expect("member status json");
+        assert_eq!(
+            attached_payload["realtime_attachment_status"],
+            "binding_not_ready"
+        );
+
+        let detach_request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/mob/{mob_id}/members/worker-1/realtime/detach"))
+            .body(Body::empty())
+            .unwrap();
+        let detach_response = app.clone().oneshot(detach_request).await.unwrap();
+        let detach_status = detach_response.status();
+        let detach_body = detach_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            detach_status,
+            StatusCode::OK,
+            "live detach route failed: {}",
+            String::from_utf8_lossy(&detach_body)
+        );
+
+        let status_request = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/mob/{mob_id}/members/worker-1/status"))
+            .body(Body::empty())
+            .unwrap();
+        let detached_status_response = app.oneshot(status_request).await.unwrap();
+        let detached_status = detached_status_response.status();
+        let detached_body = detached_status_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            detached_status,
+            StatusCode::OK,
+            "member status route failed after live detach: {}",
+            String::from_utf8_lossy(&detached_body)
+        );
+        let detached_payload: serde_json::Value =
+            serde_json::from_slice(&detached_body).expect("member status json");
+        assert_eq!(detached_payload["realtime_attachment_status"], "unattached");
     }
 
     #[tokio::test]

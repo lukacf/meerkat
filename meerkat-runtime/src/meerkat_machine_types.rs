@@ -39,6 +39,23 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriverError,
 };
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeAttachmentStatus {
+    Unattached,
+    IntentPresentUnbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+    ReattachRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RealtimeAttachmentSignalAuthority {
+    pub session_id: SessionId,
+    pub authority_epoch: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionLlmReconfigureRequest {
@@ -277,6 +294,9 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeState {
         runtime_id: LogicalRuntimeId,
     },
+    RuntimeRealtimeAttachmentStatus {
+        session_id: SessionId,
+    },
     LoadBoundaryReceipt {
         runtime_id: LogicalRuntimeId,
         run_id: LifecycleRunId,
@@ -340,6 +360,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     RecoveryReport(RecoveryReport),
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
+    RealtimeAttachmentStatus(RealtimeAttachmentStatus),
     BoundaryReceipt(Option<RunBoundaryReceipt>),
     Prepared(MeerkatMachineLegacyRunPrepared),
 }

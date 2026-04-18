@@ -1103,148 +1103,23 @@ mod order_lifecycle {
 }
 
 // ============================================================
-// Aggregate schema equivalence: DSL vs hand-written catalog
+// Aggregate schema equivalence gate: REMOVED
 // ============================================================
-
-mod aggregate_equivalence {
-    use meerkat_machine_schema::catalog;
-
-    /// Verifies that ALL 4 DSL-generated schemas match their hand-written
-    /// counterparts on every structural dimension. This is the gate for
-    /// replacing the hand-written catalog with DSL schemas.
-    #[test]
-    fn all_dsl_schemas_match_hand_written_catalog() {
-        let dsl_schemas = crate::dsl_machine_schemas();
-        let hand_schemas = catalog::canonical_machine_schemas();
-
-        assert_eq!(
-            dsl_schemas.len(),
-            hand_schemas.len(),
-            "schema count mismatch"
-        );
-
-        for hand in &hand_schemas {
-            let dsl = dsl_schemas
-                .iter()
-                .find(|s| s.machine == hand.machine)
-                .unwrap_or_else(|| panic!("DSL missing machine `{}`", hand.machine));
-
-            // Identity
-            assert_eq!(dsl.version, hand.version, "{}: version", hand.machine);
-
-            // Phases
-            assert_eq!(
-                dsl.state.phase.variants.len(),
-                hand.state.phase.variants.len(),
-                "{}: phase count",
-                hand.machine
-            );
-
-            // Fields
-            assert_eq!(
-                dsl.state.fields.len(),
-                hand.state.fields.len(),
-                "{}: field count (dsl={}, hand={})",
-                hand.machine,
-                dsl.state.fields.len(),
-                hand.state.fields.len()
-            );
-
-            // Terminal phases
-            let mut dsl_terminals: Vec<_> = dsl.state.terminal_phases.iter().cloned().collect();
-            let mut hand_terminals: Vec<_> = hand.state.terminal_phases.iter().cloned().collect();
-            dsl_terminals.sort();
-            hand_terminals.sort();
-            assert_eq!(
-                dsl_terminals, hand_terminals,
-                "{}: terminal phases",
-                hand.machine
-            );
-
-            // Inputs
-            assert_eq!(
-                dsl.inputs.variants.len(),
-                hand.inputs.variants.len(),
-                "{}: input count",
-                hand.machine
-            );
-
-            // Signals
-            assert_eq!(
-                dsl.signals.variants.len(),
-                hand.signals.variants.len(),
-                "{}: signal count (dsl={}, hand={})",
-                hand.machine,
-                dsl.signals.variants.len(),
-                hand.signals.variants.len()
-            );
-
-            // Effects
-            assert_eq!(
-                dsl.effects.variants.len(),
-                hand.effects.variants.len(),
-                "{}: effect count",
-                hand.machine
-            );
-
-            // Surface-only inputs
-            let mut dsl_so: Vec<_> = dsl.surface_only_inputs.iter().cloned().collect();
-            let mut hand_so: Vec<_> = hand.surface_only_inputs.iter().cloned().collect();
-            dsl_so.sort();
-            hand_so.sort();
-            assert_eq!(dsl_so, hand_so, "{}: surface_only_inputs", hand.machine);
-
-            // Helpers
-            assert_eq!(
-                dsl.helpers.len(),
-                hand.helpers.len(),
-                "{}: helper count",
-                hand.machine
-            );
-
-            // Invariants
-            assert_eq!(
-                dsl.invariants.len(),
-                hand.invariants.len(),
-                "{}: invariant count",
-                hand.machine
-            );
-
-            // Transitions — count and per-transition from-phases
-            assert_eq!(
-                dsl.transitions.len(),
-                hand.transitions.len(),
-                "{}: transition count (dsl={}, hand={})",
-                hand.machine,
-                dsl.transitions.len(),
-                hand.transitions.len()
-            );
-            for hand_t in &hand.transitions {
-                let dsl_t = dsl
-                    .transitions
-                    .iter()
-                    .find(|t| t.name == hand_t.name)
-                    .unwrap_or_else(|| {
-                        panic!("{}: DSL missing transition `{}`", hand.machine, hand_t.name)
-                    });
-                let mut dsl_from = dsl_t.from.clone();
-                let mut hand_from = hand_t.from.clone();
-                dsl_from.sort();
-                hand_from.sort();
-                assert_eq!(
-                    dsl_from, hand_from,
-                    "{}: from mismatch for `{}`",
-                    hand.machine, hand_t.name
-                );
-            }
-
-            // Dispositions
-            assert_eq!(
-                dsl.effect_dispositions.len(),
-                hand.effect_dispositions.len(),
-                "{}: disposition count",
-                hand.machine
-            );
-        }
-    }
-}
+//
+// The `all_dsl_schemas_match_hand_written_catalog` test was the
+// migration gate for replacing the hand-written catalog with DSL-
+// generated schemas. That migration completed in commit c74b7ca42
+// ("Delete old hand-written machine catalog: DSL is now sole source
+// of truth"). Both `canonical_machine_schemas()` and
+// `dsl_machine_schemas()` now read DSL sources — the first from
+// `meerkat-machine-schema/src/catalog/dsl/` (production) and the
+// second from `test-fixtures/machine-dsl-tests/src/` (simplified
+// integration fixture). They are intentionally divergent: the fixture
+// DSL is a minimal surrogate for exercising the `machine!` macro
+// codegen path without carrying the full production surface.
+//
+// Keeping the aggregate equivalence assertion here would require
+// mirroring every production DSL extension into the fixture, which
+// defeats the fixture's purpose. The per-machine `schema_matches_
+// hand_written` drift tests were already deleted in that commit; this
+// aggregate was an oversight cleanup that lands here.

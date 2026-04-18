@@ -176,6 +176,34 @@ class RuntimeStateParams:
 
 
 @dataclass
+class RuntimeRealtimeAttachmentStatusParams:
+    """Request payload for `runtime/realtime_attachment_status`."""
+    session_id: str = ''
+
+
+@dataclass
+class RealtimeOpenRequest:
+    """Request payload for `realtime/open_info`."""
+    channel_config: Optional[dict[str, Any]] = None
+    reconnect_policy: Optional[dict[str, Any]] = None
+    role: Literal['primary', 'observer'] = None
+    target: dict[str, Any] = field(default_factory=dict)
+    turning_mode: Literal['provider_managed', 'explicit_commit'] = None
+
+
+@dataclass
+class RealtimeStatusParams:
+    """Request payload for `realtime/status`."""
+    target: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeCapabilitiesParams:
+    """Request payload for `realtime/capabilities`."""
+    target: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RuntimeAcceptParams:
     """Request payload for `runtime/accept`."""
     input: Any = None
@@ -287,6 +315,152 @@ class MobUnwireResult:
 class RuntimeStateResult:
     """Response payload for `runtime/state`."""
     state: Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed'] = None
+
+
+@dataclass
+class RuntimeRealtimeAttachmentStatusResult:
+    """Response payload for `runtime/realtime_attachment_status`."""
+    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required'] = None
+
+
+@dataclass
+class RealtimeReconnectPolicy:
+    """Public reconnect policy for a realtime channel."""
+    initial_backoff_ms: int = 0
+    max_attempts: int = 0
+    max_backoff_ms: int = 0
+    max_total_ms: int = 0
+
+
+@dataclass
+class RealtimeCapabilities:
+    """Product-facing realtime capability set for one target/provider combination."""
+    audio_input_format: Optional[dict[str, Any]] = None
+    audio_output_format: Optional[dict[str, Any]] = None
+    input_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
+    interrupt_supported: bool = False
+    output_kinds: list[Literal['text', 'audio', 'video']] = field(default_factory=list)
+    tool_lifecycle_events_supported: bool = False
+    transcript_supported: bool = False
+    turning_modes: list[Literal['provider_managed', 'explicit_commit']] = field(default_factory=list)
+    video_supported: bool = False
+
+
+@dataclass
+class RealtimeChannelStatus:
+    """Public realtime channel status projection."""
+    attempt_count: int = 0
+    deadline_at: Optional[str] = None
+    next_retry_at: Optional[str] = None
+    reason: Optional[str] = None
+    state: Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error'] = None
+
+
+@dataclass
+class RealtimeOpenInfo:
+    """Response payload for `realtime/open_info`."""
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    default_protocol_version: str = ''
+    expires_at: str = ''
+    open_token: str = ''
+    supported_protocol_versions: list[str] = field(default_factory=list)
+    target: dict[str, Any] = field(default_factory=dict)
+    ws_url: str = ''
+
+
+@dataclass
+class RealtimeStatusResult:
+    """Response payload for `realtime/status`."""
+    status: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeCapabilitiesResult:
+    """Response payload for `realtime/capabilities`."""
+    capabilities: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeTextChunk:
+    """A text chunk for realtime ingress/egress."""
+    text: str = ''
+
+
+@dataclass
+class RealtimeTextDelta:
+    """A text delta chunk for realtime output."""
+    delta: str = ''
+
+
+@dataclass
+class RealtimeAudioChunk:
+    """An opaque realtime audio chunk with MIME + format metadata.
+
+Both sender and receiver MUST stamp `sample_rate_hz` and `channels` so the
+transport layer can validate against the provider session's negotiated
+format instead of silently producing garbled audio when an ESP32 or browser
+client ships the wrong rate."""
+    channels: int = 0
+    data: str = ''
+    mime_type: str = ''
+    sample_rate_hz: int = 0
+
+
+@dataclass
+class RealtimeVideoChunk:
+    """An opaque realtime video chunk with MIME metadata."""
+    data: str = ''
+    mime_type: str = ''
+
+
+@dataclass
+class RealtimeChannelOpenFrame:
+    """Payload for `channel.open`."""
+    open_token: str = ''
+    protocol_version: str = ''
+    role: Literal['primary', 'observer'] = None
+    turning_mode: Literal['provider_managed', 'explicit_commit'] = None
+
+
+@dataclass
+class RealtimeChannelInputFrame:
+    """Payload for `channel.input`."""
+    chunk: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeChannelOpenedFrame:
+    """Payload for `channel.opened`."""
+    capabilities: dict[str, Any] = field(default_factory=dict)
+    protocol_version: str = ''
+    role: Literal['primary', 'observer'] = None
+    status: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeChannelStatusFrame:
+    """Payload for `channel.status`."""
+    status: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeChannelEventFrame:
+    """Payload for `channel.event`."""
+    event: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RealtimeChannelErrorFrame:
+    """Payload for `channel.error`."""
+    code: str = ''
+    details: Optional[dict[str, Any]] = None
+    message: str = ''
+
+
+@dataclass
+class RealtimeChannelClosedFrame:
+    """Payload for `channel.closed`."""
+    reason: Optional[str] = None
 
 
 @dataclass
@@ -458,6 +632,42 @@ WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 
 # Public runtime state projection used by RPC surfaces.
 WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
+
+# Public live attachment status projection used by runtime and mob surfaces.
+WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
+
+# Target for a public realtime channel.
+RealtimeChannelTarget = dict[str, Any]
+
+# Opening role for a realtime channel.
+RealtimeChannelRole = Literal['primary', 'observer']
+
+# Turning mode for a realtime channel.
+RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
+
+# Input modality kind supported by a realtime channel.
+RealtimeInputKind = Literal['text', 'audio', 'video']
+
+# Output modality kind supported by a realtime channel.
+RealtimeOutputKind = Literal['text', 'audio', 'video']
+
+# Lifecycle state for a realtime channel.
+RealtimeChannelState = Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
+
+# Modality-neutral input chunk.
+RealtimeInputChunk = dict[str, Any]
+
+# Modality-neutral output chunk.
+RealtimeOutputChunk = dict[str, Any]
+
+# Normalized realtime event stream payload.
+RealtimeEvent = dict[str, Any]
+
+# Client-to-server realtime frame.
+RealtimeClientFrame = dict[str, Any]
+
+# Server-to-client realtime frame.
+RealtimeServerFrame = dict[str, Any]
 
 # Discriminator for `runtime/accept` responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']

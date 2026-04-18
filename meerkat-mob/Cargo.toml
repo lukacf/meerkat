@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 # Internal crates
 meerkat-core = { workspace = true }
+meerkat-contracts = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "skills", "session-compaction", "memory-store", "anthropic", "openai", "gemini"] }
 meerkat-session = { workspace = true, features = ["session-compaction"] }
@@ -68,7 +69,25 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 
+# ## Features
+#
+# - `runtime-adapter` (default): pulls in `meerkat-runtime` so mob orchestration
+#   can attach to an in-process `MeerkatMachine` via the `LocalMobRuntimeBridge`
+#   adapter. Required for the embedded single-host deployment (CLI, RPC, WASM).
+# - Building with `--no-default-features` omits `meerkat-runtime` and exposes only
+#   the transport-agnostic `MobMemberRuntimeBridge` trait plus the
+#   `MobSupervisorBridge` comms transport. This is the supported configuration
+#   for remote-only / cross-host deployments where the runtime is reached over
+#   the supervisor-bridge comms channel rather than in-process. CI exercises
+#   both shapes via `make test-feature-matrix-lib`.
+# - `integration-real-tests`: opt-in suite for end-to-end smoke tests that boot
+#   real sessions (see `[[test]]` entries below).
 [features]
+default = ["runtime-adapter"]
+# Vestigial: meerkat-runtime is now mandatory under the DSL cutover, so this
+# feature is retained only to keep the cfg-gates compiling. The dep expression
+# is empty because the dep is always present.
+runtime-adapter = []
 integration-real-tests = []
 
 [package.metadata.cargo-machete]

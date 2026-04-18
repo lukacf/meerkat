@@ -4,11 +4,16 @@
 //! allowing the same database to be reopened after drop within the same process.
 
 use super::realm_profile::{RealmProfileStore, StoredRealmProfile};
-use super::{MobEventStore, MobRunStore, MobSpecStore, MobStoreError};
+use super::{
+    ExternalBindingOverlayRecord, MobEventStore, MobRunStore, MobRuntimeMetadataStore,
+    MobSpecStore, MobStoreError, SupervisorAuthorityRecord,
+};
 use crate::definition::MobDefinition;
 use crate::error::MobError;
 use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored_mob_event};
-use crate::ids::{FlowId, FrameId, LoopId, LoopInstanceId, MobId, RunId, StepId};
+use crate::ids::{
+    AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
+};
 use crate::profile::Profile;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
@@ -40,6 +45,17 @@ CREATE TABLE IF NOT EXISTS mob_runs (
 CREATE TABLE IF NOT EXISTS mob_specs (
     mob_id TEXT PRIMARY KEY,
     spec_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_supervisors (
+    mob_id TEXT PRIMARY KEY,
+    record_json BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mob_runtime_binding_overlays (
+    mob_id TEXT NOT NULL,
+    agent_identity TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    record_json BLOB NOT NULL,
+    PRIMARY KEY (mob_id, agent_identity, generation)
 );
 CREATE TABLE IF NOT EXISTS realm_profiles (
     name TEXT PRIMARY KEY,
@@ -169,10 +185,270 @@ impl SqliteMobStores {
         }
     }
 
+    pub fn runtime_metadata_store(&self) -> SqliteMobRuntimeMetadataStore {
+        SqliteMobRuntimeMetadataStore {
+            path: self.path.clone(),
+        }
+    }
+
     pub fn realm_profile_store(&self) -> SqliteRealmProfileStore {
         SqliteRealmProfileStore {
             path: self.path.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SqliteMobRuntimeMetadataStore
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct SqliteMobRuntimeMetadataStore {
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for SqliteMobRuntimeMetadataStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteMobRuntimeMetadataStore")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
+    async fn load_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Option<SupervisorAuthorityRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let row: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT record_json FROM mob_runtime_supervisors WHERE mob_id = ?1",
+                    params![mob_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            row.map(|bytes| decode_json(&bytes)).transpose()
+        })
+        .await
+    }
+
+    async fn put_supervisor_authority(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_supervisors (mob_id, record_json) VALUES (?1, ?2)
+                 ON CONFLICT(mob_id) DO UPDATE SET record_json = excluded.record_json",
+                params![mob_id.as_str(), encode_json(&record)?],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn put_supervisor_authority_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &SupervisorAuthorityRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_runtime_supervisors (mob_id, record_json) VALUES (?1, ?2)",
+                    params![mob_id.as_str(), encode_json(&record)?],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "DELETE FROM mob_runtime_supervisors WHERE mob_id = ?1",
+                params![mob_id.as_str()],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn list_external_binding_overlays(
+        &self,
+        mob_id: &MobId,
+    ) -> Result<Vec<ExternalBindingOverlayRecord>, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT record_json
+                     FROM mob_runtime_binding_overlays
+                     WHERE mob_id = ?1
+                     ORDER BY agent_identity, generation",
+                )
+                .map_err(se)?;
+            let rows = stmt
+                .query_map(params![mob_id.as_str()], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(se)?;
+            let mut records = Vec::new();
+            for row in rows {
+                let bytes = row.map_err(se)?;
+                records.push(decode_json(&bytes)?);
+            }
+            Ok(records)
+        })
+        .await
+    }
+
+    async fn put_external_binding_overlay_if_absent(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO mob_runtime_binding_overlays
+                     (mob_id, agent_identity, generation, record_json)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        mob_id.as_str(),
+                        record.agent_identity.as_str(),
+                        i64::try_from(record.generation.get()).map_err(|_| {
+                            MobStoreError::Internal(format!(
+                                "generation {} exceeds i64::MAX",
+                                record.generation.get()
+                            ))
+                        })?,
+                        encode_json(&record)?,
+                    ],
+                )
+                .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn upsert_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        record: &ExternalBindingOverlayRecord,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let record = record.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_runtime_binding_overlays
+                 (mob_id, agent_identity, generation, record_json)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(mob_id, agent_identity, generation)
+                 DO UPDATE SET record_json = excluded.record_json",
+                params![
+                    mob_id.as_str(),
+                    record.agent_identity.as_str(),
+                    i64::try_from(record.generation.get()).map_err(|_| {
+                        MobStoreError::Internal(format!(
+                            "generation {} exceeds i64::MAX",
+                            record.generation.get()
+                        ))
+                    })?,
+                    encode_json(&record)?,
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_external_binding_overlay(
+        &self,
+        mob_id: &MobId,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        let agent_identity = agent_identity.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "DELETE FROM mob_runtime_binding_overlays
+                 WHERE mob_id = ?1 AND agent_identity = ?2 AND generation = ?3",
+                params![
+                    mob_id.as_str(),
+                    agent_identity.as_str(),
+                    i64::try_from(generation.get()).map_err(|_| {
+                        MobStoreError::Internal(format!(
+                            "generation {} exceeds i64::MAX",
+                            generation.get()
+                        ))
+                    })?,
+                ],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn delete_external_binding_overlays(&self, mob_id: &MobId) -> Result<(), MobStoreError> {
+        let path = self.path.clone();
+        let mob_id = mob_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "DELETE FROM mob_runtime_binding_overlays WHERE mob_id = ?1",
+                params![mob_id.as_str()],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -1645,10 +1921,11 @@ impl RealmProfileStore for SqliteRealmProfileStore {
 mod tests {
     use super::*;
     use crate::definition::{BackendConfig, FlowSpec, WiringRules};
-    use crate::event::MobEventKind;
-    use crate::ids::{AgentIdentity, ProfileName};
+    use crate::event::{MemberRef, MobEventKind};
+    use crate::ids::{AgentIdentity, Generation, ProfileName};
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::run::StepRunStatus;
+    use crate::store::ExternalBindingOverlayStatus;
     use futures::future::join_all;
     use indexmap::IndexMap;
 
@@ -1875,6 +2152,125 @@ mod tests {
 
         let loaded = store.get_spec(&MobId::from("mob")).await.unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_runtime_metadata_store_roundtrips_supervisor_and_overlay_records() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        let mob_id = MobId::from("mob");
+        let supervisor = SupervisorAuthorityRecord::generate(1);
+        let overlay = ExternalBindingOverlayRecord {
+            agent_identity: AgentIdentity::from("worker-1"),
+            generation: Generation::new(2),
+            normalized_member_ref: Some(MemberRef::BackendPeer {
+                peer_id: "peer-worker-1".to_string(),
+                address: "tcp://worker-1".to_string(),
+                bootstrap_token: None,
+                session_id: None,
+            }),
+            bootstrap_token: None,
+            status: ExternalBindingOverlayStatus::Normalized,
+            updated_at: Utc::now(),
+        };
+
+        store
+            .put_supervisor_authority(&mob_id, &supervisor)
+            .await
+            .unwrap();
+        let loaded_supervisor = store
+            .load_supervisor_authority(&mob_id)
+            .await
+            .unwrap()
+            .expect("supervisor should persist");
+        assert_eq!(loaded_supervisor, supervisor);
+
+        assert!(
+            store
+                .put_external_binding_overlay_if_absent(&mob_id, &overlay)
+                .await
+                .unwrap(),
+            "first overlay insert should win"
+        );
+        assert!(
+            !store
+                .put_external_binding_overlay_if_absent(&mob_id, &overlay)
+                .await
+                .unwrap(),
+            "duplicate overlay insert should be ignored"
+        );
+
+        let overlays = store.list_external_binding_overlays(&mob_id).await.unwrap();
+        assert_eq!(overlays, vec![overlay.clone()]);
+
+        let failed_overlay = ExternalBindingOverlayRecord {
+            status: ExternalBindingOverlayStatus::Failed {
+                reason: "normalization failed".to_string(),
+            },
+            normalized_member_ref: None,
+            updated_at: Utc::now(),
+            ..overlay
+        };
+        store
+            .upsert_external_binding_overlay(&mob_id, &failed_overlay)
+            .await
+            .unwrap();
+        let overlays = store.list_external_binding_overlays(&mob_id).await.unwrap();
+        assert_eq!(overlays, vec![failed_overlay]);
+
+        store
+            .delete_external_binding_overlays(&mob_id)
+            .await
+            .unwrap();
+        assert!(
+            store
+                .list_external_binding_overlays(&mob_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "overlay delete should clear all records for the mob"
+        );
+
+        store.delete_supervisor_authority(&mob_id).await.unwrap();
+        assert!(
+            store
+                .load_supervisor_authority(&mob_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "supervisor delete should remove the stored record"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_runtime_metadata_store_put_supervisor_if_absent_preserves_existing_record()
+    {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path)
+            .unwrap()
+            .runtime_metadata_store();
+        let mob_id = MobId::from("mob");
+        let first = SupervisorAuthorityRecord::generate(1);
+        let second = SupervisorAuthorityRecord::generate(1);
+
+        assert!(
+            store
+                .put_supervisor_authority_if_absent(&mob_id, &first)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .put_supervisor_authority_if_absent(&mob_id, &second)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.load_supervisor_authority(&mob_id).await.unwrap(),
+            Some(first)
+        );
     }
 
     #[tokio::test]

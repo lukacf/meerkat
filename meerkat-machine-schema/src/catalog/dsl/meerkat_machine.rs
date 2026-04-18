@@ -14,6 +14,17 @@ machine! {
             current_run_id: Option<RunId>,
             pre_run_phase: Option<String>,
             silent_intent_overrides: Set<String>,
+            // Realtime-attachment authority state — per-session binding-state
+            // machine with monotonic authority epochs for provider-callback
+            // validation. See docs/architecture/realtime-259-port-plan.md.
+            realtime_intent_present: bool,
+            realtime_binding_state: String,
+            realtime_binding_authority_epoch: Option<u64>,
+            realtime_reattach_required: bool,
+            realtime_next_authority_epoch: u64,
+            // Live-topology reconfigure phase — temporarily blocks realtime
+            // publishes/attaches while an LLM-identity swap is in progress.
+            live_topology_phase: String,
         }
 
         init(Initializing) {
@@ -23,6 +34,12 @@ machine! {
             current_run_id = None,
             pre_run_phase = None,
             silent_intent_overrides = EmptySet,
+            realtime_intent_present = false,
+            realtime_binding_state = "Unbound",
+            realtime_binding_authority_epoch = None,
+            realtime_reattach_required = false,
+            realtime_next_authority_epoch = 1,
+            live_topology_phase = "Idle",
         }
 
         terminal [Destroyed]
@@ -88,6 +105,7 @@ machine! {
             Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: String },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
+            RuntimeRealtimeAttachmentStatus { session_id: SessionId },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, run_id: RunId },
             AcceptWithoutWake { input_id: InputId },
@@ -95,6 +113,21 @@ machine! {
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
             Recycle,
+            // Realtime-attachment inputs.
+            ProjectRealtimeIntent { present: bool },
+            BeginRealtimeBinding,
+            ReplaceRealtimeBinding,
+            DetachRealtimeBinding,
+            RequireRealtimeReattach,
+            PublishRealtimeSignal { authority_epoch: u64, next_binding_state: String },
+            // Live-topology reconfigure inputs.
+            BeginLiveTopologyReconfigure { authority_epoch: u64 },
+            MarkLiveTopologyDetached,
+            ApplyLiveTopologyIdentity,
+            ApplyLiveTopologyVisibility,
+            CompleteLiveTopology,
+            AbortLiveTopologyBeforeDetach,
+            FailLiveTopologyAfterDetach,
         }
 
         surface_only [
@@ -105,6 +138,7 @@ machine! {
             InputState,
             ListActiveInputs,
             RuntimeState,
+            RuntimeRealtimeAttachmentStatus,
             LoadBoundaryReceipt,
             Recover
         ]
@@ -174,6 +208,11 @@ machine! {
             EmitExternalToolDelta,
             CloseSurfaceConnection,
             RejectSurfaceCall,
+            // Realtime-attachment effects.
+            RealtimeIntentProjected { present: bool },
+            RealtimeBindingRotated { authority_epoch: u64 },
+            // Live-topology reconfigure effects.
+            LiveTopologyPhaseChanged,
         }
 
         // =====================================================================
@@ -220,6 +259,9 @@ machine! {
         disposition EmitExternalToolDelta => external,
         disposition CloseSurfaceConnection => local,
         disposition RejectSurfaceCall => external,
+        disposition RealtimeIntentProjected => external,
+        disposition RealtimeBindingRotated => external,
+        disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
         // Invariants
@@ -237,6 +279,15 @@ machine! {
             self.current_run_id == None
             || self.lifecycle_phase == Phase::Running
             || self.lifecycle_phase == Phase::Retired
+        }
+
+        // Realtime binding state + authority epoch must stay in lockstep.
+        // Unbound iff no epoch; any active binding phase must carry Some(epoch).
+        // Prevents Unbound+Some(epoch) and BindingReady+None from being
+        // representable as a derived TLC fact.
+        invariant realtime_binding_epoch_consistency {
+            (self.realtime_binding_state == "Unbound")
+            == (self.realtime_binding_authority_epoch == None)
         }
 
         // =====================================================================
@@ -1330,6 +1381,210 @@ machine! {
             }
             to Attached
             emit InitiateRecycle
+        }
+
+        // =====================================================================
+        // Realtime-attachment transitions
+        // =====================================================================
+
+        transition ProjectRealtimeIntent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ProjectRealtimeIntent { present }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_intent_present = present;
+            }
+            to Idle
+            emit RealtimeIntentProjected { present: present }
+        }
+
+        transition BeginRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BeginRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            update {
+                self.realtime_binding_state = "BindingNotReady";
+                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
+        }
+
+        transition ReplaceRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ReplaceRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            update {
+                self.realtime_binding_state = "ReplacementPending";
+                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
+        }
+
+        transition DetachRealtimeBinding {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DetachRealtimeBinding
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
+        transition RequireRealtimeReattach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RequireRealtimeReattach
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+        }
+
+        transition PublishRealtimeSignal {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PublishRealtimeSignal { authority_epoch, next_binding_state }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "valid_next_state" {
+                next_binding_state == "BindingNotReady"
+                || next_binding_state == "BindingReady"
+                || next_binding_state == "ReplacementPending"
+            }
+            update {
+                self.realtime_binding_state = next_binding_state;
+                self.realtime_reattach_required = false;
+            }
+            to Idle
+        }
+
+        // =====================================================================
+        // Live-topology reconfigure transitions
+        // =====================================================================
+
+        transition BeginLiveTopologyReconfigure {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input BeginLiveTopologyReconfigure { authority_epoch }
+            guard "session_registered" { self.session_id != None }
+            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
+            guard "topology_idle" { self.live_topology_phase == "Idle" }
+            update {
+                self.live_topology_phase = "Reconfiguring";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition MarkLiveTopologyDetached {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input MarkLiveTopologyDetached
+            guard "session_registered" { self.session_id != None }
+            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            // DSL-native "safe to detach now" guard.
+            //
+            // **Catalog/runtime divergence (intentional):** the runtime DSL
+            // (`meerkat-runtime/src/meerkat_machine/dsl.rs`) guards on the
+            // richer `turn_phase ∈ {Ready, DrainingBoundary, Completed,
+            // Failed, Cancelled}` set, which permits detach at the natural
+            // draining boundary mid-run. The catalog DSL is the TLC-facing
+            // twin and does not model `turn_phase`; it conservatively
+            // approximates "safe to detach" as "no run currently open"
+            // (`current_run_id == None`). This is a strict over-
+            // approximation: any TLC trace that exercises this transition
+            // under the catalog guard is also admissible under the runtime
+            // guard, so invariants proven here hold in production.
+            guard "no_active_run" { self.current_run_id == None }
+            update {
+                self.live_topology_phase = "Detached";
+                // Compose the detach into the binding authority.
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = false;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition ApplyLiveTopologyIdentity {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyLiveTopologyIdentity
+            guard "session_registered" { self.session_id != None }
+            guard "topology_detached" { self.live_topology_phase == "Detached" }
+            update {
+                self.live_topology_phase = "HostIdentityApplied";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition ApplyLiveTopologyVisibility {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ApplyLiveTopologyVisibility
+            guard "session_registered" { self.session_id != None }
+            guard "host_identity_applied" { self.live_topology_phase == "HostIdentityApplied" }
+            update {
+                self.live_topology_phase = "HostVisibilityApplied";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition CompleteLiveTopology {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CompleteLiveTopology
+            guard "session_registered" { self.session_id != None }
+            guard "host_visibility_applied" { self.live_topology_phase == "HostVisibilityApplied" }
+            update {
+                self.live_topology_phase = "Idle";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition AbortLiveTopologyBeforeDetach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AbortLiveTopologyBeforeDetach
+            guard "session_registered" { self.session_id != None }
+            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            update {
+                self.live_topology_phase = "Idle";
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
+        }
+
+        transition FailLiveTopologyAfterDetach {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input FailLiveTopologyAfterDetach
+            guard "session_registered" { self.session_id != None }
+            guard "topology_past_detach" {
+                self.live_topology_phase == "Detached"
+                || self.live_topology_phase == "HostIdentityApplied"
+                || self.live_topology_phase == "HostVisibilityApplied"
+            }
+            update {
+                self.live_topology_phase = "Idle";
+                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_authority_epoch = None;
+                self.realtime_reattach_required = true;
+                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+            }
+            to Idle
+            emit LiveTopologyPhaseChanged
         }
     }
 }

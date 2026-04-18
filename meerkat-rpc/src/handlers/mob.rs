@@ -153,6 +153,52 @@ pub struct MobSpawnParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
+    // DELETE_ME A10: `SpawnMemberSpec` has 15 public fields; the RPC
+    // mirrors every non-internal one. The first pass added `binding`,
+    // `shell_env`, and `auto_wire_parent`; A3 + C1 unblocked
+    // `launch_mode`; and this pass adds `tool_access_policy`,
+    // `budget_split_policy`, `inherited_tool_filter`, and
+    // `override_profile` to reach full parity with Rust-in-process
+    // spawn. Types are taken verbatim from `meerkat-core` /
+    // `meerkat-mob` where they already have serde support, so no
+    // additional wire shape is introduced — the wire shape is just
+    // the existing Rust-type serde form.
+    /// Optional runtime binding for external-peer members (maps to
+    /// SpawnMemberSpec::binding).
+    #[serde(default)]
+    pub binding: Option<meerkat_contracts::WireRuntimeBinding>,
+    /// Per-agent environment variables injected into shell tool subprocesses
+    /// (maps to SpawnMemberSpec::shell_env).
+    #[serde(default)]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Whether the spawned member should be auto-wired to its spawner
+    /// (maps to SpawnMemberSpec::auto_wire_parent).
+    #[serde(default)]
+    pub auto_wire_parent: Option<bool>,
+    /// How this member should be launched (fresh / resume / fork)
+    /// (maps to SpawnMemberSpec::launch_mode). Defaults to `Fresh`.
+    #[serde(default)]
+    pub launch_mode: Option<meerkat_mob::MemberLaunchMode>,
+    /// Tool access policy for the spawned member
+    /// (maps to SpawnMemberSpec::tool_access_policy).
+    #[serde(default)]
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Budget split policy from the orchestrator to this member
+    /// (maps to SpawnMemberSpec::budget_split_policy).
+    #[serde(default)]
+    pub budget_split_policy: Option<meerkat_mob::BudgetSplitPolicy>,
+    /// Pre-resolved inherited tool filter
+    /// (maps to SpawnMemberSpec::inherited_tool_filter). When set,
+    /// stored on child session metadata as
+    /// `INHERITED_TOOL_FILTER_METADATA_KEY`.
+    #[serde(default)]
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    /// Override profile resolved from `SpawnTooling::Profile`
+    /// (maps to SpawnMemberSpec::override_profile). When set, spawn
+    /// uses this profile instead of looking up by `profile` from the
+    /// mob definition.
+    #[serde(default)]
+    pub override_profile: Option<meerkat_mob::Profile>,
 }
 
 pub async fn handle_spawn(
@@ -175,6 +221,41 @@ pub async fn handle_spawn(
     spec.context = params.context;
     spec.labels = params.labels;
     spec.additional_instructions = params.additional_instructions;
+    if let Some(binding) = params.binding {
+        spec.binding = Some(match binding {
+            meerkat_contracts::WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
+            meerkat_contracts::WireRuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            } => meerkat_mob::RuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            },
+        });
+    }
+    if let Some(shell_env) = params.shell_env {
+        spec.shell_env = Some(shell_env);
+    }
+    if let Some(auto_wire_parent) = params.auto_wire_parent {
+        spec.auto_wire_parent = auto_wire_parent;
+    }
+    if let Some(launch_mode) = params.launch_mode {
+        spec.launch_mode = launch_mode;
+    }
+    if let Some(tool_access_policy) = params.tool_access_policy {
+        spec.tool_access_policy = Some(tool_access_policy);
+    }
+    if let Some(budget_split_policy) = params.budget_split_policy {
+        spec.budget_split_policy = Some(budget_split_policy);
+    }
+    if let Some(inherited_tool_filter) = params.inherited_tool_filter {
+        spec.inherited_tool_filter = Some(inherited_tool_filter);
+    }
+    if let Some(override_profile) = params.override_profile {
+        spec.override_profile = Some(override_profile);
+    }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
         Err(err) => invalid_params(id, err.to_string()),
@@ -448,21 +529,49 @@ pub async fn handle_lifecycle(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let result = match params.action.as_str() {
-        "stop" => state.mob_stop(&mob_id).await,
-        "resume" => state.mob_resume(&mob_id).await,
-        "complete" => state.mob_complete(&mob_id).await,
-        "reset" => state.mob_reset(&mob_id).await,
-        "destroy" => state.mob_destroy(&mob_id).await,
+    // `destroy` returns a structured `MobDestroyReport` with
+    // force_destroyed_members, orphaned_remote_members, partial errors, etc.
+    // The other lifecycle actions are `()` on success. Surface the report on
+    // destroy so clients (mobkit, tests) can distinguish clean destroy from
+    // partial cleanup instead of assuming `ok: true` means everything
+    // succeeded.
+    let destroy_report = match params.action.as_str() {
+        "stop" => match state.mob_stop(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "resume" => match state.mob_resume(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "complete" => match state.mob_complete(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "reset" => match state.mob_reset(&mob_id).await {
+            Ok(()) => None,
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
+        "destroy" => match state.mob_destroy(&mob_id).await {
+            Ok(report) => Some(report),
+            Err(err) => return invalid_params(id, err.to_string()),
+        },
         other => return invalid_params(id, format!("Unknown mob lifecycle action: {other}")),
     };
-    match result {
-        Ok(()) => RpcResponse::success(
-            id,
-            serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true}),
-        ),
-        Err(err) => invalid_params(id, err.to_string()),
+    let mut body = serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true});
+    if let Some(report) = destroy_report
+        && let Some(obj) = body.as_object_mut()
+    {
+        match serde_json::to_value(&report) {
+            Ok(value) => {
+                obj.insert("destroy_report".to_string(), value);
+            }
+            Err(err) => {
+                return invalid_params(id, format!("destroy report serialize: {err}"));
+            }
+        }
     }
+    RpcResponse::success(id, body)
 }
 
 #[derive(Debug, Deserialize)]
@@ -876,6 +985,325 @@ pub async fn handle_force_cancel(
     }
 }
 
+pub async fn handle_realtime_attach(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_realtime_attach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
+        .await
+    {
+        Ok(attached) => RpcResponse::success(id, serde_json::json!({"attached": attached})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_realtime_detach(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state
+        .mob_realtime_detach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
+        .await
+    {
+        Ok(detached) => RpcResponse::success(id, serde_json::json!({"detached": detached})),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/destroy (Finding C3)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/destroy` — dedicated destroy endpoint that always returns the
+/// structured `MobDestroyReport`. `mob/lifecycle action=destroy` already
+/// surfaces the report (A1), but callers often want an explicit destroy
+/// endpoint so the response body shape is predictable without branching on
+/// `action`. Finding C3.
+pub async fn handle_destroy(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_destroy(&mob_id).await {
+        Ok(report) => {
+            let report_value = match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("failed to serialize MobDestroyReport: {err}"),
+                    );
+                }
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "ok": true,
+                    "destroy_report": report_value,
+                }),
+            )
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/snapshot (Finding C2)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/snapshot` — return a point-in-time aggregate of mob status +
+/// member list in a single atomic call. Replaces the "subscribe to events
+/// and run your own projection" pattern that mobkit and other consumers had
+/// to fall back to when they just wanted to render current state.
+pub async fn handle_snapshot(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let status = match state.mob_status(&mob_id).await {
+        Ok(status) => status.to_string(),
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let members = match state.mob_list_members(&mob_id).await {
+        Ok(members) => members,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    RpcResponse::success(
+        id,
+        serde_json::json!({
+            "mob_id": mob_id,
+            "status": status,
+            "members": members,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// mob/rotate_supervisor (Finding C10)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/rotate_supervisor` — rotate the supervisor bridge for all
+/// members of a mob, surfacing the structured rotation report so operators
+/// can inspect per-member outcomes instead of getting a bare ok:true.
+pub async fn handle_rotate_supervisor(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    match state.mob_rotate_supervisor(&mob_id).await {
+        Ok(report) => {
+            let report_value = match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(err) => {
+                    return invalid_params(
+                        id,
+                        format!("failed to serialize SupervisorRotationReport: {err}"),
+                    );
+                }
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "ok": true,
+                    "report": report_value,
+                }),
+            )
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mob/submit_work, mob/cancel_work, mob/cancel_all_work (Finding C4)
+// ---------------------------------------------------------------------------
+//
+// Exposes the work lane (previously Rust-only) through JSON-RPC so mobkit
+// and other non-Rust consumers can submit / cancel work.
+
+#[derive(Debug, Deserialize)]
+pub struct MobSubmitWorkParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub generation: u64,
+    pub fence_token: u64,
+    /// Optional caller-supplied work reference. When absent the server
+    /// generates a fresh UUID.
+    #[serde(default)]
+    pub work_ref: Option<String>,
+    pub content: ContentInput,
+    /// One of `"external"` or `"internal"`. Defaults to `"external"` when
+    /// omitted — matches the dominant mob work-lane usage (user-originated
+    /// turns into a mob member).
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobCancelWorkParams {
+    pub mob_id: String,
+    pub work_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobCancelAllWorkParams {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub generation: u64,
+    pub fence_token: u64,
+}
+
+pub async fn handle_submit_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobSubmitWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    let generation = meerkat_mob::Generation::new(params.generation);
+    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity.clone(), generation);
+    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    let work_ref = match params.work_ref {
+        Some(ref s) if !s.is_empty() => match meerkat_mob::WorkRef::from_str(s) {
+            Ok(wr) => wr,
+            Err(err) => {
+                return invalid_params(id, format!("work_ref must be a valid UUID: {err}"));
+            }
+        },
+        _ => meerkat_mob::WorkRef::new(),
+    };
+    let origin = match params.origin.as_deref().unwrap_or("external") {
+        "external" => meerkat_mob::WorkOrigin::External,
+        "internal" => meerkat_mob::WorkOrigin::Internal,
+        other => {
+            return invalid_params(
+                id,
+                format!("origin must be 'external' or 'internal', got: {other}"),
+            );
+        }
+    };
+    let spec = meerkat_mob::WorkSpec::new(params.content, origin);
+    match state
+        .mob_submit_work(&mob_id, runtime_id, fence_token, work_ref, spec)
+        .await
+    {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            serde_json::json!({
+                "mob_id": mob_id,
+                "work_ref": receipt.work_ref.to_string(),
+                "agent_runtime_id": WireAgentRuntimeId {
+                    identity: receipt.runtime_id.identity.to_string(),
+                    generation: receipt.runtime_id.generation.get(),
+                },
+            }),
+        ),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_cancel_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobCancelWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let work_ref = match meerkat_mob::WorkRef::from_str(&params.work_ref) {
+        Ok(wr) => wr,
+        Err(err) => {
+            return invalid_params(id, format!("work_ref must be a valid UUID: {err}"));
+        }
+    };
+    match state.mob_cancel_work(&mob_id, work_ref).await {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_cancel_all_work(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobCancelAllWorkParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    let generation = meerkat_mob::Generation::new(params.generation);
+    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity, generation);
+    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    match state
+        .mob_cancel_all_work(&mob_id, runtime_id, fence_token)
+        .await
+    {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({ "mob_id": mob_id, "ok": true })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // mob/member_status
 // ---------------------------------------------------------------------------
@@ -1137,7 +1565,36 @@ pub async fn handle_mob_turn_start(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_mob::{AgentIdentity, AgentRuntimeId, FenceToken};
+    use meerkat_mob::{
+        AgentIdentity, AgentRuntimeId, FenceToken, MobDefinition, MobId, MobRuntimeMode,
+        ProfileName,
+    };
+    use std::collections::BTreeMap;
+
+    fn voice_test_definition(mob_id: &str) -> MobDefinition {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            ProfileName::from("worker"),
+            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
+                model: "claude-sonnet-4-5".to_string(),
+                skills: Vec::new(),
+                tools: meerkat_mob::profile::ToolConfig {
+                    comms: true,
+                    ..meerkat_mob::profile::ToolConfig::default()
+                },
+                peer_description: "worker".to_string(),
+                external_addressable: false,
+                backend: None,
+                runtime_mode: MobRuntimeMode::TurnDriven,
+                max_inline_peer_notifications: None,
+                output_schema: None,
+                provider_params: None,
+            }),
+        );
+        let mut definition = MobDefinition::explicit(MobId::from(mob_id));
+        definition.profiles = profiles;
+        definition
+    }
 
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()
@@ -1207,6 +1664,95 @@ mod tests {
         let err = serde_json::from_value::<MobCreateParams>(value)
             .expect_err("reserved owner_session_id must be rejected");
         assert!(err.to_string().contains("unknown field `owner_session_id`"));
+    }
+
+    /// DELETE_ME A10 regression: `MobSpawnParams` now carries all 15
+    /// `SpawnMemberSpec` public fields so RPC spawn reaches parity with
+    /// Rust-in-process spawn. The first A10 partial covered binding /
+    /// shell_env / auto_wire_parent; A3+C1 unblocked launch_mode; this
+    /// final pass adds tool_access_policy, budget_split_policy,
+    /// inherited_tool_filter, and override_profile. This test pins each
+    /// new field to round-trip through serde (proving the wire shape
+    /// is the serde form of the underlying Rust type — no parallel
+    /// wire contract introduced).
+    #[test]
+    fn mob_spawn_params_carry_full_member_spec_surface() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        use meerkat_core::tool_scope::ToolFilter;
+
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "launch_mode": { "mode": "fresh" },
+            "tool_access_policy": {
+                "type": "allow_list",
+                "value": ["grep", "read"]
+            },
+            "budget_split_policy": { "type": "remaining" },
+            "inherited_tool_filter": { "Allow": ["grep", "read"] },
+            "override_profile": {
+                "model": "claude-sonnet-4-6",
+                "skills": [],
+                "tools": {},
+                "peer_description": "",
+                "external_addressable": false
+            },
+        });
+        let params: MobSpawnParams =
+            serde_json::from_value(value).expect("spawn params with full surface deserialize");
+
+        // launch_mode is Fresh (default shape via serde tag).
+        assert!(matches!(
+            params.launch_mode,
+            Some(meerkat_mob::MemberLaunchMode::Fresh)
+        ));
+
+        // tool_access_policy is the AllowList variant with the two tools.
+        match params.tool_access_policy {
+            Some(ToolAccessPolicy::AllowList(ref tools)) => {
+                assert_eq!(tools, &vec!["grep".to_string(), "read".to_string()]);
+            }
+            other => panic!("expected AllowList, got {other:?}"),
+        }
+
+        // budget_split_policy is Remaining.
+        assert!(matches!(
+            params.budget_split_policy,
+            Some(meerkat_mob::BudgetSplitPolicy::Remaining)
+        ));
+
+        // inherited_tool_filter round-trips through serde.
+        assert!(matches!(
+            params.inherited_tool_filter,
+            Some(ToolFilter::Allow(_))
+        ));
+        if let Some(ToolFilter::Allow(ref allowlist)) = params.inherited_tool_filter {
+            assert!(allowlist.contains("grep"));
+            assert!(allowlist.contains("read"));
+        }
+
+        // override_profile model survives the round-trip.
+        let override_profile = params
+            .override_profile
+            .as_ref()
+            .expect("override_profile round-trips through serde");
+        assert_eq!(override_profile.model, "claude-sonnet-4-6");
+
+        // And all older fields that aren't set stay None so the additive
+        // wire extension doesn't break prior callers.
+        let minimal = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+        });
+        let minimal_params: MobSpawnParams = serde_json::from_value(minimal)
+            .expect("spawn params without optional fields deserialize");
+        assert!(minimal_params.launch_mode.is_none());
+        assert!(minimal_params.tool_access_policy.is_none());
+        assert!(minimal_params.budget_split_policy.is_none());
+        assert!(minimal_params.inherited_tool_filter.is_none());
+        assert!(minimal_params.override_profile.is_none());
     }
 
     #[test]
@@ -1292,5 +1838,83 @@ mod tests {
         assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
         assert_eq!(params.timeout_ms, Some(2500));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn realtime_attach_and_detach_handlers_drive_member_status() {
+        let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let mob_id = state
+            .mob_create_definition(voice_test_definition("mob-voice-rpc"))
+            .await
+            .expect("create voice mob");
+        state
+            .mob_spawn(
+                &mob_id,
+                ProfileName::from("worker"),
+                AgentIdentity::from("worker-1"),
+                Some(MobRuntimeMode::TurnDriven),
+                None,
+            )
+            .await
+            .expect("spawn worker");
+
+        let attach_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("attach params");
+        let attach_response =
+            handle_realtime_attach(Some(RpcId::Num(1)), Some(attach_params.as_ref()), &state).await;
+        assert!(
+            attach_response.error.is_none(),
+            "voice attach should succeed"
+        );
+
+        let status_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("status params");
+        let attached_status =
+            handle_member_status(Some(RpcId::Num(2)), Some(status_params.as_ref()), &state).await;
+        let attached_value: serde_json::Value = serde_json::from_str(
+            attached_status
+                .result
+                .as_ref()
+                .expect("member status result")
+                .get(),
+        )
+        .expect("member status json");
+        assert_eq!(
+            attached_value["realtime_attachment_status"],
+            serde_json::Value::String("binding_not_ready".to_string())
+        );
+
+        let detach_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "mob_id": mob_id.to_string(),
+            "agent_identity": "worker-1",
+        }))
+        .expect("detach params");
+        let detach_response =
+            handle_realtime_detach(Some(RpcId::Num(3)), Some(detach_params.as_ref()), &state).await;
+        assert!(
+            detach_response.error.is_none(),
+            "voice detach should succeed"
+        );
+
+        let detached_status =
+            handle_member_status(Some(RpcId::Num(4)), Some(status_params.as_ref()), &state).await;
+        let detached_value: serde_json::Value = serde_json::from_str(
+            detached_status
+                .result
+                .as_ref()
+                .expect("member status result")
+                .get(),
+        )
+        .expect("member status json");
+        assert_eq!(
+            detached_value["realtime_attachment_status"],
+            serde_json::Value::String("unattached".to_string())
+        );
     }
 }

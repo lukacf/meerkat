@@ -145,6 +145,12 @@ pub(crate) fn project_state(
         surface_removal_applied_at_turn: std::collections::BTreeMap::new(),
         surface_phase: "Operating".to_string(),
         removal_timeout_ms: 30000,
+        realtime_intent_present: false,
+        realtime_binding_state: "Unbound".to_string(),
+        realtime_binding_authority_epoch: None,
+        realtime_reattach_required: false,
+        realtime_next_authority_epoch: 1,
+        live_topology_phase: "Idle".to_string(),
     }
 }
 

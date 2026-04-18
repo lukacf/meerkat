@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated composition model for meerkat_mob_seam.
 
-CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, InputIdValues, NatValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentRuntimeIdValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues
+CONSTANTS AgentIdentityValues, AgentRuntimeIdValues, BooleanValues, FenceTokenValues, GenerationValues, InputIdValues, NatValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfAgentIdentityValues, SetOfAgentRuntimeIdValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -14,6 +14,7 @@ OptionRunIdValues == {None} \cup {Some(x) : x \in RunIdValues}
 OptionSessionIdValues == {None} \cup {Some(x) : x \in SessionIdValues}
 OptionSessionLlmCapabilitySurfaceValues == {None} \cup {Some(x) : x \in SessionLlmCapabilitySurfaceValues}
 OptionStringValues == {None} \cup {Some(x) : x \in StringValues}
+OptionU64Values == {None} \cup {Some(x) : x \in NatValues}
 MapAgentRuntimeIdFenceTokenValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in AgentRuntimeIdValues, v \in FenceTokenValues }
 MapStringToolVisibilityWitnessValues == {[x \in {} |-> None]} \cup { [x \in {k} |-> v] : k \in StringValues, v \in ToolVisibilityWitnessValues }
 
@@ -120,8 +121,8 @@ RouteDeliveryKind(route_name) ==
 
 RouteTargetActor(route_name) == ActorOfMachine(RouteTargetMachine(route_name))
 
-VARIABLES meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
-vars == << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+VARIABLES meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs
+vars == << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, model_step_count, pending_inputs, observed_inputs, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 RoutePackets == SeqElements(pending_routes) \cup delivered_routes
 PendingActors == {ActorOfMachine(packet.machine) : packet \in SeqElements(pending_inputs)}
@@ -135,6 +136,12 @@ BaseInit ==
     /\ meerkat_current_run_id = None
     /\ meerkat_pre_run_phase = None
     /\ meerkat_silent_intent_overrides = {}
+    /\ meerkat_realtime_intent_present = FALSE
+    /\ meerkat_realtime_binding_state = "Unbound"
+    /\ meerkat_realtime_binding_authority_epoch = None
+    /\ meerkat_realtime_reattach_required = FALSE
+    /\ meerkat_realtime_next_authority_epoch = 1
+    /\ meerkat_live_topology_phase = "Idle"
     /\ mob_phase = "Running"
     /\ mob_live_runtime_ids = {}
     /\ mob_externally_addressable_runtime_ids = {}
@@ -142,6 +149,7 @@ BaseInit ==
     /\ mob_active_run_count = 0
     /\ mob_pending_spawn_count = 0
     /\ mob_coordinator_bound = TRUE
+    /\ mob_member_voice_intent = {}
     /\ model_step_count = 0
     /\ pending_routes = <<>>
     /\ delivered_routes = {}
@@ -183,7 +191,7 @@ meerkat_Initialize ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Initializing"
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -202,7 +210,7 @@ meerkat_RegisterSessionIdle(arg_session_id) ==
        /\ meerkat_phase = "Idle"
        /\ meerkat_phase' = "Idle"
        /\ meerkat_session_id' = Some(packet.payload.session_id)
-       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -221,7 +229,7 @@ meerkat_RegisterSessionAttached(arg_session_id) ==
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
        /\ meerkat_session_id' = Some(packet.payload.session_id)
-       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -240,7 +248,7 @@ meerkat_RegisterSessionRunning(arg_session_id) ==
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
        /\ meerkat_session_id' = Some(packet.payload.session_id)
-       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -259,7 +267,7 @@ meerkat_RegisterSessionRetired(arg_session_id) ==
        /\ meerkat_phase = "Retired"
        /\ meerkat_phase' = "Retired"
        /\ meerkat_session_id' = Some(packet.payload.session_id)
-       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -278,7 +286,7 @@ meerkat_RegisterSessionStopped(arg_session_id) ==
        /\ meerkat_phase = "Stopped"
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_session_id' = Some(packet.payload.session_id)
-       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -302,7 +310,7 @@ meerkat_UnregisterSessionIdle(arg_session_id) ==
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -326,7 +334,7 @@ meerkat_UnregisterSessionAttached(arg_session_id) ==
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -350,7 +358,7 @@ meerkat_UnregisterSessionRunning(arg_session_id) ==
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -374,7 +382,7 @@ meerkat_UnregisterSessionRetired(arg_session_id) ==
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -398,7 +406,7 @@ meerkat_UnregisterSessionStopped(arg_session_id) ==
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -427,7 +435,7 @@ meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previou
        /\ (meerkat_session_id # None)
        /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -456,7 +464,7 @@ meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous
        /\ (meerkat_session_id # None)
        /\ (meerkat_active_runtime_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -476,7 +484,7 @@ meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -496,7 +504,7 @@ meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -516,7 +524,7 @@ meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -536,7 +544,7 @@ meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -556,7 +564,7 @@ meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -576,7 +584,7 @@ meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -596,7 +604,7 @@ meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -616,7 +624,7 @@ meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -636,7 +644,7 @@ meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -656,7 +664,7 @@ meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -678,7 +686,7 @@ meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_g
        /\ meerkat_phase' = "Initializing"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -700,7 +708,7 @@ meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generatio
        /\ meerkat_phase' = "Attached"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -722,7 +730,7 @@ meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_gener
        /\ meerkat_phase' = "Attached"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -744,7 +752,7 @@ meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_genera
        /\ meerkat_phase' = "Running"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -766,7 +774,7 @@ meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_genera
        /\ meerkat_phase' = "Retired"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -788,7 +796,7 @@ meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_genera
        /\ meerkat_phase' = "Stopped"
        /\ meerkat_active_runtime_id' = Some(packet.payload.agent_runtime_id)
        /\ meerkat_active_fence_token' = Some(packet.payload.fence_token)
-       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeReady", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN Some(packet.payload.agent_runtime_id) THEN Some(packet.payload.agent_runtime_id)["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN Some(packet.payload.fence_token) THEN Some(packet.payload.fence_token)["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_bound_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeBound", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -807,7 +815,7 @@ meerkat_SetPeerIngressContextIdle(arg_keep_alive) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -826,7 +834,7 @@ meerkat_SetPeerIngressContextAttached(arg_keep_alive) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -845,7 +853,7 @@ meerkat_SetPeerIngressContextRunning(arg_keep_alive) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -864,7 +872,7 @@ meerkat_SetPeerIngressContextRetired(arg_keep_alive) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -883,7 +891,7 @@ meerkat_SetPeerIngressContextStopped(arg_keep_alive) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -902,7 +910,7 @@ meerkat_NotifyDrainExitedIdle(arg_reason) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -921,7 +929,7 @@ meerkat_NotifyDrainExitedAttached(arg_reason) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -940,7 +948,7 @@ meerkat_NotifyDrainExitedRunning(arg_reason) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -959,7 +967,7 @@ meerkat_NotifyDrainExitedRetired(arg_reason) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -978,7 +986,7 @@ meerkat_NotifyDrainExitedStopped(arg_reason) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -995,7 +1003,7 @@ meerkat_InterruptCurrentRunAttached ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1012,7 +1020,7 @@ meerkat_InterruptCurrentRun ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1029,7 +1037,7 @@ meerkat_CancelAfterBoundaryAttached ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1046,7 +1054,7 @@ meerkat_CancelAfterBoundary ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1064,7 +1072,7 @@ meerkat_BoundaryAppliedPublish(arg_revision) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1091,7 +1099,7 @@ meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg
        /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
        /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1118,7 +1126,7 @@ meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter,
        /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
        /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1145,7 +1153,7 @@ meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, 
        /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
        /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1172,7 +1180,7 @@ meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, 
        /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
        /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1199,7 +1207,7 @@ meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, 
        /\ ((packet.payload.active_visibility_revision # packet.payload.staged_visibility_revision) \/ ((packet.payload.active_filter = packet.payload.staged_filter) /\ (packet.payload.active_requested_deferred_names = packet.payload.staged_requested_deferred_names)))
        /\ (\A requested_name \in packet.payload.active_requested_deferred_names : (requested_name \in packet.payload.staged_requested_deferred_names))
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1216,7 +1224,7 @@ meerkat_RetireRequestedFromIdle ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle" \/ meerkat_phase = "Attached" \/ meerkat_phase = "Running"
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeRetired", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN meerkat_active_runtime_id THEN meerkat_active_runtime_id["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN meerkat_active_fence_token THEN meerkat_active_fence_token["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_retired_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeRetired", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeRetired", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN meerkat_active_runtime_id THEN meerkat_active_runtime_id["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN meerkat_active_fence_token THEN meerkat_active_fence_token["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_retired_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeRetired", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -1237,7 +1245,7 @@ meerkat_Reset ==
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
        /\ meerkat_silent_intent_overrides' = {}
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1257,7 +1265,7 @@ meerkat_StopRuntimeExecutorUnbound ==
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
        /\ meerkat_silent_intent_overrides' = {}
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1275,7 +1283,7 @@ meerkat_StopRuntimeExecutorAttached ==
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
        /\ meerkat_silent_intent_overrides' = {}
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1293,7 +1301,7 @@ meerkat_StopRuntimeExecutorRunning ==
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
        /\ meerkat_silent_intent_overrides' = {}
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1314,7 +1322,7 @@ meerkat_Destroy ==
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
        /\ meerkat_silent_intent_overrides' = {}
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "mob", variant |-> "ObserveRuntimeDestroyed", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN meerkat_active_runtime_id THEN meerkat_active_runtime_id["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN meerkat_active_fence_token THEN meerkat_active_fence_token["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_destroyed_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeDestroyed", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "ObserveRuntimeDestroyed", payload |-> [agent_runtime_id |-> (IF "value" \in DOMAIN meerkat_active_runtime_id THEN meerkat_active_runtime_id["value"] ELSE None), fence_token |-> (IF "value" \in DOMAIN meerkat_active_fence_token THEN meerkat_active_fence_token["value"] ELSE None)], source_kind |-> "route", source_route |-> "runtime_destroyed_reaches_mob", source_machine |-> "meerkat", source_effect |-> "RuntimeDestroyed", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -1332,7 +1340,7 @@ meerkat_EnsureSessionWithExecutorIdle(arg_session_id) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1350,7 +1358,7 @@ meerkat_EnsureSessionWithExecutorAttached(arg_session_id) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1368,7 +1376,7 @@ meerkat_EnsureSessionWithExecutorRunning(arg_session_id) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1386,7 +1394,7 @@ meerkat_EnsureSessionWithExecutorRetired(arg_session_id) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Retired"
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1404,7 +1412,7 @@ meerkat_EnsureSessionWithExecutorStopped(arg_session_id) ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Stopped"
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1425,7 +1433,7 @@ meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents) ==
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
        /\ meerkat_silent_intent_overrides' = packet.payload.intents
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1446,7 +1454,7 @@ meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents) ==
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
        /\ meerkat_silent_intent_overrides' = packet.payload.intents
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1467,7 +1475,7 @@ meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents) ==
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
        /\ meerkat_silent_intent_overrides' = packet.payload.intents
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1488,7 +1496,7 @@ meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents) ==
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
        /\ meerkat_silent_intent_overrides' = packet.payload.intents
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1508,7 +1516,7 @@ meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1527,7 +1535,7 @@ meerkat_AbortIdle(arg_session_id) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1546,7 +1554,7 @@ meerkat_AbortAttached(arg_session_id) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1565,7 +1573,7 @@ meerkat_AbortRunning(arg_session_id) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1584,7 +1592,7 @@ meerkat_AbortRetired(arg_session_id) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1603,7 +1611,7 @@ meerkat_AbortStopped(arg_session_id) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1622,7 +1630,7 @@ meerkat_WaitIdle(arg_session_id) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1641,7 +1649,7 @@ meerkat_WaitAttached(arg_session_id) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1660,7 +1668,7 @@ meerkat_WaitRunning(arg_session_id) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1679,7 +1687,7 @@ meerkat_WaitRetired(arg_session_id) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1698,7 +1706,7 @@ meerkat_WaitStopped(arg_session_id) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1715,7 +1723,7 @@ meerkat_AbortAllIdle ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Idle"
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1732,7 +1740,7 @@ meerkat_AbortAllAttached ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Attached"
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1749,7 +1757,7 @@ meerkat_AbortAllRunning ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Running"
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1766,7 +1774,7 @@ meerkat_AbortAllRetired ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Retired"
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1783,7 +1791,7 @@ meerkat_AbortAllStopped ==
        /\ ~HigherPriorityReady("meerkat_kernel")
        /\ meerkat_phase = "Stopped"
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1801,7 +1809,7 @@ meerkat_EnsureDrainRunningAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1819,7 +1827,7 @@ meerkat_EnsureDrainRunningRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1840,7 +1848,7 @@ meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1861,7 +1869,7 @@ meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1882,7 +1890,7 @@ meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1901,7 +1909,7 @@ meerkat_PublishEventIdle(arg_kind) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1920,7 +1928,7 @@ meerkat_PublishEventAttached(arg_kind) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1939,7 +1947,7 @@ meerkat_PublishEventRunning(arg_kind) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1958,7 +1966,7 @@ meerkat_PublishEventRetired(arg_kind) ==
        /\ meerkat_phase = "Retired"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Retired"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -1977,7 +1985,7 @@ meerkat_PublishEventStopped(arg_kind) ==
        /\ meerkat_phase = "Stopped"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2001,7 +2009,7 @@ meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_proce
        /\ (packet.payload.request_immediate_processing = FALSE)
        /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2025,7 +2033,7 @@ meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_pr
        /\ (packet.payload.request_immediate_processing = TRUE)
        /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2051,7 +2059,7 @@ meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediat
        /\ meerkat_phase' = "Running"
        /\ meerkat_current_run_id' = Some(packet.payload.run_id)
        /\ meerkat_pre_run_phase' = Some("attached")
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2075,7 +2083,7 @@ meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_p
        /\ (packet.payload.request_immediate_processing = FALSE)
        /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2099,7 +2107,7 @@ meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immed
        /\ (packet.payload.request_immediate_processing = FALSE)
        /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2123,7 +2131,7 @@ meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_i
        /\ (packet.payload.request_immediate_processing = FALSE)
        /\ (packet.payload.interrupt_yielding = TRUE)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2147,7 +2155,7 @@ meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate
        /\ (packet.payload.request_immediate_processing = TRUE)
        /\ (packet.payload.interrupt_yielding = FALSE)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2166,7 +2174,7 @@ meerkat_AcceptWithoutWakeIdle(arg_input_id) ==
        /\ meerkat_phase = "Idle"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Idle"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2185,7 +2193,7 @@ meerkat_AcceptWithoutWakeAttached(arg_input_id) ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2204,7 +2212,7 @@ meerkat_AcceptWithoutWakeRunning(arg_input_id) ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2222,7 +2230,7 @@ meerkat_ClassifyExternalEnvelopeAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2240,7 +2248,7 @@ meerkat_ClassifyExternalEnvelopeRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2258,7 +2266,7 @@ meerkat_ClassifyPlainEventAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2276,7 +2284,7 @@ meerkat_ClassifyPlainEventRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2298,7 +2306,7 @@ meerkat_PrepareIdle(arg_session_id, arg_run_id) ==
        /\ meerkat_phase' = "Running"
        /\ meerkat_current_run_id' = Some(packet.payload.run_id)
        /\ meerkat_pre_run_phase' = Some("idle")
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2320,7 +2328,7 @@ meerkat_PrepareAttached(arg_session_id, arg_run_id) ==
        /\ meerkat_phase' = "Running"
        /\ meerkat_current_run_id' = Some(packet.payload.run_id)
        /\ meerkat_pre_run_phase' = Some("attached")
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2340,7 +2348,7 @@ meerkat_DrainQueuedRunRetired(arg_run_id) ==
        /\ meerkat_phase' = "Running"
        /\ meerkat_current_run_id' = Some(packet.payload.run_id)
        /\ meerkat_pre_run_phase' = Some("retired")
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2358,7 +2366,7 @@ meerkat_StartConversationRunAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2376,7 +2384,7 @@ meerkat_StartImmediateAppendAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2394,7 +2402,7 @@ meerkat_StartImmediateContextAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2417,7 +2425,7 @@ meerkat_CommitRunningToIdle(arg_input_id, arg_run_id) ==
        /\ meerkat_phase' = "Idle"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2440,7 +2448,7 @@ meerkat_CommitRunningToAttached(arg_input_id, arg_run_id) ==
        /\ meerkat_phase' = "Attached"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2463,7 +2471,7 @@ meerkat_CommitRunningToRetired(arg_input_id, arg_run_id) ==
        /\ meerkat_phase' = "Retired"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2485,7 +2493,7 @@ meerkat_FailRunningToIdle(arg_run_id) ==
        /\ meerkat_phase' = "Idle"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2507,7 +2515,7 @@ meerkat_FailRunningToAttached(arg_run_id) ==
        /\ meerkat_phase' = "Attached"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2529,7 +2537,7 @@ meerkat_FailRunningToRetired(arg_run_id) ==
        /\ meerkat_phase' = "Retired"
        /\ meerkat_current_run_id' = None
        /\ meerkat_pre_run_phase' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2547,7 +2555,7 @@ meerkat_StageAddAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2565,7 +2573,7 @@ meerkat_StageAddRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2583,7 +2591,7 @@ meerkat_StageRemoveAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2601,7 +2609,7 @@ meerkat_StageRemoveRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2619,7 +2627,7 @@ meerkat_StageReloadAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2637,7 +2645,7 @@ meerkat_StageReloadRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2655,7 +2663,7 @@ meerkat_ApplySurfaceBoundaryAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2673,7 +2681,7 @@ meerkat_ApplySurfaceBoundaryRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2691,7 +2699,7 @@ meerkat_PendingSucceededAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2709,7 +2717,7 @@ meerkat_PendingSucceededRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2727,7 +2735,7 @@ meerkat_PendingFailedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2745,7 +2753,7 @@ meerkat_PendingFailedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2763,7 +2771,7 @@ meerkat_CallStartedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2781,7 +2789,7 @@ meerkat_CallStartedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2799,7 +2807,7 @@ meerkat_CallFinishedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2817,7 +2825,7 @@ meerkat_CallFinishedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2835,7 +2843,7 @@ meerkat_FinalizeRemovalCleanAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2853,7 +2861,7 @@ meerkat_FinalizeRemovalCleanRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2871,7 +2879,7 @@ meerkat_FinalizeRemovalForcedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2889,7 +2897,7 @@ meerkat_FinalizeRemovalForcedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2907,7 +2915,7 @@ meerkat_SnapshotAlignedAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2925,7 +2933,7 @@ meerkat_SnapshotAlignedRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2943,7 +2951,7 @@ meerkat_ShutdownSurfaceAttached ==
        /\ meerkat_phase = "Attached"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Attached"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2961,7 +2969,7 @@ meerkat_ShutdownSurfaceRunning ==
        /\ meerkat_phase = "Running"
        /\ (meerkat_session_id # None)
        /\ meerkat_phase' = "Running"
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -2981,7 +2989,7 @@ meerkat_RecycleFromIdleOrRetired ==
        /\ meerkat_phase' = "Idle"
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3001,7 +3009,7 @@ meerkat_RecycleFromAttached ==
        /\ meerkat_phase' = "Attached"
        /\ meerkat_active_fence_token' = None
        /\ meerkat_current_run_id' = None
-       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3011,9 +3019,1435 @@ meerkat_RecycleFromAttached ==
        /\ model_step_count' = model_step_count + 1
 
 
+meerkat_ProjectRealtimeIntentIdle(arg_present) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ProjectRealtimeIntent"
+       /\ packet.payload.present = arg_present
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_intent_present' = packet.payload.present
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeIntentProjected", payload |-> [present |-> packet.payload.present], effect_id |-> (model_step_count + 1), source_transition |-> "ProjectRealtimeIntentIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ProjectRealtimeIntentIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ProjectRealtimeIntentAttached(arg_present) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ProjectRealtimeIntent"
+       /\ packet.payload.present = arg_present
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_intent_present' = packet.payload.present
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeIntentProjected", payload |-> [present |-> packet.payload.present], effect_id |-> (model_step_count + 1), source_transition |-> "ProjectRealtimeIntentAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ProjectRealtimeIntentAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ProjectRealtimeIntentRunning(arg_present) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ProjectRealtimeIntent"
+       /\ packet.payload.present = arg_present
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_intent_present' = packet.payload.present
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeIntentProjected", payload |-> [present |-> packet.payload.present], effect_id |-> (model_step_count + 1), source_transition |-> "ProjectRealtimeIntentRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ProjectRealtimeIntentRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ProjectRealtimeIntentRetired(arg_present) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ProjectRealtimeIntent"
+       /\ packet.payload.present = arg_present
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_intent_present' = packet.payload.present
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeIntentProjected", payload |-> [present |-> packet.payload.present], effect_id |-> (model_step_count + 1), source_transition |-> "ProjectRealtimeIntentRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ProjectRealtimeIntentRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ProjectRealtimeIntentStopped(arg_present) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ProjectRealtimeIntent"
+       /\ packet.payload.present = arg_present
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_intent_present' = packet.payload.present
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeIntentProjected", payload |-> [present |-> packet.payload.present], effect_id |-> (model_step_count + 1), source_transition |-> "ProjectRealtimeIntentStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ProjectRealtimeIntentStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginRealtimeBindingIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "BindingNotReady"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRealtimeBindingIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginRealtimeBindingIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginRealtimeBindingAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "BindingNotReady"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRealtimeBindingAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginRealtimeBindingAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginRealtimeBindingRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "BindingNotReady"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRealtimeBindingRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginRealtimeBindingRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginRealtimeBindingRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "BindingNotReady"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRealtimeBindingRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginRealtimeBindingRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginRealtimeBindingStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "BindingNotReady"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "BeginRealtimeBindingStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginRealtimeBindingStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ReplaceRealtimeBindingIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ReplaceRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "ReplacementPending"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "ReplaceRealtimeBindingIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ReplaceRealtimeBindingIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ReplaceRealtimeBindingAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ReplaceRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "ReplacementPending"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "ReplaceRealtimeBindingAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ReplaceRealtimeBindingAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ReplaceRealtimeBindingRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ReplaceRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "ReplacementPending"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "ReplaceRealtimeBindingRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ReplaceRealtimeBindingRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ReplaceRealtimeBindingRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ReplaceRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "ReplacementPending"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "ReplaceRealtimeBindingRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ReplaceRealtimeBindingRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ReplaceRealtimeBindingStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ReplaceRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "ReplacementPending"
+       /\ meerkat_realtime_binding_authority_epoch' = Some(meerkat_realtime_next_authority_epoch)
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RealtimeBindingRotated", payload |-> [authority_epoch |-> (IF "value" \in DOMAIN Some(meerkat_realtime_next_authority_epoch) THEN Some(meerkat_realtime_next_authority_epoch)["value"] ELSE None)], effect_id |-> (model_step_count + 1), source_transition |-> "ReplaceRealtimeBindingStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ReplaceRealtimeBindingStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_DetachRealtimeBindingIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "DetachRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "DetachRealtimeBindingIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_DetachRealtimeBindingAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "DetachRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "DetachRealtimeBindingAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_DetachRealtimeBindingRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "DetachRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "DetachRealtimeBindingRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_DetachRealtimeBindingRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "DetachRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "DetachRealtimeBindingRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_DetachRealtimeBindingStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "DetachRealtimeBinding"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "DetachRealtimeBindingStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_RequireRealtimeReattachIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "RequireRealtimeReattach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "RequireRealtimeReattachIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_RequireRealtimeReattachAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "RequireRealtimeReattach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "RequireRealtimeReattachAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_RequireRealtimeReattachRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "RequireRealtimeReattach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "RequireRealtimeReattachRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_RequireRealtimeReattachRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "RequireRealtimeReattach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "RequireRealtimeReattachRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_RequireRealtimeReattachStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "RequireRealtimeReattach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "RequireRealtimeReattachStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_PublishRealtimeSignalIdle(arg_authority_epoch, arg_next_binding_state) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "PublishRealtimeSignal"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ packet.payload.next_binding_state = arg_next_binding_state
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ ((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending"))
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = packet.payload.next_binding_state
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_authority_epoch, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "PublishRealtimeSignalIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_PublishRealtimeSignalAttached(arg_authority_epoch, arg_next_binding_state) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "PublishRealtimeSignal"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ packet.payload.next_binding_state = arg_next_binding_state
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ ((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending"))
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = packet.payload.next_binding_state
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_authority_epoch, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "PublishRealtimeSignalAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_PublishRealtimeSignalRunning(arg_authority_epoch, arg_next_binding_state) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "PublishRealtimeSignal"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ packet.payload.next_binding_state = arg_next_binding_state
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ ((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending"))
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = packet.payload.next_binding_state
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_authority_epoch, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "PublishRealtimeSignalRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_PublishRealtimeSignalRetired(arg_authority_epoch, arg_next_binding_state) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "PublishRealtimeSignal"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ packet.payload.next_binding_state = arg_next_binding_state
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ ((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending"))
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = packet.payload.next_binding_state
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_authority_epoch, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "PublishRealtimeSignalRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_PublishRealtimeSignalStopped(arg_authority_epoch, arg_next_binding_state) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "PublishRealtimeSignal"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ packet.payload.next_binding_state = arg_next_binding_state
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ ((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending"))
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = packet.payload.next_binding_state
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_authority_epoch, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "PublishRealtimeSignalStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginLiveTopologyReconfigureIdle(arg_authority_epoch) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginLiveTopologyReconfigure"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_live_topology_phase' = "Reconfiguring"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginLiveTopologyReconfigureIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginLiveTopologyReconfigureIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginLiveTopologyReconfigureAttached(arg_authority_epoch) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginLiveTopologyReconfigure"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_live_topology_phase' = "Reconfiguring"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginLiveTopologyReconfigureAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginLiveTopologyReconfigureAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginLiveTopologyReconfigureRunning(arg_authority_epoch) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginLiveTopologyReconfigure"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_live_topology_phase' = "Reconfiguring"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginLiveTopologyReconfigureRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginLiveTopologyReconfigureRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginLiveTopologyReconfigureRetired(arg_authority_epoch) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginLiveTopologyReconfigure"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_live_topology_phase' = "Reconfiguring"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginLiveTopologyReconfigureRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginLiveTopologyReconfigureRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_BeginLiveTopologyReconfigureStopped(arg_authority_epoch) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "BeginLiveTopologyReconfigure"
+       /\ packet.payload.authority_epoch = arg_authority_epoch
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))
+       /\ (meerkat_live_topology_phase = "Idle")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_live_topology_phase' = "Reconfiguring"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "BeginLiveTopologyReconfigureStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "BeginLiveTopologyReconfigureStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_MarkLiveTopologyDetachedIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "MarkLiveTopologyDetached"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Detached"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkLiveTopologyDetachedIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "MarkLiveTopologyDetachedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_MarkLiveTopologyDetachedAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "MarkLiveTopologyDetached"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Detached"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkLiveTopologyDetachedAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "MarkLiveTopologyDetachedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_MarkLiveTopologyDetachedRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "MarkLiveTopologyDetached"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Detached"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkLiveTopologyDetachedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "MarkLiveTopologyDetachedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_MarkLiveTopologyDetachedRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "MarkLiveTopologyDetached"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Detached"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkLiveTopologyDetachedRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "MarkLiveTopologyDetachedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_MarkLiveTopologyDetachedStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "MarkLiveTopologyDetached"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ (meerkat_current_run_id = None)
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = FALSE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Detached"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "MarkLiveTopologyDetachedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "MarkLiveTopologyDetachedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyIdentityIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyIdentity"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Detached")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_live_topology_phase' = "HostIdentityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyIdentityIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyIdentityIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyIdentityAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyIdentity"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Detached")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_live_topology_phase' = "HostIdentityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyIdentityAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyIdentityAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyIdentityRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyIdentity"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Detached")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_live_topology_phase' = "HostIdentityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyIdentityRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyIdentityRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyIdentityRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyIdentity"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Detached")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_live_topology_phase' = "HostIdentityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyIdentityRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyIdentityRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyIdentityStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyIdentity"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Detached")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_live_topology_phase' = "HostIdentityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyIdentityStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyIdentityStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyVisibilityIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyVisibility"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostIdentityApplied")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_live_topology_phase' = "HostVisibilityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyVisibilityIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyVisibilityIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyVisibilityAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyVisibility"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostIdentityApplied")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_live_topology_phase' = "HostVisibilityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyVisibilityAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyVisibilityAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyVisibilityRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyVisibility"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostIdentityApplied")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_live_topology_phase' = "HostVisibilityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyVisibilityRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyVisibilityRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyVisibilityRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyVisibility"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostIdentityApplied")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_live_topology_phase' = "HostVisibilityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyVisibilityRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyVisibilityRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_ApplyLiveTopologyVisibilityStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "ApplyLiveTopologyVisibility"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostIdentityApplied")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_live_topology_phase' = "HostVisibilityApplied"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "ApplyLiveTopologyVisibilityStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "ApplyLiveTopologyVisibilityStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_CompleteLiveTopologyIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "CompleteLiveTopology"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostVisibilityApplied")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteLiveTopologyIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CompleteLiveTopologyIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_CompleteLiveTopologyAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "CompleteLiveTopology"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostVisibilityApplied")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteLiveTopologyAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CompleteLiveTopologyAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_CompleteLiveTopologyRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "CompleteLiveTopology"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostVisibilityApplied")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteLiveTopologyRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CompleteLiveTopologyRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_CompleteLiveTopologyRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "CompleteLiveTopology"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostVisibilityApplied")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteLiveTopologyRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CompleteLiveTopologyRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_CompleteLiveTopologyStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "CompleteLiveTopology"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "HostVisibilityApplied")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CompleteLiveTopologyStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "CompleteLiveTopologyStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbortLiveTopologyBeforeDetachIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbortLiveTopologyBeforeDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbortLiveTopologyBeforeDetachIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbortLiveTopologyBeforeDetachIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbortLiveTopologyBeforeDetachAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbortLiveTopologyBeforeDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbortLiveTopologyBeforeDetachAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbortLiveTopologyBeforeDetachAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbortLiveTopologyBeforeDetachRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbortLiveTopologyBeforeDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbortLiveTopologyBeforeDetachRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbortLiveTopologyBeforeDetachRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbortLiveTopologyBeforeDetachRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbortLiveTopologyBeforeDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbortLiveTopologyBeforeDetachRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbortLiveTopologyBeforeDetachRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_AbortLiveTopologyBeforeDetachStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "AbortLiveTopologyBeforeDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ (meerkat_live_topology_phase = "Reconfiguring")
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "AbortLiveTopologyBeforeDetachStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "AbortLiveTopologyBeforeDetachStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_FailLiveTopologyAfterDetachIdle ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "FailLiveTopologyAfterDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Idle"
+       /\ (meerkat_session_id # None)
+       /\ ((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied"))
+       /\ meerkat_phase' = "Idle"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FailLiveTopologyAfterDetachIdle"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "FailLiveTopologyAfterDetachIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_FailLiveTopologyAfterDetachAttached ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "FailLiveTopologyAfterDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Attached"
+       /\ (meerkat_session_id # None)
+       /\ ((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied"))
+       /\ meerkat_phase' = "Attached"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FailLiveTopologyAfterDetachAttached"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "FailLiveTopologyAfterDetachAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_FailLiveTopologyAfterDetachRunning ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "FailLiveTopologyAfterDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Running"
+       /\ (meerkat_session_id # None)
+       /\ ((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied"))
+       /\ meerkat_phase' = "Running"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FailLiveTopologyAfterDetachRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "FailLiveTopologyAfterDetachRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_FailLiveTopologyAfterDetachRetired ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "FailLiveTopologyAfterDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Retired"
+       /\ (meerkat_session_id # None)
+       /\ ((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied"))
+       /\ meerkat_phase' = "Retired"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FailLiveTopologyAfterDetachRetired"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "FailLiveTopologyAfterDetachRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+meerkat_FailLiveTopologyAfterDetachStopped ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "meerkat"
+       /\ packet.variant = "FailLiveTopologyAfterDetach"
+       /\ ~HigherPriorityReady("meerkat_kernel")
+       /\ meerkat_phase = "Stopped"
+       /\ (meerkat_session_id # None)
+       /\ ((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied"))
+       /\ meerkat_phase' = "Stopped"
+       /\ meerkat_realtime_binding_state' = "Unbound"
+       /\ meerkat_realtime_binding_authority_epoch' = None
+       /\ meerkat_realtime_reattach_required' = TRUE
+       /\ meerkat_realtime_next_authority_epoch' = (meerkat_realtime_next_authority_epoch + 1)
+       /\ meerkat_live_topology_phase' = "Idle"
+       /\ UNCHANGED << meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "LiveTopologyPhaseChanged", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "FailLiveTopologyAfterDetachStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "FailLiveTopologyAfterDetachStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
+       /\ model_step_count' = model_step_count + 1
+
+
 meerkat_fence_requires_bound_runtime == ((meerkat_active_fence_token = None) \/ (meerkat_active_runtime_id # None))
 meerkat_running_has_current_run == ((meerkat_phase # "Running") \/ (meerkat_current_run_id # None))
 meerkat_current_run_only_while_running_or_retired == ((meerkat_current_run_id = None) \/ (meerkat_phase = "Running") \/ (meerkat_phase = "Retired"))
+meerkat_realtime_binding_epoch_consistency == ((meerkat_realtime_binding_state = "Unbound") = (meerkat_realtime_binding_authority_epoch = None))
 
 mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable) ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -3033,7 +4467,7 @@ mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3052,7 +4486,7 @@ mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token) ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3077,7 +4511,7 @@ mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id
        /\ (packet.payload.origin = "External")
        /\ (packet.payload.agent_runtime_id \in mob_externally_addressable_runtime_ids)
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3101,7 +4535,7 @@ mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ (packet.payload.origin = "Internal")
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Ingest", payload |-> [origin |-> packet.payload.origin, runtime_id |-> packet.payload.agent_runtime_id, work_id |-> packet.payload.work_id], source_kind |-> "route", source_route |-> "work_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeIngress", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3121,7 +4555,7 @@ mob_RetireMember(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_phase = "Running"
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3145,7 +4579,7 @@ mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_externally_addressable_runtime_ids' = (mob_externally_addressable_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3172,7 +4606,7 @@ mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_g
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3199,7 +4633,7 @@ mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg
        /\ mob_runtime_fence_tokens' = MapSet(mob_runtime_fence_tokens, packet.payload.agent_runtime_id, packet.payload.fence_token)
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "PrepareBindings", payload |-> [agent_runtime_id |-> packet.payload.agent_runtime_id, fence_token |-> packet.payload.fence_token, generation |-> packet.payload.generation], source_kind |-> "route", source_route |-> "binding_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeBinding", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3217,7 +4651,7 @@ mob_MarkCompleted ==
        /\ mob_phase = "Running" \/ mob_phase = "Stopped"
        /\ (mob_active_run_count = 0)
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3239,7 +4673,7 @@ mob_DestroyMob ==
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "destroy_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeDestroy", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "destroy_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeDestroy", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -3264,7 +4698,7 @@ mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token) ==
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3281,7 +4715,7 @@ mob_RecordOperatorActionProvenanceRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3298,7 +4732,7 @@ mob_RecordOperatorActionProvenanceStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3315,7 +4749,7 @@ mob_RecordOperatorActionProvenanceCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3332,7 +4766,7 @@ mob_RecordOperatorActionProvenanceDestroyed ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Destroyed"
        /\ mob_phase' = "Destroyed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3349,7 +4783,7 @@ mob_SetSpawnPolicyRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3366,7 +4800,7 @@ mob_SetSpawnPolicyStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3383,7 +4817,7 @@ mob_SetSpawnPolicyCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3400,7 +4834,7 @@ mob_SetSpawnPolicyDestroyed ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Destroyed"
        /\ mob_phase' = "Destroyed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3420,7 +4854,7 @@ mob_StopRunning ==
        /\ mob_phase' = "Stopped"
        /\ mob_active_run_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3438,7 +4872,7 @@ mob_ResumeStopped ==
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3456,7 +4890,7 @@ mob_CompleteRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Completed"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3476,7 +4910,7 @@ mob_ResetToRunning ==
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3493,7 +4927,7 @@ mob_WireRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3510,7 +4944,7 @@ mob_ExternalTurnRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3527,7 +4961,7 @@ mob_InternalTurnRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3544,7 +4978,7 @@ mob_TaskCreateRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3561,7 +4995,7 @@ mob_TaskUpdateRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3579,7 +5013,7 @@ mob_ForceCancelRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3597,7 +5031,7 @@ mob_SubscribeAgentEventsRunning ==
        /\ mob_phase = "Running"
        /\ (mob_live_runtime_ids # {})
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3615,7 +5049,7 @@ mob_SubscribeAgentEventsStopped ==
        /\ mob_phase = "Stopped"
        /\ (mob_live_runtime_ids # {})
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3633,7 +5067,7 @@ mob_SubscribeAgentEventsCompleted ==
        /\ mob_phase = "Completed"
        /\ (mob_live_runtime_ids # {})
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3651,7 +5085,7 @@ mob_SubscribeAgentEventsDestroyed ==
        /\ mob_phase = "Destroyed"
        /\ (mob_live_runtime_ids # {})
        /\ mob_phase' = "Destroyed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3668,7 +5102,7 @@ mob_SubscribeAllAgentEventsRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3685,7 +5119,7 @@ mob_SubscribeAllAgentEventsStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3702,7 +5136,7 @@ mob_SubscribeAllAgentEventsCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3719,7 +5153,7 @@ mob_SubscribeAllAgentEventsDestroyed ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Destroyed"
        /\ mob_phase' = "Destroyed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3736,7 +5170,7 @@ mob_SubscribeMobEventsRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3753,7 +5187,7 @@ mob_SubscribeMobEventsStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3770,7 +5204,7 @@ mob_SubscribeMobEventsCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3787,7 +5221,7 @@ mob_SubscribeMobEventsDestroyed ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Destroyed"
        /\ mob_phase' = "Destroyed"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3806,7 +5240,7 @@ mob_ShutdownRunning ==
        /\ mob_phase' = "Stopped"
        /\ mob_active_run_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3825,7 +5259,7 @@ mob_ShutdownStopped ==
        /\ mob_phase' = "Stopped"
        /\ mob_active_run_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3844,7 +5278,7 @@ mob_ShutdownCompleted ==
        /\ mob_phase' = "Completed"
        /\ mob_active_run_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3862,7 +5296,7 @@ mob_CancelFlowRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3880,7 +5314,7 @@ mob_InitializeOrchestratorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3898,7 +5332,7 @@ mob_BindCoordinatorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3916,7 +5350,7 @@ mob_UnbindCoordinatorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3934,7 +5368,7 @@ mob_StageSpawnRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_pending_spawn_count' = (mob_pending_spawn_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3952,7 +5386,7 @@ mob_StopOrchestratorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3970,7 +5404,7 @@ mob_StopOrchestratorStopped ==
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -3988,7 +5422,7 @@ mob_StopOrchestratorCompleted ==
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4006,7 +5440,7 @@ mob_ResumeOrchestratorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4024,7 +5458,7 @@ mob_ResumeOrchestratorStopped ==
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4042,7 +5476,7 @@ mob_ResumeOrchestratorCompleted ==
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
        /\ mob_coordinator_bound' = TRUE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4060,7 +5494,7 @@ mob_DestroyOrchestratorRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4078,7 +5512,7 @@ mob_DestroyOrchestratorStopped ==
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4096,7 +5530,7 @@ mob_DestroyOrchestratorCompleted ==
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Completed"
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4113,7 +5547,7 @@ mob_ForceCancelMemberRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4130,7 +5564,7 @@ mob_MemberPeerExposedRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4147,7 +5581,7 @@ mob_MemberTerminalizedRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4164,7 +5598,7 @@ mob_OperationPeerTrustedRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4181,7 +5615,7 @@ mob_PeerInputAdmittedRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4198,7 +5632,7 @@ mob_BeginCleanupStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4215,7 +5649,7 @@ mob_BeginCleanupCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4232,7 +5666,7 @@ mob_FinishCleanupStopped ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Stopped"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4249,7 +5683,7 @@ mob_FinishCleanupCompleted ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Completed"
        /\ mob_phase' = "Stopped"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4268,7 +5702,7 @@ mob_RunFlowRunning ==
        /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4287,7 +5721,7 @@ mob_StartFlowRunning ==
        /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4305,7 +5739,7 @@ mob_CreateRunRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4323,7 +5757,7 @@ mob_StartRunRunning ==
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = (mob_active_run_count) + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4340,7 +5774,7 @@ mob_UnwireRunning ==
        /\ ~HigherPriorityReady("mob_kernel")
        /\ mob_phase = "Running"
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4359,7 +5793,7 @@ mob_CompleteFlowRunning ==
        /\ (mob_active_run_count > 0)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4378,7 +5812,7 @@ mob_FinishRunRunning ==
        /\ (mob_active_run_count > 0)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4400,7 +5834,7 @@ mob_RetireRunning(arg_agent_runtime_id) ==
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -4422,7 +5856,7 @@ mob_RetireStopped(arg_agent_runtime_id) ==
        /\ mob_phase' = "Stopped"
        /\ mob_live_runtime_ids' = (mob_live_runtime_ids \ {packet.payload.agent_runtime_id})
        /\ mob_runtime_fence_tokens' = MapRemove(mob_runtime_fence_tokens, packet.payload.agent_runtime_id)
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = AppendIfMissing(SeqRemove(pending_inputs, packet), [machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> "meerkat", variant |-> "Retire", payload |-> [tag |-> "unit"], source_kind |-> "route", source_route |-> "retire_request_reaches_meerkat", source_machine |-> "mob", source_effect |-> "RequestRuntimeRetire", effect_id |-> (model_step_count + 1)]}
        /\ pending_routes' = pending_routes
@@ -4441,7 +5875,7 @@ mob_RetireAllRunning ==
        /\ mob_phase' = "Running"
        /\ mob_live_runtime_ids' = {}
        /\ mob_runtime_fence_tokens' = [x \in {} |-> None]
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4460,7 +5894,7 @@ mob_RetireAllStopped ==
        /\ mob_phase' = "Stopped"
        /\ mob_live_runtime_ids' = {}
        /\ mob_runtime_fence_tokens' = [x \in {} |-> None]
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4479,7 +5913,7 @@ mob_CompleteSpawnRunning ==
        /\ (mob_pending_spawn_count > 0)
        /\ mob_phase' = "Running"
        /\ mob_pending_spawn_count' = (mob_pending_spawn_count) - 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4501,7 +5935,7 @@ mob_DestroyFromAny ==
        /\ mob_active_run_count' = 0
        /\ mob_pending_spawn_count' = 0
        /\ mob_coordinator_bound' = FALSE
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_externally_addressable_runtime_ids, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_externally_addressable_runtime_ids, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4521,7 +5955,7 @@ mob_RespawnRunning(arg_agent_runtime_id) ==
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ (mob_coordinator_bound = TRUE)
        /\ mob_phase' = "Running"
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
@@ -4543,13 +5977,51 @@ mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token) ==
        /\ (packet.payload.agent_runtime_id \in mob_live_runtime_ids)
        /\ mob_phase' = "Running"
        /\ mob_active_run_count' = 0
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
        /\ pending_inputs' = SeqRemove(pending_inputs, packet)
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
        /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "FlowTerminalized", payload |-> [tag |-> "unit"], effect_id |-> (model_step_count + 1), source_transition |-> "CancelAllWorkRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "CancelAllWorkRunning", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RealtimeAttach(arg_agent_identity) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RealtimeAttach"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_member_voice_intent' = (mob_member_voice_intent \cup {packet.payload.agent_identity})
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "MemberVoiceIntentSet", payload |-> [agent_identity |-> packet.payload.agent_identity], effect_id |-> (model_step_count + 1), source_transition |-> "RealtimeAttach"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RealtimeAttach", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
+       /\ model_step_count' = model_step_count + 1
+
+
+mob_RealtimeDetach(arg_agent_identity) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "mob"
+       /\ packet.variant = "RealtimeDetach"
+       /\ packet.payload.agent_identity = arg_agent_identity
+       /\ ~HigherPriorityReady("mob_kernel")
+       /\ mob_phase = "Running"
+       /\ mob_phase' = "Running"
+       /\ mob_member_voice_intent' = (mob_member_voice_intent \ {packet.payload.agent_identity})
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "MemberVoiceIntentCleared", payload |-> [agent_identity |-> packet.payload.agent_identity], effect_id |-> (model_step_count + 1), source_transition |-> "RealtimeDetach"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "RealtimeDetach", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
 
@@ -4660,6 +6132,71 @@ EntryPacketAdmissible_meerkat(packet) ==
     \/ /\ (packet.variant = "Fail") /\ (meerkat_phase = "Running") /\ ((meerkat_pre_run_phase = Some("retired"))) /\ ((meerkat_current_run_id = Some(packet.payload.run_id)))
     \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Idle" \/ meerkat_phase = "Retired") /\ ((meerkat_active_runtime_id # None))
     \/ /\ (packet.variant = "Recycle") /\ (meerkat_phase = "Attached") /\ ((meerkat_active_runtime_id # None))
+    \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "ProjectRealtimeIntent") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "BeginRealtimeBinding") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginRealtimeBinding") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginRealtimeBinding") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginRealtimeBinding") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginRealtimeBinding") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "ReplaceRealtimeBinding") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "ReplaceRealtimeBinding") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "ReplaceRealtimeBinding") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "ReplaceRealtimeBinding") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "ReplaceRealtimeBinding") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "DetachRealtimeBinding") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "DetachRealtimeBinding") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "DetachRealtimeBinding") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "DetachRealtimeBinding") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "DetachRealtimeBinding") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "RequireRealtimeReattach") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "RequireRealtimeReattach") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "RequireRealtimeReattach") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "RequireRealtimeReattach") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "RequireRealtimeReattach") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None))
+    \/ /\ (packet.variant = "PublishRealtimeSignal") /\ (meerkat_phase = "Idle") /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle")) /\ (((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending")))
+    \/ /\ (packet.variant = "PublishRealtimeSignal") /\ (meerkat_phase = "Attached") /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle")) /\ (((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending")))
+    \/ /\ (packet.variant = "PublishRealtimeSignal") /\ (meerkat_phase = "Running") /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle")) /\ (((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending")))
+    \/ /\ (packet.variant = "PublishRealtimeSignal") /\ (meerkat_phase = "Retired") /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle")) /\ (((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending")))
+    \/ /\ (packet.variant = "PublishRealtimeSignal") /\ (meerkat_phase = "Stopped") /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle")) /\ (((packet.payload.next_binding_state = "BindingNotReady") \/ (packet.payload.next_binding_state = "BindingReady") \/ (packet.payload.next_binding_state = "ReplacementPending")))
+    \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "BeginLiveTopologyReconfigure") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_realtime_binding_authority_epoch = Some(packet.payload.authority_epoch))) /\ ((meerkat_live_topology_phase = "Idle"))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "MarkLiveTopologyDetached") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring")) /\ ((meerkat_current_run_id = None))
+    \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyIdentity") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Detached"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyVisibility") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostIdentityApplied"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyVisibility") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostIdentityApplied"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyVisibility") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostIdentityApplied"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyVisibility") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostIdentityApplied"))
+    \/ /\ (packet.variant = "ApplyLiveTopologyVisibility") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostIdentityApplied"))
+    \/ /\ (packet.variant = "CompleteLiveTopology") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostVisibilityApplied"))
+    \/ /\ (packet.variant = "CompleteLiveTopology") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostVisibilityApplied"))
+    \/ /\ (packet.variant = "CompleteLiveTopology") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostVisibilityApplied"))
+    \/ /\ (packet.variant = "CompleteLiveTopology") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostVisibilityApplied"))
+    \/ /\ (packet.variant = "CompleteLiveTopology") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "HostVisibilityApplied"))
+    \/ /\ (packet.variant = "AbortLiveTopologyBeforeDetach") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "AbortLiveTopologyBeforeDetach") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "AbortLiveTopologyBeforeDetach") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "AbortLiveTopologyBeforeDetach") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "AbortLiveTopologyBeforeDetach") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ ((meerkat_live_topology_phase = "Reconfiguring"))
+    \/ /\ (packet.variant = "FailLiveTopologyAfterDetach") /\ (meerkat_phase = "Idle") /\ ((meerkat_session_id # None)) /\ (((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied")))
+    \/ /\ (packet.variant = "FailLiveTopologyAfterDetach") /\ (meerkat_phase = "Attached") /\ ((meerkat_session_id # None)) /\ (((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied")))
+    \/ /\ (packet.variant = "FailLiveTopologyAfterDetach") /\ (meerkat_phase = "Running") /\ ((meerkat_session_id # None)) /\ (((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied")))
+    \/ /\ (packet.variant = "FailLiveTopologyAfterDetach") /\ (meerkat_phase = "Retired") /\ ((meerkat_session_id # None)) /\ (((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied")))
+    \/ /\ (packet.variant = "FailLiveTopologyAfterDetach") /\ (meerkat_phase = "Stopped") /\ ((meerkat_session_id # None)) /\ (((meerkat_live_topology_phase = "Detached") \/ (meerkat_live_topology_phase = "HostIdentityApplied") \/ (meerkat_live_topology_phase = "HostVisibilityApplied")))
 
 EntryPacketAdmissible_mob(packet) ==
     \/ /\ (packet.variant = "Spawn") /\ (mob_phase = "Running") /\ ((mob_coordinator_bound = TRUE))
@@ -4708,6 +6245,8 @@ EntryPacketAdmissible_mob(packet) ==
     \/ /\ (packet.variant = "Destroy") /\ (mob_phase = "Running" \/ mob_phase = "Stopped" \/ mob_phase = "Completed")
     \/ /\ (packet.variant = "Respawn") /\ (mob_phase = "Running") /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids)) /\ ((mob_coordinator_bound = TRUE))
     \/ /\ (packet.variant = "CancelAllWork") /\ (mob_phase = "Running") /\ ((mob_live_runtime_ids # {})) /\ ((packet.payload.agent_runtime_id \in mob_live_runtime_ids))
+    \/ /\ (packet.variant = "RealtimeAttach") /\ (mob_phase = "Running")
+    \/ /\ (packet.variant = "RealtimeDetach") /\ (mob_phase = "Running")
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -4721,7 +6260,7 @@ Inject_spawn_member(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, a
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "Spawn", payload |-> [agent_identity |-> arg_agent_identity, agent_runtime_id |-> arg_agent_runtime_id, external_addressable |-> arg_external_addressable, fence_token |-> arg_fence_token, generation |-> arg_generation], source_kind |-> "entry", source_route |-> "spawn_member", source_machine |-> "external_entry", source_effect |-> "Spawn", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "Spawn", payload |-> [agent_identity |-> arg_agent_identity, agent_runtime_id |-> arg_agent_runtime_id, external_addressable |-> arg_external_addressable, fence_token |-> arg_fence_token, generation |-> arg_generation], source_kind |-> "entry", source_route |-> "spawn_member", source_machine |-> "external_entry", source_effect |-> "Spawn", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_submit_work(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin) ==
     /\ ~([machine |-> "mob", variant |-> "SubmitWork", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token, origin |-> arg_origin, work_id |-> arg_work_id], source_kind |-> "entry", source_route |-> "submit_work", source_machine |-> "external_entry", source_effect |-> "SubmitWork", effect_id |-> 0] \in SeqElements(pending_inputs))
@@ -4729,7 +6268,7 @@ Inject_submit_work(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origi
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "SubmitWork", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token, origin |-> arg_origin, work_id |-> arg_work_id], source_kind |-> "entry", source_route |-> "submit_work", source_machine |-> "external_entry", source_effect |-> "SubmitWork", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "SubmitWork", payload |-> [agent_runtime_id |-> arg_agent_runtime_id, fence_token |-> arg_fence_token, origin |-> arg_origin, work_id |-> arg_work_id], source_kind |-> "entry", source_route |-> "submit_work", source_machine |-> "external_entry", source_effect |-> "SubmitWork", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_retire_member(arg_agent_runtime_id) ==
     /\ ~([machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0] \in SeqElements(pending_inputs))
@@ -4737,7 +6276,7 @@ Inject_retire_member(arg_agent_runtime_id) ==
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "Retire", payload |-> [agent_runtime_id |-> arg_agent_runtime_id], source_kind |-> "entry", source_route |-> "retire_member", source_machine |-> "external_entry", source_effect |-> "Retire", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 Inject_destroy_mob ==
     /\ ~([machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0] \in SeqElements(pending_inputs))
@@ -4745,7 +6284,7 @@ Inject_destroy_mob ==
     /\ pending_inputs' = Append(pending_inputs, [machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0])
     /\ observed_inputs' = observed_inputs \cup {[machine |-> "mob", variant |-> "Destroy", payload |-> [tag |-> "unit"], source_kind |-> "entry", source_route |-> "destroy_mob", source_machine |-> "external_entry", source_effect |-> "Destroy", effect_id |-> 0]}
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+    /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, pending_routes, delivered_routes, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 DeliverQueuedRoute ==
     /\ Len(pending_routes) > 0
@@ -4755,7 +6294,7 @@ DeliverQueuedRoute ==
        /\ model_step_count' = model_step_count + 1
        /\ pending_inputs' = AppendIfMissing(pending_inputs, [machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id])
        /\ observed_inputs' = observed_inputs \cup {[machine |-> route.target_machine, variant |-> route.target_input, payload |-> route.payload, source_kind |-> "route", source_route |-> route.route, source_machine |-> route.source_machine, source_effect |-> route.effect, effect_id |-> route.effect_id]}
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, emitted_effects, observed_transitions, witness_current_script_input, witness_remaining_script_inputs >>
 
 RejectPendingEntryInput ==
     /\ \E packet \in SeqElements(pending_inputs) :
@@ -4768,7 +6307,7 @@ RejectPendingEntryInput ==
        /\ emitted_effects' = emitted_effects
        /\ observed_transitions' = observed_transitions
        /\ model_step_count' = model_step_count + 1
-       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, witness_current_script_input, witness_remaining_script_inputs >>
+       /\ UNCHANGED << meerkat_phase, meerkat_session_id, meerkat_active_runtime_id, meerkat_active_fence_token, meerkat_current_run_id, meerkat_pre_run_phase, meerkat_silent_intent_overrides, meerkat_realtime_intent_present, meerkat_realtime_binding_state, meerkat_realtime_binding_authority_epoch, meerkat_realtime_reattach_required, meerkat_realtime_next_authority_epoch, meerkat_live_topology_phase, mob_phase, mob_live_runtime_ids, mob_externally_addressable_runtime_ids, mob_runtime_fence_tokens, mob_active_run_count, mob_pending_spawn_count, mob_coordinator_bound, mob_member_voice_intent, witness_current_script_input, witness_remaining_script_inputs >>
 
 QuiescentStutter ==
     /\ Len(pending_routes) = 0
@@ -4929,6 +6468,71 @@ CoreNext ==
     \/ meerkat_ShutdownSurfaceRunning
     \/ meerkat_RecycleFromIdleOrRetired
     \/ meerkat_RecycleFromAttached
+    \/ \E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentIdle(arg_present)
+    \/ \E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentAttached(arg_present)
+    \/ \E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRunning(arg_present)
+    \/ \E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRetired(arg_present)
+    \/ \E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentStopped(arg_present)
+    \/ meerkat_BeginRealtimeBindingIdle
+    \/ meerkat_BeginRealtimeBindingAttached
+    \/ meerkat_BeginRealtimeBindingRunning
+    \/ meerkat_BeginRealtimeBindingRetired
+    \/ meerkat_BeginRealtimeBindingStopped
+    \/ meerkat_ReplaceRealtimeBindingIdle
+    \/ meerkat_ReplaceRealtimeBindingAttached
+    \/ meerkat_ReplaceRealtimeBindingRunning
+    \/ meerkat_ReplaceRealtimeBindingRetired
+    \/ meerkat_ReplaceRealtimeBindingStopped
+    \/ meerkat_DetachRealtimeBindingIdle
+    \/ meerkat_DetachRealtimeBindingAttached
+    \/ meerkat_DetachRealtimeBindingRunning
+    \/ meerkat_DetachRealtimeBindingRetired
+    \/ meerkat_DetachRealtimeBindingStopped
+    \/ meerkat_RequireRealtimeReattachIdle
+    \/ meerkat_RequireRealtimeReattachAttached
+    \/ meerkat_RequireRealtimeReattachRunning
+    \/ meerkat_RequireRealtimeReattachRetired
+    \/ meerkat_RequireRealtimeReattachStopped
+    \/ \E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalIdle(arg_authority_epoch, arg_next_binding_state)
+    \/ \E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalAttached(arg_authority_epoch, arg_next_binding_state)
+    \/ \E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRunning(arg_authority_epoch, arg_next_binding_state)
+    \/ \E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRetired(arg_authority_epoch, arg_next_binding_state)
+    \/ \E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalStopped(arg_authority_epoch, arg_next_binding_state)
+    \/ \E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureIdle(arg_authority_epoch)
+    \/ \E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureAttached(arg_authority_epoch)
+    \/ \E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRunning(arg_authority_epoch)
+    \/ \E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRetired(arg_authority_epoch)
+    \/ \E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureStopped(arg_authority_epoch)
+    \/ meerkat_MarkLiveTopologyDetachedIdle
+    \/ meerkat_MarkLiveTopologyDetachedAttached
+    \/ meerkat_MarkLiveTopologyDetachedRunning
+    \/ meerkat_MarkLiveTopologyDetachedRetired
+    \/ meerkat_MarkLiveTopologyDetachedStopped
+    \/ meerkat_ApplyLiveTopologyIdentityIdle
+    \/ meerkat_ApplyLiveTopologyIdentityAttached
+    \/ meerkat_ApplyLiveTopologyIdentityRunning
+    \/ meerkat_ApplyLiveTopologyIdentityRetired
+    \/ meerkat_ApplyLiveTopologyIdentityStopped
+    \/ meerkat_ApplyLiveTopologyVisibilityIdle
+    \/ meerkat_ApplyLiveTopologyVisibilityAttached
+    \/ meerkat_ApplyLiveTopologyVisibilityRunning
+    \/ meerkat_ApplyLiveTopologyVisibilityRetired
+    \/ meerkat_ApplyLiveTopologyVisibilityStopped
+    \/ meerkat_CompleteLiveTopologyIdle
+    \/ meerkat_CompleteLiveTopologyAttached
+    \/ meerkat_CompleteLiveTopologyRunning
+    \/ meerkat_CompleteLiveTopologyRetired
+    \/ meerkat_CompleteLiveTopologyStopped
+    \/ meerkat_AbortLiveTopologyBeforeDetachIdle
+    \/ meerkat_AbortLiveTopologyBeforeDetachAttached
+    \/ meerkat_AbortLiveTopologyBeforeDetachRunning
+    \/ meerkat_AbortLiveTopologyBeforeDetachRetired
+    \/ meerkat_AbortLiveTopologyBeforeDetachStopped
+    \/ meerkat_FailLiveTopologyAfterDetachIdle
+    \/ meerkat_FailLiveTopologyAfterDetachAttached
+    \/ meerkat_FailLiveTopologyAfterDetachRunning
+    \/ meerkat_FailLiveTopologyAfterDetachRetired
+    \/ meerkat_FailLiveTopologyAfterDetachStopped
     \/ \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)
@@ -5011,6 +6615,8 @@ CoreNext ==
     \/ mob_DestroyFromAny
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token)
+    \/ \E arg_agent_identity \in AgentIdentityValues : mob_RealtimeAttach(arg_agent_identity)
+    \/ \E arg_agent_identity \in AgentIdentityValues : mob_RealtimeDetach(arg_agent_identity)
     \/ QuiescentStutter
 
 InjectNext ==
@@ -5052,16 +6658,16 @@ RouteObserved_runtime_destroyed_reaches_mob == \E packet \in RoutePackets : pack
 RouteCoverage_runtime_destroyed_reaches_mob == (RouteObserved_runtime_destroyed_reaches_mob \/ ~RouteObserved_runtime_destroyed_reaches_mob)
 CoverageInstrumentation == RouteCoverage_binding_request_reaches_meerkat /\ RouteCoverage_work_request_reaches_meerkat /\ RouteCoverage_retire_request_reaches_meerkat /\ RouteCoverage_destroy_request_reaches_meerkat /\ RouteCoverage_runtime_bound_reaches_mob /\ RouteCoverage_runtime_retired_reaches_mob /\ RouteCoverage_runtime_destroyed_reaches_mob
 
-CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0
-DeepStateConstraint == /\ model_step_count <= 6 /\ Len(pending_inputs) <= 2 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 6 /\ Cardinality(meerkat_silent_intent_overrides) <= 2 /\ Cardinality(mob_live_runtime_ids) <= 2 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 2
-WitnessStateConstraint_basic_round_trip == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0
-WitnessStateConstraint_retire_runtime_path == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0
-WitnessStateConstraint_destroy_runtime_path == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0
+CiStateConstraint == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 10 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 0 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0 /\ Cardinality(mob_member_voice_intent) <= 0
+DeepStateConstraint == /\ model_step_count <= 6 /\ Len(pending_inputs) <= 2 /\ Cardinality(observed_inputs) <= 6 /\ Len(pending_routes) <= 2 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 2 /\ Cardinality(observed_transitions) <= 6 /\ Cardinality(meerkat_silent_intent_overrides) <= 2 /\ Cardinality(mob_live_runtime_ids) <= 2 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 2 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 2 /\ Cardinality(mob_member_voice_intent) <= 2
+WitnessStateConstraint_basic_round_trip == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 13 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 3 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0 /\ Cardinality(mob_member_voice_intent) <= 0
+WitnessStateConstraint_retire_runtime_path == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0 /\ Cardinality(mob_member_voice_intent) <= 0
+WitnessStateConstraint_destroy_runtime_path == /\ model_step_count <= 8 /\ Len(pending_inputs) <= 8 /\ Cardinality(observed_inputs) <= 12 /\ Len(pending_routes) <= 8 /\ Cardinality(delivered_routes) <= 2 /\ Cardinality(emitted_effects) <= 0 /\ Cardinality(observed_transitions) <= 8 /\ Cardinality(meerkat_silent_intent_overrides) <= 0 /\ Cardinality(mob_live_runtime_ids) <= 0 /\ Cardinality(mob_externally_addressable_runtime_ids) <= 0 /\ Cardinality(DOMAIN mob_runtime_fence_tokens) <= 0 /\ Cardinality(mob_member_voice_intent) <= 0
 
 Spec == Init /\ [][Next]_vars
-WitnessSpec_basic_round_trip == WitnessInit_basic_round_trip /\ [] [WitnessNext_basic_round_trip]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token))
-WitnessSpec_retire_runtime_path == WitnessInit_retire_runtime_path /\ [] [WitnessNext_retire_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token))
-WitnessSpec_destroy_runtime_path == WitnessInit_destroy_runtime_path /\ [] [WitnessNext_destroy_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token))
+WitnessSpec_basic_round_trip == WitnessInit_basic_round_trip /\ [] [WitnessNext_basic_round_trip]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentIdle(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentAttached(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRunning(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRetired(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentStopped(arg_present)) /\ WF_vars(meerkat_BeginRealtimeBindingIdle) /\ WF_vars(meerkat_BeginRealtimeBindingAttached) /\ WF_vars(meerkat_BeginRealtimeBindingRunning) /\ WF_vars(meerkat_BeginRealtimeBindingRetired) /\ WF_vars(meerkat_BeginRealtimeBindingStopped) /\ WF_vars(meerkat_ReplaceRealtimeBindingIdle) /\ WF_vars(meerkat_ReplaceRealtimeBindingAttached) /\ WF_vars(meerkat_ReplaceRealtimeBindingRunning) /\ WF_vars(meerkat_ReplaceRealtimeBindingRetired) /\ WF_vars(meerkat_ReplaceRealtimeBindingStopped) /\ WF_vars(meerkat_DetachRealtimeBindingIdle) /\ WF_vars(meerkat_DetachRealtimeBindingAttached) /\ WF_vars(meerkat_DetachRealtimeBindingRunning) /\ WF_vars(meerkat_DetachRealtimeBindingRetired) /\ WF_vars(meerkat_DetachRealtimeBindingStopped) /\ WF_vars(meerkat_RequireRealtimeReattachIdle) /\ WF_vars(meerkat_RequireRealtimeReattachAttached) /\ WF_vars(meerkat_RequireRealtimeReattachRunning) /\ WF_vars(meerkat_RequireRealtimeReattachRetired) /\ WF_vars(meerkat_RequireRealtimeReattachStopped) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalIdle(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalAttached(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRunning(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRetired(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalStopped(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureIdle(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureAttached(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRunning(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRetired(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureStopped(arg_authority_epoch)) /\ WF_vars(meerkat_MarkLiveTopologyDetachedIdle) /\ WF_vars(meerkat_MarkLiveTopologyDetachedAttached) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRunning) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRetired) /\ WF_vars(meerkat_MarkLiveTopologyDetachedStopped) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityStopped) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityStopped) /\ WF_vars(meerkat_CompleteLiveTopologyIdle) /\ WF_vars(meerkat_CompleteLiveTopologyAttached) /\ WF_vars(meerkat_CompleteLiveTopologyRunning) /\ WF_vars(meerkat_CompleteLiveTopologyRetired) /\ WF_vars(meerkat_CompleteLiveTopologyStopped) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachIdle) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachAttached) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRunning) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRetired) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachStopped) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachIdle) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachAttached) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRunning) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRetired) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachStopped) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeAttach(arg_agent_identity)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeDetach(arg_agent_identity))
+WitnessSpec_retire_runtime_path == WitnessInit_retire_runtime_path /\ [] [WitnessNext_retire_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentIdle(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentAttached(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRunning(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRetired(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentStopped(arg_present)) /\ WF_vars(meerkat_BeginRealtimeBindingIdle) /\ WF_vars(meerkat_BeginRealtimeBindingAttached) /\ WF_vars(meerkat_BeginRealtimeBindingRunning) /\ WF_vars(meerkat_BeginRealtimeBindingRetired) /\ WF_vars(meerkat_BeginRealtimeBindingStopped) /\ WF_vars(meerkat_ReplaceRealtimeBindingIdle) /\ WF_vars(meerkat_ReplaceRealtimeBindingAttached) /\ WF_vars(meerkat_ReplaceRealtimeBindingRunning) /\ WF_vars(meerkat_ReplaceRealtimeBindingRetired) /\ WF_vars(meerkat_ReplaceRealtimeBindingStopped) /\ WF_vars(meerkat_DetachRealtimeBindingIdle) /\ WF_vars(meerkat_DetachRealtimeBindingAttached) /\ WF_vars(meerkat_DetachRealtimeBindingRunning) /\ WF_vars(meerkat_DetachRealtimeBindingRetired) /\ WF_vars(meerkat_DetachRealtimeBindingStopped) /\ WF_vars(meerkat_RequireRealtimeReattachIdle) /\ WF_vars(meerkat_RequireRealtimeReattachAttached) /\ WF_vars(meerkat_RequireRealtimeReattachRunning) /\ WF_vars(meerkat_RequireRealtimeReattachRetired) /\ WF_vars(meerkat_RequireRealtimeReattachStopped) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalIdle(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalAttached(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRunning(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRetired(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalStopped(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureIdle(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureAttached(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRunning(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRetired(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureStopped(arg_authority_epoch)) /\ WF_vars(meerkat_MarkLiveTopologyDetachedIdle) /\ WF_vars(meerkat_MarkLiveTopologyDetachedAttached) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRunning) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRetired) /\ WF_vars(meerkat_MarkLiveTopologyDetachedStopped) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityStopped) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityStopped) /\ WF_vars(meerkat_CompleteLiveTopologyIdle) /\ WF_vars(meerkat_CompleteLiveTopologyAttached) /\ WF_vars(meerkat_CompleteLiveTopologyRunning) /\ WF_vars(meerkat_CompleteLiveTopologyRetired) /\ WF_vars(meerkat_CompleteLiveTopologyStopped) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachIdle) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachAttached) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRunning) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRetired) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachStopped) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachIdle) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachAttached) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRunning) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRetired) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachStopped) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeAttach(arg_agent_identity)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeDetach(arg_agent_identity))
+WitnessSpec_destroy_runtime_path == WitnessInit_destroy_runtime_path /\ [] [WitnessNext_destroy_runtime_path]_vars /\ WF_vars(DeliverQueuedRoute) /\ WF_vars(RejectPendingEntryInput) /\ WF_vars(meerkat_Initialize) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_RegisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_UnregisterSessionStopped(arg_session_id)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityAttached(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_previous_identity \in SessionLlmIdentityValues : \E arg_previous_visibility_state \in SessionToolVisibilityStateValues : \E arg_previous_capability_surface \in OptionSessionLlmCapabilitySurfaceValues : \E arg_previous_capability_surface_status \in SessionLlmCapabilitySurfaceStatusValues : \E arg_target_identity \in SessionLlmIdentityValues : \E arg_target_capability_surface \in SessionLlmCapabilitySurfaceValues : \E arg_next_visibility_state \in SessionToolVisibilityStateValues : \E arg_next_capability_base_filter \in ToolFilterValues : \E arg_next_active_visibility_revision \in 0..2 : \E arg_tool_visibility_delta \in SessionToolVisibilityDeltaValues : meerkat_ReconfigureSessionLlmIdentityRunning(arg_previous_identity, arg_previous_visibility_state, arg_previous_capability_surface, arg_previous_capability_surface_status, arg_target_identity, arg_target_capability_surface, arg_next_visibility_state, arg_next_capability_base_filter, arg_next_active_visibility_revision, arg_tool_visibility_delta)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterIdle(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterAttached(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRunning(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterRetired(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_filter \in ToolFilterValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_StagePersistentFilterStopped(arg_filter, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsIdle(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsAttached(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRunning(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsRetired(arg_names, arg_witnesses)) /\ WF_vars(\E arg_names \in SetOfStringValues : \E arg_witnesses \in MapStringToolVisibilityWitnessValues : meerkat_RequestDeferredToolsStopped(arg_names, arg_witnesses)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsInitializing(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsIdle(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsAttached(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRunning(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsRetired(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : meerkat_PrepareBindingsStopped(arg_agent_runtime_id, arg_fence_token, arg_generation)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextIdle(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextAttached(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRunning(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextRetired(arg_keep_alive)) /\ WF_vars(\E arg_keep_alive \in BOOLEAN : meerkat_SetPeerIngressContextStopped(arg_keep_alive)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedIdle(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedAttached(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRunning(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedRetired(arg_reason)) /\ WF_vars(\E arg_reason \in StringValues : meerkat_NotifyDrainExitedStopped(arg_reason)) /\ WF_vars(meerkat_InterruptCurrentRunAttached) /\ WF_vars(meerkat_InterruptCurrentRun) /\ WF_vars(meerkat_CancelAfterBoundaryAttached) /\ WF_vars(meerkat_CancelAfterBoundary) /\ WF_vars(\E arg_revision \in 0..2 : meerkat_BoundaryAppliedPublish(arg_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetIdle(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetAttached(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRunning(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetRetired(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(\E arg_active_filter \in ToolFilterValues : \E arg_staged_filter \in ToolFilterValues : \E arg_active_requested_deferred_names \in SetOfStringValues : \E arg_staged_requested_deferred_names \in SetOfStringValues : \E arg_active_visibility_revision \in 0..2 : \E arg_staged_visibility_revision \in 0..2 : meerkat_PublishCommittedVisibleSetStopped(arg_active_filter, arg_staged_filter, arg_active_requested_deferred_names, arg_staged_requested_deferred_names, arg_active_visibility_revision, arg_staged_visibility_revision)) /\ WF_vars(meerkat_RetireRequestedFromIdle) /\ WF_vars(meerkat_Reset) /\ WF_vars(meerkat_StopRuntimeExecutorUnbound) /\ WF_vars(meerkat_StopRuntimeExecutorAttached) /\ WF_vars(meerkat_StopRuntimeExecutorRunning) /\ WF_vars(meerkat_Destroy) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_EnsureSessionWithExecutorStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsIdle(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsAttached(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRunning(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsRetired(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_intents \in SetOfStringValues : meerkat_SetSilentIntentsStopped(arg_session_id, arg_intents)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_AbortStopped(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitIdle(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitAttached(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRunning(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitRetired(arg_session_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : meerkat_WaitStopped(arg_session_id)) /\ WF_vars(meerkat_AbortAllIdle) /\ WF_vars(meerkat_AbortAllAttached) /\ WF_vars(meerkat_AbortAllRunning) /\ WF_vars(meerkat_AbortAllRetired) /\ WF_vars(meerkat_AbortAllStopped) /\ WF_vars(meerkat_EnsureDrainRunningAttached) /\ WF_vars(meerkat_EnsureDrainRunningRunning) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestIdle(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestAttached(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_runtime_id \in AgentRuntimeIdValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : meerkat_IngestRunning(arg_runtime_id, arg_work_id, arg_origin)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventIdle(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventAttached(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRunning(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventRetired(arg_kind)) /\ WF_vars(\E arg_kind \in StringValues : meerkat_PublishEventStopped(arg_kind)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionIdleImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionAttachedQueued(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningQueuedPassive(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningInterruptYielding(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_request_immediate_processing \in BOOLEAN : \E arg_interrupt_yielding \in BOOLEAN : \E arg_run_id \in RunIdValues : meerkat_AcceptWithCompletionRunningImmediate(arg_input_id, arg_request_immediate_processing, arg_interrupt_yielding, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeIdle(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeAttached(arg_input_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : meerkat_AcceptWithoutWakeRunning(arg_input_id)) /\ WF_vars(meerkat_ClassifyExternalEnvelopeAttached) /\ WF_vars(meerkat_ClassifyExternalEnvelopeRunning) /\ WF_vars(meerkat_ClassifyPlainEventAttached) /\ WF_vars(meerkat_ClassifyPlainEventRunning) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareIdle(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_session_id \in SessionIdValues : \E arg_run_id \in RunIdValues : meerkat_PrepareAttached(arg_session_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_DrainQueuedRunRetired(arg_run_id)) /\ WF_vars(meerkat_StartConversationRunAttached) /\ WF_vars(meerkat_StartImmediateAppendAttached) /\ WF_vars(meerkat_StartImmediateContextAttached) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToIdle(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToAttached(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_input_id \in InputIdValues : \E arg_run_id \in RunIdValues : meerkat_CommitRunningToRetired(arg_input_id, arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToIdle(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToAttached(arg_run_id)) /\ WF_vars(\E arg_run_id \in RunIdValues : meerkat_FailRunningToRetired(arg_run_id)) /\ WF_vars(meerkat_StageAddAttached) /\ WF_vars(meerkat_StageAddRunning) /\ WF_vars(meerkat_StageRemoveAttached) /\ WF_vars(meerkat_StageRemoveRunning) /\ WF_vars(meerkat_StageReloadAttached) /\ WF_vars(meerkat_StageReloadRunning) /\ WF_vars(meerkat_ApplySurfaceBoundaryAttached) /\ WF_vars(meerkat_ApplySurfaceBoundaryRunning) /\ WF_vars(meerkat_PendingSucceededAttached) /\ WF_vars(meerkat_PendingSucceededRunning) /\ WF_vars(meerkat_PendingFailedAttached) /\ WF_vars(meerkat_PendingFailedRunning) /\ WF_vars(meerkat_CallStartedAttached) /\ WF_vars(meerkat_CallStartedRunning) /\ WF_vars(meerkat_CallFinishedAttached) /\ WF_vars(meerkat_CallFinishedRunning) /\ WF_vars(meerkat_FinalizeRemovalCleanAttached) /\ WF_vars(meerkat_FinalizeRemovalCleanRunning) /\ WF_vars(meerkat_FinalizeRemovalForcedAttached) /\ WF_vars(meerkat_FinalizeRemovalForcedRunning) /\ WF_vars(meerkat_SnapshotAlignedAttached) /\ WF_vars(meerkat_SnapshotAlignedRunning) /\ WF_vars(meerkat_ShutdownSurfaceAttached) /\ WF_vars(meerkat_ShutdownSurfaceRunning) /\ WF_vars(meerkat_RecycleFromIdleOrRetired) /\ WF_vars(meerkat_RecycleFromAttached) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentIdle(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentAttached(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRunning(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentRetired(arg_present)) /\ WF_vars(\E arg_present \in BOOLEAN : meerkat_ProjectRealtimeIntentStopped(arg_present)) /\ WF_vars(meerkat_BeginRealtimeBindingIdle) /\ WF_vars(meerkat_BeginRealtimeBindingAttached) /\ WF_vars(meerkat_BeginRealtimeBindingRunning) /\ WF_vars(meerkat_BeginRealtimeBindingRetired) /\ WF_vars(meerkat_BeginRealtimeBindingStopped) /\ WF_vars(meerkat_ReplaceRealtimeBindingIdle) /\ WF_vars(meerkat_ReplaceRealtimeBindingAttached) /\ WF_vars(meerkat_ReplaceRealtimeBindingRunning) /\ WF_vars(meerkat_ReplaceRealtimeBindingRetired) /\ WF_vars(meerkat_ReplaceRealtimeBindingStopped) /\ WF_vars(meerkat_DetachRealtimeBindingIdle) /\ WF_vars(meerkat_DetachRealtimeBindingAttached) /\ WF_vars(meerkat_DetachRealtimeBindingRunning) /\ WF_vars(meerkat_DetachRealtimeBindingRetired) /\ WF_vars(meerkat_DetachRealtimeBindingStopped) /\ WF_vars(meerkat_RequireRealtimeReattachIdle) /\ WF_vars(meerkat_RequireRealtimeReattachAttached) /\ WF_vars(meerkat_RequireRealtimeReattachRunning) /\ WF_vars(meerkat_RequireRealtimeReattachRetired) /\ WF_vars(meerkat_RequireRealtimeReattachStopped) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalIdle(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalAttached(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRunning(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalRetired(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : \E arg_next_binding_state \in StringValues : meerkat_PublishRealtimeSignalStopped(arg_authority_epoch, arg_next_binding_state)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureIdle(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureAttached(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRunning(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureRetired(arg_authority_epoch)) /\ WF_vars(\E arg_authority_epoch \in 0..2 : meerkat_BeginLiveTopologyReconfigureStopped(arg_authority_epoch)) /\ WF_vars(meerkat_MarkLiveTopologyDetachedIdle) /\ WF_vars(meerkat_MarkLiveTopologyDetachedAttached) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRunning) /\ WF_vars(meerkat_MarkLiveTopologyDetachedRetired) /\ WF_vars(meerkat_MarkLiveTopologyDetachedStopped) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyIdentityStopped) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityIdle) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityAttached) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRunning) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityRetired) /\ WF_vars(meerkat_ApplyLiveTopologyVisibilityStopped) /\ WF_vars(meerkat_CompleteLiveTopologyIdle) /\ WF_vars(meerkat_CompleteLiveTopologyAttached) /\ WF_vars(meerkat_CompleteLiveTopologyRunning) /\ WF_vars(meerkat_CompleteLiveTopologyRetired) /\ WF_vars(meerkat_CompleteLiveTopologyStopped) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachIdle) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachAttached) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRunning) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachRetired) /\ WF_vars(meerkat_AbortLiveTopologyBeforeDetachStopped) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachIdle) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachAttached) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRunning) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachRetired) /\ WF_vars(meerkat_FailLiveTopologyAfterDetachStopped) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_SpawnRunning(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeReady(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningExternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_work_id \in WorkIdValues : \E arg_origin \in StringValues : mob_SubmitWorkRunningInternal(arg_agent_runtime_id, arg_fence_token, arg_work_id, arg_origin)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_RetireMember(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeRetired(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_ResetMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_external_addressable \in BOOLEAN : mob_RespawnMember(arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_external_addressable)) /\ WF_vars(mob_MarkCompleted) /\ WF_vars(mob_DestroyMob) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_ObserveRuntimeDestroyed(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(mob_RecordOperatorActionProvenanceRunning) /\ WF_vars(mob_RecordOperatorActionProvenanceStopped) /\ WF_vars(mob_RecordOperatorActionProvenanceCompleted) /\ WF_vars(mob_RecordOperatorActionProvenanceDestroyed) /\ WF_vars(mob_SetSpawnPolicyRunning) /\ WF_vars(mob_SetSpawnPolicyStopped) /\ WF_vars(mob_SetSpawnPolicyCompleted) /\ WF_vars(mob_SetSpawnPolicyDestroyed) /\ WF_vars(mob_StopRunning) /\ WF_vars(mob_ResumeStopped) /\ WF_vars(mob_CompleteRunning) /\ WF_vars(mob_ResetToRunning) /\ WF_vars(mob_WireRunning) /\ WF_vars(mob_ExternalTurnRunning) /\ WF_vars(mob_InternalTurnRunning) /\ WF_vars(mob_TaskCreateRunning) /\ WF_vars(mob_TaskUpdateRunning) /\ WF_vars(mob_ForceCancelRunning) /\ WF_vars(mob_SubscribeAgentEventsRunning) /\ WF_vars(mob_SubscribeAgentEventsStopped) /\ WF_vars(mob_SubscribeAgentEventsCompleted) /\ WF_vars(mob_SubscribeAgentEventsDestroyed) /\ WF_vars(mob_SubscribeAllAgentEventsRunning) /\ WF_vars(mob_SubscribeAllAgentEventsStopped) /\ WF_vars(mob_SubscribeAllAgentEventsCompleted) /\ WF_vars(mob_SubscribeAllAgentEventsDestroyed) /\ WF_vars(mob_SubscribeMobEventsRunning) /\ WF_vars(mob_SubscribeMobEventsStopped) /\ WF_vars(mob_SubscribeMobEventsCompleted) /\ WF_vars(mob_SubscribeMobEventsDestroyed) /\ WF_vars(mob_ShutdownRunning) /\ WF_vars(mob_ShutdownStopped) /\ WF_vars(mob_ShutdownCompleted) /\ WF_vars(mob_CancelFlowRunning) /\ WF_vars(mob_InitializeOrchestratorRunning) /\ WF_vars(mob_BindCoordinatorRunning) /\ WF_vars(mob_UnbindCoordinatorRunning) /\ WF_vars(mob_StageSpawnRunning) /\ WF_vars(mob_StopOrchestratorRunning) /\ WF_vars(mob_StopOrchestratorStopped) /\ WF_vars(mob_StopOrchestratorCompleted) /\ WF_vars(mob_ResumeOrchestratorRunning) /\ WF_vars(mob_ResumeOrchestratorStopped) /\ WF_vars(mob_ResumeOrchestratorCompleted) /\ WF_vars(mob_DestroyOrchestratorRunning) /\ WF_vars(mob_DestroyOrchestratorStopped) /\ WF_vars(mob_DestroyOrchestratorCompleted) /\ WF_vars(mob_ForceCancelMemberRunning) /\ WF_vars(mob_MemberPeerExposedRunning) /\ WF_vars(mob_MemberTerminalizedRunning) /\ WF_vars(mob_OperationPeerTrustedRunning) /\ WF_vars(mob_PeerInputAdmittedRunning) /\ WF_vars(mob_BeginCleanupStopped) /\ WF_vars(mob_BeginCleanupCompleted) /\ WF_vars(mob_FinishCleanupStopped) /\ WF_vars(mob_FinishCleanupCompleted) /\ WF_vars(mob_RunFlowRunning) /\ WF_vars(mob_StartFlowRunning) /\ WF_vars(mob_CreateRunRunning) /\ WF_vars(mob_StartRunRunning) /\ WF_vars(mob_UnwireRunning) /\ WF_vars(mob_CompleteFlowRunning) /\ WF_vars(mob_FinishRunRunning) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RetireStopped(arg_agent_runtime_id)) /\ WF_vars(mob_RetireAllRunning) /\ WF_vars(mob_RetireAllStopped) /\ WF_vars(mob_CompleteSpawnRunning) /\ WF_vars(mob_DestroyFromAny) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : mob_RespawnRunning(arg_agent_runtime_id)) /\ WF_vars(\E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : mob_CancelAllWorkRunning(arg_agent_runtime_id, arg_fence_token)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeAttach(arg_agent_identity)) /\ WF_vars(\E arg_agent_identity \in AgentIdentityValues : mob_RealtimeDetach(arg_agent_identity))
 
 WitnessRouteObserved_basic_round_trip_binding_request_reaches_meerkat == <> RouteObserved_binding_request_reaches_meerkat
 WitnessRouteObserved_basic_round_trip_work_request_reaches_meerkat == <> RouteObserved_work_request_reaches_meerkat
@@ -5074,5 +6680,6 @@ WitnessRouteObserved_destroy_runtime_path_runtime_destroyed_reaches_mob == <> Ro
 THEOREM Spec => []meerkat_fence_requires_bound_runtime
 THEOREM Spec => []meerkat_running_has_current_run
 THEOREM Spec => []meerkat_current_run_only_while_running_or_retired
+THEOREM Spec => []meerkat_realtime_binding_epoch_consistency
 
 =============================================================================

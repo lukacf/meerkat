@@ -40,6 +40,7 @@ thiserror = { workspace = true }
 # Utilities
 uuid = { workspace = true, features = ["v4"] }
 base64 = "0.22"
+sha2 = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 parking_lot = "0.12"
 tracing = { workspace = true }

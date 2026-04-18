@@ -39,6 +39,40 @@ smoke_scenario!(e2e_smoke_s52_cli_rpc_cli_continuity, 52);
 smoke_scenario!(e2e_smoke_s53_cli_rest_cli_continuity, 53);
 smoke_scenario!(e2e_smoke_s54_shared_realm_mob_visibility, 54);
 smoke_scenario!(e2e_smoke_s55_rpc_rest_callback_peer_storm_resume, 55);
+smoke_scenario!(
+    e2e_smoke_s57_python_sdk_realtime_channel_session_exchange,
+    57
+);
+smoke_scenario!(
+    e2e_smoke_s58_python_sdk_realtime_member_respawn_continuity,
+    58
+);
+smoke_scenario!(
+    e2e_smoke_s59_typescript_sdk_realtime_channel_session_exchange,
+    59
+);
+smoke_scenario!(e2e_smoke_s60_rust_sdk_realtime_channel_session_exchange, 60);
+smoke_scenario!(e2e_smoke_s61_cli_realtime_bridge_session_roundtrip, 61);
+smoke_scenario!(
+    e2e_smoke_s62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange,
+    62
+);
+smoke_scenario!(
+    e2e_smoke_s63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange,
+    63
+);
+smoke_scenario!(
+    e2e_smoke_s64_python_sdk_realtime_member_model_switch_continuity,
+    64
+);
+smoke_scenario!(
+    e2e_smoke_s71_rust_sdk_realtime_audio_mob_collaboration_roundtrip,
+    71
+);
+smoke_scenario!(
+    e2e_smoke_s72_rust_sdk_realtime_audio_member_model_switch_continuity,
+    72
+);
 smoke_suite!(e2e_smoke_rpc_mob_callback_tools, "rpc-mob-callback-tools");
 smoke_suite!(
     e2e_smoke_rpc_transport_backpressure,

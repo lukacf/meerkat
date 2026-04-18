@@ -1,6 +1,15 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    dead_code,
+    unused_assignments,
+    unused_variables
+)]
 
-use std::collections::BTreeMap;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -86,6 +95,1015 @@ fn openai_smoke_model() -> String {
     first_env(&["SMOKE_MODEL_OPENAI", "OPENAI_SMOKE_MODEL"]).unwrap_or_else(|| "gpt-5.4".into())
 }
 
+fn openai_switch_model() -> String {
+    first_env(&[
+        "SMOKE_MODEL_OPENAI_SWITCH",
+        "OPENAI_SMOKE_MODEL_SWITCH",
+        "OPENAI_MODEL_SWITCH",
+    ])
+    .unwrap_or_else(|| "gpt-4.1-mini".into())
+}
+
+const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
+const OPENAI_TRANSCRIBE_MODEL: &str = "gpt-4o-mini-transcribe";
+const OPENAI_TTS_DEFAULT_VOICE: &str = "marin";
+const REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
+const REALTIME_AUDIO_SAMPLE_RATE_HZ: usize = 24_000;
+const REALTIME_AUDIO_BYTES_PER_SAMPLE: usize = 2;
+const REALTIME_AUDIO_FRAME_MS: usize = 200;
+const REALTIME_AUDIO_TRAILING_SILENCE_MS: usize = 500;
+const REALTIME_AUDIO_INTERNAL_SILENCE_THRESHOLD: i16 = 64;
+const REALTIME_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 180;
+const REALTIME_AUDIO_PRESERVED_INTERNAL_SILENCE_MS: usize = 75;
+const REALTIME_OUTPUT_IDLE_SETTLE_MS: u64 = 1_500;
+
+fn openai_tts_model() -> String {
+    first_env(&["RKAT_OPENAI_TTS_MODEL", "OPENAI_TTS_MODEL"])
+        .unwrap_or_else(|| OPENAI_TTS_MODEL.to_string())
+}
+
+fn openai_transcribe_model() -> String {
+    first_env(&["RKAT_OPENAI_TRANSCRIBE_MODEL", "OPENAI_TRANSCRIBE_MODEL"])
+        .unwrap_or_else(|| OPENAI_TRANSCRIBE_MODEL.to_string())
+}
+
+fn openai_tts_voice() -> String {
+    first_env(&["RKAT_REALTIME_OPENAI_VOICE", "OPENAI_REALTIME_VOICE"])
+        .unwrap_or_else(|| OPENAI_TTS_DEFAULT_VOICE.to_string())
+}
+
+fn realtime_tts_cache_dir() -> PathBuf {
+    workspace_root().join("target/e2e-realtime-tts-cache")
+}
+
+fn realtime_audio_artifacts_dir(scenario: &str) -> PathBuf {
+    workspace_root()
+        .join("target/e2e-realtime-audio-artifacts")
+        .join(scenario)
+}
+
+fn realtime_transcription_cache_dir() -> PathBuf {
+    workspace_root().join("target/e2e-realtime-transcribe-cache")
+}
+
+fn normalize_semantic_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|segment| segment.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
+    variants
+        .iter()
+        .any(|variant| text.contains(&normalize_semantic_text(variant)))
+}
+
+fn realtime_audio_cache_key(text: &str, model: &str, voice: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"openai-tts-v2\0");
+    digest.update(model.as_bytes());
+    digest.update(b"\0");
+    digest.update(voice.as_bytes());
+    digest.update(b"\0");
+    digest.update(text.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn realtime_transcription_cache_key(pcm: &[u8], model: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"openai-transcribe-v1\0");
+    digest.update(model.as_bytes());
+    digest.update(b"\0");
+    digest.update(pcm);
+    format!("{:x}", digest.finalize())
+}
+
+fn pcm_bytes_per_ms() -> usize {
+    (REALTIME_AUDIO_SAMPLE_RATE_HZ * REALTIME_AUDIO_BYTES_PER_SAMPLE) / 1000
+}
+
+fn append_pcm_trailing_silence(pcm: &[u8], trailing_silence_ms: usize) -> Vec<u8> {
+    let silence_bytes = pcm_bytes_per_ms() * trailing_silence_ms;
+    let mut output = Vec::with_capacity(pcm.len() + silence_bytes);
+    output.extend_from_slice(pcm);
+    output.resize(output.len() + silence_bytes, 0);
+    output
+}
+
+fn compress_internal_pcm_silence(
+    pcm: &[u8],
+    amplitude_threshold: i16,
+    max_silence_ms: usize,
+    preserved_silence_ms: usize,
+) -> Vec<u8> {
+    let max_silence_bytes = pcm_bytes_per_ms() * max_silence_ms;
+    let preserved_silence_bytes = pcm_bytes_per_ms() * preserved_silence_ms;
+    let mut output = Vec::with_capacity(pcm.len());
+    let mut index = 0usize;
+
+    while index + REALTIME_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
+        let sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
+        let silent = sample.abs() <= amplitude_threshold;
+        let run_start = index;
+        index += REALTIME_AUDIO_BYTES_PER_SAMPLE;
+
+        while index + REALTIME_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
+            let sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
+            if (sample.abs() <= amplitude_threshold) != silent {
+                break;
+            }
+            index += REALTIME_AUDIO_BYTES_PER_SAMPLE;
+        }
+
+        let run = &pcm[run_start..index];
+        if silent && run.len() > max_silence_bytes {
+            output.extend_from_slice(&run[..preserved_silence_bytes.min(run.len())]);
+        } else {
+            output.extend_from_slice(run);
+        }
+    }
+
+    if index < pcm.len() {
+        output.extend_from_slice(&pcm[index..]);
+    }
+
+    output
+}
+
+fn prepare_tts_pcm_for_realtime_vad(pcm: &[u8]) -> Vec<u8> {
+    compress_internal_pcm_silence(
+        pcm,
+        REALTIME_AUDIO_INTERNAL_SILENCE_THRESHOLD,
+        REALTIME_AUDIO_MAX_INTERNAL_SILENCE_MS,
+        REALTIME_AUDIO_PRESERVED_INTERNAL_SILENCE_MS,
+    )
+}
+
+fn chunk_pcm_bytes(pcm: &[u8], frame_ms: usize, trailing_silence_ms: usize) -> Vec<Vec<u8>> {
+    let frame_bytes = pcm_bytes_per_ms() * frame_ms;
+    append_pcm_trailing_silence(pcm, trailing_silence_ms)
+        .chunks(frame_bytes.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn decode_realtime_audio_chunk(data: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    Ok(BASE64_STANDARD.decode(data)?)
+}
+
+fn pcm_has_non_silence(pcm: &[u8]) -> bool {
+    pcm.chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+        .any(|sample| sample != 0)
+}
+
+fn pcm_to_wav_bytes(pcm: &[u8], sample_rate_hz: u32) -> Vec<u8> {
+    let channels = 1u16;
+    let bits_per_sample = 16u16;
+    let byte_rate = sample_rate_hz * channels as u32 * (bits_per_sample as u32 / 8);
+    let block_align = channels * (bits_per_sample / 8);
+    let data_len = pcm.len() as u32;
+    let riff_len = 36u32 + data_len;
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_len.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate_hz.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
+}
+
+#[derive(Debug, Default, Clone)]
+struct RealtimeFrameCapture {
+    input_partials: Vec<String>,
+    input_finals: Vec<String>,
+    output_text: String,
+    output_audio_pcm: Vec<u8>,
+    output_text_events: Vec<(usize, String)>,
+    output_audio_events: Vec<(usize, Vec<u8>)>,
+    tool_call_names_by_id: BTreeMap<String, String>,
+    tool_call_requests: Vec<String>,
+    tool_call_completions: Vec<String>,
+    tool_call_failures: Vec<String>,
+    status_states: Vec<String>,
+    event_kinds: Vec<String>,
+    frame_log: Vec<String>,
+    saw_turn_started: bool,
+    saw_turn_committed: bool,
+    saw_turn_completed: bool,
+    saw_interrupted: bool,
+}
+
+impl RealtimeFrameCapture {
+    fn merge_from(&mut self, other: Self) {
+        self.input_partials.extend(other.input_partials);
+        self.input_finals.extend(other.input_finals);
+        self.output_text.push_str(&other.output_text);
+        self.output_audio_pcm.extend(other.output_audio_pcm);
+        self.output_text_events.extend(other.output_text_events);
+        self.output_audio_events.extend(other.output_audio_events);
+        self.tool_call_names_by_id
+            .extend(other.tool_call_names_by_id);
+        self.tool_call_requests.extend(other.tool_call_requests);
+        self.tool_call_completions
+            .extend(other.tool_call_completions);
+        self.tool_call_failures.extend(other.tool_call_failures);
+        self.status_states.extend(other.status_states);
+        self.event_kinds.extend(other.event_kinds);
+        self.frame_log.extend(other.frame_log);
+        self.saw_turn_started |= other.saw_turn_started;
+        self.saw_turn_committed |= other.saw_turn_committed;
+        self.saw_turn_completed |= other.saw_turn_completed;
+        self.saw_interrupted |= other.saw_interrupted;
+    }
+}
+
+fn capture_event_index(capture: &RealtimeFrameCapture, kind: &str) -> Option<usize> {
+    capture.event_kinds.iter().position(|entry| entry == kind)
+}
+
+fn capture_nth_event_index(
+    capture: &RealtimeFrameCapture,
+    kind: &str,
+    ordinal: usize,
+) -> Option<usize> {
+    capture
+        .event_kinds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| (entry == kind).then_some(index))
+        .nth(ordinal)
+}
+
+fn capture_event_count(capture: &RealtimeFrameCapture, kind: &str) -> usize {
+    capture
+        .event_kinds
+        .iter()
+        .filter(|entry| *entry == kind)
+        .count()
+}
+
+fn capture_output_text_after_event(capture: &RealtimeFrameCapture, event_index: usize) -> String {
+    capture
+        .output_text_events
+        .iter()
+        .filter(|(index, _)| *index > event_index)
+        .map(|(_, text)| text.as_str())
+        .collect()
+}
+
+fn capture_output_audio_after_event(capture: &RealtimeFrameCapture, event_index: usize) -> Vec<u8> {
+    let mut pcm = Vec::new();
+    for (_, chunk) in capture
+        .output_audio_events
+        .iter()
+        .filter(|(index, _)| *index > event_index)
+    {
+        pcm.extend_from_slice(chunk);
+    }
+    pcm
+}
+
+fn observe_realtime_server_frame(
+    capture: &mut RealtimeFrameCapture,
+    frame: &meerkat::contracts::RealtimeServerFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    capture.frame_log.push(serde_json::to_string(frame)?);
+    match frame {
+        meerkat::contracts::RealtimeServerFrame::ChannelEvent(event_frame) => {
+            match &event_frame.event {
+                meerkat::contracts::RealtimeEvent::InputTranscriptPartial { text } => {
+                    capture
+                        .event_kinds
+                        .push("input_transcript_partial".to_string());
+                    capture.input_partials.push(text.clone());
+                }
+                meerkat::contracts::RealtimeEvent::InputTranscriptFinal { text, .. } => {
+                    capture
+                        .event_kinds
+                        .push("input_transcript_final".to_string());
+                    capture.input_finals.push(text.clone());
+                }
+                meerkat::contracts::RealtimeEvent::TurnStarted => {
+                    capture.event_kinds.push("turn_started".to_string());
+                    capture.saw_turn_started = true;
+                }
+                meerkat::contracts::RealtimeEvent::TurnCommitted => {
+                    capture.event_kinds.push("turn_committed".to_string());
+                    capture.saw_turn_committed = true;
+                }
+                meerkat::contracts::RealtimeEvent::TurnCompleted => {
+                    capture.event_kinds.push("turn_completed".to_string());
+                    capture.saw_turn_completed = true;
+                }
+                meerkat::contracts::RealtimeEvent::OutputTextDelta { delta } => {
+                    capture.event_kinds.push("output_text_delta".to_string());
+                    capture.output_text.push_str(delta);
+                    capture
+                        .output_text_events
+                        .push((capture.event_kinds.len() - 1, delta.clone()));
+                }
+                meerkat::contracts::RealtimeEvent::OutputAudioChunk { chunk } => {
+                    capture.event_kinds.push("output_audio_chunk".to_string());
+                    let decoded = decode_realtime_audio_chunk(&chunk.data)?;
+                    capture.output_audio_pcm.extend_from_slice(&decoded);
+                    capture
+                        .output_audio_events
+                        .push((capture.event_kinds.len() - 1, decoded));
+                }
+                meerkat::contracts::RealtimeEvent::Interrupted => {
+                    capture.event_kinds.push("interrupted".to_string());
+                    capture.saw_interrupted = true;
+                }
+                meerkat::contracts::RealtimeEvent::ToolCallRequested { call_id, tool_name } => {
+                    capture.event_kinds.push("tool_call_requested".to_string());
+                    capture
+                        .tool_call_names_by_id
+                        .insert(call_id.clone(), tool_name.clone());
+                    capture.tool_call_requests.push(tool_name.clone());
+                }
+                meerkat::contracts::RealtimeEvent::ToolCallCompleted { call_id } => {
+                    capture.event_kinds.push("tool_call_completed".to_string());
+                    capture.tool_call_completions.push(
+                        capture
+                            .tool_call_names_by_id
+                            .get(call_id)
+                            .cloned()
+                            .unwrap_or_else(|| call_id.clone()),
+                    );
+                }
+                meerkat::contracts::RealtimeEvent::ToolCallFailed { call_id, .. } => {
+                    capture.event_kinds.push("tool_call_failed".to_string());
+                    capture.tool_call_failures.push(
+                        capture
+                            .tool_call_names_by_id
+                            .get(call_id)
+                            .cloned()
+                            .unwrap_or_else(|| call_id.clone()),
+                    );
+                }
+                meerkat::contracts::RealtimeEvent::ToolCallTimedOut { call_id, .. } => {
+                    capture.event_kinds.push("tool_call_timed_out".to_string());
+                    capture.tool_call_failures.push(
+                        capture
+                            .tool_call_names_by_id
+                            .get(call_id)
+                            .cloned()
+                            .unwrap_or_else(|| call_id.clone()),
+                    );
+                }
+                meerkat::contracts::RealtimeEvent::AssistantTranscriptTruncated { .. } => {
+                    capture
+                        .event_kinds
+                        .push("assistant_transcript_truncated".to_string());
+                }
+                meerkat::contracts::RealtimeEvent::StatusChanged { status } => {
+                    capture.event_kinds.push("status_changed".to_string());
+                    capture.status_states.push(format!("{:?}", status.state));
+                }
+                meerkat::contracts::RealtimeEvent::NeedsReattach => {
+                    capture.event_kinds.push("needs_reattach".to_string());
+                }
+                meerkat::contracts::RealtimeEvent::OutputVideoChunk { .. } => {
+                    capture.event_kinds.push("output_video_chunk".to_string());
+                }
+            }
+            Ok(())
+        }
+        meerkat::contracts::RealtimeServerFrame::ChannelStatus(status_frame) => {
+            capture
+                .status_states
+                .push(format!("{:?}", status_frame.status.state));
+            Ok(())
+        }
+        meerkat::contracts::RealtimeServerFrame::ChannelError(error) => Err(format!(
+            "unexpected realtime channel error {}: {}",
+            error.code, error.message
+        )
+        .into()),
+        meerkat::contracts::RealtimeServerFrame::ChannelClosed(frame) => {
+            Err(format!("realtime websocket closed unexpectedly: {:?}", frame.reason).into())
+        }
+        meerkat::contracts::RealtimeServerFrame::ChannelOpened(_) => Ok(()),
+    }
+}
+
+async fn collect_realtime_frames_until<F>(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>>
+where
+    F: Fn(&RealtimeFrameCapture) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut capture = RealtimeFrameCapture::default();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let next_frame = match timeout(remaining, receiver.next_frame()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(format!(
+                    "timed out waiting for realtime frame condition: capture={capture:?}"
+                )
+                .into());
+            }
+        };
+        let Some(frame) = next_frame else {
+            return Err("realtime websocket closed before expected frame".into());
+        };
+        observe_realtime_server_frame(&mut capture, &frame)?;
+        if predicate(&capture) {
+            return Ok(capture);
+        }
+    }
+    Err("timed out waiting for realtime frame condition".into())
+}
+
+async fn collect_realtime_frames_until_turn_completed(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    collect_realtime_frames_until(receiver, timeout_secs, |capture| capture.saw_turn_completed)
+        .await
+}
+
+fn realtime_frame_has_output(frame: &meerkat::contracts::RealtimeServerFrame) -> bool {
+    matches!(
+        frame,
+        meerkat::contracts::RealtimeServerFrame::ChannelEvent(
+            meerkat::contracts::RealtimeChannelEventFrame {
+                event: meerkat::contracts::RealtimeEvent::OutputAudioChunk { .. }
+                    | meerkat::contracts::RealtimeEvent::OutputTextDelta { .. }
+                    | meerkat::contracts::RealtimeEvent::TurnCompleted
+            }
+        )
+    )
+}
+
+async fn collect_realtime_frames_until_output_settles(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(REALTIME_OUTPUT_IDLE_SETTLE_MS);
+    let mut capture = RealtimeFrameCapture::default();
+    let mut output_started = false;
+    let mut output_idle_deadline = deadline;
+
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if output_started && now >= output_idle_deadline {
+            return Ok(capture);
+        }
+
+        let wait_deadline = if output_started {
+            output_idle_deadline.min(deadline)
+        } else {
+            deadline
+        };
+        let wait_for = wait_deadline.saturating_duration_since(now);
+        if wait_for.is_zero() {
+            if output_started {
+                return Ok(capture);
+            }
+            break;
+        }
+
+        match timeout(wait_for, receiver.next_frame()).await {
+            Ok(Ok(Some(frame))) => {
+                let saw_output = realtime_frame_has_output(&frame);
+                observe_realtime_server_frame(&mut capture, &frame)?;
+                if capture.saw_turn_completed {
+                    return Ok(capture);
+                }
+                if saw_output {
+                    output_started = true;
+                    output_idle_deadline = Instant::now() + idle_window;
+                }
+            }
+            Ok(Ok(None)) => {
+                return if output_started {
+                    Ok(capture)
+                } else {
+                    Err("realtime websocket closed before assistant output arrived".into())
+                };
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                return if output_started {
+                    Ok(capture)
+                } else {
+                    Err(
+                        format!("timed out waiting for realtime output: capture={capture:?}")
+                            .into(),
+                    )
+                };
+            }
+        }
+    }
+
+    Err(format!("timed out waiting for realtime output: capture={capture:?}").into())
+}
+
+async fn collect_realtime_frames_until_ready_or_idle(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(500);
+    let mut capture = RealtimeFrameCapture::default();
+
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match timeout(remaining, receiver.next_frame()).await {
+            Ok(Ok(Some(frame))) => {
+                observe_realtime_server_frame(&mut capture, &frame)?;
+                if capture
+                    .status_states
+                    .last()
+                    .is_some_and(|state| state == "Ready")
+                {
+                    return Ok(capture);
+                }
+            }
+            Ok(Ok(None)) => {
+                return Err("realtime websocket closed before the channel became ready".into());
+            }
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => return Ok(capture),
+        }
+    }
+
+    Ok(capture)
+}
+
+async fn collect_realtime_frames_until_barge_in_preemption_and_second_commit<F>(
+    sender: &mut meerkat::RealtimeConnectionSender,
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    seed_capture: &RealtimeFrameCapture,
+    barge_in_pcm: &[u8],
+    timeout_secs: u64,
+    start_barge_in: F,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>>
+where
+    F: Fn(&RealtimeFrameCapture) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut capture = seed_capture.clone();
+    let mut started_barge_in = start_barge_in(&capture);
+    let barge_in_chunks = chunk_pcm_bytes(
+        barge_in_pcm,
+        REALTIME_AUDIO_FRAME_MS,
+        REALTIME_AUDIO_TRAILING_SILENCE_MS,
+    );
+    let mut next_barge_in_chunk = 0_usize;
+    let mut next_barge_in_send_at = started_barge_in.then_some(Instant::now());
+
+    // If the commit witness already observed assistant output, that is the
+    // earliest dogma-correct public proof that the response is in flight. Do
+    // not wait for an additional post-commit output frame before starting the
+    // spoken stop utterance, or the smoke starts proving scheduler luck
+    // instead of true barge-in behavior.
+    if started_barge_in
+        && next_barge_in_chunk < barge_in_chunks.len()
+        && next_barge_in_send_at.is_some_and(|scheduled| Instant::now() >= scheduled)
+    {
+        sender
+            .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
+                meerkat::contracts::RealtimeAudioChunk {
+                    mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                    sample_rate_hz: 24_000,
+                    channels: 1,
+                    data: BASE64_STANDARD.encode(&barge_in_chunks[next_barge_in_chunk]),
+                },
+            ))
+            .await?;
+        next_barge_in_chunk += 1;
+        next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
+            .then_some(Instant::now() + Duration::from_millis(REALTIME_AUDIO_FRAME_MS as u64));
+    }
+
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if started_barge_in
+            && next_barge_in_chunk < barge_in_chunks.len()
+            && next_barge_in_send_at.is_some_and(|scheduled| now >= scheduled)
+        {
+            sender
+                .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
+                    meerkat::contracts::RealtimeAudioChunk {
+                        mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
+                        data: BASE64_STANDARD.encode(&barge_in_chunks[next_barge_in_chunk]),
+                    },
+                ))
+                .await?;
+            next_barge_in_chunk += 1;
+            next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
+                .then_some(Instant::now() + Duration::from_millis(REALTIME_AUDIO_FRAME_MS as u64));
+            continue;
+        }
+
+        let wait_deadline = next_barge_in_send_at
+            .filter(|scheduled| *scheduled < deadline)
+            .unwrap_or(deadline);
+        let remaining = wait_deadline.saturating_duration_since(Instant::now());
+        let next_frame = match timeout(remaining, receiver.next_frame()).await {
+            Ok(result) => result?,
+            Err(_) if started_barge_in && next_barge_in_send_at.is_some() => continue,
+            Err(_) => return Err(format!(
+                "timed out waiting for barge-in preemption + post-barge commit: capture={capture:?}"
+            )
+            .into()),
+        };
+        let Some(frame) = next_frame else {
+            return Err("realtime websocket closed before barge-in completed".into());
+        };
+        observe_realtime_server_frame(&mut capture, &frame)?;
+
+        if !started_barge_in && start_barge_in(&capture) {
+            started_barge_in = true;
+            next_barge_in_send_at = Some(Instant::now());
+        }
+
+        if started_barge_in {
+            let barge_in_complete = next_barge_in_chunk == barge_in_chunks.len();
+            let interrupted_index = capture_event_index(&capture, "interrupted");
+            let post_barge_commit_index = capture
+                .event_kinds
+                .iter()
+                .enumerate()
+                .rfind(|(_, kind)| *kind == "turn_committed")
+                .map(|(index, _)| index);
+            if barge_in_complete
+                && interrupted_index
+                    .zip(post_barge_commit_index)
+                    .is_some_and(|(interrupt_index, commit_index)| interrupt_index < commit_index)
+            {
+                return Ok(capture);
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for barge-in preemption + post-barge commit: capture={capture:?}"
+    )
+    .into())
+}
+
+async fn stream_realtime_audio(
+    sender: &mut meerkat::RealtimeConnectionSender,
+    pcm: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let chunks = chunk_pcm_bytes(
+        pcm,
+        REALTIME_AUDIO_FRAME_MS,
+        REALTIME_AUDIO_TRAILING_SILENCE_MS,
+    );
+    for (index, chunk) in chunks.iter().enumerate() {
+        sender
+            .send_input(meerkat::contracts::RealtimeInputChunk::AudioChunk(
+                meerkat::contracts::RealtimeAudioChunk {
+                    mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                    sample_rate_hz: 24_000,
+                    channels: 1,
+                    data: BASE64_STANDARD.encode(chunk),
+                },
+            ))
+            .await?;
+        if index + 1 < chunks.len() {
+            sleep(Duration::from_millis(REALTIME_AUDIO_FRAME_MS as u64)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn send_realtime_audio_and_wait_for_commit(
+    sender: &mut meerkat::RealtimeConnectionSender,
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    pcm: &[u8],
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    stream_realtime_audio(sender, pcm).await?;
+    collect_realtime_frames_until(receiver, timeout_secs, |capture| {
+        capture.saw_turn_committed && !capture.input_finals.is_empty()
+    })
+    .await
+}
+
+async fn settle_realtime_turn_after_commit(
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    commit_capture: &RealtimeFrameCapture,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    if commit_capture.saw_turn_completed {
+        return Ok(RealtimeFrameCapture::default());
+    }
+    let output_already_started = !commit_capture.output_text.is_empty()
+        || !commit_capture.output_audio_pcm.is_empty()
+        || !commit_capture.tool_call_requests.is_empty()
+        || !commit_capture.tool_call_completions.is_empty()
+        || !commit_capture.tool_call_failures.is_empty();
+    let mut capture = if output_already_started {
+        // Once the commit witness already contains assistant-side output,
+        // asking the channel to prove "output started" again is the wrong
+        // contract. The remaining authoritative witness is the terminal
+        // boundary for the turn that has already visibly begun.
+        collect_realtime_frames_until_turn_completed(receiver, 30).await?
+    } else {
+        let mut capture =
+            collect_realtime_frames_until_output_settles(receiver, timeout_secs).await?;
+        if !capture.saw_turn_completed {
+            // Product-boundary discipline:
+            // for ordinary spoken follow-up turns, "quiet output" is not a
+            // sufficient readiness witness. The previous provider-managed turn
+            // is still semantically active until the public realtime channel
+            // emits its terminal boundary. Advancing on output idle guesses at
+            // provider state and lets the next utterance overlap a still-live
+            // response.
+            //
+            // Transitional note: the channel status surface still models
+            // attachment readiness, not per-turn readiness. Until Machines(TM)
+            // give us a richer canonical turn-readiness contract, the
+            // dogma-correct public witness here is the channel's explicit
+            // `TurnCompleted` event.
+            capture.merge_from(collect_realtime_frames_until_turn_completed(receiver, 30).await?);
+        }
+        capture
+    };
+    if !capture.saw_turn_completed {
+        capture.merge_from(collect_realtime_frames_until_turn_completed(receiver, 30).await?);
+    }
+    Ok(capture)
+}
+
+async fn interrupt_realtime_output_and_settle(
+    sender: &mut meerkat::RealtimeConnectionSender,
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    sender.interrupt().await?;
+    collect_realtime_frames_until_ready_or_idle(receiver, timeout_secs).await
+}
+
+async fn ensure_realtime_session_quiescent(
+    sender: &mut meerkat::RealtimeConnectionSender,
+    receiver: &mut meerkat::RealtimeConnectionReceiver,
+    prior_capture: &RealtimeFrameCapture,
+    timeout_secs: u64,
+) -> Result<RealtimeFrameCapture, Box<dyn std::error::Error>> {
+    if prior_capture.saw_turn_completed {
+        return collect_realtime_frames_until_ready_or_idle(receiver, timeout_secs).await;
+    }
+
+    // Public-client discipline:
+    // when a turn is expected to start from idle, but the prior provider turn
+    // never emitted an explicit completion, the safe next step is to interrupt
+    // and drain before sending more audio. This keeps the smoke honest to the
+    // realtime surface contract instead of depending on provider-specific
+    // response-finalization timing.
+    interrupt_realtime_output_and_settle(sender, receiver, timeout_secs).await
+}
+
+async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let api_key = openai_api_key().ok_or("OpenAI API key is required for realtime audio smokes")?;
+    let model = openai_tts_model();
+    let voice = openai_tts_voice();
+    let cache_key = realtime_audio_cache_key(text, &model, &voice);
+    let cache_path = realtime_tts_cache_dir().join(format!("{cache_key}.pcm"));
+    if cache_path.exists() {
+        return Ok(tokio::fs::read(cache_path).await?);
+    }
+
+    tokio::fs::create_dir_all(realtime_tts_cache_dir()).await?;
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": model,
+            "voice": voice,
+            "input": text,
+            "response_format": "pcm",
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("OpenAI TTS request failed with {status}: {body}").into());
+    }
+    let pcm = prepare_tts_pcm_for_realtime_vad(&response.bytes().await?);
+    tokio::fs::write(&cache_path, &pcm).await?;
+    Ok(pcm)
+}
+
+async fn openai_transcribe_pcm(pcm: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let api_key = openai_api_key().ok_or("OpenAI API key is required for realtime audio smokes")?;
+    let model = openai_transcribe_model();
+    let cache_key = realtime_transcription_cache_key(pcm, &model);
+    let cache_path = realtime_transcription_cache_dir().join(format!("{cache_key}.txt"));
+    if cache_path.exists() {
+        return Ok(tokio::fs::read_to_string(cache_path).await?);
+    }
+
+    tokio::fs::create_dir_all(realtime_transcription_cache_dir()).await?;
+    let wav = pcm_to_wav_bytes(pcm, REALTIME_AUDIO_SAMPLE_RATE_HZ as u32);
+    let form = reqwest::multipart::Form::new()
+        .text("model", model.clone())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(wav)
+                .file_name("realtime-output.wav")
+                .mime_str("audio/wav")?,
+        );
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload: Value = response.json().await?;
+    let text = payload["text"]
+        .as_str()
+        .ok_or_else(|| format!("OpenAI transcription response missing text field: {payload}"))?
+        .to_string();
+    tokio::fs::write(&cache_path, text.as_bytes()).await?;
+    Ok(text)
+}
+
+async fn normalized_output_audio_transcript(
+    capture: &RealtimeFrameCapture,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if capture.output_audio_pcm.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(normalize_semantic_text(
+        &openai_transcribe_pcm(&capture.output_audio_pcm).await?,
+    ))
+}
+
+async fn dump_realtime_audio_artifacts(
+    scenario: &str,
+    turn_label: &str,
+    input_pcm: &[u8],
+    capture: &RealtimeFrameCapture,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = realtime_audio_artifacts_dir(scenario);
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join(format!("{turn_label}-input.pcm")), input_pcm).await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-output.pcm")),
+        &capture.output_audio_pcm,
+    )
+    .await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-frames.jsonl")),
+        capture.frame_log.join("\n"),
+    )
+    .await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-summary.json")),
+        serde_json::to_vec_pretty(&json!({
+            "input_partials": capture.input_partials,
+            "input_finals": capture.input_finals,
+            "output_text": capture.output_text,
+            "tool_call_requests": capture.tool_call_requests,
+            "tool_call_completions": capture.tool_call_completions,
+            "tool_call_failures": capture.tool_call_failures,
+            "status_states": capture.status_states,
+            "saw_turn_started": capture.saw_turn_started,
+            "saw_turn_committed": capture.saw_turn_committed,
+            "saw_turn_completed": capture.saw_turn_completed,
+            "saw_interrupted": capture.saw_interrupted,
+        }))?,
+    )
+    .await?;
+    Ok(())
+}
+
+#[test]
+fn realtime_audio_cache_key_is_stable_and_sensitive_to_voice() {
+    let key_a = realtime_audio_cache_key("hello world", "gpt-4o-mini-tts", "marin");
+    let key_b = realtime_audio_cache_key("hello world", "gpt-4o-mini-tts", "marin");
+    let key_c = realtime_audio_cache_key("hello world", "gpt-4o-mini-tts", "cedar");
+    assert_eq!(key_a, key_b);
+    assert_ne!(key_a, key_c);
+}
+
+#[test]
+fn realtime_audio_chunking_appends_trailing_silence_in_fixed_frames() {
+    let one_frame = vec![1_u8; pcm_bytes_per_ms() * REALTIME_AUDIO_FRAME_MS];
+    let chunks = chunk_pcm_bytes(
+        &one_frame,
+        REALTIME_AUDIO_FRAME_MS,
+        REALTIME_AUDIO_TRAILING_SILENCE_MS,
+    );
+    assert_eq!(
+        chunks.len(),
+        4,
+        "200ms audio + 500ms silence should yield four 200ms frames"
+    );
+    assert_eq!(
+        chunks[0].len(),
+        pcm_bytes_per_ms() * REALTIME_AUDIO_FRAME_MS
+    );
+    assert!(
+        chunks[1..].iter().flatten().all(|byte| *byte == 0),
+        "trailing frames should be silence-only"
+    );
+}
+
+#[test]
+fn realtime_audio_silence_compression_preserves_short_pauses_and_caps_long_ones() {
+    let tone = vec![1_u8; pcm_bytes_per_ms() * 40];
+    let long_silence = vec![0_u8; pcm_bytes_per_ms() * 400];
+    let short_silence = vec![0_u8; pcm_bytes_per_ms() * 40];
+    let mut pcm = Vec::new();
+    pcm.extend_from_slice(&tone);
+    pcm.extend_from_slice(&long_silence);
+    pcm.extend_from_slice(&tone);
+    pcm.extend_from_slice(&short_silence);
+    pcm.extend_from_slice(&tone);
+
+    let prepared = prepare_tts_pcm_for_realtime_vad(&pcm);
+    let expected_long_silence = pcm_bytes_per_ms() * REALTIME_AUDIO_PRESERVED_INTERNAL_SILENCE_MS;
+    assert!(
+        prepared.len() < pcm.len(),
+        "long internal silences should be compressed"
+    );
+    assert!(
+        prepared.len() >= tone.len() * 3 + short_silence.len() + expected_long_silence,
+        "compression should preserve signal and the bounded amount of long silence"
+    );
+}
+
+#[test]
+fn realtime_audio_chunk_base64_round_trips() {
+    let raw = vec![1_u8, 2, 3, 4, 5, 6];
+    let encoded = BASE64_STANDARD.encode(&raw);
+    let decoded = decode_realtime_audio_chunk(&encoded).expect("decode realtime audio chunk");
+    assert_eq!(decoded, raw);
+}
+
+#[test]
+fn realtime_audio_observer_collects_audio_chunks_and_text() {
+    let mut capture = RealtimeFrameCapture::default();
+    observe_realtime_server_frame(
+        &mut capture,
+        &meerkat::contracts::RealtimeServerFrame::ChannelEvent(
+            meerkat::contracts::RealtimeChannelEventFrame {
+                event: meerkat::contracts::RealtimeEvent::OutputTextDelta {
+                    delta: "cedar ".to_string(),
+                },
+            },
+        ),
+    )
+    .expect("observe text delta");
+    observe_realtime_server_frame(
+        &mut capture,
+        &meerkat::contracts::RealtimeServerFrame::ChannelEvent(
+            meerkat::contracts::RealtimeChannelEventFrame {
+                event: meerkat::contracts::RealtimeEvent::OutputAudioChunk {
+                    chunk: meerkat::contracts::RealtimeAudioChunk {
+                        mime_type: REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: 24_000,
+                        channels: 1,
+                        data: BASE64_STANDARD.encode([1_u8, 0, 2, 0]),
+                    },
+                },
+            },
+        ),
+    )
+    .expect("observe audio chunk");
+    assert_eq!(capture.output_text, "cedar ");
+    assert_eq!(capture.output_audio_pcm, vec![1_u8, 0, 2, 0]);
+    assert!(pcm_has_non_silence(&capture.output_audio_pcm));
+}
+
 fn skip_if_missing_binary(path: &Option<PathBuf>, name: &str) -> bool {
     if path.is_none() {
         eprintln!(
@@ -94,6 +1112,332 @@ fn skip_if_missing_binary(path: &Option<PathBuf>, name: &str) -> bool {
         return true;
     }
     false
+}
+
+#[tokio::test]
+#[ignore = "helper:provider-backed realtime audio"]
+async fn realtime_audio_provider_roundtrip_emits_output_audio()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(_openai_key) = openai_api_key() else {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "realtime-audio-provider-helper";
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-audio-helper",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-ws",
+            "127.0.0.1:0",
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        eprintln!("[audio helper] initialize");
+        let _ = rpc_call(&mut rpc, 1, "initialize", json!({}), 20).await?;
+        eprintln!("[audio helper] create session");
+        let created = rpc_call(
+            &mut rpc,
+            2,
+            "session/create",
+            json!({
+                "prompt": "Reply exactly with AUDIO HELPER OK and cedar.",
+                "model": openai_smoke_model(),
+            }),
+            180,
+        )
+        .await?;
+        let session_id = created["session_id"]
+            .as_str()
+            .ok_or("session/create missing session_id")?
+            .to_string();
+
+        eprintln!("[audio helper] request open_info");
+        let open_info_value = rpc_call(
+            &mut rpc,
+            3,
+            "realtime/open_info",
+            json!({
+                "target": {
+                    "type": "session_target",
+                    "session_id": session_id,
+                },
+                "role": "primary",
+                "turning_mode": "provider_managed",
+            }),
+            30,
+        )
+        .await?;
+        let open_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(open_info_value)?;
+        let channel = meerkat::RealtimeChannel::session(session_id.clone());
+        eprintln!("[audio helper] connect channel");
+        let connection = channel.connect(&open_info).await?;
+        let (mut sender, mut receiver) = connection.split();
+
+        eprintln!("[audio helper] synthesize tts");
+        let input_pcm = openai_tts_pcm("Reply exactly with audio helper ok and cedar.").await?;
+        eprintln!("[audio helper] stream audio");
+        let mut capture =
+            send_realtime_audio_and_wait_for_commit(&mut sender, &mut receiver, &input_pcm, 120)
+                .await?;
+        eprintln!("[audio helper] collect first audio output");
+        capture.merge_from(
+            collect_realtime_frames_until(&mut receiver, 120, |capture| {
+                !capture.output_audio_pcm.is_empty()
+            })
+            .await?,
+        );
+
+        eprintln!("[audio helper] wait for session read");
+        let read_deadline = Instant::now() + Duration::from_secs(120);
+        let read = loop {
+            let read = rpc_call(
+                &mut rpc,
+                4,
+                "session/read",
+                json!({ "session_id": session_id }),
+                30,
+            )
+            .await?;
+            if read["last_assistant_text"].as_str().is_some_and(|text| {
+                let normalized = normalize_semantic_text(text);
+                normalized.contains("audio helper ok") && normalized.contains("cedar")
+            }) {
+                break read;
+            }
+            if Instant::now() >= read_deadline {
+                dump_realtime_audio_artifacts(scenario_name, "turn-1", &input_pcm, &capture).await?;
+                return Err(format!(
+                    "timed out waiting for provider-backed audio reply to commit: {read}"
+                )
+                .into());
+            }
+            sleep(Duration::from_millis(250)).await;
+        };
+
+        if !capture.saw_turn_started
+            || !capture.saw_turn_committed
+            || capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(scenario_name, "turn-1", &input_pcm, &capture).await?;
+            return Err(format!(
+                "provider-backed audio helper did not emit the expected realtime audio/text events: capture={capture:?}, read={read}"
+            )
+            .into());
+        }
+
+        eprintln!("[audio helper] close");
+        sender.close().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    let shutdown_result = shutdown_stdio_process(rpc).await;
+    result?;
+    shutdown_result?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "helper:provider-backed realtime member audio"]
+async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_member_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(_openai_key) = openai_api_key() else {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "realtime-audio-member-helper";
+    let mob_id = "scenario-audio-member-helper-mob";
+    let agent_identity = "worker-rt-audio";
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-audio-member-helper",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-ws",
+            "127.0.0.1:0",
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        eprintln!("[member audio helper] initialize");
+        let _ = rpc_call(&mut rpc, 1, "initialize", json!({}), 20).await?;
+        eprintln!("[member audio helper] create mob");
+        let _created = rpc_call(
+            &mut rpc,
+            2,
+            "mob/create",
+            json!({
+                "definition": {
+                    "id": mob_id,
+                    "profiles": {
+                        "worker": {
+                            "model": openai_smoke_model(),
+                            "external_addressable": true,
+                            "tools": { "comms": true },
+                        }
+                    }
+                }
+            }),
+            60,
+        )
+        .await?;
+        eprintln!("[member audio helper] spawn worker");
+        let _spawned = rpc_call(
+            &mut rpc,
+            3,
+            "mob/spawn",
+            json!({
+                "mob_id": mob_id,
+                "profile": "worker",
+                "agent_identity": agent_identity,
+                "runtime_mode": "turn_driven",
+            }),
+            180,
+        )
+        .await?;
+        eprintln!("[member audio helper] seed worker session");
+        let seeded = rpc_call(
+            &mut rpc,
+            4,
+            "mob/turn_start",
+            json!({
+                "mob_id": mob_id,
+                "agent_identity": agent_identity,
+                "prompt": "Reply exactly WORKER_READY_AUDIO.",
+            }),
+            180,
+        )
+        .await?;
+        let current_session_id = seeded["session_id"]
+            .as_str()
+            .ok_or("mob/turn_start missing session_id")?
+            .to_string();
+        assert!(!current_session_id.is_empty());
+
+        eprintln!("[member audio helper] request open_info");
+        let open_info_value = rpc_call(
+            &mut rpc,
+            5,
+            "realtime/open_info",
+            json!({
+                "target": {
+                    "type": "mob_member_target",
+                    "mob_id": mob_id,
+                    "agent_identity": agent_identity,
+                },
+                "role": "primary",
+                "turning_mode": "provider_managed",
+            }),
+            30,
+        )
+        .await?;
+        let open_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(open_info_value)?;
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id, agent_identity);
+        eprintln!("[member audio helper] connect channel");
+        let connection = channel.connect(&open_info).await?;
+        let (mut sender, mut receiver) = connection.split();
+
+        eprintln!("[member audio helper] synthesize tts");
+        let input_pcm = openai_tts_pcm("Reply with audio member helper and cedar.").await?;
+        eprintln!("[member audio helper] stream audio");
+        let mut capture =
+            send_realtime_audio_and_wait_for_commit(&mut sender, &mut receiver, &input_pcm, 120)
+                .await?;
+        eprintln!("[member audio helper] collect first audio output");
+        capture.merge_from(
+            collect_realtime_frames_until(&mut receiver, 120, |capture| {
+                !capture.output_audio_pcm.is_empty()
+            })
+            .await?,
+        );
+
+        let member_status = rpc_mob_member_status(&mut rpc, 6, mob_id, agent_identity).await?;
+
+        if !capture.saw_turn_started
+            || !capture.saw_turn_committed
+            || capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(scenario_name, "turn-1", &input_pcm, &capture).await?;
+            return Err(format!(
+                "member-target realtime audio helper did not emit expected audio events: capture={capture:?}, member_status={member_status}"
+            )
+            .into());
+        }
+
+        assert!(
+            matches!(
+                member_status["realtime_attachment_status"].as_str(),
+                Some("binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
+            ),
+            "unexpected member realtime status after audio roundtrip: {member_status}"
+        );
+
+        eprintln!("[member audio helper] close");
+        sender.close().await?;
+        let detached_status =
+            wait_for_rpc_member_status(&mut rpc, mob_id, agent_identity, 30, |status| {
+                status["realtime_attachment_status"].as_str() == Some("unattached")
+            })
+            .await?;
+        assert_eq!(
+            detached_status["realtime_attachment_status"].as_str(),
+            Some("unattached")
+        );
+
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    let shutdown_result = shutdown_stdio_process(rpc).await;
+    result?;
+    shutdown_result?;
+    Ok(())
 }
 
 async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -241,6 +1585,29 @@ struct RpcProcess {
     stderr: BufReader<ChildStderr>,
 }
 
+async fn read_available_stderr(process: &mut RpcProcess, budget_ms: u64) -> String {
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    let mut collected = String::new();
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let mut line = String::new();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match timeout(
+            remaining.min(Duration::from_millis(50)),
+            process.stderr.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => collected.push_str(&line),
+            Ok(Err(_)) => break,
+        }
+    }
+    collected
+}
+
 async fn spawn_stdio_process(
     binary: &Path,
     cwd: &Path,
@@ -263,6 +1630,15 @@ async fn spawn_stdio_process(
         cmd.env("OPENAI_API_KEY", &key)
             .env("RKAT_OPENAI_API_KEY", key);
     }
+    for passthrough in [
+        "RKAT_OPENAI_REALTIME_TRACE_JSON",
+        "RKAT_OPENAI_REALTIME_TRACE_LIFECYCLE",
+        "RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE",
+    ] {
+        if let Ok(value) = std::env::var(passthrough) {
+            cmd.env(passthrough, value);
+        }
+    }
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
@@ -273,6 +1649,61 @@ async fn spawn_stdio_process(
         stdout: BufReader::new(stdout),
         stderr: BufReader::new(stderr),
     })
+}
+
+async fn spawn_stdio_process_without_openai(
+    binary: &Path,
+    cwd: &Path,
+    args: &[&str],
+    api_key: Option<&str>,
+) -> Result<RpcProcess, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new(binary);
+    cmd.current_dir(cwd)
+        .env("HOME", cwd)
+        .env("XDG_DATA_HOME", cwd.join("data"))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("RKAT_OPENAI_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args);
+    if let Some(key) = api_key {
+        cmd.env("ANTHROPIC_API_KEY", key)
+            .env("RKAT_ANTHROPIC_API_KEY", key);
+    }
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take().ok_or("missing child stdin")?;
+    let stdout = child.stdout.take().ok_or("missing child stdout")?;
+    let stderr = child.stderr.take().ok_or("missing child stderr")?;
+    Ok(RpcProcess {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        stderr: BufReader::new(stderr),
+    })
+}
+
+async fn spawn_background_process_without_openai(
+    binary: &Path,
+    cwd: &Path,
+    args: &[&str],
+    api_key: Option<&str>,
+) -> Result<Child, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new(binary);
+    cmd.current_dir(cwd)
+        .env("HOME", cwd)
+        .env("XDG_DATA_HOME", cwd.join("data"))
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("RKAT_OPENAI_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args);
+    if let Some(key) = api_key {
+        cmd.env("ANTHROPIC_API_KEY", key)
+            .env("RKAT_ANTHROPIC_API_KEY", key);
+    }
+    Ok(cmd.spawn()?)
 }
 
 async fn rpc_send_line(
@@ -324,6 +1755,45 @@ async fn rpc_read_response_line(
         };
         if parsed.get("id").is_some() {
             return Ok(trimmed);
+        }
+    }
+}
+
+async fn stdio_read_json_line(
+    process: &mut RpcProcess,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    loop {
+        let mut line = String::new();
+        let bytes_read = match timeout(
+            Duration::from_secs(timeout_secs),
+            process.stdout.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(bytes_read) => bytes_read?,
+            Err(_) => {
+                return Err(
+                    format!("timed out waiting for stdio JSON line after {timeout_secs}s").into(),
+                );
+            }
+        };
+        if bytes_read == 0 {
+            let mut stderr = String::new();
+            let _ = process.stderr.read_to_string(&mut stderr).await;
+            return Err(format!(
+                "stdio process reached EOF before JSON payload\nstderr:\n{}",
+                stderr.trim()
+            )
+            .into());
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(trimmed) {
+            Ok(value) => return Ok(value),
+            Err(_) => continue,
         }
     }
 }
@@ -424,6 +1894,8 @@ struct RpcEventPump {
     next_id: u64,
     responses: BTreeMap<u64, Value>,
     callbacks: BTreeMap<String, Value>,
+    mob_stream_events: BTreeMap<String, Vec<Value>>,
+    closed_mob_streams: BTreeSet<String>,
 }
 
 impl RpcEventPump {
@@ -508,6 +1980,141 @@ impl RpcEventPump {
         }
     }
 
+    async fn open_mob_stream(
+        &mut self,
+        process: &mut RpcProcess,
+        mob_id: &str,
+        agent_identity: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let mut params = json!({ "mob_id": mob_id });
+        if let Some(agent_identity) = agent_identity {
+            params["agent_identity"] = json!(agent_identity);
+        }
+        let opened = self
+            .call(process, "mob/stream_open", params, timeout_secs)
+            .await?;
+        opened["stream_id"]
+            .as_str()
+            .map(|stream_id| stream_id.to_string())
+            .ok_or_else(|| format!("mob/stream_open missing stream_id: {opened}").into())
+    }
+
+    async fn close_mob_stream(
+        &mut self,
+        process: &mut RpcProcess,
+        stream_id: &str,
+        timeout_secs: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let closed = self
+            .call(
+                process,
+                "mob/stream_close",
+                json!({ "stream_id": stream_id }),
+                timeout_secs,
+            )
+            .await?;
+        if closed["closed"] != true {
+            return Err(format!("mob/stream_close did not close stream: {closed}").into());
+        }
+        Ok(())
+    }
+
+    async fn wait_for_mob_stream_event<F>(
+        &mut self,
+        process: &mut RpcProcess,
+        stream_id: &str,
+        timeout_secs: u64,
+        predicate: F,
+    ) -> Result<Value, Box<dyn std::error::Error>>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if let Some(event) = self
+                .mob_stream_events
+                .get(stream_id)
+                .and_then(|events| events.iter().find(|event| predicate(event)))
+            {
+                return Ok(event.clone());
+            }
+            if self.closed_mob_streams.contains(stream_id) {
+                return Err(format!(
+                    "mob stream '{stream_id}' closed before the expected event arrived"
+                )
+                .into());
+            }
+            if Instant::now() >= deadline {
+                let seen = self
+                    .mob_stream_events
+                    .get(stream_id)
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(format!(
+                    "timed out waiting for mob stream '{stream_id}' event; seen={seen:?}"
+                )
+                .into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_secs = remaining.as_secs().max(1);
+            let value = rpc_read_json_line(process, remaining_secs).await?;
+            self.ingest_event(value)?;
+        }
+    }
+
+    async fn wait_for_mob_stream_event_after<F>(
+        &mut self,
+        process: &mut RpcProcess,
+        stream_id: &str,
+        after_count: usize,
+        timeout_secs: u64,
+        predicate: F,
+    ) -> Result<Value, Box<dyn std::error::Error>>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if let Some(event) = self.mob_stream_events.get(stream_id).and_then(|events| {
+                events
+                    .iter()
+                    .skip(after_count)
+                    .find(|event| predicate(event))
+            }) {
+                return Ok(event.clone());
+            }
+            if self.closed_mob_streams.contains(stream_id) {
+                return Err(format!(
+                    "mob stream '{stream_id}' closed before the expected event arrived"
+                )
+                .into());
+            }
+            if Instant::now() >= deadline {
+                let seen = self
+                    .mob_stream_events
+                    .get(stream_id)
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(format!(
+                    "timed out waiting for mob stream '{stream_id}' event after index {after_count}; seen={seen:?}"
+                )
+                .into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_secs = remaining.as_secs().max(1);
+            let value = rpc_read_json_line(process, remaining_secs).await?;
+            self.ingest_event(value)?;
+        }
+    }
+
+    fn mob_stream_events(&self, stream_id: &str) -> Vec<Value> {
+        self.mob_stream_events
+            .get(stream_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     async fn respond_callback(
         &mut self,
         process: &mut RpcProcess,
@@ -543,6 +2150,26 @@ impl RpcEventPump {
             self.callbacks.insert(label, value);
             return Ok(());
         }
+        if value.get("method").and_then(Value::as_str) == Some("mob/stream_event") {
+            let stream_id = value["params"]["stream_id"]
+                .as_str()
+                .ok_or_else(|| format!("mob/stream_event missing stream_id: {value}"))?
+                .to_string();
+            let event = value["params"]["event"].clone();
+            self.mob_stream_events
+                .entry(stream_id)
+                .or_default()
+                .push(event);
+            return Ok(());
+        }
+        if value.get("method").and_then(Value::as_str) == Some("mob/stream_end") {
+            let stream_id = value["params"]["stream_id"]
+                .as_str()
+                .ok_or_else(|| format!("mob/stream_end missing stream_id: {value}"))?
+                .to_string();
+            self.closed_mob_streams.insert(stream_id);
+            return Ok(());
+        }
         if let Some(id) = value.get("id").and_then(Value::as_u64) {
             self.responses.insert(id, value);
         }
@@ -555,17 +2182,11 @@ fn allocate_port() -> u16 {
     listener.local_addr().expect("local addr").port()
 }
 
-async fn wait_for_rest_server(
-    child: Child,
-    port: u16,
-) -> Result<Child, Box<dyn std::error::Error>> {
-    wait_for_rest_server_with_timeout(child, port, 20).await
-}
-
-async fn wait_for_rest_server_with_timeout(
+async fn wait_for_tcp_server_with_timeout(
     mut child: Child,
     port: u16,
     timeout_secs: u64,
+    service_name: &str,
 ) -> Result<Child, Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     loop {
@@ -575,7 +2196,7 @@ async fn wait_for_rest_server_with_timeout(
         if let Some(status) = child.try_wait()? {
             let output = child.wait_with_output().await?;
             return Err(format!(
-                "REST server exited before binding port {port}: {status}\nstdout:\n{}\nstderr:\n{}",
+                "{service_name} exited before binding port {port}: {status}\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             )
@@ -585,7 +2206,7 @@ async fn wait_for_rest_server_with_timeout(
             let _ = child.start_kill();
             let output = child.wait_with_output().await?;
             return Err(format!(
-                "timed out waiting for port {port} after {timeout_secs}s\nstdout:\n{}\nstderr:\n{}",
+                "timed out waiting for {service_name} on port {port} after {timeout_secs}s\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
             )
@@ -593,6 +2214,21 @@ async fn wait_for_rest_server_with_timeout(
         }
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn wait_for_rest_server(
+    child: Child,
+    port: u16,
+) -> Result<Child, Box<dyn std::error::Error>> {
+    wait_for_rest_server_with_timeout(child, port, 20).await
+}
+
+async fn wait_for_rest_server_with_timeout(
+    child: Child,
+    port: u16,
+    timeout_secs: u64,
+) -> Result<Child, Box<dyn std::error::Error>> {
+    wait_for_tcp_server_with_timeout(child, port, timeout_secs, "REST server").await
 }
 
 async fn shutdown_child(mut child: Child) -> Result<(), Box<dyn std::error::Error>> {
@@ -696,6 +2332,62 @@ fn http_json_body(response: &str) -> Result<Value, Box<dyn std::error::Error>> {
     })
 }
 
+async fn tcp_rpc_call(
+    addr: &str,
+    request_id: u64,
+    method: &str,
+    params: Value,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let stream = timeout(Duration::from_secs(timeout_secs), TcpStream::connect(addr)).await??;
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half).lines();
+
+    for (id, method_name, method_params) in [
+        (1_u64, "initialize", json!({})),
+        (request_id, method, params),
+    ] {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method_name,
+            "params": method_params,
+        })
+        .to_string();
+        write_half.write_all(request.as_bytes()).await?;
+        write_half.write_all(b"\n").await?;
+        write_half.flush().await?;
+
+        loop {
+            let line = timeout(Duration::from_secs(timeout_secs), reader.next_line()).await??;
+            let Some(line) = line else {
+                return Err(
+                    format!("rpc tcp server closed before responding to `{method_name}`").into(),
+                );
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(trimmed)?;
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = value.get("error")
+                && !error.is_null()
+            {
+                return Err(format!("rpc tcp `{method_name}` failed: {error}").into());
+            }
+            if method_name == method {
+                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+            }
+            break;
+        }
+    }
+
+    Err(format!("rpc tcp host did not return `{method}`").into())
+}
+
 fn history_assistant_texts(history: &Value) -> Vec<String> {
     history["messages"]
         .as_array()
@@ -749,6 +2441,347 @@ fn history_user_texts(history: &Value) -> Vec<String> {
             _ => Vec::new(),
         })
         .collect()
+}
+
+fn mob_stream_event_type(event: &Value) -> Option<&str> {
+    event["payload"]["type"].as_str()
+}
+
+fn mob_stream_tool_name(event: &Value) -> Option<&str> {
+    event["payload"]["name"].as_str()
+}
+
+fn mob_stream_tool_args_json(event: &Value) -> Option<Value> {
+    event["payload"].get("args").cloned()
+}
+
+fn mob_stream_send_response_token(event: &Value) -> Option<String> {
+    mob_stream_tool_args_json(event)
+        .and_then(|args| args["result"]["token"].as_str().map(ToString::to_string))
+}
+
+fn mob_stream_send_response_request_intent(event: &Value) -> Option<String> {
+    mob_stream_tool_args_json(event).and_then(|args| {
+        args["result"]["request_intent"]
+            .as_str()
+            .map(ToString::to_string)
+    })
+}
+
+fn mob_stream_tool_result_json(event: &Value) -> Option<Value> {
+    event["payload"]["result"]
+        .as_str()
+        .and_then(|result| serde_json::from_str(result).ok())
+}
+
+fn mob_stream_interaction_result_text(event: &Value) -> Option<String> {
+    event["payload"]["result"].as_str().map(ToString::to_string)
+}
+
+fn mob_stream_has_tool_event(events: &[Value], event_type: &str, tool_name: &str) -> bool {
+    events.iter().any(|event| {
+        mob_stream_event_type(event) == Some(event_type)
+            && mob_stream_tool_name(event) == Some(tool_name)
+    })
+}
+
+async fn pump_mob_member_status(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    mob_id: &str,
+    agent_identity: &str,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    pump.call(
+        process,
+        "mob/member_status",
+        json!({
+            "mob_id": mob_id,
+            "agent_identity": agent_identity,
+        }),
+        timeout_secs,
+    )
+    .await
+}
+
+async fn pump_session_history(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    session_id: &str,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    pump.call(
+        process,
+        "session/history",
+        json!({
+            "session_id": session_id,
+            "offset": 0,
+            "limit": 200,
+        }),
+        timeout_secs,
+    )
+    .await
+}
+
+async fn pump_session_list(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    timeout_secs: u64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    pump.call(
+        process,
+        "session/list",
+        json!({
+            "offset": 0,
+            "limit": 200,
+        }),
+        timeout_secs,
+    )
+    .await
+}
+
+async fn wait_for_pump_member_status<F>(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    mob_id: &str,
+    agent_identity: &str,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<Value, Box<dyn std::error::Error>>
+where
+    F: Fn(&Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let status = pump
+            .call(
+                process,
+                "mob/member_status",
+                json!({
+                    "mob_id": mob_id,
+                    "agent_identity": agent_identity,
+                }),
+                timeout_secs.min(120),
+            )
+            .await?;
+        if predicate(&status) {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for pump member status mob={mob_id} member={agent_identity}: {status}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_pump_any_session_history<F>(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<(String, Value), Box<dyn std::error::Error>>
+where
+    F: Fn(&str, &Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last_session_summaries = Value::Null;
+    let mut last_histories: Vec<(String, Value)> = Vec::new();
+    loop {
+        let session_list = pump_session_list(pump, process, 30).await?;
+        last_session_summaries = session_list.clone();
+        last_histories.clear();
+
+        let sessions = session_list["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for session in sessions {
+            let Some(session_id) = session["session_id"].as_str() else {
+                continue;
+            };
+            let history = pump_session_history(pump, process, session_id, 30).await?;
+            if predicate(session_id, &history) {
+                return Ok((session_id.to_string(), history));
+            }
+            last_histories.push((session_id.to_string(), history));
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for any session history predicate: sessions={last_session_summaries}; histories={last_histories:?}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_pump_session_history<F>(
+    pump: &mut RpcEventPump,
+    process: &mut RpcProcess,
+    session_id: &str,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<Value, Box<dyn std::error::Error>>
+where
+    F: Fn(&Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        let history = pump_session_history(pump, process, session_id, 30).await?;
+        if predicate(&history) {
+            return Ok(history);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for session history session={session_id}: {history}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn send_realtime_text_and_wait_for_commit(
+    connection: &mut meerkat::RealtimeConnection,
+    text: &str,
+    timeout_secs: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    connection
+        .send_input(meerkat::contracts::RealtimeInputChunk::TextChunk(
+            meerkat::contracts::RealtimeTextChunk {
+                text: text.to_string(),
+            },
+        ))
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut saw_turn_started = false;
+    let mut saw_input_partial = false;
+    let mut saw_input_final = false;
+    let mut saw_turn_committed = false;
+    let mut output = String::new();
+    while Instant::now() < deadline && !saw_turn_committed {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(frame) = timeout(remaining, connection.next_frame()).await?? else {
+            return Err("realtime websocket closed before turn committed".into());
+        };
+        match frame {
+            meerkat::contracts::RealtimeServerFrame::ChannelEvent(event_frame) => {
+                match event_frame.event {
+                    meerkat::contracts::RealtimeEvent::TurnStarted => saw_turn_started = true,
+                    meerkat::contracts::RealtimeEvent::InputTranscriptPartial { .. } => {
+                        saw_input_partial = true;
+                    }
+                    meerkat::contracts::RealtimeEvent::InputTranscriptFinal { .. } => {
+                        saw_input_final = true;
+                    }
+                    meerkat::contracts::RealtimeEvent::OutputTextDelta { delta } => {
+                        output.push_str(&delta);
+                    }
+                    meerkat::contracts::RealtimeEvent::TurnCommitted => saw_turn_committed = true,
+                    _ => {}
+                }
+            }
+            meerkat::contracts::RealtimeServerFrame::ChannelError(error) => {
+                return Err(format!(
+                    "unexpected realtime channel error {}: {}",
+                    error.code, error.message
+                )
+                .into());
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_turn_started {
+        return Err("expected turn_started realtime event".into());
+    }
+    if !saw_input_partial {
+        return Err("expected input_transcript_partial realtime event".into());
+    }
+    if !saw_input_final {
+        return Err("expected input_transcript_final realtime event".into());
+    }
+    if !saw_turn_committed {
+        return Err("expected turn_committed realtime event".into());
+    }
+    Ok(output)
+}
+
+async fn collect_realtime_output_text_until_turn_completed(
+    connection: &mut meerkat::RealtimeConnection,
+    timeout_secs: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut saw_turn_completed = false;
+    let mut output = String::new();
+    while Instant::now() < deadline && !saw_turn_completed {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(frame) = timeout(remaining, connection.next_frame()).await?? else {
+            break;
+        };
+        match frame {
+            meerkat::contracts::RealtimeServerFrame::ChannelEvent(event_frame) => {
+                match event_frame.event {
+                    meerkat::contracts::RealtimeEvent::OutputTextDelta { delta } => {
+                        output.push_str(&delta);
+                    }
+                    meerkat::contracts::RealtimeEvent::TurnCompleted => {
+                        saw_turn_completed = true;
+                    }
+                    _ => {}
+                }
+            }
+            meerkat::contracts::RealtimeServerFrame::ChannelError(error) => {
+                return Err(format!(
+                    "unexpected realtime channel error {}: {}",
+                    error.code, error.message
+                )
+                .into());
+            }
+            _ => {}
+        }
+    }
+    if !saw_turn_completed {
+        return Err("expected turn_completed realtime event".into());
+    }
+    Ok(output)
+}
+
+async fn wait_for_realtime_turn_completed(
+    connection: &mut meerkat::RealtimeConnection,
+    timeout_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Some(frame) = timeout(remaining, connection.next_frame()).await?? else {
+            return Err("realtime websocket closed before turn completed".into());
+        };
+        match frame {
+            meerkat::contracts::RealtimeServerFrame::ChannelEvent(event_frame) => {
+                if matches!(
+                    event_frame.event,
+                    meerkat::contracts::RealtimeEvent::TurnCompleted
+                ) {
+                    return Ok(());
+                }
+            }
+            meerkat::contracts::RealtimeServerFrame::ChannelError(error) => {
+                return Err(format!(
+                    "unexpected realtime channel error {}: {}",
+                    error.code, error.message
+                )
+                .into());
+            }
+            _ => {}
+        }
+    }
+    Err("expected realtime turn_completed event".into())
 }
 
 fn parse_mcp_tool_payload(response: &Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -898,6 +2931,87 @@ async fn rest_mob_member_status(
         return Err(format!("REST mob member status failed: {response}").into());
     }
     http_json_body(&response)
+}
+
+async fn rpc_mob_member_status(
+    process: &mut RpcProcess,
+    id: u64,
+    mob_id: &str,
+    agent_identity: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    rpc_call(
+        process,
+        id,
+        "mob/member_status",
+        json!({
+            "mob_id": mob_id,
+            "agent_identity": agent_identity,
+        }),
+        30,
+    )
+    .await
+}
+
+async fn wait_for_rpc_session_read<F>(
+    process: &mut RpcProcess,
+    session_id: &str,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<Value, Box<dyn std::error::Error>>
+where
+    F: Fn(&Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut request_id = 2_000_u64;
+    loop {
+        let read = rpc_call(
+            process,
+            request_id,
+            "session/read",
+            json!({ "session_id": session_id }),
+            30,
+        )
+        .await?;
+        if predicate(&read) {
+            return Ok(read);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for session/read predicate on {session_id}: {read}"
+            )
+            .into());
+        }
+        request_id += 1;
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn wait_for_rpc_member_status<F>(
+    process: &mut RpcProcess,
+    mob_id: &str,
+    agent_identity: &str,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<Value, Box<dyn std::error::Error>>
+where
+    F: Fn(&Value) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut request_id = 1_000_u64;
+    loop {
+        let status = rpc_mob_member_status(process, request_id, mob_id, agent_identity).await?;
+        if predicate(&status) {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for member status predicate on {mob_id}/{agent_identity}: {status}"
+            )
+            .into());
+        }
+        request_id += 1;
+        sleep(Duration::from_millis(250)).await;
+    }
 }
 
 // ===========================================================================
@@ -2414,5 +4528,2457 @@ async fn rpc_rest_explicit_mob_registry_restores_without_live_api()
     assert_ne!(rest_worker_status["current_session_id"].as_str(), Some(""));
 
     shutdown_child(rest_child).await?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 60: Rust SDK realtime channel session exchange
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_60_rust_sdk_realtime_channel_session_exchange()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-60-rust-realtime";
+    let mut rpc = spawn_stdio_process_without_openai(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-ws",
+            "127.0.0.1:0",
+        ],
+        Some(&api_key),
+    )
+    .await?;
+
+    let _ = rpc_call(&mut rpc, 1, "initialize", json!({}), 20).await?;
+    let created = rpc_call(
+        &mut rpc,
+        2,
+        "session/create",
+        json!({
+            "prompt": "When asked through Rust realtime, reply with RUST-REALTIME-60 and mention birch.",
+            "model": smoke_model(),
+        }),
+        180,
+    )
+    .await?;
+    let session_id = created["session_id"]
+        .as_str()
+        .ok_or("session/create missing session_id")?
+        .to_string();
+
+    let open_info_value = rpc_call(
+        &mut rpc,
+        3,
+        "realtime/open_info",
+        json!({
+            "target": {
+                "type": "session_target",
+                "session_id": session_id,
+            },
+            "role": "primary",
+            "turning_mode": "provider_managed",
+        }),
+        30,
+    )
+    .await?;
+    let open_info: meerkat::contracts::RealtimeOpenInfo = serde_json::from_value(open_info_value)?;
+
+    let channel = meerkat::RealtimeChannel::session(session_id.clone());
+    let mut connection = channel.connect(&open_info).await?;
+    connection
+        .send_input(meerkat::contracts::RealtimeInputChunk::TextChunk(
+            meerkat::contracts::RealtimeTextChunk {
+                text: "Reply with RUST-REALTIME-60 and birch.".to_string(),
+            },
+        ))
+        .await?;
+
+    let mut saw_turn_started = false;
+    let mut saw_input_partial = false;
+    let mut saw_input_final = false;
+    let mut saw_turn_committed = false;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline && !saw_turn_committed {
+        let Some(frame) = connection.next_frame().await? else {
+            return Err("realtime websocket closed before turn committed".into());
+        };
+        if let meerkat::contracts::RealtimeServerFrame::ChannelEvent(event_frame) = frame {
+            match event_frame.event {
+                meerkat::contracts::RealtimeEvent::TurnStarted => saw_turn_started = true,
+                meerkat::contracts::RealtimeEvent::InputTranscriptPartial { .. } => {
+                    saw_input_partial = true;
+                }
+                meerkat::contracts::RealtimeEvent::InputTranscriptFinal { .. } => {
+                    saw_input_final = true;
+                }
+                meerkat::contracts::RealtimeEvent::TurnCommitted => saw_turn_committed = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_turn_started, "expected turn_started realtime event");
+    assert!(
+        saw_input_partial,
+        "expected input_transcript_partial realtime event"
+    );
+    assert!(
+        saw_input_final,
+        "expected input_transcript_final realtime event"
+    );
+    assert!(saw_turn_committed, "expected turn_committed realtime event");
+
+    let read_deadline = Instant::now() + Duration::from_secs(120);
+    let read = loop {
+        let read = rpc_call(
+            &mut rpc,
+            4,
+            "session/read",
+            json!({ "session_id": session_id }),
+            30,
+        )
+        .await?;
+        if read["last_assistant_text"]
+            .as_str()
+            .is_some_and(|text| text.to_lowercase().contains("rust-realtime-60"))
+        {
+            break read;
+        }
+        if Instant::now() >= read_deadline {
+            return Err(format!("timed out waiting for Rust realtime reply: {read}").into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
+
+    let last_assistant_text = read["last_assistant_text"]
+        .as_str()
+        .ok_or("session/read missing last_assistant_text")?
+        .to_lowercase();
+    assert!(last_assistant_text.contains("rust-realtime-60"));
+    assert!(last_assistant_text.contains("birch"));
+
+    connection.close().await?;
+    let close_deadline = Instant::now() + Duration::from_secs(30);
+    let mut saw_closed = false;
+    while Instant::now() < close_deadline && !saw_closed {
+        let Some(frame) = connection.next_frame().await? else {
+            break;
+        };
+        if matches!(
+            frame,
+            meerkat::contracts::RealtimeServerFrame::ChannelClosed(_)
+        ) {
+            saw_closed = true;
+        }
+    }
+    assert!(saw_closed, "expected channel.closed after Rust SDK close");
+
+    shutdown_stdio_process(rpc).await?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 61: CLI realtime bridge session exchange
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_61_cli_realtime_bridge_session_roundtrip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat = binary_path("rkat");
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat, "rkat") || skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat = rkat.unwrap();
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-61-cli-realtime";
+    let mut create_rpc = spawn_stdio_process_without_openai(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let _ = rpc_call(&mut create_rpc, 1, "initialize", json!({}), 20).await?;
+    let created = rpc_call(
+        &mut create_rpc,
+        2,
+        "session/create",
+        json!({
+            "prompt": "When asked through the CLI realtime bridge, reply with CLI-REALTIME-61 and mention willow.",
+            "model": smoke_model(),
+        }),
+        180,
+    )
+    .await?;
+    let session_id = created["session_id"]
+        .as_str()
+        .ok_or("session/create missing session_id")?
+        .to_string();
+    shutdown_stdio_process(create_rpc).await?;
+
+    let mut cli = spawn_stdio_process_without_openai(
+        &rkat,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "realtime",
+            "bridge",
+            "session",
+            &session_id,
+        ],
+        Some(&api_key),
+    )
+    .await?;
+
+    let opened = stdio_read_json_line(&mut cli, 30).await?;
+    assert_eq!(opened["type"].as_str(), Some("channel.opened"));
+
+    rpc_send_line(
+        &mut cli,
+        r#"{"type":"channel.input","chunk":{"kind":"text_chunk","text":"Reply with CLI-REALTIME-61 and willow."}}"#,
+    )
+    .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut saw_turn_started = false;
+    let mut saw_turn_committed = false;
+    while Instant::now() < deadline && !saw_turn_committed {
+        let frame = stdio_read_json_line(&mut cli, 30).await?;
+        if frame["type"].as_str() != Some("channel.event") {
+            continue;
+        }
+        match frame["event"]["type"].as_str() {
+            Some("turn_started") => saw_turn_started = true,
+            Some("turn_committed") => saw_turn_committed = true,
+            Some("channel.error") => {
+                return Err(format!("unexpected CLI realtime channel error: {frame}").into());
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_turn_started, "expected CLI bridge turn_started event");
+    assert!(
+        saw_turn_committed,
+        "expected CLI bridge turn_committed event"
+    );
+
+    rpc_send_line(&mut cli, r#"{"type":"channel.close"}"#).await?;
+    let close_deadline = Instant::now() + Duration::from_secs(30);
+    let mut saw_closed = false;
+    while Instant::now() < close_deadline && !saw_closed {
+        let frame = stdio_read_json_line(&mut cli, 30).await?;
+        if frame["type"].as_str() == Some("channel.closed") {
+            saw_closed = true;
+        }
+    }
+    assert!(saw_closed, "expected CLI bridge channel.closed frame");
+    shutdown_stdio_process(cli).await?;
+
+    let mut verify_rpc = spawn_stdio_process_without_openai(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let _ = rpc_call(&mut verify_rpc, 1, "initialize", json!({}), 20).await?;
+    let read_deadline = Instant::now() + Duration::from_secs(120);
+    let read = loop {
+        let read = rpc_call(
+            &mut verify_rpc,
+            2,
+            "session/read",
+            json!({ "session_id": session_id }),
+            30,
+        )
+        .await?;
+        if read["last_assistant_text"]
+            .as_str()
+            .is_some_and(|text| text.to_lowercase().contains("cli-realtime-61"))
+        {
+            break read;
+        }
+        if Instant::now() >= read_deadline {
+            return Err(format!("timed out waiting for CLI realtime reply: {read}").into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    };
+    let last_assistant_text = read["last_assistant_text"]
+        .as_str()
+        .ok_or("session/read missing last_assistant_text")?
+        .to_lowercase();
+    assert!(last_assistant_text.contains("cli-realtime-61"));
+    assert!(last_assistant_text.contains("willow"));
+    shutdown_stdio_process(verify_rpc).await?;
+
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 62: REST bootstrap to Rust SDK realtime channel exchange
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    let rkat_rest = binary_path("rkat-rest");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc")
+        || skip_if_missing_binary(&rkat_rest, "rkat-rest")
+    {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+    let rkat_rest = rkat_rest.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-62-rest-bootstrap";
+    let rpc_port = allocate_port();
+    let rest_port = allocate_port();
+    let rpc_addr = format!("127.0.0.1:{rpc_port}");
+
+    let rpc_child = wait_for_tcp_server_with_timeout(
+        spawn_background_process_without_openai(
+            &rkat_rpc,
+            &project_dir,
+            &[
+                "--state-root",
+                state_root.to_str().unwrap(),
+                "--realm",
+                realm_id,
+                "--context-root",
+                project_dir.to_str().unwrap(),
+                "--tcp",
+                &rpc_addr,
+                "--realtime-ws",
+                "127.0.0.1:0",
+            ],
+            Some(&api_key),
+        )
+        .await?,
+        rpc_port,
+        60,
+        "RPC server",
+    )
+    .await?;
+
+    let realm_paths = meerkat_store::realm_paths_in(&state_root, realm_id);
+    tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
+    let rest_config = format!(
+        "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 256\nbudget_warning_threshold = 0.8\n\n[rest]\nhost = \"127.0.0.1\"\nport = {rest_port}\n",
+        smoke_model()
+    );
+    tokio::fs::write(&realm_paths.config_path, rest_config).await?;
+
+    let rest_child = wait_for_rest_server_with_timeout(
+        spawn_background_process_without_openai(
+            &rkat_rest,
+            &project_dir,
+            &[
+                "--state-root",
+                state_root.to_str().unwrap(),
+                "--realm",
+                realm_id,
+                "--context-root",
+                project_dir.to_str().unwrap(),
+                "--instance",
+                "scenario-62-rest",
+                "--realtime-rpc-tcp",
+                &rpc_addr,
+            ],
+            Some(&api_key),
+        )
+        .await?,
+        rest_port,
+        60,
+    )
+    .await?;
+
+    let create_body = format!(
+        r#"{{"prompt":"When asked through REST bootstrap realtime, reply with REST-REALTIME-62 and mention spruce.","model":"{}"}}"#,
+        smoke_model()
+    );
+    let create_response = http_request(
+        rest_port,
+        format!(
+            "POST /sessions HTTP/1.1\r\nHost: 127.0.0.1:{rest_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            create_body.len(),
+            create_body
+        ),
+    )
+    .await?;
+    if !create_response.starts_with("HTTP/1.1 200") {
+        return Err(format!("REST create failed: {create_response}").into());
+    }
+    let created = http_json_body(&create_response)?;
+    let session_id = created["session_id"]
+        .as_str()
+        .ok_or("REST create missing session_id")?
+        .to_string();
+
+    let open_info_body = json!({
+        "target": {
+            "type": "session_target",
+            "session_id": session_id,
+        },
+        "role": "primary",
+        "turning_mode": "provider_managed",
+    })
+    .to_string();
+    let open_info_response = http_request(
+        rest_port,
+        format!(
+            "POST /realtime/open_info HTTP/1.1\r\nHost: 127.0.0.1:{rest_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            open_info_body.len(),
+            open_info_body
+        ),
+    )
+    .await?;
+    if !open_info_response.starts_with("HTTP/1.1 200") {
+        return Err(format!("REST realtime/open_info failed: {open_info_response}").into());
+    }
+    let open_info: meerkat::contracts::RealtimeOpenInfo =
+        serde_json::from_value(http_json_body(&open_info_response)?)?;
+
+    let channel = meerkat::RealtimeChannel::session(session_id.clone());
+    let mut connection = channel.connect(&open_info).await?;
+    let mut output = send_realtime_text_and_wait_for_commit(
+        &mut connection,
+        "Reply with REST-REALTIME-62 and spruce.",
+        90,
+    )
+    .await?;
+    output
+        .push_str(&collect_realtime_output_text_until_turn_completed(&mut connection, 120).await?);
+    let _output = output;
+    connection.close().await?;
+
+    let history_deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let history = rest_session_history(rest_port, &session_id).await?;
+        let assistant_messages = history_assistant_texts(&history)
+            .into_iter()
+            .map(|message| message.to_lowercase())
+            .collect::<Vec<_>>();
+        if assistant_messages
+            .iter()
+            .any(|message| message.contains("rest-realtime-62") && message.contains("spruce"))
+        {
+            break;
+        }
+        if Instant::now() >= history_deadline {
+            return Err(format!(
+                "timed out waiting for REST-bootstrapped realtime history update: {history}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    shutdown_child(rest_child).await?;
+    shutdown_child(rpc_child).await?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 63: MCP bootstrap to Rust SDK member realtime exchange
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    let rkat_mcp = binary_path("rkat-mcp");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc")
+        || skip_if_missing_binary(&rkat_mcp, "rkat-mcp")
+    {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat_rpc = rkat_rpc.unwrap();
+    let rkat_mcp = rkat_mcp.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "scenario-63-mcp-bootstrap";
+    let rpc_port = allocate_port();
+    let rpc_addr = format!("127.0.0.1:{rpc_port}");
+    let rpc_child = wait_for_tcp_server_with_timeout(
+        spawn_background_process_without_openai(
+            &rkat_rpc,
+            &project_dir,
+            &[
+                "--state-root",
+                state_root.to_str().unwrap(),
+                "--realm",
+                realm_id,
+                "--context-root",
+                project_dir.to_str().unwrap(),
+                "--tcp",
+                &rpc_addr,
+                "--realtime-ws",
+                "127.0.0.1:0",
+            ],
+            Some(&api_key),
+        )
+        .await?,
+        rpc_port,
+        60,
+        "RPC server",
+    )
+    .await?;
+
+    let mut mcp = spawn_stdio_process_without_openai(
+        &rkat_mcp,
+        &project_dir,
+        &[
+            "--realm",
+            realm_id,
+            "--instance",
+            "scenario-63-mcp",
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-rpc-tcp",
+            &rpc_addr,
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    initialize_mcp(&mut mcp, 30).await?;
+
+    let created = tcp_rpc_call(
+        &rpc_addr,
+        1,
+        "mob/create",
+        json!({
+            "definition": {
+                "id": "scenario-63-mob",
+                "profiles": {
+                    "worker": {
+                        "model": smoke_model(),
+                        "external_addressable": true,
+                        "tools": { "comms": true }
+                    }
+                }
+            }
+        }),
+        60,
+    )
+    .await?;
+    let mob_id = created["mob_id"]
+        .as_str()
+        .ok_or("RPC mob create missing mob_id")?
+        .to_string();
+
+    let _spawned = tcp_rpc_call(
+        &rpc_addr,
+        2,
+        "mob/spawn",
+        json!({
+            "mob_id": mob_id,
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "runtime_mode": "turn_driven",
+        }),
+        180,
+    )
+    .await?;
+
+    let open_info_payload = parse_mcp_tool_payload(
+        &mcp_call_tool(
+            &mut mcp,
+            3,
+            "meerkat_realtime_open_info",
+            json!({
+                "target": {
+                    "type": "mob_member_target",
+                    "mob_id": mob_id,
+                    "agent_identity": "worker-1",
+                },
+                "role": "primary",
+                "turning_mode": "provider_managed",
+            }),
+            30,
+        )
+        .await?,
+    )?;
+    let open_info: meerkat::contracts::RealtimeOpenInfo =
+        serde_json::from_value(open_info_payload)?;
+
+    let channel = meerkat::RealtimeChannel::mob_member(mob_id.clone(), "worker-1");
+    let mut connection = channel.connect(&open_info).await?;
+
+    let attached_status = tcp_rpc_call(
+        &rpc_addr,
+        4,
+        "mob/member_status",
+        json!({
+            "mob_id": mob_id,
+            "agent_identity": "worker-1",
+        }),
+        30,
+    )
+    .await?;
+    assert_eq!(
+        attached_status["realtime_attachment_status"].as_str(),
+        Some("binding_not_ready"),
+        "member-target realtime open should project binding_not_ready on the owning RPC host"
+    );
+
+    send_realtime_text_and_wait_for_commit(
+        &mut connection,
+        "Reply with MCP-REALTIME-63 and cedar.",
+        90,
+    )
+    .await?;
+    wait_for_realtime_turn_completed(&mut connection, 90).await?;
+
+    let preview_deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let member_status = tcp_rpc_call(
+            &rpc_addr,
+            1,
+            "mob/member_status",
+            json!({
+                "mob_id": mob_id,
+                "agent_identity": "worker-1",
+            }),
+            30,
+        )
+        .await?;
+        let preview = member_status["output_preview"].as_str().unwrap_or_default();
+        if preview.contains("MCP-REALTIME-63") && preview.to_ascii_lowercase().contains("cedar") {
+            break;
+        }
+        if Instant::now() >= preview_deadline {
+            return Err(format!(
+                "RPC member status never surfaced expected output preview after MCP bootstrap realtime turn: {member_status}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    connection.close().await?;
+    let detached_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let member_status = tcp_rpc_call(
+            &rpc_addr,
+            6,
+            "mob/member_status",
+            json!({
+                "mob_id": mob_id,
+                "agent_identity": "worker-1",
+            }),
+            30,
+        )
+        .await?;
+        let preview = member_status["output_preview"].as_str().unwrap_or_default();
+        if member_status["realtime_attachment_status"].as_str() == Some("unattached")
+            && preview.contains("MCP-REALTIME-63")
+            && preview.to_ascii_lowercase().contains("cedar")
+        {
+            break;
+        }
+        if Instant::now() >= detached_deadline {
+            return Err(format!(
+                "RPC member status never reflected detached realtime state with preserved preview after MCP bootstrap close: {member_status}"
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    shutdown_stdio_process(mcp).await?;
+    shutdown_child(rpc_child).await?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 71: Rust SDK realtime audio mob collaboration roundtrip
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "scenario-71-realtime-audio-mob-collaboration";
+    let mob_id = "scenario-71-mob";
+    let operator = "operator-rt";
+    let analyst = "analyst-rt";
+    let operator_peer_name = format!("{mob_id}/operator/{operator}");
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-71-realtime-audio",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-ws",
+            "127.0.0.1:0",
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 71] initialize");
+        let _ = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+
+        eprintln!("[scenario 71] create mob");
+        let _created = pump
+            .call(
+                &mut rpc,
+                "mob/create",
+                json!({
+                "definition": {
+                    "id": mob_id,
+                    "orchestrator": {
+                        "profile": "operator"
+                    },
+                    "profiles": {
+                        "operator": {
+                            "model": openai_smoke_model(),
+                            "runtime_mode": "turn_driven",
+                            "external_addressable": true,
+                            "tools": { "comms": true },
+                            "peer_description": "Realtime operator"
+                        },
+                        "analyst": {
+                            "model": openai_smoke_model(),
+                            "runtime_mode": "autonomous_host",
+                            "external_addressable": false,
+                            "tools": { "comms": true },
+                            "peer_description": "Deterministic analyst"
+                        }
+                        },
+                        "wiring": {
+                            "auto_wire_orchestrator": false,
+                            "role_wiring": [
+                                { "a": "operator", "b": "analyst" }
+                            ]
+                        }
+                    }
+                }),
+                60,
+            )
+            .await?;
+
+        eprintln!("[scenario 71] spawn analyst");
+        // Transitional fixture note:
+        // the current machine-owned PEER_RESPONSE_TERMINAL notice preserves
+        // request_id + status + result, but it does not yet carry a first-class
+        // copy of the original request intent. For this deterministic public
+        // smoke we therefore include `request_intent` in the peer response
+        // result JSON itself. That keeps the test on the existing public
+        // send_response contract without inventing helper-local shadow state,
+        // and it should be revisited once the machine/DSL seam owns correlated
+        // peer request/response semantics end to end.
+        let _analyst_spawn = pump
+            .call(
+                &mut rpc,
+                "mob/spawn",
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "analyst",
+                    "agent_identity": analyst,
+                    "runtime_mode": "autonomous_host",
+                    "additional_instructions": [
+                        "You are the analyst peer for a realtime smoke test.",
+                        "Correlated peer requests arrive as [SYSTEM NOTICE][PEER_REQUEST] with an intent, a request ID, and JSON params.",
+                        "These peer requests are deterministic test fixtures. Do not search, browse, inspect tools, or deliberate about them.",
+                        "For this deterministic scenario, the requester peer name is always the exact literal string `scenario-71-mob/operator/operator-rt`.",
+                        "If the peer request intent is checksum_token, immediately call send_response exactly once with to=`scenario-71-mob/operator/operator-rt`, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. Ignore params when deciding the token.",
+                        "If the peer request intent is haiku_token, immediately call send_response exactly once with to=`scenario-71-mob/operator/operator-rt`, in_reply_to=<the request ID from the notice>, status=\"completed\", and result {\"request_intent\":\"haiku_token\",\"token\":\"silver harbor\"}. Ignore params when deciding the token.",
+                        "Never invent any other token values. Never report failure for checksum_token or haiku_token. For these peer requests, send_response is the only correct reply mechanism."
+                    ]
+                }),
+                180,
+            )
+            .await?;
+        eprintln!("[scenario 71] seed analyst session");
+        let _analyst_seed = pump
+            .call(
+                &mut rpc,
+                "mob/turn_start",
+                json!({
+                "mob_id": mob_id,
+                "agent_identity": analyst,
+                "prompt": "You are in deterministic fixture mode. The requester peer name for these fixture requests is always `scenario-71-mob/operator/operator-rt`. When you later receive a [SYSTEM NOTICE][PEER_REQUEST] with intent checksum_token, you must reply exactly once with send_response to=`scenario-71-mob/operator/operator-rt`, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. When you later receive intent haiku_token, you must reply exactly once with send_response to=`scenario-71-mob/operator/operator-rt`, in_reply_to=<request id>, status=completed, result={\"request_intent\":\"haiku_token\",\"token\":\"silver harbor\"}. Do not browse, search, or fail those requests. Reply exactly ANALYST_READY."
+                }),
+                180,
+            )
+            .await?;
+
+        eprintln!("[scenario 71] spawn operator");
+        let _operator_seed = pump
+            .call(
+                &mut rpc,
+                "mob/spawn",
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "operator",
+                    "agent_identity": operator,
+                    "runtime_mode": "turn_driven",
+                    "additional_instructions": [
+                        "You are the realtime operator for a smoke test.",
+                        "When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else.",
+                        "The exact spoken phrase `Please remember the codeword amber lantern and reply remembering amber lantern.` means answer with exactly `Remembering amber lantern.` and nothing else.",
+                        "When the user asks you to ask analyst for the token, you MUST call peers exactly once in that turn, identify the single returned peer whose description corresponds to the deterministic analyst fixture, and then call send_request exactly once to that exact returned peer name.",
+                        "The exact spoken phrase `Ask analyst for the token.` means you must use send_request intent checksum_token.",
+                        "For checksum token work, use send_request with intent checksum_token, params {\"subject\":\"alpha beta gamma\"}, and handling_mode \"queue\", with `to` set to the exact peer name you just discovered from peers. Never hardcode a private peer alias.",
+                        "Correlated peer responses arrive later as runtime-owned system notices. In this deterministic fixture, treat any [SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] whose `Result` JSON contains `\"request_intent\":\"checksum_token\"` or `\"request_intent\":\"haiku_token\"` as authoritative for that token lookup.",
+                        "When several terminal peer notices exist, prefer the most recent one whose `Result` JSON contains `\"request_intent\":\"checksum_token\"` or `\"request_intent\":\"haiku_token\"` matching the token you need. Use request ID matching only as a fallback when the result does not carry request_intent.",
+                        "For checksum answers, the checksum token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `checksum_token`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
+                        "For haiku answers, the haiku token must come from the `Result` JSON inside the most recent authoritative terminal peer response whose `request_intent` is `haiku_token`. Read the exact string in `\"token\"` from that notice and repeat it verbatim.",
+                        "A remembered codeword and a peer-response token are different facts. Never reuse the remembered codeword as the token, even if both are in context at once.",
+                        "The placeholder text `<remembered codeword>`, `<checksum token>`, and `<haiku token>` is specification shorthand only. Never say angle brackets, placeholder words, or stand-ins like `checksum token` out loud. Replace them with the exact remembered codeword or the exact token from the authoritative peer response before answering.",
+                        "The exact spoken phrase `Ask analyst for the token.` is an asynchronous request turn. In that turn, after calling peers and send_request, answer with exactly `Waiting for analyst token.` and nothing else.",
+                        "Never derive a token from the request subject. `alpha beta gamma` and `alpha_beta_gamma` are not valid token answers.",
+                        "If the user says `Say only the codeword once.` or `Say only the code word once.`, answer with exactly `<remembered codeword>.` and nothing else.",
+                        "The exact spoken phrase `Repeat the codeword and token over and over until I say stop.` means answer with exactly `Looping now: <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>.` and nothing else.",
+                        "If the user says `Stop now.`, `Stop.`, `Start now.`, or `Start.`, answer with exactly `Stopped.` and nothing else.",
+                        "If the user interrupts you and says `Stop and say the codeword and token once.`, `Stop and say the code word and token once.`, `Start and say the codeword and token once.`, `Start and say the code word and token once.`, `Stop and just say the codeword and token once.`, `Stop and just say the code word and token once.`, `Start and just say the codeword and token once.`, or `Start and just say the code word and token once.`, answer with exactly `<remembered codeword>. <checksum token>.` and nothing else.",
+                        "If the user says `Please say the codeword and token once.` or `Please say the code word and token once.`, answer with exactly `<remembered codeword>. <checksum token>.` and nothing else.",
+                        "The exact spoken phrase `Ask analyst for the haiku token.` is an asynchronous request turn. In that turn, call peers exactly once, identify the same deterministic analyst peer, then call send_request exactly once to that exact peer name with intent haiku_token, params {}, and handling_mode \"queue\", then answer with exactly `Waiting for haiku token.` and nothing else.",
+                        "If the user says `Say only the haiku token and goodbye.`, answer with exactly `<haiku token>. goodbye.` and nothing else, using the most recent terminal haiku peer response.",
+                        "Do not invent checksum or haiku tokens. You do not know them until analyst-rt replies.",
+                        "Never emit raw JSON, tool arguments, or function-call syntax to the user in your final spoken answer.",
+                        "Remember user-provided codewords verbatim and answer concisely with the requested tokens.",
+                        "Never spam peers or send_request in a loop. One request per user turn is enough."
+                    ],
+                    "initial_message": "Reply exactly OPERATOR_AUDIO_READY."
+                }),
+                180,
+            )
+            .await?;
+        eprintln!("[scenario 71] seed operator session");
+        let operator_seed = pump
+            .call(
+                &mut rpc,
+                "mob/turn_start",
+                json!({
+                "mob_id": mob_id,
+                "agent_identity": operator,
+                "prompt": "Deterministic fixture mapping: placeholder text such as `<remembered codeword>`, `<checksum token>`, and `<haiku token>` is instruction shorthand only; never speak or print the placeholder itself, and always substitute the exact remembered codeword or exact token from the most recent authoritative terminal peer response before answering. The token must come from the `Result` JSON in the authoritative terminal peer response, and you must never reuse the remembered codeword as the token. In this fixture, any terminal peer response whose `Result` JSON contains `request_intent` is authoritative for that token family, and the most recent matching terminal response wins. When the `Result` JSON includes `request_intent`, treat that field as the authoritative discriminator for whether the token is the checksum token or the haiku token. If the later spoken user turn is `Please remember the codeword amber lantern and reply remembering amber lantern.`, answer exactly `Remembering amber lantern.`. If the later spoken user turn is `Ask analyst for the token.`, you must call peers exactly once, choose the deterministic analyst peer from the returned peer list, then send_request exactly once to that exact returned peer name with intent checksum_token, params {\"subject\":\"alpha beta gamma\"}, handling_mode=\"queue\", then answer exactly `Waiting for analyst token.`. If the later spoken user turn is `Say only the codeword once.` or `Say only the code word once.`, answer exactly `<remembered codeword>.`. If the later spoken user turn is `Repeat the codeword and token over and over until I say stop.`, answer exactly `Looping now: <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>. <remembered codeword>. <checksum token>.` using the most recent terminal checksum peer response. If the later spoken user turn is `Stop now.`, `Stop.`, `Start now.`, or `Start.`, answer exactly `Stopped.`. If the later spoken user turn is `Stop and say the codeword and token once.`, `Stop and say the code word and token once.`, `Start and say the codeword and token once.`, `Start and say the code word and token once.`, `Stop and just say the codeword and token once.`, `Stop and just say the code word and token once.`, `Start and just say the codeword and token once.`, or `Start and just say the code word and token once.`, answer exactly `<remembered codeword>. <checksum token>.`. If the later spoken user turn is `Please say the codeword and token once.` or `Please say the code word and token once.`, answer exactly `<remembered codeword>. <checksum token>.`. If the later spoken user turn is `Ask analyst for the haiku token.`, you must call peers exactly once, choose the deterministic analyst peer from the returned peer list, then call send_request exactly once to that exact returned peer name with intent haiku_token, params {}, handling_mode=\"queue\", then answer exactly `Waiting for haiku token.`. If the later spoken user turn is `Say only the haiku token and goodbye.`, answer exactly `<haiku token>. goodbye.` using the most recent terminal haiku peer response. Reply exactly OPERATOR_AUDIO_READY.",
+            }),
+            180,
+        )
+        .await?;
+        let current_session_id = operator_seed["session_id"]
+            .as_str()
+            .ok_or("mob/turn_start for operator missing session_id")?
+            .to_string();
+
+        eprintln!("[scenario 71] wait for comms wiring");
+        let _operator_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            operator,
+            120,
+            |status| {
+                status["peer_connectivity"]["reachable_peer_count"].as_u64() == Some(1)
+                    && status["peer_connectivity"]["unknown_peer_count"].as_u64() == Some(0)
+            },
+        )
+        .await?;
+        let _analyst_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            analyst,
+            120,
+            |status| {
+                status["peer_connectivity"]["reachable_peer_count"].as_u64() == Some(1)
+                    && status["peer_connectivity"]["unknown_peer_count"].as_u64() == Some(0)
+            },
+        )
+        .await?;
+
+        eprintln!("[scenario 71] open mob streams");
+        let operator_stream = pump
+            .open_mob_stream(&mut rpc, mob_id, Some(operator), 30)
+            .await?;
+        let analyst_stream = pump
+            .open_mob_stream(&mut rpc, mob_id, Some(analyst), 30)
+            .await?;
+
+        let baseline_history =
+            pump_session_history(&mut pump, &mut rpc, &current_session_id, 30).await?;
+        let baseline_user_count = history_user_texts(&baseline_history).len();
+
+        eprintln!("[scenario 71] open realtime channel");
+        let open_info_value = pump
+            .call(
+                &mut rpc,
+                "realtime/open_info",
+                json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+                30,
+            )
+            .await?;
+        let open_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(open_info_value)?;
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id, operator);
+        let connection = match channel.connect(&open_info).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                let context = if rpc_stderr.trim().is_empty() {
+                    format!("realtime channel open failed without rpc stderr: {error}")
+                } else {
+                    format!(
+                        "realtime channel open failed: {error}\nrpc stderr:\n{}",
+                        rpc_stderr.trim()
+                    )
+                };
+                return Err(context.into());
+            }
+        };
+        let (mut sender, mut receiver) = connection.split();
+        let _ready_capture = collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await?;
+        let _binding_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            operator,
+            30,
+            |status| status["realtime_attachment_status"].as_str() == Some("binding_ready"),
+        )
+        .await?;
+        let remember_pcm = openai_tts_pcm(
+            "Remember the codeword amber lantern."
+        )
+        .await?;
+        // Important for the async public path: terminal peer responses must use
+        // default/queue semantics here, not steer. The runtime policy table
+        // intentionally gives `peer_response_terminal + steer` boundary-only
+        // semantics, which would not wake an idle turn-driven realtime member.
+        // This smoke is proving the real asynchronous request/response path, so
+        // the analyst fixture leaves handling_mode unset and lets the runtime's
+        // kind default queue/wake behavior own the delivery.
+        let checksum_request_pcm = openai_tts_pcm("Ask analyst for the token.").await?;
+        let codeword_only_pcm = openai_tts_pcm("Say only the codeword once.").await?;
+        // Keep this spoken turn to a single sentence with minimal internal
+        // pauses. Provider-managed VAD can legitimately split punctuation-rich
+        // TTS into multiple committed user turns, which would make the smoke
+        // prove the wrong thing. The flagship interruption witness needs one
+        // long assistant response from one committed user turn.
+        let token_explain_pcm =
+            openai_tts_pcm("Repeat the codeword and token over and over until I say stop.").await?;
+        // Keep the barge-in utterance as short as possible so the provider can
+        // still commit it while the deterministic looping reply is actively
+        // speaking. A longer stop phrase makes the smoke race-y for the wrong
+        // reason and stops proving true audio overlap/preemption.
+        let stop_pcm = openai_tts_pcm("Stop.").await?;
+        let recall_pcm =
+            openai_tts_pcm("Please say the codeword and token once.").await?;
+        let haiku_request_pcm = openai_tts_pcm("Ask analyst for the haiku token.").await?;
+        let haiku_reply_pcm = openai_tts_pcm("Say only the haiku token and goodbye.").await?;
+
+        eprintln!("[scenario 71] send turn 1 remember");
+        let mut remember_capture = match send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &remember_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 71 turn 1 remember failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        remember_capture.merge_from(
+            settle_realtime_turn_after_commit(&mut receiver, &remember_capture, 120).await?,
+        );
+        let remember_output_text = normalize_semantic_text(&remember_capture.output_text);
+        if remember_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&remember_capture.output_audio_pcm)
+            || !remember_output_text.contains("amber lantern")
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-1-remember",
+                &remember_pcm,
+                &remember_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 1 remember emitted unexpected realtime output text `{remember_output_text}`: {remember_capture:?}"
+            )
+            .into());
+        }
+
+        let analyst_event_count_before_checksum = pump.mob_stream_events(&analyst_stream).len();
+        let _turn1_quiesced =
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &remember_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 2 token request");
+        let turn2_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &checksum_request_pcm,
+            120,
+        )
+        .await?;
+        let turn2_settled_capture =
+            match settle_realtime_turn_after_commit(&mut receiver, &turn2_commit, 120).await {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                    let operator_events = pump.mob_stream_events(&operator_stream).clone();
+                    let analyst_events = pump.mob_stream_events(&analyst_stream).clone();
+                    return Err(format!(
+                        "turn 2 request did not settle after commit: {error}\n\
+                         rpc stderr:\n{}\n\
+                         operator stream events: {operator_events:?}\n\
+                         analyst stream events: {analyst_events:?}",
+                        rpc_stderr.trim()
+                    )
+                    .into());
+                }
+            };
+        let mut turn2_capture = turn2_commit.clone();
+        turn2_capture.merge_from(turn2_settled_capture.clone());
+        if turn2_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-2-token-request",
+                &checksum_request_pcm,
+                &turn2_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 2 request did not emit real output audio: {turn2_capture:?}"
+            )
+            .into());
+        }
+        let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
+        // Product-contract note:
+        // for the asynchronous request turn we prove two public things only:
+        // the channel emitted real output audio, and the channel's semantic
+        // text surface said "waiting for analyst token". A second speech-to-
+        // text pass over the synthesized output is intentionally not
+        // authoritative here because TTS + transcription can wobble on names
+        // ("analyst" vs "amulet's") without reflecting a Meerkat semantic bug.
+        if !normalized_text_contains_any(
+            &turn2_output_text,
+            &["waiting for analyst token", "waiting for the analyst token"],
+        ) {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-2-token-request",
+                &checksum_request_pcm,
+                &turn2_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 2 request emitted unexpected semantic output text `{turn2_output_text}`: {turn2_capture:?}"
+            )
+            .into());
+        }
+        let operator_event_count_after_turn2 = pump.mob_stream_events(&operator_stream).len();
+        assert!(
+            turn2_capture
+                .tool_call_requests
+                .iter()
+                .any(|tool_name| tool_name == "peers"),
+            "expected realtime channel to surface peers tool call during token request flow: {turn2_capture:?}"
+        );
+        assert!(
+            turn2_capture
+                .tool_call_completions
+                .iter()
+                .any(|tool_name| tool_name == "peers"),
+            "expected realtime channel to surface completed peers tool call during token request flow: {turn2_capture:?}"
+        );
+        assert!(
+            turn2_capture
+                .tool_call_requests
+                .iter()
+                .any(|tool_name| tool_name == "send_request"),
+            "expected realtime channel to surface send_request tool call during token request flow: {turn2_capture:?}"
+        );
+        assert!(
+            turn2_capture
+                .tool_call_completions
+                .iter()
+                .any(|tool_name| tool_name == "send_request"),
+            "expected realtime channel to surface completed send_request during token request flow: {turn2_capture:?}"
+        );
+        let analyst_checksum_response_requested = pump.wait_for_mob_stream_event_after(
+            &mut rpc,
+            &analyst_stream,
+            analyst_event_count_before_checksum,
+            120,
+            |event| {
+                mob_stream_event_type(event) == Some("tool_call_requested")
+                    && mob_stream_tool_name(event) == Some("send_response")
+                    && mob_stream_send_response_token(event).is_some()
+            },
+        )
+        .await?;
+        pump.wait_for_mob_stream_event_after(
+            &mut rpc,
+            &analyst_stream,
+            analyst_event_count_before_checksum,
+            120,
+            |event| {
+                mob_stream_event_type(event) == Some("tool_execution_completed")
+                    && mob_stream_tool_name(event) == Some("send_response")
+            },
+        )
+        .await?;
+        // Public async-handoff witness:
+        // `mob/stream` does not currently expose the runtime-owned
+        // system-context append text inside `run_started.prompt` for
+        // context-only immediate wakes. The public signal we *do* have is that
+        // the operator emits a later idle wake/run after turn 2 has already
+        // completed. Waiting for that post-turn run before reconstructing the
+        // provider session keeps the smoke aligned with actual user-visible
+        // state instead of assuming the analyst-side send_response completion
+        // is already the operator's durable truth boundary.
+        let operator_async_peer_response_run = pump
+            .wait_for_mob_stream_event_after(
+                &mut rpc,
+                &operator_stream,
+                operator_event_count_after_turn2,
+                120,
+                |event| {
+                    mob_stream_event_type(event) == Some("run_completed")
+                },
+            )
+            .await
+            .map_err(|error| {
+                let operator_events = pump.mob_stream_events(&operator_stream);
+                format!(
+                    "operator never completed the post-turn async wake run after analyst send_response completed: {error}; operator_events={operator_events:?}"
+                )
+            })?;
+        let expected_checksum_token =
+            mob_stream_send_response_token(&analyst_checksum_response_requested).ok_or_else(
+                || {
+                    format!(
+                        "analyst send_response did not include result.token: {analyst_checksum_response_requested}"
+                    )
+                },
+            )?;
+        let expected_checksum_token_normalized =
+            normalize_semantic_text(&expected_checksum_token);
+        let checksum_request_intent =
+            mob_stream_send_response_request_intent(&analyst_checksum_response_requested)
+                .ok_or_else(|| {
+                    format!(
+                        "analyst send_response did not include result.request_intent: {analyst_checksum_response_requested}"
+                    )
+                })?;
+        if checksum_request_intent != "checksum_token" {
+            return Err(format!(
+                "analyst send_response carried unexpected request_intent `{checksum_request_intent}`: {analyst_checksum_response_requested}"
+            )
+            .into());
+        }
+        let checksum_response_target = mob_stream_tool_args_json(&analyst_checksum_response_requested)
+            .and_then(|args| args["to"].as_str().map(ToString::to_string))
+            .ok_or_else(|| {
+                format!(
+                    "analyst send_response did not include target peer name: {analyst_checksum_response_requested}"
+                )
+            })?;
+        if checksum_response_target != operator_peer_name {
+            return Err(format!(
+                "analyst send_response targeted `{checksum_response_target}` instead of operator peer `{operator_peer_name}`: {analyst_checksum_response_requested}"
+            )
+            .into());
+        }
+        let _operator_async_peer_result = operator_async_peer_response_run["payload"]["result"]
+            .as_str()
+            .map(normalize_semantic_text)
+            .ok_or_else(|| {
+                format!(
+                    "operator async post-turn run_completed event missing result payload: {operator_async_peer_response_run}"
+                )
+            })?;
+        eprintln!("[scenario 71] reopen realtime channel on reconstructed session state");
+        // Public contract note:
+        // `session/read` on an active live session is intentionally a coarse
+        // non-blocking summary surface, so its second-granularity `updated_at`
+        // is not a reliable witness for a narrow runtime-owned context append
+        // that lands immediately after the operator says "Waiting for analyst
+        // token.". The stronger public proof is what follows:
+        // 1. close and reopen the realtime channel,
+        // 2. let the existing realtime projection-refresh path reconcile any
+        //    between-turn Meerkat mutations into the already-open provider
+        //    session when needed, and
+        // 3. prove via later spoken recall that the reopened live surface can
+        //    surface the authoritative terminal peer result.
+        sender.close().await?;
+        drop(receiver);
+        let _mid_detached_status =
+            wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
+                status["realtime_attachment_status"].as_str() == Some("unattached")
+            })
+            .await?;
+        let reopen_info_value = pump
+            .call(
+                &mut rpc,
+                "realtime/open_info",
+                json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+                30,
+            )
+            .await?;
+        let reopen_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(reopen_info_value)?;
+        let reconnect = channel.connect(&reopen_info).await?;
+        let (new_sender, new_receiver) = reconnect.split();
+        sender = new_sender;
+        receiver = new_receiver;
+        let _reopen_ready_capture =
+            collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await?;
+        let _rebound_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            operator,
+            30,
+            |status| status["realtime_attachment_status"].as_str() == Some("binding_ready"),
+        )
+        .await?;
+        eprintln!("[scenario 71] send turn 3 codeword-only recall");
+        let turn3_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &codeword_only_pcm,
+            120,
+        )
+        .await
+        .map_err(|err| format!("turn 3 codeword-only recall never committed: {err}"))?;
+        let turn3_settled_capture =
+            match settle_realtime_turn_after_commit(&mut receiver, &turn3_commit, 120).await {
+                Ok(capture) => capture,
+                Err(err) => {
+                    let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                    let message = if rpc_stderr.trim().is_empty() {
+                        format!(
+                            "turn 3 codeword-only recall never produced settled output: {err}; commit={turn3_commit:?}"
+                        )
+                    } else {
+                        format!(
+                            "turn 3 codeword-only recall never produced settled output: {err}; commit={turn3_commit:?}\nrpc stderr:\n{}",
+                            rpc_stderr.trim()
+                        )
+                    };
+                    return Err(message.into());
+                }
+            };
+        let mut turn3_capture = turn3_commit.clone();
+        turn3_capture.merge_from(turn3_settled_capture.clone());
+        let turn3_output_text = normalize_semantic_text(&turn3_capture.output_text);
+        if turn3_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn3_capture.output_audio_pcm)
+            || !normalized_text_contains_any(&turn3_output_text, &["amber lantern", "amberlantern"])
+            || turn3_output_text.contains(&expected_checksum_token_normalized)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-3-codeword-only",
+                &codeword_only_pcm,
+                &turn3_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 3 codeword-only recall emitted unexpected realtime output text `{turn3_output_text}`: {turn3_capture:?}"
+            )
+            .into());
+        }
+        let _turn3_canonical_commit = wait_for_rpc_session_read(
+            &mut rpc,
+            &current_session_id,
+            30,
+            |read| {
+                read["last_assistant_text"].as_str().is_some_and(|text| {
+                    normalized_text_contains_any(
+                        &normalize_semantic_text(text),
+                        &["amber lantern", "amberlantern"],
+                    )
+                })
+            },
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "turn 3 codeword-only recall never crossed the canonical assistant-turn boundary before the long-answer turn: \
+turn3_capture={turn3_capture:?}; error={err}"
+            )
+        })?;
+
+        let _turn3_quiesced =
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn3_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 4 explanation and barge into turn 5");
+        let turn45_primary_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &token_explain_pcm,
+            120,
+        )
+        .await?;
+        let turn45_preemption_capture = match collect_realtime_frames_until_barge_in_preemption_and_second_commit(
+                &mut sender,
+                &mut receiver,
+                &turn45_primary_commit,
+                &stop_pcm,
+                120,
+                |capture| {
+                    capture_event_count(capture, "output_text_delta") > 0
+                        || capture_event_count(capture, "output_audio_chunk") > 0
+                },
+            )
+            .await {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
+                    let stderr_path = std::env::temp_dir().join("s71-turn45-stderr.log");
+                    let _ = tokio::fs::write(&stderr_path, rpc_stderr.as_bytes()).await;
+                    return Err(format!(
+                        "scenario 71 turn 4-5 barge-in failed: {error}\nrpc stderr dumped to {}",
+                        stderr_path.display()
+                    ).into());
+                }
+            };
+        let turn45_settled_capture =
+            collect_realtime_frames_until_output_settles(&mut receiver, 120).await?;
+        let mut turn45_capture = turn45_primary_commit.clone();
+        turn45_capture.merge_from(turn45_preemption_capture.clone());
+        turn45_capture.merge_from(turn45_settled_capture.clone());
+        let interrupted_index = capture_event_index(&turn45_capture, "interrupted")
+            .ok_or("missing interrupted event during turn 5 barge-in")?;
+        let committed_index = turn45_capture
+            .event_kinds
+            .iter()
+            .enumerate()
+            .rfind(|(_, kind)| *kind == "turn_committed")
+            .map(|(index, _)| index)
+            .ok_or("missing post-barge turn_committed event after turn 5")?;
+        if interrupted_index >= committed_index
+            || turn45_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn45_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-5-stop",
+                &stop_pcm,
+                &turn45_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 5 barge-in capture did not preempt active assistant output with real audio: {turn45_capture:?}"
+            )
+            .into());
+        }
+        if turn45_settled_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn45_settled_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-5-stop",
+                &stop_pcm,
+                &turn45_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 5 did not emit settled post-barge output audio: {turn45_capture:?}"
+            )
+            .into());
+        }
+        eprintln!("[scenario 71] wait for turn 5 canonical history");
+        let (_turn5_session_id, turn5_history) = wait_for_pump_any_session_history(
+            &mut pump,
+            &mut rpc,
+            120,
+            |_, history| {
+                let user_messages = history_user_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                let assistant_messages = history_assistant_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                user_messages.iter().any(|text| {
+                    normalized_text_contains_any(
+                        text,
+                        &[
+                            "remember the codeword amber lantern",
+                            "remember the code word amber lantern",
+                            "remember amber lantern",
+                        ],
+                    )
+                })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the token"))
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "repeat the codeword and token over and over until i say stop",
+                                "repeat the code word and token over and over until i say stop",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "stop now",
+                                "start now",
+                                "stop",
+                                "start",
+                            ],
+                        )
+                    })
+                    && assistant_messages
+                        .iter()
+                        .any(|text| text.contains("stopped"))
+            },
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "turn 5 canonical history did not settle after barge-in: \
+turn45_input_finals={:?}; turn45_input_partials={:?}; turn45_event_kinds={:?}; \
+turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
+                turn45_capture.input_finals,
+                turn45_capture.input_partials,
+                turn45_capture.event_kinds,
+                turn45_settled_capture.output_text,
+                turn45_capture.frame_log,
+            )
+        })?;
+        let turn5_assistant_messages = history_assistant_texts(&turn5_history)
+            .into_iter()
+            .map(|text| normalize_semantic_text(&text))
+            .collect::<Vec<_>>();
+        assert!(
+            turn5_assistant_messages
+                .iter()
+                .any(|text| text.contains("stopped")),
+            "expected canonical assistant history to retain the stop acknowledgement after barge-in: {turn5_history}"
+        );
+        assert!(
+            !turn5_assistant_messages
+                .iter()
+                .any(|text| text.contains("looping now")),
+            "interrupted assistant partial output must not survive into canonical history: {turn5_history}"
+        );
+
+        let _turn5_quiesced =
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn45_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 6 post-barge recall");
+        let turn6_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &recall_pcm,
+            120,
+        )
+        .await?;
+        let turn6_settled_capture =
+            settle_realtime_turn_after_commit(&mut receiver, &turn6_commit, 120).await?;
+        let mut turn6_capture = turn6_commit.clone();
+        turn6_capture.merge_from(turn6_settled_capture.clone());
+        if turn6_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn6_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-6-recall",
+                &recall_pcm,
+                &turn6_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 6 recall did not emit real output audio: {turn6_capture:?}"
+            )
+            .into());
+        }
+        let turn6_output_text = normalize_semantic_text(&turn6_capture.output_text);
+        if !turn6_output_text.contains("amber lantern")
+            || !turn6_output_text.contains(&expected_checksum_token_normalized)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-6-recall",
+                &recall_pcm,
+                &turn6_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 6 recall emitted unexpected semantic output text `{turn6_output_text}`: {turn6_capture:?}"
+            )
+            .into());
+        }
+        eprintln!("[scenario 71] wait for turn 6 canonical history");
+        let (_turn6_session_id, turn6_history) = wait_for_pump_any_session_history(
+            &mut pump,
+            &mut rpc,
+            120,
+            |_, history| {
+                let user_messages = history_user_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                let assistant_messages = history_assistant_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                user_messages.iter().any(|text| {
+                    normalized_text_contains_any(
+                        text,
+                        &[
+                            "remember the codeword amber lantern",
+                            "remember the code word amber lantern",
+                            "remember amber lantern",
+                        ],
+                    )
+                })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the token"))
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "repeat the codeword and token over and over until i say stop",
+                                "repeat the code word and token over and over until i say stop",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &["stop now", "start now", "stop", "start"],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "please say the codeword and token once",
+                                "please say the code word and token once",
+                            ],
+                        )
+                    })
+                    && assistant_messages.iter().any(|text| {
+                        text.contains("amber lantern")
+                            && text.contains(&expected_checksum_token_normalized)
+                    })
+            },
+        )
+        .await?;
+        let turn6_assistant_messages = history_assistant_texts(&turn6_history)
+            .into_iter()
+            .map(|text| normalize_semantic_text(&text))
+            .collect::<Vec<_>>();
+        assert!(
+            turn6_assistant_messages.iter().any(|text| {
+                text.contains("amber lantern")
+                    && text.contains(&expected_checksum_token_normalized)
+            }),
+            "expected canonical assistant history to retain codeword/token recall after the stop turn: {turn6_history}"
+        );
+        assert!(
+            !turn6_assistant_messages
+                .iter()
+                .any(|text| text.contains("looping now")),
+            "interrupted looping output must not survive into canonical history after recall: {turn6_history}"
+        );
+        let _turn6_quiesced =
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn6_capture, 5)
+                .await?;
+
+        eprintln!("[scenario 71] send turn 7 haiku request");
+        let analyst_event_count_before_turn7 = pump.mob_stream_events(&analyst_stream).len();
+        let turn7_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &haiku_request_pcm,
+            120,
+        )
+        .await?;
+        let turn7_settled_capture =
+            settle_realtime_turn_after_commit(&mut receiver, &turn7_commit, 120).await?;
+        let mut turn7_capture = turn7_commit.clone();
+        turn7_capture.merge_from(turn7_settled_capture.clone());
+        if turn7_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn7_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-7-haiku-request",
+                &haiku_request_pcm,
+                &turn7_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 7 request did not emit real output audio: {turn7_capture:?}"
+            )
+            .into());
+        }
+        let turn7_output_text = normalize_semantic_text(&turn7_capture.output_text);
+        // Same reasoning as turn 2: on the asynchronous request turn, the
+        // public semantic witness is the channel text/event stream plus real
+        // output audio, not a second transcription pass of the spoken output.
+        if !normalized_text_contains_any(
+            &turn7_output_text,
+            &["waiting for haiku token", "waiting for the haiku token"],
+        ) {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-7-haiku-request",
+                &haiku_request_pcm,
+                &turn7_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 7 request emitted unexpected semantic output text `{turn7_output_text}`: {turn7_capture:?}"
+            )
+            .into());
+        }
+        assert!(
+            turn7_capture
+                .tool_call_requests
+                .iter()
+                .any(|tool_name| tool_name == "send_request"),
+            "expected realtime channel to surface a second send_request tool call during turn 7: {turn7_capture:?}"
+        );
+        assert!(
+            turn7_capture
+                .tool_call_completions
+                .iter()
+                .any(|tool_name| tool_name == "send_request"),
+            "expected realtime channel to surface a completed second send_request during turn 7: {turn7_capture:?}"
+        );
+        let analyst_haiku_response_requested = pump.wait_for_mob_stream_event_after(
+            &mut rpc,
+            &analyst_stream,
+            analyst_event_count_before_turn7,
+            120,
+            |event| {
+                mob_stream_event_type(event) == Some("tool_call_requested")
+                    && mob_stream_tool_name(event) == Some("send_response")
+                    && mob_stream_send_response_token(event).is_some()
+            },
+        )
+        .await?;
+        pump.wait_for_mob_stream_event_after(
+            &mut rpc,
+            &analyst_stream,
+            analyst_event_count_before_turn7,
+            120,
+            |event| {
+                mob_stream_event_type(event) == Some("tool_execution_completed")
+                    && mob_stream_tool_name(event) == Some("send_response")
+            },
+        )
+        .await?;
+        let expected_haiku_token =
+            mob_stream_send_response_token(&analyst_haiku_response_requested).ok_or_else(|| {
+                format!(
+                    "analyst haiku send_response did not include result.token: {analyst_haiku_response_requested}"
+                )
+            })?;
+        let expected_haiku_token_normalized = normalize_semantic_text(&expected_haiku_token);
+        let haiku_request_intent =
+            mob_stream_send_response_request_intent(&analyst_haiku_response_requested)
+                .ok_or_else(|| {
+                    format!(
+                        "analyst haiku send_response did not include result.request_intent: {analyst_haiku_response_requested}"
+                    )
+                })?;
+        if haiku_request_intent != "haiku_token" {
+            return Err(format!(
+                "analyst haiku send_response carried unexpected request_intent `{haiku_request_intent}`: {analyst_haiku_response_requested}"
+            )
+            .into());
+        }
+        let haiku_response_target = mob_stream_tool_args_json(&analyst_haiku_response_requested)
+            .and_then(|args| args["to"].as_str().map(ToString::to_string))
+            .ok_or_else(|| {
+                format!(
+                    "analyst haiku send_response did not include target peer name: {analyst_haiku_response_requested}"
+                )
+            })?;
+        if haiku_response_target != operator_peer_name {
+            return Err(format!(
+                "analyst haiku send_response targeted `{haiku_response_target}` instead of operator peer `{operator_peer_name}`: {analyst_haiku_response_requested}"
+            )
+            .into());
+        }
+        let _turn7_quiesced =
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn7_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 8");
+        let turn8_commit = send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &haiku_reply_pcm,
+            120,
+        )
+        .await?;
+        let turn8_settled_capture =
+            settle_realtime_turn_after_commit(&mut receiver, &turn8_commit, 120).await?;
+        let mut turn8_capture = turn8_commit.clone();
+        turn8_capture.merge_from(turn8_settled_capture.clone());
+
+        // Check the merged capture: audio can arrive in either the commit
+        // window or the settled window depending on provider event ordering
+        // (TurnCommitted/InputTranscriptFinal vs first OutputAudioChunk). For
+        // short fast turns OpenAI can emit the first audio chunk before
+        // InputTranscriptFinal, which then lands in the commit capture and
+        // leaves the settled slice empty even though the turn produced audio.
+        if turn8_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn8_capture.output_audio_pcm)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-8-haiku-reply",
+                &haiku_reply_pcm,
+                &turn8_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 8 capture did not emit real output audio: {turn8_capture:?}"
+            )
+            .into());
+        }
+        let turn8_output_text = normalize_semantic_text(&turn8_capture.output_text);
+        let turn8_output_audio_text = normalized_output_audio_transcript(&turn8_capture).await?;
+        if !turn8_output_text.contains(&expected_haiku_token_normalized)
+            || !turn8_output_text.contains("goodbye")
+            || !turn8_output_audio_text.contains("goodbye")
+            || !turn8_output_audio_text.contains(&expected_haiku_token_normalized)
+        {
+            dump_realtime_audio_artifacts(
+                scenario_name,
+                "turn-8-haiku-reply",
+                &haiku_reply_pcm,
+                &turn8_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 8 emitted unexpected realtime output audio transcript `{turn8_output_audio_text}` with text deltas `{turn8_output_text}`: {turn8_capture:?}"
+            )
+            .into());
+        }
+
+        eprintln!("[scenario 71] wait for final canonical history");
+        let (_final_session_id, final_history) = wait_for_pump_any_session_history(
+            &mut pump,
+            &mut rpc,
+            120,
+            |_, history| {
+                let user_messages = history_user_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                let assistant_messages = history_assistant_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                user_messages.iter().any(|text| {
+                    normalized_text_contains_any(
+                        text,
+                        &[
+                            "remember the codeword amber lantern",
+                            "remember the code word amber lantern",
+                            "remember amber lantern",
+                        ],
+                    )
+                })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the token"))
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "repeat the codeword and token over and over until i say stop",
+                                "repeat the code word and token over and over until i say stop",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "stop now",
+                                "start now",
+                                "stop",
+                                "start",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "please say the codeword and token once",
+                                "please say the code word and token once",
+                            ],
+                        )
+                    })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the haiku token"))
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("say only the haiku token and goodbye"))
+                    && assistant_messages
+                        .iter()
+                        .any(|text| {
+                            text.contains(&expected_haiku_token_normalized)
+                                && text.contains("goodbye")
+                        })
+            },
+        )
+        .await?;
+        let final_assistant_messages = history_assistant_texts(&final_history)
+            .into_iter()
+            .map(|text| normalize_semantic_text(&text))
+            .collect::<Vec<_>>();
+        assert!(final_assistant_messages
+            .iter()
+            .any(|text| {
+                text.contains(&expected_haiku_token_normalized) && text.contains("goodbye")
+            }));
+
+        eprintln!("[scenario 71] close channel");
+        sender.close().await?;
+        // Transitional note: realtime audio product truth is the channel stream
+        // plus canonical session history. `output_preview` is a secondary
+        // projection today, so this flagship smoke deliberately avoids making
+        // it a release-blocking authority until the upcoming machine-owned
+        // realtime/comms seam replaces the current projection path.
+        let detached_status =
+            wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
+                status["realtime_attachment_status"].as_str() == Some("unattached")
+            })
+            .await?;
+        assert_eq!(
+            detached_status["realtime_attachment_status"].as_str(),
+            Some("unattached")
+        );
+
+        eprintln!("[scenario 71] verify committed history");
+        let (_history_session_id, history) = wait_for_pump_any_session_history(
+            &mut pump,
+            &mut rpc,
+            30,
+            |_, history| {
+                let user_messages = history_user_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                let assistant_messages = history_assistant_texts(history)
+                    .into_iter()
+                    .map(|text| normalize_semantic_text(&text))
+                    .collect::<Vec<_>>();
+                user_messages.iter().any(|text| {
+                    normalized_text_contains_any(
+                        text,
+                        &[
+                            "remember the codeword amber lantern",
+                            "remember the code word amber lantern",
+                            "remember amber lantern",
+                        ],
+                    )
+                })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the token"))
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "repeat the codeword and token over and over until i say stop",
+                                "repeat the code word and token over and over until i say stop",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "stop now",
+                                "start now",
+                                "stop",
+                                "start",
+                            ],
+                        )
+                    })
+                    && user_messages.iter().any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "please say the codeword and token once",
+                                "please say the code word and token once",
+                            ],
+                        )
+                    })
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("ask analyst for the haiku token"))
+                    && user_messages
+                        .iter()
+                        .any(|text| text.contains("say only the haiku token and goodbye"))
+                    && assistant_messages
+                        .iter()
+                        .any(|text| {
+                            text.contains(&expected_haiku_token_normalized)
+                                && text.contains("goodbye")
+                        })
+            },
+        )
+        .await?;
+        let user_messages = history_user_texts(&history);
+        let assistant_messages = history_assistant_texts(&history)
+            .into_iter()
+            .map(|text| normalize_semantic_text(&text))
+            .collect::<Vec<_>>();
+        let normalized_user_messages = user_messages
+            .iter()
+            .map(|text| normalize_semantic_text(text))
+            .collect::<Vec<_>>();
+
+        assert!(
+            normalized_user_messages.iter().any(|text| {
+                normalized_text_contains_any(
+                    text,
+                    &[
+                        "remember the codeword amber lantern",
+                        "remember the code word amber lantern",
+                        "remember amber lantern",
+                    ],
+                )
+            })
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| text.contains("ask analyst for the token"))
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| text.contains("say only the codeword once"))
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "repeat the codeword and token over and over until i say stop",
+                                "repeat the code word and token over and over until i say stop",
+                            ],
+                        )
+                    })
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "stop now",
+                                "start now",
+                                "stop",
+                                "start",
+                            ],
+                        )
+                    })
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| {
+                        normalized_text_contains_any(
+                            text,
+                            &[
+                                "please say the codeword and token once",
+                                "please say the code word and token once",
+                            ],
+                        )
+                    })
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| text.contains("ask analyst for the haiku token"))
+                && normalized_user_messages
+                    .iter()
+                    .any(|text| text.contains("say only the haiku token and goodbye")),
+            "expected canonical history to retain all committed audio turns: {history}"
+        );
+        assert!(
+            assistant_messages
+                .iter()
+                .any(|text| text.contains("amber lantern") && text.contains("remember")),
+            "expected canonical assistant history to retain the remembered codeword acknowledgement: {history}"
+        );
+        assert!(
+            assistant_messages
+                .iter()
+                .any(|text| {
+                    text.contains(&expected_checksum_token_normalized)
+                        && text.contains("amber lantern")
+                }),
+            "expected canonical assistant history to retain codeword answer after barge-in: {history}"
+        );
+        assert!(
+            assistant_messages
+                .iter()
+                .any(|text| {
+                    text.contains(&expected_haiku_token_normalized)
+                        && text.contains("goodbye")
+                }),
+            "expected canonical assistant history to retain haiku token goodbye answer: {history}"
+        );
+        assert!(
+            !assistant_messages.iter().any(|text| text.contains("looping now")),
+            "expected interrupted looping output to stay out of final canonical history: {history}"
+        );
+
+        pump.close_mob_stream(&mut rpc, &operator_stream, 30).await?;
+        pump.close_mob_stream(&mut rpc, &analyst_stream, 30).await?;
+        eprintln!("[scenario 71] complete");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    let shutdown_result = shutdown_stdio_process(rpc).await;
+    result?;
+    shutdown_result?;
+    Ok(())
+}
+
+// ===========================================================================
+// Scenario 72: Rust SDK realtime audio member model-switch continuity
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "scenario-72-realtime-audio-model-switch";
+    let mob_id = "scenario-72-mob";
+    let agent_identity = "lead-rt-switch-audio";
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-72-realtime-audio",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--realtime-ws",
+            "127.0.0.1:0",
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 72] initialize");
+        let _ = pump.call(&mut rpc, "initialize", json!({}), 20).await?;
+        eprintln!("[scenario 72] create mob");
+        let _ = pump
+            .call(
+                &mut rpc,
+                "mob/create",
+                json!({
+                    "definition": {
+                        "id": mob_id,
+                        "profiles": {
+                            "lead": {
+                                "model": openai_smoke_model(),
+                                "tools": { "comms": true },
+                                "peer_description": "Lead realtime worker",
+                                "external_addressable": true
+                            }
+                        }
+                    }
+                }),
+                60,
+            )
+            .await?;
+
+        eprintln!("[scenario 72] spawn lead");
+        let _spawned = pump
+            .call(
+                &mut rpc,
+                "mob/spawn",
+                json!({
+                    "mob_id": mob_id,
+                    "profile": "lead",
+                    "agent_identity": agent_identity,
+                    "runtime_mode": "turn_driven",
+                    "initial_message": "Reply exactly READY_RT_AUDIO_72."
+                }),
+                180,
+            )
+            .await?;
+        eprintln!("[scenario 72] seed lead session");
+        let seeded = pump
+            .call(
+                &mut rpc,
+                "mob/turn_start",
+                json!({
+                    "mob_id": mob_id,
+                    "agent_identity": agent_identity,
+                    "prompt": "Reply exactly READY_RT_AUDIO_72.",
+                }),
+                180,
+            )
+            .await?;
+        let _current_session_id = seeded["session_id"]
+            .as_str()
+            .ok_or("mob/turn_start missing session_id for scenario 72")?
+            .to_string();
+
+        let open_info_value = pump
+            .call(
+                &mut rpc,
+                "realtime/open_info",
+                json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": mob_id,
+                        "agent_identity": agent_identity,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+                30,
+            )
+            .await?;
+        let open_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(open_info_value)?;
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id, agent_identity);
+        eprintln!("[scenario 72] connect realtime channel");
+        let connection = channel.connect(&open_info).await?;
+        let (mut sender, mut receiver) = connection.split();
+
+        let turn1_pcm = openai_tts_pcm("Reply with pine river.").await?;
+        eprintln!("[scenario 72] send turn 1 audio");
+        let mut turn1_capture = match send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &turn1_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 72 turn 1 audio failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        eprintln!("[scenario 72] collect turn 1 output");
+        match collect_realtime_frames_until_output_settles(&mut receiver, 120).await {
+            Ok(capture) => turn1_capture.merge_from(capture),
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "scenario 72 turn 1 output did not settle: {error}\nturn1_commit_capture={turn1_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        let turn1_output_text = normalize_semantic_text(&turn1_capture.output_text);
+        let turn1_output_audio_text = normalized_output_audio_transcript(&turn1_capture).await?;
+        if turn1_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn1_capture.output_audio_pcm)
+            || !(turn1_output_audio_text.contains("pine river")
+                || turn1_output_text.contains("pine river"))
+        {
+            dump_realtime_audio_artifacts(scenario_name, "turn-1", &turn1_pcm, &turn1_capture)
+                .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+            return Err(format!(
+                "scenario 72 turn 1 emitted unexpected realtime output audio transcript `{turn1_output_audio_text}` with text deltas `{turn1_output_text}`: {turn1_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
+            )
+            .into());
+        }
+        let initial_status = pump_mob_member_status(&mut pump, &mut rpc, mob_id, agent_identity, 30)
+            .await?;
+        assert!(
+            matches!(
+                initial_status["realtime_attachment_status"].as_str(),
+                Some("binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
+            ),
+            "scenario 72 channel entered an unexpected status before the switch: {initial_status}"
+        );
+
+        let switched = pump
+            .call(
+                &mut rpc,
+                "mob/turn_start",
+                json!({
+                    "mob_id": mob_id,
+                    "agent_identity": agent_identity,
+                    "prompt": "Reply with SWITCH_AUDIO_72 and birch.",
+                    "model": openai_switch_model(),
+                    "provider": "openai",
+                }),
+                180,
+            )
+            .await?;
+        eprintln!("[scenario 72] model switch reply received");
+        let switched_text = normalize_semantic_text(switched["text"].as_str().unwrap_or_default());
+        assert!(
+            !switched_text.is_empty(),
+            "scenario 72 model-switch control reply was empty: {switched}"
+        );
+        let _post_switch_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            agent_identity,
+            30,
+            |status| status["realtime_attachment_status"].as_str() == Some("binding_ready"),
+        )
+        .await?;
+        let _post_switch_frames = collect_realtime_frames_until_ready_or_idle(&mut receiver, 5)
+            .await
+            .unwrap_or_default();
+
+        let turn2_pcm = openai_tts_pcm("Reply with copper canyon after the switch.").await?;
+        eprintln!("[scenario 72] send turn 2 audio");
+        let mut turn2_capture = match send_realtime_audio_and_wait_for_commit(
+            &mut sender,
+            &mut receiver,
+            &turn2_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 72 turn 2 audio failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        eprintln!("[scenario 72] collect turn 2 output");
+        match collect_realtime_frames_until_output_settles(&mut receiver, 120).await {
+            Ok(capture) => turn2_capture.merge_from(capture),
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "scenario 72 turn 2 output did not settle: {error}\nturn2_commit_capture={turn2_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
+        let turn2_output_audio_text = normalized_output_audio_transcript(&turn2_capture).await?;
+        if turn2_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
+            || !(turn2_output_audio_text.contains("copper canyon")
+                || turn2_output_text.contains("copper canyon"))
+        {
+            dump_realtime_audio_artifacts(scenario_name, "turn-2", &turn2_pcm, &turn2_capture)
+                .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+            return Err(format!(
+                "scenario 72 turn 2 emitted unexpected realtime output audio transcript `{turn2_output_audio_text}` with text deltas `{turn2_output_text}`: {turn2_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
+            )
+            .into());
+        }
+
+        let final_status = pump_mob_member_status(&mut pump, &mut rpc, mob_id, agent_identity, 30)
+            .await?;
+        assert!(
+            matches!(
+                final_status["realtime_attachment_status"].as_str(),
+                Some("binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required")
+            ),
+            "scenario 72 channel entered an unexpected terminal member status: {final_status}"
+        );
+
+        eprintln!("[scenario 72] close channel");
+        sender.close().await?;
+        let detached_status = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            agent_identity,
+            30,
+            |status| status["realtime_attachment_status"].as_str() == Some("unattached"),
+        )
+        .await?;
+        assert_eq!(
+            detached_status["realtime_attachment_status"].as_str(),
+            Some("unattached")
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    let shutdown_result = shutdown_stdio_process(rpc).await;
+    result?;
+    shutdown_result?;
     Ok(())
 }

@@ -300,6 +300,8 @@ jobs:
           cargo check -p meerkat --no-default-features --features openai,memory-store
           cargo check -p meerkat --no-default-features --features gemini,jsonl-store
           cargo check -p meerkat --features all-providers,comms,mcp
+          cargo check -p meerkat-mob --no-default-features
+          cargo check -p meerkat-mob --no-default-features --features runtime-adapter
           cargo nextest run -p meerkat --features all-providers,comms,mcp
 
   test-feature-matrix-surface-checks:

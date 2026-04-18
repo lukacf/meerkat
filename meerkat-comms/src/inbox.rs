@@ -30,6 +30,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) raw_item_id: String,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
+    pub(crate) auth_exempt: bool,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
@@ -105,8 +106,12 @@ impl ClassifiedInboxQueue {
     ///
     /// External items drive the transition: an empty queue after dequeue moves
     /// to `Delivered`; otherwise we stay in `Received`. Plain events do not
-    /// drive the peer-ingress phase.
+    /// drive the peer-ingress phase. Auth-exempt entries (bridge bootstrap
+    /// / idempotency-ack envelopes) bypass the phase machinery entirely.
     fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
+        if entry.auth_exempt {
+            return;
+        }
         let InboxItem::External { .. } = &entry.item else {
             return;
         };
@@ -417,7 +422,14 @@ impl InboxSender {
             let kind = result.ingress_kind();
             let (should_enqueue, trusted_snapshot) = {
                 let mut queue = classified_queue.lock();
-                queue.admit_peer_receive(&result)
+                if result.auth_exempt && ctx.require_peer_auth && !result.trusted_sender {
+                    // Auth-exempt bridge traffic (bootstrap / idempotency-ack)
+                    // bypasses the peer-trust gate so bootstrapping can
+                    // complete before trust edges exist.
+                    (true, Some(false))
+                } else {
+                    queue.admit_peer_receive(&result)
+                }
             };
             if !should_enqueue {
                 return Ok(());
@@ -426,6 +438,7 @@ impl InboxSender {
                 raw_item_id: result.raw_item_id,
                 item: result.item,
                 class: result.class,
+                auth_exempt: result.auth_exempt,
                 kind,
                 from_peer: result.from_peer,
                 lifecycle_peer: result.lifecycle_peer,

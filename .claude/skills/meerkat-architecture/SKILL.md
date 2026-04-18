@@ -39,12 +39,30 @@ Short version:
 11. Derived projections are rebuildable, never authoritative.
 12. Surfaces are skins, not authorities.
 
+### Realtime attachment vocabulary (public noun)
+
+Public API surfaces describe `realtime`, not `voice`. The converged
+terms across RPC, REST, MCP, and SDKs are:
+
+- `runtime/realtime_attachment_status` — runtime-owned status projection
+- `mob/realtime_attach` / `mob/realtime_detach` — per-member attach/detach
+- `mob/member_status.realtime_attachment_status` — per-member projection
+
+The `realtime_attachment_status` enum is the typed form surfaces
+present; audio-only backend behavior is one provider specialization,
+not the public capability name. Prior `live_*` surfaces have been
+renamed to the `realtime_*` vocabulary across RPC/REST/MCP/SDK catalogs.
+
+Load `references/realtime-attachment.md` when touching realtime
+attachment state, the live-topology reconfigure flow, or the DSL
+authority epoch model.
+
 ## The 4-machine target
 
 Exactly four canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
-- **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution.
+- **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification, **realtime attachment authority, live-topology reconfigure phase**.
+- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution, **per-member realtime intent**.
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 
@@ -54,24 +72,38 @@ Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bund
 
 Detailed architecture, DSL ↔ schema ↔ kernel ↔ TLA+ flow, the field-driven design principle, signals vs inputs, and the cross-crate handle trait pattern: **load `references/machine-system.md`**.
 
+## Identity-first mob model
+
+Stable per-member identity is separate from per-runtime binding:
+
+- **`AgentIdentity`** — assigned at spawn, persists across respawns and runtime-binding changes. Keys all public mob APIs (`mob/realtime_attach { agent_identity }`, `mob/member_status`, delegate targets, voice intent, etc.).
+- **`AgentRuntimeId`** — per-runtime binding detail. Rotates on respawn. DSL guards keyed on `{agent_runtime_id, fence_token}` use this for binding-level rotation safety.
+- **`FenceToken`** — monotonic epoch counter for runtime bindings. DSL guards enforce `fence_token` ordering.
+- **`Generation`** — mob-member generation counter; increments on respawn.
+
+When adding state or effects keyed on member identity, choose
+`AgentIdentity` if the fact survives respawn (voice intent,
+wiring preferences), `AgentRuntimeId` if it's per-binding (ops
+registry membership, live bridge).
+
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
 | `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf; no meerkat deps) | — |
 | `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle` |
-| `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas | — |
-| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini) | Implements `AgentLlmClient` |
+| `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
+| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini), **realtime (OpenAI) transport** | Implements `AgentLlmClient` |
 | `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router (routes to `ExternalToolSurfaceHandle`) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
-| `meerkat-runtime` | Runtime control plane, policy engine, detached wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
+| `meerkat-runtime` | Runtime control plane, policy engine, detached wake, DSL handle impls, **`reconfigure_live_topology` orchestration, realtime attachment public methods** | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims, pure peer data types | Implements `CommsRuntime` |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
 | `meerkat-memory` | Semantic memory stores and retrieval | Implements `MemoryStore` |
-| `meerkat-mob` | Multi-agent orchestration, member provisioning, flow runtime | `MobSessionService`, `MobProvisioner` |
+| `meerkat-mob` | Multi-agent orchestration, member provisioning, flow runtime, **identity-first binding model, supervisor bridge** | `MobSessionService`, `MobProvisioner`, `MobMemberRuntimeBridge` |
 | `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
 | `meerkat-mob-mcp` | MCP/operator mob surface plus agent-facing delegation tool surface | `MobMcpState`, `AgentMobToolSurfaceFactory` |
 | `meerkat-schedule` | Scheduler subsystem; `Schedule::apply` / `Occurrence::apply` on domain types | `ScheduleService`, `ScheduleDriver`, `ScheduleStore` |
@@ -79,7 +111,7 @@ Detailed architecture, DSL ↔ schema ↔ kernel ↔ TLA+ flow, the field-driven
 | `meerkat-machine-schema` | Rust-native machine/composition catalog DSL — the formal authority | — |
 | `meerkat-machine-kernels` | Generated kernel interpreter for all machines/compositions | `GeneratedMachineKernel` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
-| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports | Wires everything together |
+| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports, **`SessionLlmReconfigureHost` wiring** | Wires everything together |
 
 **Rule: `meerkat-core` has zero I/O dependencies.** All I/O happens in satellite crates.
 
@@ -91,6 +123,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 - **`references/machine-system.md`** — load when touching DSL sources, catalog schemas, generated kernels, TLC verification, authority cutover, handle trait design, or any "where does this semantic state live" question. Covers the DSL → MachineSchema → kernel → TLA+ → runtime flow, the field-driven design principle, signals vs inputs, and the `HandleDslAuthority` cross-crate pattern.
 - **`references/runtime-control-plane.md`** — load when working on `MeerkatMachine`, runtime drivers, session registration, policy resolution, `RuntimeBuildMode` / `SessionRuntimeBindings`, `OpsLifecycleRegistry`, session service lifecycle, persistence pairing, detached-op wake, or test harness ownership.
+- **`references/realtime-attachment.md`** — load when working on realtime attachment state, the live-topology reconfigure flow, provider callback authority epochs, or the peer-response-terminal context append path. Covers the DSL state fields, the `RealtimeAttachmentSignalAuthority` token, and the five CoreExecutor entry points that route context-only staged primitives.
 - **`references/agent-construction.md`** — load when touching `AgentFactory::build_agent()`, agent builder, multimodal content types, or runtime tool scoping.
 - **`references/mob-orchestration.md`** — load when working on mobs: creation, launch modes, spawn policies, delegation tools, lifecycle control, provisioning, wiring, flow/frame execution, mob persistence, or `MobActor` decomposition.
 - **`references/comms-model.md`** — load when working on peer trust, inter-agent messaging, comms drain lifecycle, envelope classification, or session identity claims.
@@ -105,6 +138,7 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter
+- `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs` — `reconfigure_live_topology` orchestration
 - `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
 - `meerkat-core/src/handles.rs` — DSL handle trait definitions
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
@@ -112,6 +146,12 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (pipeline)
 - `meerkat-session/src/{ephemeral,persistent}.rs` — session services
 - `meerkat-mob/src/runtime/actor.rs` — `MobActor`
+- `meerkat-mob/src/backend.rs`, `meerkat-mob/src/ids.rs` — identity-first binding model
+- `meerkat-mob/src/runtime/supervisor_bridge.rs` — supervisor bridge transport
+- `meerkat-mob/src/runtime/local_bridge.rs` — in-process MeerkatMachine bridge
 - `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
+- `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
 - `docs/architecture/meerkat-runtime-dogma.md` — full dogma
+- `docs/architecture/identity-first-live-voice-proposal.md` — realtime + identity-first design notes
+- `docs/guides/realtime.mdx` — user-facing realtime voice guide (public vocabulary, state enum, reconfigure flow)
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog

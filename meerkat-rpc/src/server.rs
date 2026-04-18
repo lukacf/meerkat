@@ -124,6 +124,12 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
     }
 
+    /// Attach the shared realtime websocket bootstrap host.
+    pub fn with_realtime_ws_host(mut self, host: Arc<crate::realtime_ws::RealtimeWsHost>) -> Self {
+        self.router = self.router.with_realtime_ws_host(host);
+        self
+    }
+
     #[cfg(feature = "mob")]
     /// Create a new RPC server with an optional skill runtime and explicit mob state.
     ///
@@ -521,11 +527,25 @@ pub async fn serve_stdio_with_skill_runtime(
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 ) -> Result<(), ServerError> {
+    serve_stdio_with_skill_runtime_and_realtime_ws_host(runtime, config_store, skill_runtime, None)
+        .await
+}
+
+/// Start the RPC server on stdin/stdout with an optional sibling realtime host.
+pub async fn serve_stdio_with_skill_runtime_and_realtime_ws_host(
+    runtime: Arc<SessionRuntime>,
+    config_store: Arc<dyn ConfigStore>,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    realtime_ws_host: Option<Arc<crate::realtime_ws::RealtimeWsHost>>,
+) -> Result<(), ServerError> {
     let stdin = tokio::io::stdin();
     let stdout = BlockingWriter::stdout();
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);
+    if let Some(realtime_ws_host) = realtime_ws_host {
+        server = server.with_realtime_ws_host(realtime_ws_host);
+    }
     server.run().await
 }
 
@@ -540,10 +560,25 @@ pub async fn serve_tcp_connection(
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 ) -> Result<(), ServerError> {
+    serve_tcp_connection_with_realtime_ws_host(stream, runtime, config_store, skill_runtime, None)
+        .await
+}
+
+/// Accept a single RPC TCP client with an optional sibling realtime host.
+pub async fn serve_tcp_connection_with_realtime_ws_host(
+    stream: tokio::net::TcpStream,
+    runtime: Arc<SessionRuntime>,
+    config_store: Arc<dyn ConfigStore>,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    realtime_ws_host: Option<Arc<crate::realtime_ws::RealtimeWsHost>>,
+) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, write_half, runtime, config_store, skill_runtime);
+    if let Some(realtime_ws_host) = realtime_ws_host {
+        server = server.with_realtime_ws_host(realtime_ws_host);
+    }
     server.skip_shutdown_on_eof = true;
     server.run().await
 }
@@ -559,6 +594,17 @@ pub async fn serve_tcp(
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
 ) -> Result<(), ServerError> {
+    serve_tcp_with_realtime_ws_host(addr, runtime, config_store, skill_runtime, None).await
+}
+
+/// Listen on a TCP address and serve RPC clients with an optional realtime host.
+pub async fn serve_tcp_with_realtime_ws_host(
+    addr: &str,
+    runtime: Arc<SessionRuntime>,
+    config_store: Arc<dyn ConfigStore>,
+    skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    realtime_ws_host: Option<Arc<crate::realtime_ws::RealtimeWsHost>>,
+) -> Result<(), ServerError> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("RPC TCP listener bound to {addr}");
     loop {
@@ -567,8 +613,16 @@ pub async fn serve_tcp(
         let runtime = Arc::clone(&runtime);
         let config_store = Arc::clone(&config_store);
         let skill_runtime = skill_runtime.clone();
+        let realtime_ws_host = realtime_ws_host.clone();
         tokio::spawn(async move {
-            if let Err(e) = serve_tcp_connection(stream, runtime, config_store, skill_runtime).await
+            if let Err(e) = serve_tcp_connection_with_realtime_ws_host(
+                stream,
+                runtime,
+                config_store,
+                skill_runtime,
+                realtime_ws_host,
+            )
+            .await
             {
                 tracing::warn!("RPC client {peer_addr} disconnected: {e}");
             } else {
@@ -649,12 +703,24 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use futures::stream;
+    use futures::{SinkExt, StreamExt, stream};
     use meerkat::AgentFactory;
     use meerkat_client::{LlmClient, LlmError};
+    use meerkat_contracts::{
+        RealtimeCapabilities, RealtimeChannelOpenFrame, RealtimeChannelRole, RealtimeChannelTarget,
+        RealtimeClientFrame, RealtimeInputKind, RealtimeOpenRequest, RealtimeOutputKind,
+        RealtimeServerFrame, RealtimeTurningMode,
+    };
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, StopReason};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
     use tokio::net::TcpStream;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     /// Mock LLM that immediately returns "Hello from mock" and ends the turn.
     struct MockLlmClient;
@@ -715,6 +781,32 @@ mod tests {
             temp.path().join("config_state.json"),
         )));
         (Arc::new(runtime), config_store)
+    }
+
+    struct NeverAppliedExecutor;
+
+    #[async_trait]
+    impl CoreExecutor for NeverAppliedExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            unreachable!("server realtime websocket tests do not drive executor apply")
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    async fn register_live_session(runtime: &Arc<SessionRuntime>, session_id: &str) {
+        let session_id =
+            meerkat_core::SessionId::parse(session_id).expect("session_id should parse");
+        runtime
+            .runtime_adapter()
+            .register_session_with_executor(session_id, Box::new(NeverAppliedExecutor))
+            .await;
     }
 
     /// Send a single JSONL line over a TCP stream.
@@ -1137,7 +1229,602 @@ mod tests {
         assert!(server_result.is_ok());
     }
 
-    // -- Test 6: Bare disconnect (connect then immediately drop) --
+    // -- Test 6: sibling realtime websocket host can coexist with TCP host --
+
+    #[tokio::test]
+    async fn realtime_ws_listener_accepts_channel_open_and_coexists_with_tcp_initialize() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;
+
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp_addr = tcp_listener.local_addr().unwrap();
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(format!(
+            "ws://{ws_addr}{}",
+            crate::REALTIME_WS_PATH
+        )));
+        let open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+
+        let tcp_rt = Arc::clone(&runtime);
+        let tcp_cs = Arc::clone(&config_store);
+        let tcp_server = tokio::spawn(async move {
+            let (stream, _) = tcp_listener.accept().await.unwrap();
+            serve_tcp_connection(stream, tcp_rt, tcp_cs, None).await
+        });
+
+        let ws_rt = Arc::clone(&runtime);
+        let ws_cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        let ws_server = tokio::spawn(async move {
+            crate::serve_realtime_ws_listener(ws_listener, ws_host, ws_rt, ws_cs).await
+        });
+
+        let ws_url = format!("ws://{ws_addr}/realtime/ws");
+        let (mut ws_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("websocket handshake should succeed");
+        ws_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: open_info.default_protocol_version.clone(),
+                        open_token: open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("channel.open should send");
+        let opened_frame = ws_stream
+            .next()
+            .await
+            .expect("expected channel.opened from websocket host")
+            .expect("websocket frame should arrive");
+        assert!(
+            matches!(opened_frame, WsMessage::Text(_)),
+            "expected websocket text frame, got {opened_frame:?}"
+        );
+        let opened_payload = match opened_frame {
+            WsMessage::Text(text) => serde_json::from_str::<RealtimeServerFrame>(&text)
+                .expect("channel.opened should deserialize"),
+            other => panic!("expected websocket text frame, got {other:?}"),
+        };
+        assert!(
+            matches!(opened_payload, RealtimeServerFrame::ChannelOpened(_)),
+            "expected channel.opened, got {opened_payload:?}"
+        );
+
+        let mut client = TcpStream::connect(tcp_addr).await.unwrap();
+        let init_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {},
+            "id": 1
+        });
+        send_jsonl(&mut client, &init_request).await;
+
+        let (read_half, _write_half) = client.into_split();
+        let mut reader = TokioBufReader::new(read_half);
+        let response = read_jsonl_line(&mut reader)
+            .await
+            .expect("expected initialize response");
+        assert_eq!(response["id"], 1);
+        assert!(response["error"].is_null(), "expected no error: {response}");
+
+        drop(_write_half);
+        drop(reader);
+        let _ = ws_stream.close(None).await;
+
+        let tcp_result = tokio::time::timeout(std::time::Duration::from_secs(5), tcp_server)
+            .await
+            .expect("tcp server should finish within timeout")
+            .expect("tcp server task should not panic");
+        assert!(tcp_result.is_ok());
+
+        ws_server.abort();
+    }
+
+    #[tokio::test]
+    async fn realtime_ws_listener_rejects_unsupported_protocol_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(format!(
+            "ws://{ws_addr}{}",
+            crate::REALTIME_WS_PATH
+        )));
+        let open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+
+        let ws_rt = Arc::clone(&runtime);
+        let ws_cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        let ws_server = tokio::spawn(async move {
+            crate::serve_realtime_ws_listener(ws_listener, ws_host, ws_rt, ws_cs).await
+        });
+
+        let ws_url = format!("ws://{ws_addr}/realtime/ws");
+        let (mut ws_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("websocket handshake should succeed");
+        ws_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: "999".to_string(),
+                        open_token: open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("channel.open should send");
+        let error_frame = ws_stream
+            .next()
+            .await
+            .expect("expected channel.error from websocket host")
+            .expect("websocket frame should arrive");
+        let error_payload = match error_frame {
+            WsMessage::Text(text) => serde_json::from_str::<RealtimeServerFrame>(&text)
+                .expect("channel.error should deserialize"),
+            other => panic!("expected websocket text frame, got {other:?}"),
+        };
+        match error_payload {
+            RealtimeServerFrame::ChannelError(frame) => {
+                assert_eq!(
+                    frame.code,
+                    meerkat_contracts::RealtimeErrorCode::UnsupportedProtocolVersion
+                );
+            }
+            other => panic!("expected channel.error, got {other:?}"),
+        }
+
+        let _ = ws_stream.close(None).await;
+        ws_server.abort();
+    }
+
+    #[tokio::test]
+    async fn realtime_ws_listener_rejects_second_primary_for_same_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;
+
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(format!(
+            "ws://{ws_addr}{}",
+            crate::REALTIME_WS_PATH
+        )));
+        let first_open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+        let second_open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+
+        let ws_rt = Arc::clone(&runtime);
+        let ws_cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        let ws_server = tokio::spawn(async move {
+            crate::serve_realtime_ws_listener(ws_listener, ws_host, ws_rt, ws_cs).await
+        });
+
+        let ws_url = format!("ws://{ws_addr}/realtime/ws");
+        let (mut first_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("first websocket handshake should succeed");
+        first_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        open_token: first_open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("first channel.open should send");
+        let first_opened = first_stream
+            .next()
+            .await
+            .expect("expected first channel.opened")
+            .expect("first channel.opened should arrive");
+        assert!(
+            matches!(first_opened, WsMessage::Text(_)),
+            "expected first websocket text frame, got {first_opened:?}"
+        );
+
+        let (mut second_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("second websocket handshake should succeed");
+        second_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        open_token: second_open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("second channel.open should send");
+        let second_error = second_stream
+            .next()
+            .await
+            .expect("expected second channel.error")
+            .expect("second channel.error should arrive");
+        let second_payload = match second_error {
+            WsMessage::Text(text) => serde_json::from_str::<RealtimeServerFrame>(&text)
+                .expect("channel.error should deserialize"),
+            other => panic!("expected websocket text frame, got {other:?}"),
+        };
+        match second_payload {
+            RealtimeServerFrame::ChannelError(frame) => {
+                assert_eq!(frame.code, meerkat_contracts::RealtimeErrorCode::TargetBusy);
+            }
+            other => panic!("expected channel.error, got {other:?}"),
+        }
+
+        let _ = first_stream.close(None).await;
+        let _ = second_stream.close(None).await;
+        ws_server.abort();
+    }
+
+    #[tokio::test]
+    async fn realtime_ws_listener_enforces_observer_read_only_frames() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        register_live_session(&runtime, "fedcba98-7654-3210-fedc-ba9876543210").await;
+
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(format!(
+            "ws://{ws_addr}{}",
+            crate::REALTIME_WS_PATH
+        )));
+        let open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "fedcba98-7654-3210-fedc-ba9876543210".to_string(),
+                    },
+                    role: RealtimeChannelRole::Observer,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+
+        let ws_rt = Arc::clone(&runtime);
+        let ws_cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        let ws_server = tokio::spawn(async move {
+            crate::serve_realtime_ws_listener(ws_listener, ws_host, ws_rt, ws_cs).await
+        });
+
+        let ws_url = format!("ws://{ws_addr}/realtime/ws");
+        let (mut ws_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("websocket handshake should succeed");
+        ws_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: open_info.default_protocol_version.clone(),
+                        open_token: open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Observer,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("channel.open should send");
+        let _opened = ws_stream
+            .next()
+            .await
+            .expect("expected channel.opened")
+            .expect("channel.opened should arrive");
+
+        ws_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelInput(
+                    meerkat_contracts::RealtimeChannelInputFrame {
+                        chunk: meerkat_contracts::RealtimeInputChunk::TextChunk(
+                            meerkat_contracts::RealtimeTextChunk {
+                                text: "observer should not write".to_string(),
+                            },
+                        ),
+                    },
+                ))
+                .expect("channel.input should serialize")
+                .into(),
+            ))
+            .await
+            .expect("channel.input should send");
+        let error_frame = ws_stream
+            .next()
+            .await
+            .expect("expected observer channel.error")
+            .expect("observer channel.error should arrive");
+        let error_payload = match error_frame {
+            WsMessage::Text(text) => serde_json::from_str::<RealtimeServerFrame>(&text)
+                .expect("channel.error should deserialize"),
+            other => panic!("expected websocket text frame, got {other:?}"),
+        };
+        match error_payload {
+            RealtimeServerFrame::ChannelError(frame) => {
+                assert_eq!(
+                    frame.code,
+                    meerkat_contracts::RealtimeErrorCode::ObserverReadOnly
+                );
+            }
+            other => panic!("expected channel.error, got {other:?}"),
+        }
+
+        let _ = ws_stream.close(None).await;
+        ws_server.abort();
+    }
+
+    #[tokio::test]
+    async fn realtime_ws_listener_releases_primary_slot_after_close() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        register_live_session(&runtime, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").await;
+
+        let ws_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_addr = ws_listener.local_addr().unwrap();
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(format!(
+            "ws://{ws_addr}{}",
+            crate::REALTIME_WS_PATH
+        )));
+        let first_open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+        let second_open_info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                RealtimeCapabilities {
+                    input_kinds: vec![RealtimeInputKind::Text, RealtimeInputKind::Audio],
+                    output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
+                    turning_modes: vec![RealtimeTurningMode::ProviderManaged],
+                    interrupt_supported: true,
+                    transcript_supported: true,
+                    tool_lifecycle_events_supported: false,
+                    video_supported: false,
+                    audio_input_format: None,
+                    audio_output_format: None,
+                },
+                None,
+            )
+            .await;
+
+        let ws_rt = Arc::clone(&runtime);
+        let ws_cs = Arc::clone(&config_store);
+        let ws_host = Arc::clone(&host);
+        let ws_server = tokio::spawn(async move {
+            crate::serve_realtime_ws_listener(ws_listener, ws_host, ws_rt, ws_cs).await
+        });
+
+        let ws_url = format!("ws://{ws_addr}/realtime/ws");
+        let (mut first_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("first websocket handshake should succeed");
+        first_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: first_open_info.default_protocol_version.clone(),
+                        open_token: first_open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("first channel.open should send");
+        let _opened = first_stream
+            .next()
+            .await
+            .expect("expected first channel.opened")
+            .expect("first channel.opened should arrive");
+        let _ = first_stream.close(None).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let (mut second_stream, _response) = connect_async(&ws_url)
+            .await
+            .expect("second websocket handshake should succeed");
+        second_stream
+            .send(WsMessage::Text(
+                serde_json::to_string(&RealtimeClientFrame::ChannelOpen(
+                    RealtimeChannelOpenFrame {
+                        protocol_version: second_open_info.default_protocol_version.clone(),
+                        open_token: second_open_info.open_token.clone(),
+                        role: RealtimeChannelRole::Primary,
+                        turning_mode: RealtimeTurningMode::ProviderManaged,
+                    },
+                ))
+                .expect("channel.open should serialize")
+                .into(),
+            ))
+            .await
+            .expect("second channel.open should send");
+        let opened_frame = second_stream
+            .next()
+            .await
+            .expect("expected second channel.opened")
+            .expect("second channel.opened should arrive");
+        let opened_payload = match opened_frame {
+            WsMessage::Text(text) => serde_json::from_str::<RealtimeServerFrame>(&text)
+                .expect("channel.opened should deserialize"),
+            other => panic!("expected websocket text frame, got {other:?}"),
+        };
+        assert!(
+            matches!(opened_payload, RealtimeServerFrame::ChannelOpened(_)),
+            "expected channel.opened after releasing the prior primary, got {opened_payload:?}"
+        );
+
+        let _ = second_stream.close(None).await;
+        ws_server.abort();
+    }
+
+    // -- Test 7: Bare disconnect (connect then immediately drop) --
 
     #[tokio::test]
     async fn tcp_bare_disconnect_no_data() {
@@ -1170,7 +1857,7 @@ mod tests {
         );
     }
 
-    // -- Test 7: Malformed JSON over TCP produces parse error, server stays alive --
+    // -- Test 8: Malformed JSON over TCP produces parse error, server stays alive --
 
     #[tokio::test]
     async fn tcp_malformed_json_returns_parse_error() {

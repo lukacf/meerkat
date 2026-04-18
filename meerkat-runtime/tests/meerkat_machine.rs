@@ -521,6 +521,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 phase: ResponseProgressPhase::InProgress,
             }),
             body: format!("progress-{label}"),
+            payload: Some(serde_json::json!({ "label": label })),
             blocks: None,
             handling_mode: None,
         })

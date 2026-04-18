@@ -11,7 +11,9 @@ use crate::accept::AcceptOutcome;
 use crate::completion::CompletionHandle;
 use crate::input::Input;
 use crate::input_state::StoredInputState;
-use crate::meerkat_machine_types::{SessionLlmReconfigureReport, SessionLlmReconfigureRequest};
+use crate::meerkat_machine_types::{
+    RealtimeAttachmentStatus, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
+};
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
 
@@ -54,6 +56,12 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError>;
+
+    /// Get the live attachment status for a session.
+    async fn realtime_attachment_status(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<RealtimeAttachmentStatus, RuntimeDriverError>;
 
     /// Retire a session's runtime.
     async fn retire_runtime(

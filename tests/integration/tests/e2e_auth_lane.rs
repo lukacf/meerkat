@@ -186,11 +186,13 @@ async fn e2e_auth_refresh_dedup_at_dsl_level() {
         "lease should be in refreshing after begin_refresh"
     );
 
-    // Second BeginAuthRefresh must be rejected — dedup invariant.
+    // Second BeginRefresh must be rejected — dedup invariant owned by
+    // the per-binding AuthMachine DSL (guard only permits
+    // `Valid → Refreshing` or `Expiring → Refreshing`).
     let err = handle.begin_refresh(key).unwrap_err();
     assert!(
-        err.to_string().contains("BeginAuthRefresh"),
-        "expected DSL rejection mentioning BeginAuthRefresh, got: {err}"
+        err.to_string().contains("BeginRefresh") || err.to_string().contains("begin_refresh"),
+        "expected DSL rejection mentioning BeginRefresh / begin_refresh, got: {err}"
     );
 
     // Unblock refresh path: Complete transitions back to valid.

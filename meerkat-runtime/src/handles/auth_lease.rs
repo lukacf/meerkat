@@ -1,60 +1,132 @@
-//! Runtime impl of [`meerkat_core::handles::AuthLeaseHandle`] (Phase 1.5-rev).
+//! Runtime impl of [`meerkat_core::handles::AuthLeaseHandle`].
 //!
-//! Routes the auth-lease trait methods to the corresponding DSL inputs on a
-//! shared per-session [`MeerkatMachineAuthority`]. Snapshots read the DSL state
-//! back out through the same authority.
+//! Per-binding [`AuthMachine`](crate::auth_machine) instances, keyed by
+//! `binding_key` (format `"<realm_id>:<binding_id>"`). Each trait
+//! method looks up or creates the corresponding machine, then fires
+//! the matching DSL input. `snapshot` projects the machine's phase
+//! + expires_at back out.
+//!
+//! The original Phase 1.5-rev design absorbed auth state into
+//! MeerkatMachine as Sets+Maps keyed by binding. Post-review that was
+//! rejected: auth lifecycle is orthogonal to MeerkatMachine's
+//! lifecycle, and carrying it there grew the TLC state space without
+//! unifying any semantics (dogma §19). Splitting it out per-binding
+//! keeps each machine small, aligns the fact "this binding's lease
+//! state" with one canonical owner per dogma §1, and decouples auth
+//! evolution from core-runtime evolution.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionError};
 
-use super::HandleDslAuthority;
-use crate::meerkat_machine::dsl as mm_dsl;
+use crate::auth_machine::dsl as auth_dsl;
 
 /// Runtime-backed [`AuthLeaseHandle`] impl.
-#[derive(Debug)]
+///
+/// Holds a mutex-guarded registry of per-binding [`auth_dsl::AuthMachineAuthority`]
+/// instances. Lookup-or-insert happens on first `acquire_lease`; all
+/// other operations require the binding to already exist.
 pub struct RuntimeAuthLeaseHandle {
-    dsl: Arc<HandleDslAuthority>,
+    machines: Arc<Mutex<HashMap<String, auth_dsl::AuthMachineAuthority>>>,
+}
+
+impl std::fmt::Debug for RuntimeAuthLeaseHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f.debug_struct("RuntimeAuthLeaseHandle")
+            .field("bindings", &guard.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl RuntimeAuthLeaseHandle {
-    /// Construct a handle backed by the session's shared DSL authority.
-    pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
-        Self { dsl }
+    pub fn new() -> Self {
+        Self {
+            machines: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    /// Construct a handle backed by an ephemeral DSL authority.
+    /// Alias for [`Self::new`]; kept for parity with other runtime
+    /// handles that distinguish session-owned vs. ephemeral
+    /// constructors. AuthMachine instances are always ephemeral from
+    /// the registry's perspective — the registry itself is owned by
+    /// the session bindings.
     pub fn ephemeral() -> Self {
-        Self::new(Arc::new(HandleDslAuthority::ephemeral()))
+        Self::new()
+    }
+
+    fn apply(
+        &self,
+        binding_key: &str,
+        input: auth_dsl::AuthMachineInput,
+        context: &'static str,
+        create_if_missing: bool,
+    ) -> Result<(), DslTransitionError> {
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = if create_if_missing {
+            guard.entry(binding_key.to_string()).or_insert_with(|| {
+                auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState::default())
+            })
+        } else {
+            match guard.get_mut(binding_key) {
+                Some(m) => m,
+                None => {
+                    return Err(DslTransitionError::new(
+                        context,
+                        format!("no auth lease registered for binding_key `{binding_key}`"),
+                    ));
+                }
+            }
+        };
+        auth_dsl::AuthMachineMutator::apply(entry, input)
+            .map(|_| ())
+            .map_err(|err| DslTransitionError::new(context, format!("{err}")))
+    }
+}
+
+impl Default for RuntimeAuthLeaseHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     fn acquire_lease(&self, binding_key: &str, expires_at: u64) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::AcquireAuthLease {
-                binding_key: binding_key.to_string(),
-                expires_at,
-            },
+        let expires_at_ts = if expires_at == u64::MAX {
+            None
+        } else {
+            Some(expires_at)
+        };
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::Acquire { expires_at_ts },
             "AuthLeaseHandle::acquire_lease",
+            true,
         )
     }
 
     fn mark_expiring(&self, binding_key: &str) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::MarkAuthExpiring {
-                binding_key: binding_key.to_string(),
-            },
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::MarkExpiring,
             "AuthLeaseHandle::mark_expiring",
+            false,
         )
     }
 
     fn begin_refresh(&self, binding_key: &str) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::BeginAuthRefresh {
-                binding_key: binding_key.to_string(),
-            },
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::BeginRefresh,
             "AuthLeaseHandle::begin_refresh",
+            false,
         )
     }
 
@@ -64,62 +136,172 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         new_expires_at: u64,
         now: u64,
     ) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::CompleteAuthRefresh {
-                binding_key: binding_key.to_string(),
+        let new_expires_at = if new_expires_at == u64::MAX {
+            None
+        } else {
+            Some(new_expires_at)
+        };
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::CompleteRefresh {
                 new_expires_at,
-                now,
+                now_ts: now,
             },
             "AuthLeaseHandle::complete_refresh",
+            false,
         )
     }
 
     fn refresh_failed(&self, binding_key: &str, permanent: bool) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::AuthRefreshFailed {
-                binding_key: binding_key.to_string(),
-                permanent,
-            },
-            "AuthLeaseHandle::refresh_failed",
-        )
+        let input = if permanent {
+            auth_dsl::AuthMachineInput::RefreshFailedPermanent
+        } else {
+            auth_dsl::AuthMachineInput::RefreshFailedTransient
+        };
+        self.apply(binding_key, input, "AuthLeaseHandle::refresh_failed", false)
     }
 
     fn mark_reauth_required(&self, binding_key: &str) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::MarkReauthRequired {
-                binding_key: binding_key.to_string(),
-            },
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::MarkReauthRequired,
             "AuthLeaseHandle::mark_reauth_required",
+            false,
         )
     }
 
     fn release_lease(&self, binding_key: &str) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ReleaseAuthLease {
-                binding_key: binding_key.to_string(),
-            },
+        // Drive the DSL transition, then drop the machine from the
+        // registry: a released lease has no observable state and
+        // keeping the spent AuthMachine around is shell-side bookkeeping
+        // that dogma §14 forbids (local state, no canonical role).
+        self.apply(
+            binding_key,
+            auth_dsl::AuthMachineInput::Release,
             "AuthLeaseHandle::release_lease",
-        )
+            false,
+        )?;
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.remove(binding_key);
+        Ok(())
     }
 
     fn snapshot(&self, binding_key: &str) -> AuthLeaseSnapshot {
-        let state = self.dsl.snapshot_state();
-        let key = binding_key.to_string();
-        let state_str = if state.auth_valid_leases.contains(&key) {
-            Some("valid".to_string())
-        } else if state.auth_expiring_leases.contains(&key) {
-            Some("expiring".to_string())
-        } else if state.auth_refreshing_leases.contains(&key) {
-            Some("refreshing".to_string())
-        } else if state.auth_reauth_required_leases.contains(&key) {
-            Some("reauth_required".to_string())
-        } else {
-            None
-        };
-        let expires_at = state.auth_expires_at.get(&key).copied();
-        AuthLeaseSnapshot {
-            state: state_str,
-            expires_at,
+        let guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.get(binding_key) {
+            Some(machine) => {
+                let state = &machine.state;
+                let phase_str = match state.lifecycle_phase {
+                    auth_dsl::AuthLifecyclePhase::Valid => Some("valid".to_string()),
+                    auth_dsl::AuthLifecyclePhase::Expiring => Some("expiring".to_string()),
+                    auth_dsl::AuthLifecyclePhase::Refreshing => Some("refreshing".to_string()),
+                    auth_dsl::AuthLifecyclePhase::ReauthRequired => {
+                        Some("reauth_required".to_string())
+                    }
+                    auth_dsl::AuthLifecyclePhase::Released => Some("released".to_string()),
+                };
+                AuthLeaseSnapshot {
+                    state: phase_str,
+                    expires_at: state.expires_at,
+                }
+            }
+            None => AuthLeaseSnapshot {
+                state: None,
+                expires_at: None,
+            },
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acquire_and_snapshot_roundtrip() {
+        let h = RuntimeAuthLeaseHandle::new();
+        h.acquire_lease("dev:default_openai", 1_800_000_000)
+            .unwrap();
+        let snap = h.snapshot("dev:default_openai");
+        assert_eq!(snap.state.as_deref(), Some("valid"));
+        assert_eq!(snap.expires_at, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn lifecycle_transitions() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = "dev:default_anthropic";
+
+        h.acquire_lease(k, 1_800_000_000).unwrap();
+        assert_eq!(h.snapshot(k).state.as_deref(), Some("valid"));
+
+        h.mark_expiring(k).unwrap();
+        assert_eq!(h.snapshot(k).state.as_deref(), Some("expiring"));
+
+        h.begin_refresh(k).unwrap();
+        assert_eq!(h.snapshot(k).state.as_deref(), Some("refreshing"));
+
+        h.complete_refresh(k, 1_800_000_900, 1_800_000_000).unwrap();
+        let snap = h.snapshot(k);
+        assert_eq!(snap.state.as_deref(), Some("valid"));
+        assert_eq!(snap.expires_at, Some(1_800_000_900));
+    }
+
+    #[test]
+    fn refresh_failed_permanent_routes_to_reauth() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = "dev:default_google";
+
+        h.acquire_lease(k, 1_800_000_000).unwrap();
+        h.begin_refresh(k).unwrap();
+        h.refresh_failed(k, true).unwrap();
+
+        assert_eq!(h.snapshot(k).state.as_deref(), Some("reauth_required"));
+    }
+
+    #[test]
+    fn refresh_failed_transient_routes_to_expiring() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = "dev:foo";
+
+        h.acquire_lease(k, 1_800_000_000).unwrap();
+        h.begin_refresh(k).unwrap();
+        h.refresh_failed(k, false).unwrap();
+
+        assert_eq!(h.snapshot(k).state.as_deref(), Some("expiring"));
+    }
+
+    #[test]
+    fn snapshot_for_unknown_binding_is_none() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let snap = h.snapshot("dev:never_registered");
+        assert!(snap.state.is_none());
+        assert!(snap.expires_at.is_none());
+    }
+
+    #[test]
+    fn mark_expiring_before_acquire_errors() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let err = h.mark_expiring("dev:ghost").unwrap_err();
+        assert_eq!(err.context, "AuthLeaseHandle::mark_expiring");
+    }
+
+    #[test]
+    fn per_binding_isolation() {
+        let h = RuntimeAuthLeaseHandle::new();
+        h.acquire_lease("dev:openai", 1_800_000_000).unwrap();
+        h.acquire_lease("dev:anthropic", 1_900_000_000).unwrap();
+        h.mark_expiring("dev:openai").unwrap();
+
+        assert_eq!(h.snapshot("dev:openai").state.as_deref(), Some("expiring"));
+        assert_eq!(h.snapshot("dev:anthropic").state.as_deref(), Some("valid"));
+        assert_eq!(h.snapshot("dev:anthropic").expires_at, Some(1_900_000_000));
     }
 }

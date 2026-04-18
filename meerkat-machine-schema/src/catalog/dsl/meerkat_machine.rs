@@ -14,16 +14,6 @@ machine! {
             current_run_id: Option<RunId>,
             pre_run_phase: Option<String>,
             silent_intent_overrides: Set<String>,
-            // Auth lease lifecycle (Phase 1.5-rev). Per-state sets encode the
-            // DSL-observable state of each binding_key. A binding_key is in at
-            // most one of these sets at any time.
-            auth_valid_leases: Set<String>,
-            auth_expiring_leases: Set<String>,
-            auth_refreshing_leases: Set<String>,
-            auth_reauth_required_leases: Set<String>,
-            auth_expires_at: Map<String, u64>,
-            auth_last_refresh: Map<String, u64>,
-            auth_refresh_attempt: Map<String, u64>,
         }
 
         init(Initializing) {
@@ -33,13 +23,6 @@ machine! {
             current_run_id = None,
             pre_run_phase = None,
             silent_intent_overrides = EmptySet,
-            auth_valid_leases = EmptySet,
-            auth_expiring_leases = EmptySet,
-            auth_refreshing_leases = EmptySet,
-            auth_reauth_required_leases = EmptySet,
-            auth_expires_at = EmptyMap,
-            auth_last_refresh = EmptyMap,
-            auth_refresh_attempt = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -112,14 +95,6 @@ machine! {
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
             Recycle,
-            // Auth lease lifecycle (Phase 1.5-rev)
-            AcquireAuthLease { binding_key: String, expires_at: u64 },
-            MarkAuthExpiring { binding_key: String },
-            BeginAuthRefresh { binding_key: String },
-            CompleteAuthRefresh { binding_key: String, new_expires_at: u64, now: u64 },
-            AuthRefreshFailed { binding_key: String, permanent: bool },
-            MarkReauthRequired { binding_key: String },
-            ReleaseAuthLease { binding_key: String },
         }
 
         surface_only [
@@ -199,9 +174,6 @@ machine! {
             EmitExternalToolDelta,
             CloseSurfaceConnection,
             RejectSurfaceCall,
-            // Auth lease lifecycle effects (Phase 1.5-rev)
-            EmitAuthLifecycleEvent { binding_key: String, new_state: String },
-            WakeRefreshLoop { binding_key: String },
         }
 
         // =====================================================================
@@ -248,9 +220,6 @@ machine! {
         disposition EmitExternalToolDelta => external,
         disposition CloseSurfaceConnection => local,
         disposition RejectSurfaceCall => external,
-        // Auth lease lifecycle dispositions (Phase 1.5-rev)
-        disposition EmitAuthLifecycleEvent => external,
-        disposition WakeRefreshLoop => local,
 
         // =====================================================================
         // Invariants
@@ -269,53 +238,6 @@ machine! {
             || self.lifecycle_phase == Phase::Running
             || self.lifecycle_phase == Phase::Retired
         }
-
-        // Auth lease invariants (Phase 1.5-rev.12):
-        //
-        // (a) Every binding_key is in at most one of the per-state sets.
-        //     Pairwise exclusion across { valid, expiring, refreshing,
-        //     reauth_required }. At-most-one state per binding is what
-        //     makes `BeginAuthRefresh` dedup correct — if a key could be
-        //     in both `valid` AND `refreshing`, a second BeginAuthRefresh
-        //     from the `valid` side would still land in `refreshing`
-        //     without rejection.
-        invariant auth_state_is_exclusive {
-            for_all(
-                k in self.auth_valid_leases,
-                !self.auth_expiring_leases.contains(k)
-                && !self.auth_refreshing_leases.contains(k)
-                && !self.auth_reauth_required_leases.contains(k)
-            )
-            && for_all(
-                k in self.auth_expiring_leases,
-                !self.auth_refreshing_leases.contains(k)
-                && !self.auth_reauth_required_leases.contains(k)
-            )
-            && for_all(
-                k in self.auth_refreshing_leases,
-                !self.auth_reauth_required_leases.contains(k)
-            )
-        }
-
-        // (c) Refresh dedup: every binding_key in `auth_refreshing_leases`
-        //     reached that set via `BeginAuthRefresh` (guarded on valid
-        //     or expiring, so never concurrent). The DSL guards enforce
-        //     this at transition time; the invariant simply restates the
-        //     post-condition "refreshing keys are not simultaneously in
-        //     another state" which is a consequence of (a).
-        //
-        // (b) Reauth-required notice surfacing: per plan §1.5r.9 the
-        //     runner's CallingLlm arm reads the DSL state via
-        //     `auth_lease_handle.snapshot()` and emits a synthetic
-        //     session notice when it observes `reauth_required`. The
-        //     DSL state (a binding_key in `auth_reauth_required_leases`)
-        //     is the sole canonical truth; no redundant effect is
-        //     declared or emitted (plan §1.5r.3 originally named an
-        //     `EmitAuthReauthNotice` effect — deleted in the dogma
-        //     §1/§19 closure honest-audit cleanup). The
-        //     `auth_reauth_notice.rs` test's
-        //     `refresh_path_terminates_in_reauth_required_on_permanent_failure`
-        //     check.
 
         // =====================================================================
         // Direct transitions
@@ -1410,154 +1332,6 @@ machine! {
             emit InitiateRecycle
         }
 
-        // =====================================================================
-        // Auth lease lifecycle transitions (Phase 1.5-rev)
-        // =====================================================================
-        //
-        // Legal state sequence:
-        //   (none) --AcquireAuthLease--> valid
-        //   valid --MarkAuthExpiring--> expiring
-        //   valid|expiring --BeginAuthRefresh--> refreshing
-        //   refreshing --CompleteAuthRefresh--> valid
-        //   refreshing --AuthRefreshFailed{permanent=false}--> expiring
-        //   refreshing --AuthRefreshFailed{permanent=true}--> reauth_required
-        //   *    --MarkReauthRequired--> reauth_required
-        //   *    --ReleaseAuthLease--> (removed)
-        //
-        // Each binding_key is a member of at most one of auth_valid_leases,
-        // auth_expiring_leases, auth_refreshing_leases, auth_reauth_required_leases.
-        // Transitions move keys between these sets.
-        //
-        // Refresh dedup invariant: BeginAuthRefresh is only legal from "valid" or
-        // "expiring" — never from "refreshing". So at most one concurrent refresh
-        // per binding_key is provably impossible via the DSL guard structure.
-
-        // AcquireAuthLease: per-phase self-loop, unconditional
-        transition AcquireAuthLease {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input AcquireAuthLease { binding_key, expires_at }
-            update {
-                self.auth_expiring_leases.remove(binding_key);
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_reauth_required_leases.remove(binding_key);
-                self.auth_valid_leases.insert(binding_key);
-                self.auth_expires_at.insert(binding_key, expires_at);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "valid" }
-        }
-
-        // MarkAuthExpiring: only legal from valid → expiring
-        transition MarkAuthExpiring {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input MarkAuthExpiring { binding_key }
-            guard "lease_is_valid" { self.auth_valid_leases.contains(binding_key) }
-            update {
-                self.auth_valid_leases.remove(binding_key);
-                self.auth_expiring_leases.insert(binding_key);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "expiring" }
-            emit WakeRefreshLoop { binding_key: binding_key }
-        }
-
-        // BeginAuthRefresh: legal from valid or expiring → refreshing
-        transition BeginAuthRefresh {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input BeginAuthRefresh { binding_key }
-            guard "lease_not_refreshing" {
-                self.auth_valid_leases.contains(binding_key)
-                || self.auth_expiring_leases.contains(binding_key)
-            }
-            update {
-                self.auth_valid_leases.remove(binding_key);
-                self.auth_expiring_leases.remove(binding_key);
-                self.auth_refreshing_leases.insert(binding_key);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "refreshing" }
-        }
-
-        // CompleteAuthRefresh: only legal from refreshing → valid
-        transition CompleteAuthRefresh {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input CompleteAuthRefresh { binding_key, new_expires_at, now }
-            guard "lease_is_refreshing" { self.auth_refreshing_leases.contains(binding_key) }
-            update {
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_valid_leases.insert(binding_key);
-                self.auth_expires_at.insert(binding_key, new_expires_at);
-                self.auth_last_refresh.insert(binding_key, now);
-                self.auth_refresh_attempt.insert(binding_key, 0);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "valid" }
-        }
-
-        // AuthRefreshFailed (transient): refreshing → expiring
-        transition AuthRefreshFailedTransient {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input AuthRefreshFailed { binding_key, permanent }
-            guard "lease_is_refreshing" { self.auth_refreshing_leases.contains(binding_key) }
-            guard "not_permanent" { permanent == false }
-            update {
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_expiring_leases.insert(binding_key);
-                self.auth_refresh_attempt.insert(binding_key, 1);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "expiring" }
-        }
-
-        // AuthRefreshFailed (permanent): refreshing → reauth_required
-        transition AuthRefreshFailedPermanent {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input AuthRefreshFailed { binding_key, permanent }
-            guard "lease_is_refreshing" { self.auth_refreshing_leases.contains(binding_key) }
-            guard "is_permanent" { permanent == true }
-            update {
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_reauth_required_leases.insert(binding_key);
-                self.auth_refresh_attempt.insert(binding_key, 1);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "reauth_required" }
-        }
-
-        // MarkReauthRequired: any known state → reauth_required
-        transition MarkReauthRequired {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input MarkReauthRequired { binding_key }
-            guard "lease_exists" {
-                self.auth_valid_leases.contains(binding_key)
-                || self.auth_expiring_leases.contains(binding_key)
-                || self.auth_refreshing_leases.contains(binding_key)
-            }
-            update {
-                self.auth_valid_leases.remove(binding_key);
-                self.auth_expiring_leases.remove(binding_key);
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_reauth_required_leases.insert(binding_key);
-            }
-            to Idle
-            emit EmitAuthLifecycleEvent { binding_key: binding_key, new_state: "reauth_required" }
-        }
-
-        // ReleaseAuthLease: removes entry from every set and expiry map
-        transition ReleaseAuthLease {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ReleaseAuthLease { binding_key }
-            update {
-                self.auth_valid_leases.remove(binding_key);
-                self.auth_expiring_leases.remove(binding_key);
-                self.auth_refreshing_leases.remove(binding_key);
-                self.auth_reauth_required_leases.remove(binding_key);
-                self.auth_expires_at.remove(binding_key);
-                self.auth_last_refresh.remove(binding_key);
-                self.auth_refresh_attempt.remove(binding_key);
-            }
-            to Idle
-        }
     }
 }
 

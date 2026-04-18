@@ -26,12 +26,17 @@ impl<T: Clone + Default> OptionValueExt<T> for Option<T> {
     }
 }
 
+pub mod auth_machine;
 pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
 
 use crate::MachineSchema;
+
+pub fn dsl_auth_machine() -> MachineSchema {
+    auth_machine::AuthMachineState::schema()
+}
 
 pub fn dsl_meerkat_machine() -> MachineSchema {
     meerkat_machine::MeerkatMachineState::schema()

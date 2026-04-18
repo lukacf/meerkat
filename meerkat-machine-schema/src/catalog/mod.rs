@@ -21,6 +21,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_mob_machine(),
         dsl::dsl_schedule_lifecycle_machine(),
         dsl::dsl_occurrence_lifecycle_machine(),
+        dsl::dsl_auth_machine(),
     ]
 }
 

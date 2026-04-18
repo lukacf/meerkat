@@ -6,7 +6,7 @@ use super::{
         schedule_runtime_bundle_composition,
     },
     dsl::{
-        dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
+        dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
         dsl_schedule_lifecycle_machine,
     },
 };
@@ -142,6 +142,18 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
             &[scenario(
                 "occurrence_start_complete_fail",
                 "occurrence transitions through pending, running, and terminal lifecycle states",
+            )],
+        ),
+        machine_manifest_from_schema(
+            &dsl_auth_machine(),
+            &[anchor(
+                "auth_lease_handle",
+                "meerkat-runtime/src/handles/auth_lease.rs",
+                "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives DSL transitions through it",
+            )],
+            &[scenario(
+                "acquire_expire_refresh_complete",
+                "lease transitions through valid, expiring, refreshing, and back to valid on successful refresh",
             )],
         ),
     ]

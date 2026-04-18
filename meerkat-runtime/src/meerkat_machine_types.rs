@@ -305,43 +305,6 @@ pub(crate) enum MeerkatMachineCommand {
         run_id: RunId,
         error: String,
     },
-    // Auth lease lifecycle (Phase 1.5-rev). These commands are surface-only
-    // — the canonical dispatch path for auth state is the AuthLeaseHandle
-    // trait in meerkat-core, routing through a shared MeerkatMachineAuthority.
-    // The variants exist here to satisfy the runtime-alphabet parity
-    // invariant (every DSL input has a matching command enum variant).
-    #[allow(dead_code)]
-    AcquireAuthLease {
-        binding_key: String,
-        expires_at: u64,
-    },
-    #[allow(dead_code)]
-    MarkAuthExpiring {
-        binding_key: String,
-    },
-    #[allow(dead_code)]
-    BeginAuthRefresh {
-        binding_key: String,
-    },
-    #[allow(dead_code)]
-    CompleteAuthRefresh {
-        binding_key: String,
-        new_expires_at: u64,
-        now: u64,
-    },
-    #[allow(dead_code)]
-    AuthRefreshFailed {
-        binding_key: String,
-        permanent: bool,
-    },
-    #[allow(dead_code)]
-    MarkReauthRequired {
-        binding_key: String,
-    },
-    #[allow(dead_code)]
-    ReleaseAuthLease {
-        binding_key: String,
-    },
 }
 
 #[derive(Debug)]

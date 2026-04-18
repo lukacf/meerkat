@@ -91,8 +91,8 @@ fn begin_refresh_rejected_from_refreshing_state() {
         .begin_refresh(key)
         .expect_err("second begin_refresh must be rejected");
     assert!(
-        err.to_string().contains("BeginAuthRefresh"),
-        "error must mention BeginAuthRefresh: {err}"
+        err.to_string().contains("BeginRefresh") || err.to_string().contains("begin_refresh"),
+        "error must mention BeginRefresh / begin_refresh: {err}"
     );
 }
 

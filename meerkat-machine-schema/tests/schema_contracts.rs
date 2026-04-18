@@ -24,7 +24,14 @@ fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
             "MeerkatMachine",
             "MobMachine",
             "ScheduleLifecycleMachine",
-            "OccurrenceLifecycleMachine"
+            "OccurrenceLifecycleMachine",
+            // AuthMachine: per-binding auth lease lifecycle. Added
+            // after Phase 1.5-rev was refactored from "absorbed into
+            // MeerkatMachine" to "standalone perimeter machine"
+            // — auth lifecycle is orthogonal to MeerkatMachine's
+            // lifecycle and gets its own canonical machine per
+            // dogma §1 "one semantic fact, one owner".
+            "AuthMachine"
         ]
     );
 

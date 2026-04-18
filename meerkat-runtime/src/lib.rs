@@ -23,6 +23,7 @@ pub mod tokio {
 pub use ::tokio;
 
 pub mod accept;
+pub mod auth_machine;
 pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_drain;

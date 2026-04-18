@@ -595,24 +595,6 @@ impl MeerkatMachine {
                 .execute_meerkat_machine_legacy_run_command(command)
                 .await
                 .map_err(Into::into),
-            // Auth lease lifecycle (Phase 1.5-rev). These commands are not
-            // routed through the command dispatcher in production — the
-            // canonical path is the AuthLeaseHandle trait. The enum variants
-            // exist to satisfy the runtime-alphabet parity invariant; reaching
-            // them here is a programming error.
-            MeerkatMachineCommand::AcquireAuthLease { .. }
-            | MeerkatMachineCommand::MarkAuthExpiring { .. }
-            | MeerkatMachineCommand::BeginAuthRefresh { .. }
-            | MeerkatMachineCommand::CompleteAuthRefresh { .. }
-            | MeerkatMachineCommand::AuthRefreshFailed { .. }
-            | MeerkatMachineCommand::MarkReauthRequired { .. }
-            | MeerkatMachineCommand::ReleaseAuthLease { .. } => Err(
-                MeerkatMachineCommandError::Driver(RuntimeDriverError::Internal(
-                    "auth lease commands must flow through AuthLeaseHandle, \
-                         not the command dispatcher"
-                        .to_string(),
-                )),
-            ),
         }
     }
 

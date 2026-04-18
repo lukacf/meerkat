@@ -4083,7 +4083,7 @@ impl MobActor {
         self.provisioner.interrupt_member(&member_ref).await
     }
 
-    async fn handle_realtime_attach(&self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
+    async fn handle_realtime_attach(&mut self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
         self.ensure_pending_spawn_alignment("handle_realtime_attach preflight")?;
         let entry = {
             let roster = self.roster.read().await;
@@ -4094,6 +4094,25 @@ impl MobActor {
         };
 
         if !entry.voice_intent_present {
+            // DELETE_ME A4 + B6: apply the DSL RealtimeAttach input so
+            // `member_voice_intent` in the MobMachine DSL state is the
+            // canonical durable-intent fact. The previous shape
+            // appended the event + mutated the roster directly, which
+            // left the DSL field inert and created parallel truth
+            // between DSL and roster. Per dogma principles #1 and #2,
+            // MobMachine owns the intent; the roster becomes a
+            // rebuildable projection (dogma #11).
+            self.apply_dsl_input(
+                mob_dsl::MobMachineInput::RealtimeAttach {
+                    agent_identity: mob_dsl::AgentIdentity::from(entry.agent_identity.as_str()),
+                },
+                "realtime_attach_input",
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "MobMachine RealtimeAttach transition rejected: {error}"
+                ))
+            })?;
             self.append_voice_intent_set_event(&meerkat_id).await?;
             self.roster
                 .write()
@@ -4107,7 +4126,7 @@ impl MobActor {
         Ok(true)
     }
 
-    async fn handle_realtime_detach(&self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
+    async fn handle_realtime_detach(&mut self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
         self.ensure_pending_spawn_alignment("handle_realtime_detach preflight")?;
         let entry = {
             let roster = self.roster.read().await;
@@ -4118,6 +4137,21 @@ impl MobActor {
         };
 
         if entry.voice_intent_present {
+            // DELETE_ME A4 + B6: see handle_realtime_attach above for
+            // the canonical DSL-authority rationale. Detach clears
+            // the same `member_voice_intent` field through the DSL
+            // RealtimeDetach transition.
+            self.apply_dsl_input(
+                mob_dsl::MobMachineInput::RealtimeDetach {
+                    agent_identity: mob_dsl::AgentIdentity::from(entry.agent_identity.as_str()),
+                },
+                "realtime_detach_input",
+            )
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "MobMachine RealtimeDetach transition rejected: {error}"
+                ))
+            })?;
             self.append_voice_intent_cleared_event(&meerkat_id).await?;
             self.roster
                 .write()

@@ -6946,6 +6946,29 @@ async fn test_member_status_uses_runtime_realtime_attachment_status_for_current_
     );
 }
 
+/// DELETE_ME A4 + B6 regression: `MobMachine`'s DSL `member_voice_intent`
+/// set is now the canonical owner of durable per-member voice intent.
+/// `handle_realtime_attach` / `handle_realtime_detach` apply
+/// `MobMachineInput::RealtimeAttach` / `RealtimeDetach` to the DSL
+/// authority **before** appending the `MemberVoiceIntentSet` /
+/// `Cleared` event and before updating the roster projection. If the
+/// DSL rejected the transition (e.g. wrong lifecycle phase), this
+/// test would fail because the attach call would propagate the DSL
+/// rejection. The DSL field is no longer inert.
+///
+/// Post-A4/B6 pipeline (each step must succeed in order):
+///   1. `apply_dsl_input(RealtimeAttach { agent_identity })` mutates
+///      `dsl_authority.state.member_voice_intent`.
+///   2. `append_voice_intent_set_event` persists the durable
+///      `MobEventKind::MemberVoiceIntentSet` to the event log.
+///   3. Roster projects `voice_intent_present: true`.
+///   4. `reconcile_realtime_attachment_runtime` pushes the intent bit
+///      into `MeerkatMachine`'s realtime-attachment authority.
+///
+/// Roster is a rebuildable projection (dogma #11); MobMachine owns the
+/// durable intent fact (dogma #1 + #2); MeerkatMachine owns transport
+/// binding status (also dogma #1). The two-kernel overlap is resolved:
+/// MobMachine = durable intent; MeerkatMachine = live transport.
 #[tokio::test]
 async fn test_realtime_attach_and_detach_update_durable_intent_and_runtime_status() {
     let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;

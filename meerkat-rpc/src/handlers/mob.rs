@@ -153,6 +153,25 @@ pub struct MobSpawnParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
+    // DELETE_ME A10: SpawnMemberSpec has 15 public fields; the RPC used to
+    // expose only 8, making RPC spawn strictly less capable than Rust spawn.
+    // Filling in the gap incrementally — launch_mode stays internal until
+    // A3/C1 land a dedicated session-adoption path, and the opaque Profile /
+    // ToolFilter / ToolAccessPolicy / BudgetSplitPolicy surfaces need their
+    // own wire contracts, but these four are straightforward additive
+    // inputs that have no extra type shape to worry about.
+    /// Optional runtime binding for external-peer members (maps to
+    /// SpawnMemberSpec::binding).
+    #[serde(default)]
+    pub binding: Option<meerkat_contracts::WireRuntimeBinding>,
+    /// Per-agent environment variables injected into shell tool subprocesses
+    /// (maps to SpawnMemberSpec::shell_env).
+    #[serde(default)]
+    pub shell_env: Option<std::collections::HashMap<String, String>>,
+    /// Whether the spawned member should be auto-wired to its spawner
+    /// (maps to SpawnMemberSpec::auto_wire_parent).
+    #[serde(default)]
+    pub auto_wire_parent: Option<bool>,
 }
 
 pub async fn handle_spawn(
@@ -175,6 +194,26 @@ pub async fn handle_spawn(
     spec.context = params.context;
     spec.labels = params.labels;
     spec.additional_instructions = params.additional_instructions;
+    if let Some(binding) = params.binding {
+        spec.binding = Some(match binding {
+            meerkat_contracts::WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
+            meerkat_contracts::WireRuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            } => meerkat_mob::RuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            },
+        });
+    }
+    if let Some(shell_env) = params.shell_env {
+        spec.shell_env = Some(shell_env);
+    }
+    if let Some(auto_wire_parent) = params.auto_wire_parent {
+        spec.auto_wire_parent = auto_wire_parent;
+    }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
         Err(err) => invalid_params(id, err.to_string()),

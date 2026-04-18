@@ -1776,10 +1776,41 @@ impl MobHandle {
 
     /// Resolve the backing bridge session ID for a member by identity.
     ///
-    /// This is an internal routing helper for surfaces that need to call
-    /// `SessionService` methods on a member's backing session. Returns `None`
-    /// if the member is not found or has no bridge session binding.
-    #[doc(hidden)]
+    /// # When to use this
+    ///
+    /// This is the canonical identity → bridge session mapping used by
+    /// **surface implementations** (RPC/MCP/REST handlers, web-runtime
+    /// wrappers) that must delegate a mob-identity action to a
+    /// session-scoped canonical API — e.g. `mob/turn_start` delegating to
+    /// the runtime's `turn/start`, or a delegation tool projecting
+    /// assistant output from a helper's backing session. Returns `None` if
+    /// the member is not found or has no bridge session binding.
+    ///
+    /// # When not to use it
+    ///
+    /// Application code acting on a mob should prefer the identity-native
+    /// [`MobHandle`] APIs: [`MobHandle::member`] to acquire a
+    /// capability-bearing handle, [`MobHandle::internal_turn`] to deliver
+    /// content without the RPC turn-start dance, [`MobHandle::peer_send`]
+    /// / [`MobHandle::member_send`] for peer comms, etc. Those hide the
+    /// session_id entirely.
+    ///
+    /// # Dogma fit (A8)
+    ///
+    /// DELETE_ME finding A8 flagged this method as contradicting the
+    /// "hide session_id from callers" principle of identity-first mobs.
+    /// The apparent contradiction was a scoping confusion: identity-first
+    /// hides session_id from **consumers of the public mob surface**
+    /// (application code, end-users, SDK clients). Surface implementations
+    /// must still bridge identity to session when delegating to the
+    /// canonical session-scoped runtime APIs they don't own themselves —
+    /// that delegation is explicitly permitted by
+    /// `docs/architecture/meerkat-runtime-dogma.md` principle #3
+    /// ("shell owns mechanics, not meaning"). The resolver reads the
+    /// roster's canonical identity→bridge mapping; no parallel truth is
+    /// introduced. Regression
+    /// `resolve_bridge_session_id_is_lookup_not_mutation` proves this is
+    /// a pure read against the single owner (the mob roster).
     pub async fn resolve_bridge_session_id(&self, identity: &AgentIdentity) -> Option<SessionId> {
         self.get_member(identity)
             .await

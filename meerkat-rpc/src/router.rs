@@ -904,6 +904,9 @@ impl MethodRouter {
             "auth/login/device_start" => {
                 handlers::auth::handle_auth_login_device_start(id, params).await
             }
+            "auth/login/device_complete" => {
+                handlers::auth::handle_auth_login_device_complete(id, params, &self.runtime).await
+            }
             "auth/status/get" => {
                 handlers::auth::handle_auth_status_get(id, params, &self.runtime).await
             }

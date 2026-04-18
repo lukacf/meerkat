@@ -1137,6 +1137,10 @@ pub fn router(state: AppState) -> Router {
             post(crate::auth_endpoints::start_device_login),
         )
         .route(
+            "/auth/login/device/complete",
+            post(crate::auth_endpoints::complete_device_login),
+        )
+        .route(
             "/auth/status/{id}",
             get(crate::auth_endpoints::get_auth_status),
         )

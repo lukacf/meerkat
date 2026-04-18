@@ -18,7 +18,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use meerkat_client::auth_oauth::{
-    OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
+    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
+    poll_device_code, request_device_code,
 };
 use meerkat_client::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
 use meerkat_client::providers::anthropic::oauth as a_oauth;
@@ -494,7 +495,6 @@ pub struct DeviceStartBody {
 }
 
 pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoResponse {
-    use meerkat_client::auth_oauth::request_device_code;
     let (endpoints, _mode, _secret) = match provider_endpoints(&body.provider, "") {
         Ok(v) => v,
         Err((status, msg)) => {
@@ -535,6 +535,140 @@ pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoR
             })),
         )
             .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct DeviceCompleteBody {
+    pub provider: String,
+    pub device_code: String,
+    #[serde(default = "default_dev_realm_rest")]
+    pub realm_id: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
+fn default_dev_realm_rest() -> String {
+    "dev".into()
+}
+
+/// Device-code flow completion leg. Single-poll semantics — the caller
+/// runs the outer retry loop using the `interval` returned from
+/// `POST /auth/login/device/start`. Returns:
+///   * `{ "state": "pending" }`     (202)
+///   * `{ "state": "slow_down" }`   (429)
+///   * `{ "state": "access_denied" }` / `{ "state": "expired" }` (400)
+///   * `{ "state": "ready", realm_id, profile_id, ... }` (200, tokens
+///     persisted to TokenStore under `<realm_id>:<profile_id>`).
+pub async fn complete_device_login(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceCompleteBody>,
+) -> impl IntoResponse {
+    let (endpoints, mode, client_secret) = match provider_endpoints(&body.provider, "") {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    if endpoints.device_code_url.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "provider '{}' does not support the device-code flow",
+                    body.provider,
+                ),
+            })),
+        )
+            .into_response();
+    }
+    let default_binding = match mode {
+        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
+        PersistedAuthMode::ChatgptOauth => "openai_oauth",
+        PersistedAuthMode::GoogleOauth => "google_oauth",
+        _ => "oauth_profile",
+    };
+    let profile_id = body
+        .profile_id
+        .unwrap_or_else(|| default_binding.to_string());
+    let http = reqwest::Client::new();
+    let outcome = match poll_device_code(&http, &endpoints, &body.device_code, client_secret).await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": format!("device-code poll failed: {e}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+    match outcome {
+        DevicePollOutcome::Pending => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "state": "pending" })),
+        )
+            .into_response(),
+        DevicePollOutcome::SlowDown => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "state": "slow_down" })),
+        )
+            .into_response(),
+        DevicePollOutcome::AccessDenied => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "state": "access_denied" })),
+        )
+            .into_response(),
+        DevicePollOutcome::Expired => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "state": "expired" })),
+        )
+            .into_response(),
+        DevicePollOutcome::Ready(result) => {
+            let expires_at = result
+                .expires_in_secs
+                .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+            let tokens = PersistedTokens {
+                auth_mode: mode,
+                primary_secret: Some(result.access_token),
+                refresh_token: result.refresh_token,
+                id_token: result.id_token,
+                expires_at,
+                last_refresh: Some(chrono::Utc::now()),
+                scopes: result
+                    .scope
+                    .as_deref()
+                    .map(|s| s.split_whitespace().map(String::from).collect())
+                    .unwrap_or_default(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            let key = TokenKey::new(body.realm_id.clone(), profile_id.clone());
+            if let Err(e) = state.token_store.save(&key, &tokens).await {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("TokenStore save failed: {e}"),
+                    })),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "state": "ready",
+                    "realm_id": body.realm_id,
+                    "profile_id": profile_id,
+                    "provider": body.provider,
+                    "expires_at": expires_at.map(|e| e.to_rfc3339()),
+                    "has_refresh_token": tokens.refresh_token.is_some(),
+                    "scopes": tokens.scopes,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

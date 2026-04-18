@@ -11,7 +11,8 @@ use std::sync::Arc;
 use serde_json::value::RawValue;
 
 use meerkat_client::auth_oauth::{
-    OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code, request_device_code,
+    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
+    poll_device_code, request_device_code,
 };
 use meerkat_client::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
 use meerkat_client::providers::anthropic::oauth as a_oauth;
@@ -571,6 +572,132 @@ pub async fn handle_auth_login_device_start(
             error::INTERNAL_ERROR,
             format!("device-code request failed: {e}"),
         ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DeviceCompleteParams {
+    provider: String,
+    device_code: String,
+    #[serde(default = "default_dev_realm")]
+    realm_id: String,
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+fn default_dev_realm() -> String {
+    "dev".into()
+}
+
+/// Plan §1.5r.9 device-flow completion leg. Single-poll semantics — the
+/// caller runs the outer retry loop using the `interval` returned from
+/// `auth.login.device_start`. Returns one of:
+///   * `{ state: "pending" }`     (202-equivalent)
+///   * `{ state: "slow_down" }`   (429-equivalent; bump caller's interval)
+///   * `{ state: "access_denied" }` / `{ state: "expired" }` (terminal)
+///   * `{ state: "ready", realm_id, profile_id, expires_at, ... }`
+///     (tokens persisted to TokenStore under `<realm_id>:<profile_id>`).
+pub async fn handle_auth_login_device_complete(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let parsed: DeviceCompleteParams = match parse_params(params) {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
+    let (endpoints, mode, client_secret) = match provider_endpoints(&parsed.provider, "") {
+        Ok(v) => v,
+        Err(msg) => return RpcResponse::error(id, error::INVALID_PARAMS, msg),
+    };
+    if endpoints.device_code_url.is_none() {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!(
+                "provider '{}' does not support the device-code flow",
+                parsed.provider,
+            ),
+        );
+    }
+    let default_binding = match mode {
+        PersistedAuthMode::ClaudeAiOauth => "anthropic_oauth",
+        PersistedAuthMode::ChatgptOauth => "openai_oauth",
+        PersistedAuthMode::GoogleOauth => "google_oauth",
+        _ => "oauth_profile",
+    };
+    let profile_id = parsed
+        .profile_id
+        .unwrap_or_else(|| default_binding.to_string());
+    let http = reqwest::Client::new();
+    let outcome =
+        match poll_device_code(&http, &endpoints, &parsed.device_code, client_secret).await {
+            Ok(o) => o,
+            Err(e) => {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("device-code poll failed: {e}"),
+                );
+            }
+        };
+    match outcome {
+        DevicePollOutcome::Pending => {
+            RpcResponse::success(id, serde_json::json!({ "state": "pending" }))
+        }
+        DevicePollOutcome::SlowDown => {
+            RpcResponse::success(id, serde_json::json!({ "state": "slow_down" }))
+        }
+        DevicePollOutcome::AccessDenied => {
+            RpcResponse::success(id, serde_json::json!({ "state": "access_denied" }))
+        }
+        DevicePollOutcome::Expired => {
+            RpcResponse::success(id, serde_json::json!({ "state": "expired" }))
+        }
+        DevicePollOutcome::Ready(result) => {
+            let store = match require_token_store(runtime, id.clone()) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            let expires_at = result
+                .expires_in_secs
+                .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+            let tokens = PersistedTokens {
+                auth_mode: mode,
+                primary_secret: Some(result.access_token),
+                refresh_token: result.refresh_token,
+                id_token: result.id_token,
+                expires_at,
+                last_refresh: Some(chrono::Utc::now()),
+                scopes: result
+                    .scope
+                    .as_deref()
+                    .map(|s| s.split_whitespace().map(String::from).collect())
+                    .unwrap_or_default(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            let key = TokenKey::new(parsed.realm_id.clone(), profile_id.clone());
+            if let Err(e) = store.save(&key, &tokens).await {
+                return RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("TokenStore save failed: {e}"),
+                );
+            }
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "state": "ready",
+                    "realm_id": parsed.realm_id,
+                    "profile_id": profile_id,
+                    "provider": parsed.provider,
+                    "expires_at": expires_at.map(|e| e.to_rfc3339()),
+                    "has_refresh_token": tokens.refresh_token.is_some(),
+                    "scopes": tokens.scopes,
+                }),
+            )
+        }
     }
 }
 

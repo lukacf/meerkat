@@ -165,6 +165,35 @@ export class Auth {
     );
   }
 
+  /** `auth.login.device_complete` — single-poll completion leg for the
+   * device-code flow. Call on the cadence returned by
+   * `loginDeviceStart` (interval seconds). Returns `{ state: "pending"
+   * | "slow_down" | "access_denied" | "expired" }` while the user has
+   * not yet approved, and `{ state: "ready", profileId, ... }` once
+   * tokens are persisted. */
+  async loginDeviceComplete(params: {
+    provider: string;
+    deviceCode: string;
+    realmId?: string;
+    profileId?: string;
+  }): Promise<
+    | { state: 'pending' | 'slow_down' | 'access_denied' | 'expired' }
+    | {
+        state: 'ready';
+        realmId: string;
+        profileId: string;
+        provider: string;
+        expiresAt: string | null;
+        hasRefreshToken: boolean;
+        scopes: string[];
+      }
+  > {
+    return this.transport.request(
+      'auth.login.device_complete',
+      params,
+    );
+  }
+
   /** `auth.status.get` — current status for a stored profile. */
   async status(profileId: string): Promise<AuthStatus> {
     return this.transport.request<{ profileId: string }, AuthStatus>(

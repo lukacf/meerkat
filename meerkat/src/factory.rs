@@ -2,6 +2,7 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
+use std::collections::BTreeMap;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -791,6 +792,14 @@ pub struct AgentFactory {
     /// a `FileLockCoordinator` here.
     #[cfg(not(target_arch = "wasm32"))]
     pub refresh_coord: Option<Arc<dyn meerkat_client::auth_store::RefreshCoordinator>>,
+    /// External auth resolvers keyed by handle. Merged into
+    /// `ResolverEnvironment.external_resolvers` during `build_agent`.
+    /// The WASM runtime registers a `WasmExternalAuthResolver` under
+    /// `"wasm_host"` so realm bindings configured with
+    /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
+    /// delegate credential resolution to the JS host's OAuth flow.
+    pub external_auth_resolvers:
+        BTreeMap<String, Arc<dyn meerkat_client::ExternalAuthResolverHandle>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -848,6 +857,7 @@ impl AgentFactory {
             token_store: None,
             #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
+            external_auth_resolvers: BTreeMap::new(),
         }
     }
 
@@ -887,6 +897,7 @@ impl AgentFactory {
             token_store,
             #[cfg(not(target_arch = "wasm32"))]
             refresh_coord: None,
+            external_auth_resolvers: BTreeMap::new(),
         }
     }
 
@@ -899,6 +910,20 @@ impl AgentFactory {
         store: Arc<dyn meerkat_client::auth_store::TokenStore>,
     ) -> Self {
         self.token_store = Some(store);
+        self
+    }
+
+    /// Register an external auth resolver that surfaces bindings whose
+    /// `CredentialSourceSpec::ExternalResolver { handle }` matches the
+    /// supplied `handle`. Used by WASM hosts (browser OAuth flow owned
+    /// by the page) and by SDK users embedding meerkat inside an
+    /// existing auth story.
+    pub fn with_external_auth_resolver(
+        mut self,
+        handle: impl Into<String>,
+        resolver: Arc<dyn meerkat_client::ExternalAuthResolverHandle>,
+    ) -> Self {
+        self.external_auth_resolvers.insert(handle.into(), resolver);
         self
     }
 
@@ -1230,6 +1255,9 @@ impl AgentFactory {
             if let Some(coord) = self.refresh_coord.clone() {
                 env = env.with_refresh_coordinator(coord);
             }
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
         let provider_registry = meerkat_client::ProviderRuntimeRegistry::default();
         let connection = provider_registry
@@ -1752,6 +1780,9 @@ impl AgentFactory {
                         if let Some(coord) = self.refresh_coord.clone() {
                             env = env.with_refresh_coordinator(coord);
                         }
+                    }
+                    for (handle, resolver) in &self.external_auth_resolvers {
+                        env = env.with_external_resolver(handle.clone(), resolver.clone());
                     }
                     let provider_registry = meerkat_client::ProviderRuntimeRegistry::default();
                     let is_env_default = build_config.connection_ref.is_none();

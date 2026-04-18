@@ -453,6 +453,18 @@ fn build_service_infrastructure(
     config: Config,
     max_sessions: usize,
 ) -> Result<(Arc<WasmSessionService>, Arc<MobMcpState>), JsValue> {
+    // Plan §4d.wasm.1 closure — wire the JS external-auth callback into
+    // the provider runtime registry. The resolver itself handles the
+    // "no callback registered" case by returning `MissingSecret`; we
+    // always register the bridge so realm bindings configured with
+    // `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
+    // work whether or not the host page has (yet) installed a callback.
+    #[cfg(target_arch = "wasm32")]
+    let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
+        "wasm_host",
+        std::sync::Arc::new(crate::external_auth::WasmExternalAuthResolver),
+    );
+    #[cfg(not(target_arch = "wasm32"))]
     let factory = meerkat::AgentFactory::minimal();
     let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
 

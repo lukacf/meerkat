@@ -71,10 +71,14 @@ impl std::fmt::Debug for ValidatedBinding {
 }
 
 // Plan §6.11 deleted the legacy marker enum. Credential material
-// lives in the `auth_lease` directly: `StaticHeaders` with a
-// `__secret__` entry for simple-secret flows, `DynamicAuthorizer` for
-// authorizer-backed flows. `build_client` reads
-// `ResolvedConnection::resolved_secret()` / `resolved_authorizer()`.
+// lives on `auth_lease` directly via the typed `ResolvedAuthKind`
+// variants: `InlineSecret(Arc<String>)` for simple-secret flows
+// (dogma §5 closure — replaces the prior `__secret__` magic-header
+// convention), `DynamicAuthorizer` for authorizer-backed flows,
+// `StaticHeaders` for multi-header wire-level envelopes, and `None`
+// for authless transports. `build_client` reads
+// `ResolvedConnection::resolved_secret()` /
+// `resolved_authorizer()`.
 
 /// A fully resolved connection carries the trait-object lease alongside
 /// backend metadata.

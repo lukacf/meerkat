@@ -254,6 +254,60 @@ fn default_registry_populated_by_features() {
     assert!(registry.get(Provider::SelfHosted).is_none());
 }
 
+/// Plan §4a.14 + §4b.13 closure: a realm configured with
+/// `CredentialSourceSpec::Command` must actually execute the subprocess
+/// via `CommandCredentialRunner` and surface its stdout as the
+/// resolved secret. Prior to the wire-up the resolver returned a
+/// hard-coded "not reachable from the simple-secret resolver" error,
+/// which meant Codex-parity external-bearer config in a manifest
+/// never worked end-to-end.
+#[tokio::test]
+async fn command_source_resolves_via_subprocess_runner() {
+    let registry = ProviderRuntimeRegistry::default();
+    let mut realm = fixture_realm();
+    realm.auth_profiles.insert(
+        "command_key".into(),
+        AuthProfile {
+            id: "command_key".into(),
+            provider: Provider::OpenAI,
+            auth_method: "api_key".into(),
+            source: CredentialSourceSpec::Command {
+                program: std::path::PathBuf::from("/bin/sh"),
+                args: vec!["-c".into(), "printf '%s' 'sk-from-cmd'".into()],
+                cwd: None,
+                env: Default::default(),
+                timeout_ms: 5_000,
+                refresh_interval_ms: None,
+            },
+            storage: Default::default(),
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        },
+    );
+    realm.bindings.insert(
+        "command_openai".into(),
+        ProviderBinding {
+            id: "command_openai".into(),
+            backend_profile: "openai_api".into(),
+            auth_profile: "command_key".into(),
+            default_model: None,
+            policy: BindingPolicy::default(),
+        },
+    );
+
+    let env = ResolverEnvironment::testing();
+    let connection = registry
+        .resolve(&realm, "command_openai", &env)
+        .await
+        .expect("Command source must resolve via CommandCredentialRunner");
+    assert_eq!(
+        connection.resolved_secret().as_deref(),
+        Some("sk-from-cmd"),
+        "resolver should dispatch Command source to CommandCredentialRunner \
+         and materialize stdout as the InlineSecret",
+    );
+}
+
 // C3 negative observable (empty-lease -> NoCredentialMaterial) is
 // anchored in per-provider mod.rs unit tests since a ResolvedConnection
 // cannot be constructed externally without resolve_binding producing one.

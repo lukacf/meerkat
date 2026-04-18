@@ -104,6 +104,59 @@ pub(crate) fn invoke_external_auth_resolver(binding_key: &str) -> Result<Promise
     })
 }
 
+/// Rust-side bridge that implements `ExternalAuthResolverHandle` by
+/// delegating to the JS callback registered via
+/// `register_external_auth_resolver`. Registered on `AgentFactory` with
+/// the well-known handle `"wasm_host"` during WASM runtime init. Realm
+/// bindings configured with
+/// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
+/// therefore delegate credential resolution to the JS host's OAuth
+/// flow.
+#[cfg(target_arch = "wasm32")]
+pub struct WasmExternalAuthResolver;
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl meerkat_client::ExternalAuthResolverHandle for WasmExternalAuthResolver {
+    async fn resolve(
+        &self,
+        binding: &meerkat_client::runtime::binding::ValidatedBinding,
+    ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
+        let binding_key = format!("{}:{}", binding.auth_profile.id, binding.backend_profile.id,);
+        let promise = invoke_external_auth_resolver(&binding_key).map_err(|e| {
+            meerkat_core::AuthError::Other(format!("wasm_host resolver: {}", js_value_display(&e),))
+        })?;
+        let js_value = wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| {
+                meerkat_core::AuthError::Other(format!(
+                    "wasm_host resolver rejected: {}",
+                    js_value_display(&e),
+                ))
+            })?;
+        let token = js_value.as_string().ok_or_else(|| {
+            meerkat_core::AuthError::Other(
+                "wasm_host resolver must resolve its Promise to a string bearer token".into(),
+            )
+        })?;
+        if token.trim().is_empty() {
+            return Err(meerkat_core::AuthError::MissingSecret);
+        }
+        Ok(meerkat_core::ResolvedAuthEnvelope::InlineSecret {
+            secret: token,
+            metadata: meerkat_core::AuthMetadata::default(),
+            expires_at: None,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_value_display(v: &JsValue) -> String {
+    v.as_string()
+        .or_else(|| v.dyn_ref::<js_sys::Error>().map(|e| e.message().into()))
+        .unwrap_or_else(|| format!("{:?}", v))
+}
+
 // ---------------------------------------------------------------------------
 // Non-wasm shim: the browser-specific types don't exist off wasm32. Expose
 // no-op stubs so unit tests can link without cfg-gating every call site.

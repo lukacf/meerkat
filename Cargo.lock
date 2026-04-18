@@ -3711,6 +3711,7 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "meerkat",
+ "meerkat-client",
  "meerkat-comms",
  "meerkat-core",
  "meerkat-hooks",

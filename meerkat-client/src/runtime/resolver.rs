@@ -54,9 +54,42 @@ pub async fn resolve_simple_secret(
             let envelope = resolver.resolve(binding).await?;
             extract_secret_from_envelope(envelope)
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        CredentialSourceSpec::Command {
+            program,
+            args,
+            cwd,
+            env: cmd_env,
+            timeout_ms,
+            refresh_interval_ms,
+        } => {
+            use crate::auth_store::{CommandCredentialRunner, CommandCredentialSpec};
+            let spec = CommandCredentialSpec {
+                program: program.clone(),
+                args: args.clone(),
+                cwd: cwd.clone(),
+                env: cmd_env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                timeout_ms: *timeout_ms,
+                refresh_interval_ms: *refresh_interval_ms,
+            };
+            let runner = CommandCredentialRunner::new(spec);
+            let tokens = runner
+                .resolve()
+                .await
+                .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
+            tokens.primary_secret.ok_or_else(|| {
+                ProviderAuthError::SourceResolutionFailed(
+                    "command returned no primary_secret in its persisted tokens payload".into(),
+                )
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
         CredentialSourceSpec::Command { .. } => Err(ProviderAuthError::SourceResolutionFailed(
-            "CredentialSourceSpec::Command requires a provider-specific runner; \
-             not reachable from the simple-secret resolver"
+            "CredentialSourceSpec::Command requires a subprocess runner; \
+             not available on the wasm32 target"
                 .into(),
         )),
         CredentialSourceSpec::FileDescriptor { .. } => {

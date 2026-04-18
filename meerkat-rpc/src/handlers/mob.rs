@@ -153,13 +153,16 @@ pub struct MobSpawnParams {
     pub context: Option<Value>,
     #[serde(default)]
     pub additional_instructions: Option<Vec<String>>,
-    // DELETE_ME A10: SpawnMemberSpec has 15 public fields; the RPC used to
-    // expose only 8, making RPC spawn strictly less capable than Rust spawn.
-    // Filling in the gap incrementally — launch_mode stays internal until
-    // A3/C1 land a dedicated session-adoption path, and the opaque Profile /
-    // ToolFilter / ToolAccessPolicy / BudgetSplitPolicy surfaces need their
-    // own wire contracts, but these four are straightforward additive
-    // inputs that have no extra type shape to worry about.
+    // DELETE_ME A10: `SpawnMemberSpec` has 15 public fields; the RPC
+    // mirrors every non-internal one. The first pass added `binding`,
+    // `shell_env`, and `auto_wire_parent`; A3 + C1 unblocked
+    // `launch_mode`; and this pass adds `tool_access_policy`,
+    // `budget_split_policy`, `inherited_tool_filter`, and
+    // `override_profile` to reach full parity with Rust-in-process
+    // spawn. Types are taken verbatim from `meerkat-core` /
+    // `meerkat-mob` where they already have serde support, so no
+    // additional wire shape is introduced — the wire shape is just
+    // the existing Rust-type serde form.
     /// Optional runtime binding for external-peer members (maps to
     /// SpawnMemberSpec::binding).
     #[serde(default)]
@@ -172,6 +175,30 @@ pub struct MobSpawnParams {
     /// (maps to SpawnMemberSpec::auto_wire_parent).
     #[serde(default)]
     pub auto_wire_parent: Option<bool>,
+    /// How this member should be launched (fresh / resume / fork)
+    /// (maps to SpawnMemberSpec::launch_mode). Defaults to `Fresh`.
+    #[serde(default)]
+    pub launch_mode: Option<meerkat_mob::MemberLaunchMode>,
+    /// Tool access policy for the spawned member
+    /// (maps to SpawnMemberSpec::tool_access_policy).
+    #[serde(default)]
+    pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
+    /// Budget split policy from the orchestrator to this member
+    /// (maps to SpawnMemberSpec::budget_split_policy).
+    #[serde(default)]
+    pub budget_split_policy: Option<meerkat_mob::BudgetSplitPolicy>,
+    /// Pre-resolved inherited tool filter
+    /// (maps to SpawnMemberSpec::inherited_tool_filter). When set,
+    /// stored on child session metadata as
+    /// `INHERITED_TOOL_FILTER_METADATA_KEY`.
+    #[serde(default)]
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    /// Override profile resolved from `SpawnTooling::Profile`
+    /// (maps to SpawnMemberSpec::override_profile). When set, spawn
+    /// uses this profile instead of looking up by `profile` from the
+    /// mob definition.
+    #[serde(default)]
+    pub override_profile: Option<meerkat_mob::Profile>,
 }
 
 pub async fn handle_spawn(
@@ -213,6 +240,21 @@ pub async fn handle_spawn(
     }
     if let Some(auto_wire_parent) = params.auto_wire_parent {
         spec.auto_wire_parent = auto_wire_parent;
+    }
+    if let Some(launch_mode) = params.launch_mode {
+        spec.launch_mode = launch_mode;
+    }
+    if let Some(tool_access_policy) = params.tool_access_policy {
+        spec.tool_access_policy = Some(tool_access_policy);
+    }
+    if let Some(budget_split_policy) = params.budget_split_policy {
+        spec.budget_split_policy = Some(budget_split_policy);
+    }
+    if let Some(inherited_tool_filter) = params.inherited_tool_filter {
+        spec.inherited_tool_filter = Some(inherited_tool_filter);
+    }
+    if let Some(override_profile) = params.override_profile {
+        spec.override_profile = Some(override_profile);
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
@@ -1622,6 +1664,95 @@ mod tests {
         let err = serde_json::from_value::<MobCreateParams>(value)
             .expect_err("reserved owner_session_id must be rejected");
         assert!(err.to_string().contains("unknown field `owner_session_id`"));
+    }
+
+    /// DELETE_ME A10 regression: `MobSpawnParams` now carries all 15
+    /// `SpawnMemberSpec` public fields so RPC spawn reaches parity with
+    /// Rust-in-process spawn. The first A10 partial covered binding /
+    /// shell_env / auto_wire_parent; A3+C1 unblocked launch_mode; this
+    /// final pass adds tool_access_policy, budget_split_policy,
+    /// inherited_tool_filter, and override_profile. This test pins each
+    /// new field to round-trip through serde (proving the wire shape
+    /// is the serde form of the underlying Rust type — no parallel
+    /// wire contract introduced).
+    #[test]
+    fn mob_spawn_params_carry_full_member_spec_surface() {
+        use meerkat_core::ops::ToolAccessPolicy;
+        use meerkat_core::tool_scope::ToolFilter;
+
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "launch_mode": { "mode": "fresh" },
+            "tool_access_policy": {
+                "type": "allow_list",
+                "value": ["grep", "read"]
+            },
+            "budget_split_policy": { "type": "remaining" },
+            "inherited_tool_filter": { "Allow": ["grep", "read"] },
+            "override_profile": {
+                "model": "claude-sonnet-4-6",
+                "skills": [],
+                "tools": {},
+                "peer_description": "",
+                "external_addressable": false
+            },
+        });
+        let params: MobSpawnParams =
+            serde_json::from_value(value).expect("spawn params with full surface deserialize");
+
+        // launch_mode is Fresh (default shape via serde tag).
+        assert!(matches!(
+            params.launch_mode,
+            Some(meerkat_mob::MemberLaunchMode::Fresh)
+        ));
+
+        // tool_access_policy is the AllowList variant with the two tools.
+        match params.tool_access_policy {
+            Some(ToolAccessPolicy::AllowList(ref tools)) => {
+                assert_eq!(tools, &vec!["grep".to_string(), "read".to_string()]);
+            }
+            other => panic!("expected AllowList, got {other:?}"),
+        }
+
+        // budget_split_policy is Remaining.
+        assert!(matches!(
+            params.budget_split_policy,
+            Some(meerkat_mob::BudgetSplitPolicy::Remaining)
+        ));
+
+        // inherited_tool_filter round-trips through serde.
+        assert!(matches!(
+            params.inherited_tool_filter,
+            Some(ToolFilter::Allow(_))
+        ));
+        if let Some(ToolFilter::Allow(ref allowlist)) = params.inherited_tool_filter {
+            assert!(allowlist.contains("grep"));
+            assert!(allowlist.contains("read"));
+        }
+
+        // override_profile model survives the round-trip.
+        let override_profile = params
+            .override_profile
+            .as_ref()
+            .expect("override_profile round-trips through serde");
+        assert_eq!(override_profile.model, "claude-sonnet-4-6");
+
+        // And all older fields that aren't set stay None so the additive
+        // wire extension doesn't break prior callers.
+        let minimal = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+        });
+        let minimal_params: MobSpawnParams = serde_json::from_value(minimal)
+            .expect("spawn params without optional fields deserialize");
+        assert!(minimal_params.launch_mode.is_none());
+        assert!(minimal_params.tool_access_policy.is_none());
+        assert!(minimal_params.budget_split_policy.is_none());
+        assert!(minimal_params.inherited_tool_filter.is_none());
+        assert!(minimal_params.override_profile.is_none());
     }
 
     #[test]

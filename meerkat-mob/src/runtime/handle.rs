@@ -982,7 +982,8 @@ impl MobHandle {
                         actual: fence_token,
                     });
                 }
-                let content = meerkat_core::types::ContentInput::from(spec.content);
+                // WorkSpec.content is already ContentInput after DELETE_ME C6.
+                let content = spec.content;
                 match spec.origin {
                     WorkOrigin::External => {
                         self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {

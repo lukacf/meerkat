@@ -306,19 +306,32 @@ impl FromStr for WorkRef {
 /// `WorkSpec` is submitted alongside a [`WorkRef`] and [`FenceToken`] through
 /// the work lane. It captures the content and delivery semantics without
 /// exposing session-level details.
+///
+/// DELETE_ME C6: `content` is a full [`meerkat_core::types::ContentInput`]
+/// (multimodal) rather than `String`, matching the rest of the platform's
+/// content-carrying types. Prior to this change the work lane was silently
+/// text-only, which was a capability regression vs. every other member-
+/// delivery surface. `impl From<String> for ContentInput` / `From<&str>` in
+/// `meerkat_core` means existing String call sites upgrade without
+/// per-call-site conversion noise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkSpec {
     /// The content to deliver to the member.
-    pub content: String,
+    pub content: meerkat_core::types::ContentInput,
     /// Whether this is an externally-originated turn (user input) or an
     /// internally-originated turn (mob coordination).
     pub origin: WorkOrigin,
 }
 
 impl WorkSpec {
-    /// Create a new work spec.
-    pub fn new(content: String, origin: WorkOrigin) -> Self {
-        Self { content, origin }
+    /// Create a new work spec. Accepts anything that implements
+    /// `Into<ContentInput>` — including `String` and `&str` — so existing
+    /// text-only call sites upgrade without churn.
+    pub fn new(content: impl Into<meerkat_core::types::ContentInput>, origin: WorkOrigin) -> Self {
+        Self {
+            content: content.into(),
+            origin,
+        }
     }
 }
 
@@ -535,7 +548,10 @@ mod tests {
         let spec = WorkSpec::new("do something".to_owned(), WorkOrigin::External);
         let encoded = serde_json::to_string(&spec).unwrap();
         let decoded: WorkSpec = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(decoded.content, "do something");
+        assert_eq!(
+            decoded.content,
+            meerkat_core::types::ContentInput::from("do something".to_string()),
+        );
         assert_eq!(decoded.origin, WorkOrigin::External);
     }
 
@@ -552,6 +568,31 @@ mod tests {
     fn test_work_spec_internal_origin() {
         let spec = WorkSpec::new("coordinate".to_owned(), WorkOrigin::Internal);
         assert_eq!(spec.origin, WorkOrigin::Internal);
-        assert_eq!(spec.content, "coordinate");
+        assert_eq!(
+            spec.content,
+            meerkat_core::types::ContentInput::from("coordinate".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_work_spec_accepts_multimodal_content() {
+        // DELETE_ME C6 regression: WorkSpec.content must be ContentInput
+        // (multimodal), not String. This test locks in that non-text
+        // ContentInput variants (e.g. image blocks) can be submitted as
+        // work content without string-coercing them first.
+        let image_block = meerkat_core::types::ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: meerkat_core::ImageData::Inline {
+                data: "iVBORw0KGgo=".to_string(),
+            },
+        };
+        let content = meerkat_core::types::ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "analyse this".to_string(),
+            },
+            image_block.clone(),
+        ]);
+        let spec = WorkSpec::new(content.clone(), WorkOrigin::External);
+        assert_eq!(spec.content, content);
     }
 }

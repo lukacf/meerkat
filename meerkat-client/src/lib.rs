@@ -15,7 +15,6 @@ pub mod block_assembler;
 pub mod error;
 pub mod factory;
 mod http;
-pub mod provider;
 mod streaming;
 mod test_client;
 pub mod types;
@@ -53,10 +52,7 @@ pub mod authorizers;
 pub use adapter::LlmClientAdapter;
 pub use block_assembler::{BlockAssembler, BlockKey, StreamAssemblyError};
 pub use error::LlmError;
-pub use factory::{
-    DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClientFactory, LlmProvider,
-};
-pub use provider::ProviderResolver;
+pub use factory::FactoryError;
 pub use test_client::TestClient;
 pub use types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmResponse, ToolCallBuffer};
 

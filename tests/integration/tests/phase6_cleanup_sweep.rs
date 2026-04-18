@@ -157,6 +157,26 @@ fn phase6_deletions() -> Vec<(&'static str, &'static str)> {
             "LlmClientFactory::create_client",
             "LlmClientFactory::create_client (plan §6.7)",
         ),
+        (
+            "pub enum LlmProvider",
+            "LlmProvider enum declaration (plan §6.8)",
+        ),
+        (
+            "pub trait LlmClientFactory",
+            "LlmClientFactory trait declaration (plan §6.7)",
+        ),
+        (
+            "DefaultClientFactory",
+            "DefaultClientFactory struct (plan §6.7)",
+        ),
+        (
+            "DefaultFactoryConfig",
+            "DefaultFactoryConfig struct (plan §6.7)",
+        ),
+        (
+            "pub struct ProviderResolver",
+            "ProviderResolver struct (plan §6.6)",
+        ),
     ]
 }
 

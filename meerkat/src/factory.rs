@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter, ProviderResolver};
+use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -1327,7 +1327,7 @@ impl AgentFactory {
             ));
         }
 
-        let inferred = ProviderResolver::infer_from_model(&build_config.model);
+        let inferred = Provider::infer_from_model(&build_config.model).unwrap_or(Provider::Other);
         if inferred != Provider::Other {
             return Ok((inferred, None));
         }
@@ -1701,8 +1701,7 @@ impl AgentFactory {
             None if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") => {
                 // Test shim: when RKAT_TEST_CLIENT=1 is set by integration
                 // tests, short-circuit to an in-process TestClient so tests
-                // don't need real provider credentials. This mirrors the
-                // legacy DefaultClientFactory::create_client behavior.
+                // don't need real provider credentials.
                 Arc::new(meerkat_client::TestClient::default())
             }
             None => {

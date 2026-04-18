@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use futures::Stream;
+use meerkat_client::LlmClientAdapter;
 use meerkat_client::error::LlmError;
 use meerkat_client::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest};
-use meerkat_client::{LlmClientAdapter, ProviderResolver};
 use meerkat_core::{
     AgentEvent, AgentLlmClient, AssistantBlock, Provider, ProviderMeta, StopReason,
 };
@@ -171,22 +171,13 @@ async fn test_llm_adapter_event_tap_mirrors_text_delta() -> Result<(), Box<dyn s
 
 #[test]
 fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(
-        ProviderResolver::infer_from_model("claude-3"),
-        Provider::Anthropic
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("gpt-4"),
-        Provider::OpenAI
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("gemini-1.5"),
-        Provider::Gemini
-    );
-    assert_eq!(
-        ProviderResolver::infer_from_model("unknown"),
-        Provider::Other
-    );
+    fn infer(m: &str) -> Provider {
+        Provider::infer_from_model(m).unwrap_or(Provider::Other)
+    }
+    assert_eq!(infer("claude-3"), Provider::Anthropic);
+    assert_eq!(infer("gpt-4"), Provider::OpenAI);
+    assert_eq!(infer("gemini-1.5"), Provider::Gemini);
+    assert_eq!(infer("unknown"), Provider::Other);
 
     // Phase 6.6 removed the legacy env-precedence credential helpers
     // from this struct. The RKAT_*-preferred env resolution now lives
@@ -201,6 +192,6 @@ fn test_provider_resolution_contract() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn test_inv_006_provider_inference_uses_resolver() {
-    let provider = ProviderResolver::infer_from_model("claude-sonnet-4");
+    let provider = Provider::infer_from_model("claude-sonnet-4").unwrap_or(Provider::Other);
     assert_eq!(provider, Provider::Anthropic);
 }

@@ -7,10 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use meerkat_client::{
-    DefaultClientFactory, DefaultFactoryConfig, FactoryError, LlmClient, LlmClientAdapter,
-    LlmClientFactory, LlmProvider, ProviderResolver,
-};
+use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter, ProviderResolver};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -1165,36 +1162,6 @@ impl AgentFactory {
             Some(tx) => LlmClientAdapter::with_event_channel(client, model.into(), tx),
             None => LlmClientAdapter::new(client, model.into()),
         }
-    }
-
-    /// Build an LLM client for a provider with optional base URL override.
-    pub async fn build_llm_client(
-        &self,
-        provider: Provider,
-        api_key: Option<String>,
-        base_url: Option<String>,
-    ) -> Result<Arc<dyn LlmClient>, FactoryError> {
-        let mapped = match provider {
-            Provider::Anthropic => LlmProvider::Anthropic,
-            Provider::OpenAI => LlmProvider::OpenAi,
-            Provider::Gemini => LlmProvider::Gemini,
-            Provider::SelfHosted => {
-                return Err(FactoryError::UnsupportedProvider("self_hosted".to_string()));
-            }
-            Provider::Other => return Err(FactoryError::UnsupportedProvider("other".to_string())),
-        };
-
-        let mut config = DefaultFactoryConfig::default();
-        if let Some(url) = base_url {
-            match mapped {
-                LlmProvider::Anthropic => config = config.with_anthropic_base_url(url),
-                LlmProvider::OpenAi => config = config.with_openai_base_url(url),
-                LlmProvider::Gemini => config = config.with_gemini_base_url(url),
-            }
-        }
-
-        let factory = DefaultClientFactory::with_config(config);
-        factory.create_client(mapped, api_key)
     }
 
     pub async fn build_llm_client_for_identity(

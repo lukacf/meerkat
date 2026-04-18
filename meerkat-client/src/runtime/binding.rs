@@ -97,23 +97,21 @@ impl std::fmt::Debug for ResolvedConnection {
 }
 
 impl ResolvedConnection {
-    /// Extract the resolved secret (api key, bearer token) from the
-    /// auth lease via the `"__secret__"` synthetic header convention.
-    /// Returns `None` if the lease is a `DynamicAuthorizer`, has no
-    /// `__secret__` header, or is empty. Plan §6.11: new build_client
-    /// code paths read this instead of `shim_credential`.
+    /// Extract the resolved inline secret (api key, bearer token, OAuth
+    /// access token) from the auth lease. Returns `None` for
+    /// authorizer-backed leases. Plan §6.11 + dogma §5 closure:
+    /// reads the typed `InlineSecret` variant of `ResolvedAuthKind`
+    /// (replaces the prior `__secret__` synthetic-header convention).
     pub fn resolved_secret(&self) -> Option<String> {
         match self.auth_lease.kind() {
-            meerkat_core::ResolvedAuthKind::StaticHeaders(headers) => headers
-                .iter()
-                .find_map(|(k, v)| (k == "__secret__").then(|| v.clone())),
+            meerkat_core::ResolvedAuthKind::InlineSecret(secret) => Some((**secret).clone()),
             _ => None,
         }
     }
 
     /// Extract the resolved dynamic authorizer (AWS SigV4, Google Auth,
     /// Azure AD, ExternalAuthorizer-backed) from the auth lease. Returns
-    /// `None` for static-headers leases. Plan §6.11.
+    /// `None` for non-authorizer leases. Plan §6.11.
     pub fn resolved_authorizer(&self) -> Option<Arc<dyn HttpAuthorizer>> {
         match self.auth_lease.kind() {
             meerkat_core::ResolvedAuthKind::DynamicAuthorizer(auth) => Some(auth.clone()),
@@ -136,6 +134,10 @@ pub struct StaticLease {
 }
 
 impl StaticLease {
+    /// Construct a lease carrying pre-projected wire headers. Used by
+    /// resolvers that know the full header set (future post-§6.12
+    /// paths). For raw secrets (api keys / bearer tokens), callers
+    /// should prefer [`StaticLease::inline_secret`].
     pub fn new(
         headers: Vec<(String, String)>,
         metadata: AuthMetadata,
@@ -146,6 +148,38 @@ impl StaticLease {
             kind: ResolvedAuthKind::StaticHeaders(headers),
             metadata,
             expires_at,
+            source_label: source_label.into(),
+        }
+    }
+
+    /// Construct a lease carrying a raw inline secret (api key, bearer
+    /// token, OAuth access token). Plan §6.11 + dogma §5: the typed
+    /// `ResolvedAuthKind::InlineSecret` variant replaces the earlier
+    /// `StaticHeaders(vec![("__secret__", value)])` magic-string
+    /// convention.
+    pub fn inline_secret(
+        secret: String,
+        metadata: AuthMetadata,
+        expires_at: Option<DateTime<Utc>>,
+        source_label: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: ResolvedAuthKind::InlineSecret(Arc::new(secret)),
+            metadata,
+            expires_at,
+            source_label: source_label.into(),
+        }
+    }
+
+    /// Construct a lease with no credential material (authorizer-backed
+    /// flows where the runtime constructs the authorizer in
+    /// `build_client`, not the resolver). Matches
+    /// `ResolvedAuthKind::None`.
+    pub fn empty_lease(metadata: AuthMetadata, source_label: impl Into<String>) -> Self {
+        Self {
+            kind: ResolvedAuthKind::None,
+            metadata,
+            expires_at: None,
             source_label: source_label.into(),
         }
     }

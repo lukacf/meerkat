@@ -241,16 +241,18 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             ));
         }
         // Plan §6.11: populate the lease with the resolved secret as
-        // a __secret__ header, or an empty lease for authorizer paths.
+        // a typed InlineSecret variant, or an empty lease for
+        // authorizer paths (build_client constructs the concrete
+        // HttpAuthorizer).
         let source_label = format!("openai:{}", binding.auth_profile.id);
         let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
-            Some(secret) => Arc::new(StaticLease::new(
-                vec![("__secret__".to_string(), secret)],
+            Some(secret) => Arc::new(StaticLease::inline_secret(
+                secret,
                 metadata,
                 None,
                 source_label,
             )),
-            None => Arc::new(StaticLease::new(Vec::new(), metadata, None, source_label)),
+            None => Arc::new(StaticLease::empty_lease(metadata, source_label)),
         };
 
         Ok(ResolvedConnection {

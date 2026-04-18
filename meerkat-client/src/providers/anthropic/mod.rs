@@ -233,19 +233,18 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         };
 
         // Plan §6.11: populate the lease with resolved secret as a
-        // __secret__ header, or an empty lease for authorizer paths.
+        // typed InlineSecret variant, or an empty lease for authorizer
+        // paths (build_client constructs AWS SigV4 / GoogleAuth / AzureAd).
         let source_label = format!("anthropic:{}", binding.auth_profile.id);
         let lease: Arc<dyn meerkat_core::AuthLease> = match secret_opt {
-            Some(secret) => Arc::new(StaticLease::new(
-                vec![("__secret__".to_string(), secret)],
+            Some(secret) => Arc::new(StaticLease::inline_secret(
+                secret,
                 AuthMetadata::default(),
                 None,
                 source_label,
             )),
-            None => Arc::new(StaticLease::new(
-                Vec::new(),
+            None => Arc::new(StaticLease::empty_lease(
                 AuthMetadata::default(),
-                None,
                 source_label,
             )),
         };

@@ -28,18 +28,25 @@ pub enum AuthRefreshReason {
 }
 
 /// The resolved credential material. `meerkat-client` resolvers produce
-/// this and wrap it in an [`AuthLease`]. Phase 2 clients do not introspect
-/// its contents — the Phase 2 shim reads
-/// `ResolvedConnection.shim_credential` instead.
+/// this and wrap it in an [`AuthLease`]; `ProviderRuntime::build_client`
+/// reads it to construct the LLM wire-layer.
 #[derive(Clone)]
 pub enum ResolvedAuthKind {
-    /// A vector of `(name, value)` header pairs. Phase 2 may populate this
-    /// with a placeholder or leave it empty; Phase 3 will populate it with
-    /// provider-correct wire headers when `build_client` owns HTTP assembly.
+    /// A pre-resolved secret (api key, static bearer, OAuth access
+    /// token). Wrapped in `Arc<String>` to keep the clone cheap and
+    /// to avoid multiplying the credential across `Arc<dyn AuthLease>`
+    /// holders. Plan §6.11: replaces the legacy `StaticHeaders` with
+    /// `__secret__` synthetic-header convention (dogma §5 "typed
+    /// truth, never folklore").
+    InlineSecret(Arc<String>),
+    /// A vector of `(name, value)` header pairs — used by resolvers
+    /// that pre-project wire-correct headers directly (some provider
+    /// runtimes may do this post-§6.12 when `build_client` owns HTTP
+    /// assembly). Empty/placeholder headers are no longer produced by
+    /// any resolver in the repo.
     StaticHeaders(Vec<(String, String)>),
-    /// A runtime authorizer invoked per request. Phase 2 `build_client`
-    /// cannot use this with the legacy provider clients — it returns
-    /// `ProviderClientError::DynamicAuthorizerNotYetSupportedInShimMode`.
+    /// A runtime authorizer invoked per request (AWS SigV4, Google
+    /// Auth, Azure AD, host-supplied ExternalAuthorizer-Dynamic).
     DynamicAuthorizer(Arc<dyn HttpAuthorizer>),
     /// No credential material (e.g., self-hosted without auth).
     None,
@@ -48,6 +55,7 @@ pub enum ResolvedAuthKind {
 impl std::fmt::Debug for ResolvedAuthKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InlineSecret(_) => f.debug_tuple("InlineSecret").field(&"<redacted>").finish(),
             Self::StaticHeaders(headers) => f
                 .debug_tuple("StaticHeaders")
                 .field(&headers.len())

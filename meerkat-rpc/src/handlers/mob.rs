@@ -988,6 +988,45 @@ pub async fn handle_realtime_detach(
 }
 
 // ---------------------------------------------------------------------------
+// mob/snapshot (Finding C2)
+// ---------------------------------------------------------------------------
+
+/// Handle `mob/snapshot` — return a point-in-time aggregate of mob status +
+/// member list in a single atomic call. Replaces the "subscribe to events
+/// and run your own projection" pattern that mobkit and other consumers had
+/// to fall back to when they just wanted to render current state.
+pub async fn handle_snapshot(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobIdParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let status = match state.mob_status(&mob_id).await {
+        Ok(status) => status.to_string(),
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let members = match state.mob_list_members(&mob_id).await {
+        Ok(members) => members,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    RpcResponse::success(
+        id,
+        serde_json::json!({
+            "mob_id": mob_id,
+            "status": status,
+            "members": members,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // mob/rotate_supervisor (Finding C10)
 // ---------------------------------------------------------------------------
 

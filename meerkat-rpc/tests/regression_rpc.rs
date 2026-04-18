@@ -865,6 +865,7 @@ async fn initialize_methods_list_complete() {
             "mob/fork_helper",
             "mob/force_cancel",
             "mob/member_status",
+            "mob/snapshot",
             "mob/rotate_supervisor",
             "mob/stream_open",
             "mob/stream_close",
@@ -992,6 +993,31 @@ async fn mob_create_status_list_lifecycle() {
     assert_eq!(lifecycle_resp["result"]["ok"], true);
     assert_eq!(lifecycle_resp["result"]["action"], "stop");
     assert_eq!(lifecycle_resp["result"]["mob_id"], mob_id);
+
+    // mob/snapshot (DELETE_ME C2): point-in-time aggregate of mob status +
+    // member list so consumers don't have to compose mob/status + mob/members
+    // manually (or subscribe to events and run their own projection).
+    let snapshot_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 41,
+        "method": "mob/snapshot",
+        "params": {"mob_id": &mob_id}
+    });
+    send_request(&mut writer, &snapshot_req).await;
+    let snapshot_resp = read_response(&mut reader).await;
+    assert!(
+        snapshot_resp["error"].is_null(),
+        "mob/snapshot must succeed for an existing mob: {snapshot_resp}",
+    );
+    assert_eq!(snapshot_resp["result"]["mob_id"], mob_id);
+    assert!(
+        snapshot_resp["result"]["status"].is_string(),
+        "mob/snapshot must carry a status string: {snapshot_resp}",
+    );
+    assert!(
+        snapshot_resp["result"]["members"].is_array(),
+        "mob/snapshot must carry a members array: {snapshot_resp}",
+    );
 
     // mob/rotate_supervisor must exist (DELETE_ME C10) and project the
     // SupervisorRotationReport on success, or return a typed error when the

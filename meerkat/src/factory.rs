@@ -657,6 +657,76 @@ pub fn provider_key(provider: Provider) -> &'static str {
     provider.as_str()
 }
 
+/// Project a [`Config`] + `provider` tuple into a [`RealmConnectionSet`]
+/// for runtime resolution (Phase 6.1 replacement for the deleted
+/// legacy credential-precedence helper).
+///
+/// Precedence matches the legacy factory path to keep on-disk TOML
+/// configurations and env-var workflows working unchanged through the
+/// 0.6.0 cutover:
+///   1. `config.provider = ProviderConfig::{Anthropic,OpenAI,Gemini} { api_key }` (legacy per-provider block)
+///   2. `config.providers.api_keys[<provider>]` (legacy shared map)
+///   3. env var `RKAT_<P>_API_KEY` -> `<P>_API_KEY` -> `GOOGLE_API_KEY` (Gemini only)
+///
+/// Layers 1+2 synthesize with `InlineSecret`; layer 3 synthesizes with
+/// `Env`, which the resolver's `env_lookup` seam reads at resolve time.
+/// Dogma §1: one canonical owner for "legacy credential precedence" —
+/// this projection — instead of a helper in the factory body.
+fn synthesize_realm_from_config(
+    config: &Config,
+    provider: Provider,
+) -> meerkat_core::RealmConnectionSet {
+    let mut api_key = config
+        .providers
+        .api_keys
+        .as_ref()
+        .and_then(|map| map.get(provider_key(provider)).cloned());
+
+    match (&config.provider, provider) {
+        (meerkat_core::ProviderConfig::Anthropic { api_key: k, .. }, Provider::Anthropic) => {
+            if k.is_some() {
+                api_key = k.clone();
+            }
+        }
+        (meerkat_core::ProviderConfig::OpenAI { api_key: k, .. }, Provider::OpenAI) => {
+            if k.is_some() {
+                api_key = k.clone();
+            }
+        }
+        (meerkat_core::ProviderConfig::Gemini { api_key: k }, Provider::Gemini) => {
+            if k.is_some() {
+                api_key = k.clone();
+            }
+        }
+        _ => {}
+    }
+
+    if api_key.is_none() {
+        if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
+            api_key = Some("test-key".to_string());
+        } else {
+            let (rkat_var, native_vars): (&str, &[&str]) = match provider {
+                Provider::Anthropic => ("RKAT_ANTHROPIC_API_KEY", &["ANTHROPIC_API_KEY"]),
+                Provider::OpenAI => ("RKAT_OPENAI_API_KEY", &["OPENAI_API_KEY"]),
+                Provider::Gemini => ("RKAT_GEMINI_API_KEY", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+                Provider::SelfHosted | Provider::Other => ("", &[]),
+            };
+            if !rkat_var.is_empty() {
+                api_key = std::env::var(rkat_var)
+                    .ok()
+                    .or_else(|| native_vars.iter().find_map(|k| std::env::var(k).ok()));
+            }
+        }
+    }
+
+    match api_key {
+        Some(secret) => {
+            meerkat_core::RealmConnectionSet::synthesize_inline_default(provider, secret)
+        }
+        None => meerkat_core::RealmConnectionSet::synthesize_env_default(provider),
+    }
+}
+
 /// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
 ///
 /// Created before mob tool composition (so it can be passed into `MobToolsBuildArgs`),
@@ -1173,22 +1243,14 @@ impl AgentFactory {
         }
 
         // Phase 6 hot-swap routing: compose a synthetic RealmConnection-
-        // Set from the Config + env (same precedence as build_agent's
-        // env-fallback path: ProviderConfig > providers.api_keys > env)
-        // and resolve through ProviderRuntimeRegistry. Test-mode shim
-        // honored identically to build_agent so hot-swap never needs
-        // real credentials under RKAT_TEST_CLIENT=1.
+        // Set from the Config + env via synthesize_realm_from_config (same
+        // precedence as build_agent's env-fallback path). Test-mode shim
+        // honored identically so hot-swap never needs real credentials
+        // under RKAT_TEST_CLIENT=1.
         if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
             return Ok(Arc::new(meerkat_client::TestClient::default()));
         }
-        let (inline, _base_url) = self.resolve_provider_credentials(identity.provider, config);
-        let realm = match inline {
-            Some(secret) => meerkat_core::RealmConnectionSet::synthesize_inline_default(
-                identity.provider,
-                secret,
-            ),
-            None => meerkat_core::RealmConnectionSet::synthesize_env_default(identity.provider),
-        };
+        let realm = synthesize_realm_from_config(config, identity.provider);
         #[allow(unused_mut)]
         let mut env = meerkat_client::ResolverEnvironment::with_process_env();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1393,87 +1455,6 @@ impl AgentFactory {
         } else {
             Some(serde_json::Value::Object(tools))
         }
-    }
-
-    fn resolve_provider_credentials(
-        &self,
-        provider: Provider,
-        config: &Config,
-    ) -> (Option<String>, Option<String>) {
-        // Preferred shared settings map (works across all providers).
-        let mut base_url = config
-            .providers
-            .base_urls
-            .as_ref()
-            .and_then(|map| map.get(provider_key(provider)).cloned());
-        let mut api_key = config
-            .providers
-            .api_keys
-            .as_ref()
-            .and_then(|map| map.get(provider_key(provider)).cloned());
-
-        // Backward-compatible provider-specific block still supported; if the
-        // selected provider matches this variant, explicit values override map values.
-        match (&config.provider, provider) {
-            (
-                meerkat_core::ProviderConfig::Anthropic {
-                    api_key: cfg_key,
-                    base_url: cfg_url,
-                },
-                Provider::Anthropic,
-            ) => {
-                if cfg_key.is_some() {
-                    api_key = cfg_key.clone();
-                }
-                if cfg_url.is_some() {
-                    base_url = cfg_url.clone();
-                }
-            }
-            (
-                meerkat_core::ProviderConfig::OpenAI {
-                    api_key: cfg_key,
-                    base_url: cfg_url,
-                },
-                Provider::OpenAI,
-            ) => {
-                if cfg_key.is_some() {
-                    api_key = cfg_key.clone();
-                }
-                if cfg_url.is_some() {
-                    base_url = cfg_url.clone();
-                }
-            }
-            (meerkat_core::ProviderConfig::Gemini { api_key: cfg_key }, Provider::Gemini) => {
-                if cfg_key.is_some() {
-                    api_key = cfg_key.clone();
-                }
-            }
-            _ => {}
-        }
-
-        // Env fallback remains last for secrets when config omits keys.
-        // RKAT_* precedence over native env var name.
-        if api_key.is_none() {
-            if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
-                api_key = Some("test-key".to_string());
-            } else {
-                let (rkat_var, native_var): (&str, &[&str]) = match provider {
-                    Provider::Anthropic => ("RKAT_ANTHROPIC_API_KEY", &["ANTHROPIC_API_KEY"]),
-                    Provider::OpenAI => ("RKAT_OPENAI_API_KEY", &["OPENAI_API_KEY"]),
-                    Provider::Gemini => {
-                        ("RKAT_GEMINI_API_KEY", &["GEMINI_API_KEY", "GOOGLE_API_KEY"])
-                    }
-                    Provider::SelfHosted | Provider::Other => ("", &[]),
-                };
-                if !rkat_var.is_empty() {
-                    api_key = std::env::var(rkat_var)
-                        .ok()
-                        .or_else(|| native_var.iter().find_map(|k| std::env::var(k).ok()));
-                }
-            }
-        }
-
-        (api_key, base_url)
     }
 
     /// Wrap a session store in the shared adapter.
@@ -1708,7 +1689,7 @@ impl AgentFactory {
         //    2. connection_ref → ProviderRuntimeRegistry
         //    3. env-var fallback → synthesized default realm →
         //       same ProviderRuntimeRegistry path
-        //    4. SelfHosted → legacy resolve_provider_credentials path
+        //    4. SelfHosted → build_self_hosted_client_from_registry
         //       (SelfHosted backends don't fit the standard
         //        backend_kind taxonomy yet; tracked for post-0.6.0)
         //
@@ -1776,23 +1757,11 @@ impl AgentFactory {
                                 //   (c) env var ANTHROPIC_API_KEY etc.
                                 // (a) and (b) synthesize with InlineSecret,
                                 // (c) synthesizes with Env source.
-                                // Precedence: (b) > (a) > (c), matching
-                                // the legacy `resolve_provider_credentials`
-                                // order so surfaces don't regress.
-                                let (inline, _base_url) =
-                                    self.resolve_provider_credentials(provider, config);
-                                let realm = match inline {
-                                    Some(secret) => {
-                                        meerkat_core::RealmConnectionSet::synthesize_inline_default(
-                                            provider, secret,
-                                        )
-                                    }
-                                    None => {
-                                        meerkat_core::RealmConnectionSet::synthesize_env_default(
-                                            provider,
-                                        )
-                                    }
-                                };
+                                // Precedence is encapsulated in
+                                // synthesize_realm_from_config so no
+                                // helper in this factory body owns the
+                                // decision (dogma §1, plan §6.1).
+                                let realm = synthesize_realm_from_config(config, provider);
                                 (realm, "default".to_string())
                             }
                         };

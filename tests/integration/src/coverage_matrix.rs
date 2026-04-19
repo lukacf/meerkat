@@ -6,8 +6,8 @@
 //! realtime-attached session) escaped every existing test lane because no
 //! single test owned the composite axes. Each axis is individually covered,
 //! but the *combination* `TurnDriven × RealtimeAttached × ResponseTerminal ×
-//! None × MobEventStream` had no home. W1-C formalizes the matrix so empty
-//! cells are visible and populated cells each have a deterministic test.
+//! None × RuntimeLoopStaged` had no home. W1-C formalizes the matrix so empty
+//! cells are visible and every `Covered` cell points at a real, passing test.
 //!
 //! Axes:
 //!
@@ -17,10 +17,13 @@
 //! - `stream_mode`        — whether a subscriber has reserved an interaction stream
 //! - `assertion_surface`  — where the test observes outcomes
 //!
-//! Every populated cell should be reachable from `e2e-fast` using the mock
-//! realtime session factory in `meerkat-openai/tests/mock_realtime_ws/`. Empty
-//! cells are listed with an explicit rationale — either "impossible combination"
-//! or "gap, TODO".
+//! `Covered` cells point at a fully-qualified test path
+//! (`crate::module::tests::fn_name`). The test may live in the
+//! integration-tests crate or in an in-crate `#[cfg(test)] mod tests` block;
+//! both count as covered so long as the test actually exists. `PendingFix`
+//! cells name the specific seam/fix they are blocked on — no placeholder
+//! stubs are shipped ahead of the fix. `Gap` and `Impossible` cells carry
+//! rationale strings.
 
 #![allow(dead_code)]
 
@@ -56,8 +59,18 @@ pub enum StreamMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssertionSurface {
+    /// Mob-lifecycle events (FlowStarted, StepDispatched, TopologyViolation,
+    /// …). Observes mob-level facts, NOT per-session turn triggers.
     MobEventStream,
+    /// Subscriber channel registered by a `ReserveInteraction` send; the
+    /// subscriber fires when a correlating response arrives.
     SubscriberStream,
+    /// Runtime-loop staged-input primitive — the observable artifact that a
+    /// peer-response-terminal has been turned into next-turn prompt context.
+    /// This is the correct surface for "peer response drives next turn"
+    /// assertions; `MobEventStream` does not carry per-session turn events.
+    RuntimeLoopStaged,
+    /// Polling-based compatibility shim. Prefer event-stream surfaces.
     Polling,
 }
 
@@ -86,15 +99,17 @@ impl fmt::Display for Cell {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Coverage {
-    /// A deterministic test exists in `e2e-fast` for this cell. The identifier
-    /// is the Rust test function name.
+    /// A deterministic test function exists in the workspace that exercises
+    /// this cell. The identifier is a fully-qualified Rust path
+    /// (`crate::module::tests::fn_name`). The test may live in the
+    /// integration-tests crate or in an in-crate `#[cfg(test)] mod tests`
+    /// block; both count as covered so long as the test actually exists
+    /// and asserts the cell's semantics.
     Covered { test_name: &'static str },
-    /// The test exists but is currently `#[ignore]` because the underlying
-    /// production fix hasn't landed. References a tracking identifier.
-    PendingFix {
-        test_name: &'static str,
-        blocked_by: &'static str,
-    },
+    /// The cell is blocked on a named fix (seam, feature, bug). The test
+    /// lands when the fix lands — no placeholder `#[ignore]`'d stub is
+    /// shipped ahead of the fix. `blocked_by` names the specific fix.
+    PendingFix { blocked_by: &'static str },
     /// No test yet — gap to fill once a clear reproducer is available.
     Gap { rationale: &'static str },
     /// Combination is impossible by construction.
@@ -118,52 +133,56 @@ pub fn cells() -> &'static [CellEntry] {
         // --- W1-C populated cells ------------------------------------------------
         //
         // The s71 shape: turn-driven + realtime-attached, peer-response terminal
-        // triggers the next turn, observed via mob event stream. This is the one
-        // that regressed; it is expected to fail until W2-E lands.
+        // triggers the next turn. Blocked on the mob-side realtime factory
+        // injection seam (task #10, W2-E).
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
                 transport: Transport::RealtimeAttached,
                 peer_input_class: PeerInputClass::ResponseTerminal,
                 stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::MobEventStream,
+                assertion_surface: AssertionSurface::RuntimeLoopStaged,
             },
             coverage: Coverage::PendingFix {
-                test_name: "turn_driven_realtime_response_terminal_triggers_next_turn",
-                blocked_by: "W2-E (typed projection-refresh effect emission)",
+                blocked_by: "W2-E (mob-side RealtimeSessionFactory injection seam, \
+                             see task #10) + typed projection-refresh effect emission",
             },
         },
-        // Non-realtime mirror of the s71 shape. This path works today; the test
-        // pins the working behavior so a regression there also gets caught.
+        // Non-realtime analogue: peer-response terminal is turned into an
+        // immediate-boundary staged input by the runtime loop. Already covered
+        // by an in-crate test in meerkat-runtime.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
                 transport: Transport::NonRealtime,
                 peer_input_class: PeerInputClass::ResponseTerminal,
                 stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::MobEventStream,
+                assertion_surface: AssertionSurface::RuntimeLoopStaged,
             },
             coverage: Coverage::Covered {
-                test_name: "turn_driven_nonrealtime_response_terminal_triggers_next_turn",
+                test_name: "meerkat_runtime::runtime_loop::tests::\
+                            peer_response_terminal_creates_immediate_context_staged_input",
             },
         },
-        // Autonomous host + realtime: host loop owns the drive, peer-response
-        // terminals should land in the transcript even while audio is attached.
+        // Autonomous host + realtime-attached: host loop drives while audio is
+        // attached; peer-response terminals should be absorbed into context.
+        // Blocked on the same mob-side realtime factory injection seam as s71.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::AutonomousHost,
                 transport: Transport::RealtimeAttached,
                 peer_input_class: PeerInputClass::ResponseTerminal,
                 stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::MobEventStream,
+                assertion_surface: AssertionSurface::RuntimeLoopStaged,
             },
-            coverage: Coverage::Covered {
-                test_name: "autonomous_host_realtime_response_terminal_appends_transcript",
+            coverage: Coverage::PendingFix {
+                blocked_by: "W2-E (mob-side RealtimeSessionFactory injection seam, \
+                             see task #10)",
             },
         },
-        // Peer-request + reserve-interaction: subscriber must fire when the
-        // correlating response arrives. Independent of runtime_mode/transport —
-        // we pick one concrete leg (TurnDriven × NonRealtime) to own the cell.
+        // Peer-request + reserve-interaction: subscriber must be registered
+        // and correlate via the request envelope id carried in `in_reply_to`.
+        // Covered by an in-crate test in meerkat-comms.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
@@ -173,7 +192,8 @@ pub fn cells() -> &'static [CellEntry] {
                 assertion_surface: AssertionSurface::SubscriberStream,
             },
             coverage: Coverage::Covered {
-                test_name: "reserve_interaction_subscriber_fires_on_matching_response",
+                test_name: "meerkat_comms::runtime::comms_runtime::tests::\
+                            test_peer_request_reserved_stream_correlates_via_request_envelope_id",
             },
         },
         // --- Explicitly empty cells ---------------------------------------------
@@ -267,10 +287,9 @@ pub fn render_matrix_report() -> String {
     for entry in cells() {
         let status = match entry.coverage {
             Coverage::Covered { test_name } => format!("COVERED ({test_name})"),
-            Coverage::PendingFix {
-                test_name,
-                blocked_by,
-            } => format!("PENDING_FIX ({test_name}; blocked_by={blocked_by})"),
+            Coverage::PendingFix { blocked_by } => {
+                format!("PENDING_FIX (blocked_by={blocked_by})")
+            }
             Coverage::Gap { rationale } => format!("GAP ({rationale})"),
             Coverage::Impossible { rationale } => format!("IMPOSSIBLE ({rationale})"),
         };
@@ -303,11 +322,38 @@ mod tests {
             transport: Transport::RealtimeAttached,
             peer_input_class: PeerInputClass::ResponseTerminal,
             stream_mode: StreamMode::None,
-            assertion_surface: AssertionSurface::MobEventStream,
+            assertion_surface: AssertionSurface::RuntimeLoopStaged,
         };
         let found = cells().iter().find(|e| e.cell == s71);
         assert!(found.is_some(), "s71 shape must be in the matrix");
-        matches!(found.unwrap().coverage, Coverage::PendingFix { .. });
+        assert!(
+            matches!(found.unwrap().coverage, Coverage::PendingFix { .. }),
+            "s71 shape must be marked PendingFix until the W2-E seam lands",
+        );
+    }
+
+    #[test]
+    fn covered_entries_reference_fully_qualified_test_paths() {
+        // Honesty pin: every `Covered` entry must name a fully-qualified
+        // Rust path (`crate::module::tests::fn_name`). We can't grep the
+        // workspace from inside the type, but we can pin the shape so a
+        // typo like `my_test_name` without a `::` path fails the build.
+        for entry in cells() {
+            if let Coverage::Covered { test_name } = entry.coverage {
+                assert!(
+                    !test_name.is_empty(),
+                    "Covered cell has empty test_name: {}",
+                    entry.cell,
+                );
+                assert!(
+                    test_name.contains("::"),
+                    "Covered cell test_name must be fully-qualified \
+                     (crate::module::tests::fn_name); got {:?} for cell {}",
+                    test_name,
+                    entry.cell,
+                );
+            }
+        }
     }
 
     #[test]

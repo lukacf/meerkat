@@ -97,15 +97,35 @@ impl fmt::Display for Cell {
     }
 }
 
+/// Where the covering test lives. Integration-scope coverage (a test in the
+/// `meerkat-integration-tests` crate) exercises cross-crate composition and
+/// is the preferred home for axis-crossing cells. In-crate unit coverage is
+/// accepted when the cell's semantics are fully observable at a single
+/// crate's public API, but the matrix flags these explicitly so a reviewer
+/// can tell at a glance whether a `Covered` entry is "the composite path
+/// runs in integration" vs "a single-crate unit test exercises the same
+/// behavior."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageScope {
+    /// Test lives in the `meerkat-integration-tests` crate.
+    Integration,
+    /// Test lives in an in-crate `#[cfg(test)] mod tests` block. Acceptable
+    /// when the cell's semantics are fully observable at a single crate's
+    /// public API; flagged so the matrix stays honest about scope.
+    InCrateUnit,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Coverage {
     /// A deterministic test function exists in the workspace that exercises
-    /// this cell. The identifier is a fully-qualified Rust path
-    /// (`crate::module::tests::fn_name`). The test may live in the
-    /// integration-tests crate or in an in-crate `#[cfg(test)] mod tests`
-    /// block; both count as covered so long as the test actually exists
-    /// and asserts the cell's semantics.
-    Covered { test_name: &'static str },
+    /// this cell. `test_name` is a fully-qualified Rust path
+    /// (`crate::module::tests::fn_name`). `scope` distinguishes
+    /// integration-scope coverage from in-crate unit coverage so the matrix
+    /// is explicit about the lane / crate the covering test runs in.
+    Covered {
+        test_name: &'static str,
+        scope: CoverageScope,
+    },
     /// The cell is blocked on a named fix (seam, feature, bug). The test
     /// lands when the fix lands — no placeholder `#[ignore]`'d stub is
     /// shipped ahead of the fix. `blocked_by` names the specific fix.
@@ -162,6 +182,7 @@ pub fn cells() -> &'static [CellEntry] {
             coverage: Coverage::Covered {
                 test_name: "meerkat_runtime::runtime_loop::tests::\
                             peer_response_terminal_creates_immediate_context_staged_input",
+                scope: CoverageScope::InCrateUnit,
             },
         },
         // Autonomous host + realtime-attached: host loop drives while audio is
@@ -194,6 +215,7 @@ pub fn cells() -> &'static [CellEntry] {
             coverage: Coverage::Covered {
                 test_name: "meerkat_comms::runtime::comms_runtime::tests::\
                             test_peer_request_reserved_stream_correlates_via_request_envelope_id",
+                scope: CoverageScope::InCrateUnit,
             },
         },
         // --- Explicitly empty cells ---------------------------------------------
@@ -286,7 +308,13 @@ pub fn render_matrix_report() -> String {
     writeln!(&mut s, "Coverage matrix ({} cells tracked):", cells().len()).ok();
     for entry in cells() {
         let status = match entry.coverage {
-            Coverage::Covered { test_name } => format!("COVERED ({test_name})"),
+            Coverage::Covered { test_name, scope } => {
+                let tag = match scope {
+                    CoverageScope::Integration => "integration",
+                    CoverageScope::InCrateUnit => "in-crate/unit",
+                };
+                format!("COVERED[{tag}] ({test_name})")
+            }
             Coverage::PendingFix { blocked_by } => {
                 format!("PENDING_FIX (blocked_by={blocked_by})")
             }
@@ -339,7 +367,7 @@ mod tests {
         // workspace from inside the type, but we can pin the shape so a
         // typo like `my_test_name` without a `::` path fails the build.
         for entry in cells() {
-            if let Coverage::Covered { test_name } = entry.coverage {
+            if let Coverage::Covered { test_name, .. } = entry.coverage {
                 assert!(
                     !test_name.is_empty(),
                     "Covered cell has empty test_name: {}",

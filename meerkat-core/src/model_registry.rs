@@ -177,6 +177,7 @@ fn append_self_hosted(
             inline_video: model.inline_video,
             vision: model.vision,
             image_tool_results: model.image_tool_results,
+            realtime: false,
             params_schema: serde_json::json!({}),
             call_timeout_secs: model.call_timeout_secs,
         };

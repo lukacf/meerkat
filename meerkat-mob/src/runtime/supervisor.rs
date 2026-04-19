@@ -77,7 +77,7 @@ impl Supervisor {
         tokio::time::timeout(
             escalation_turn_timeout,
             self.handle.internal_turn(
-                AgentIdentity::from(escalation_target.meerkat_id.as_str()),
+                escalation_target.agent_identity.clone(),
                 format!("Supervisor escalation for run '{run_id}', step '{step_id}': {reason}"),
             ),
         )
@@ -93,7 +93,7 @@ impl Supervisor {
             .supervisor_escalation(
                 run_id.clone(),
                 step_id.clone(),
-                escalation_target.meerkat_id.clone(),
+                escalation_target.agent_identity.clone(),
             )
             .await?;
 
@@ -106,7 +106,7 @@ impl Supervisor {
             .list_members()
             .await
             .into_iter()
-            .map(|entry| AgentIdentity::from(entry.meerkat_id.as_str()))
+            .map(|entry| entry.agent_identity)
             .collect();
 
         let mut failures = Vec::new();

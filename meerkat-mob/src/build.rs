@@ -37,7 +37,7 @@ impl MobToolAccessContext {
 pub struct BuildAgentConfigParams<'a> {
     pub mob_id: &'a MobId,
     pub profile_name: &'a ProfileName,
-    pub(crate) meerkat_id: &'a MeerkatId,
+    pub(crate) agent_identity: &'a MeerkatId,
     pub profile: &'a Profile,
     pub definition: &'a MobDefinition,
     pub external_tools: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
@@ -74,7 +74,7 @@ pub async fn build_agent_config(
     let BuildAgentConfigParams {
         mob_id,
         profile_name,
-        meerkat_id,
+        agent_identity,
         profile,
         definition,
         external_tools,
@@ -93,7 +93,7 @@ pub async fn build_agent_config(
     }
 
     // Comms name: "{mob_id}/{profile}/{meerkat_id}"
-    let comms_name = format!("{mob_id}/{profile_name}/{meerkat_id}");
+    let comms_name = format!("{mob_id}/{profile_name}/{agent_identity}");
 
     // Peer metadata with labels for discovery.
     // Application labels are applied first, then mob standard labels
@@ -108,7 +108,7 @@ pub async fn build_agent_config(
     peer_meta = peer_meta
         .with_label("mob_id", mob_id.as_str())
         .with_label("role", profile_name.as_str())
-        .with_label("meerkat_id", meerkat_id.as_str());
+        .with_label("meerkat_id", agent_identity.as_str());
 
     // Realm ID for namespace isolation
     let realm_id = format!("mob:{mob_id}");
@@ -447,7 +447,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -473,7 +473,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -503,7 +503,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            meerkat_id: &MeerkatId::from("w-1"),
+            agent_identity: &MeerkatId::from("w-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -539,7 +539,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile,
             definition: &def,
             external_tools: None,
@@ -571,7 +571,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -607,7 +607,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            meerkat_id: &MeerkatId::from("w-1"),
+            agent_identity: &MeerkatId::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -647,7 +647,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-operator"),
+            agent_identity: &MeerkatId::from("lead-operator"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -711,7 +711,7 @@ mod tests {
             base: BuildAgentConfigParams {
                 mob_id: &def.id,
                 profile_name: &ProfileName::from("lead"),
-                meerkat_id: &MeerkatId::from("lead-1"),
+                agent_identity: &MeerkatId::from("lead-1"),
                 profile: lead,
                 definition: &def,
                 external_tools: None,
@@ -755,7 +755,7 @@ mod tests {
         let result = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            meerkat_id: &MeerkatId::from("w-1"),
+            agent_identity: &MeerkatId::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -782,7 +782,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -815,7 +815,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -848,7 +848,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -883,7 +883,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &lead_key,
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -909,7 +909,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -935,7 +935,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -982,7 +982,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            meerkat_id: &MeerkatId::from("w-1"),
+            agent_identity: &MeerkatId::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,
@@ -1036,7 +1036,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1084,7 +1084,7 @@ mod tests {
         let err = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1117,7 +1117,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1147,7 +1147,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("lead"),
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1185,7 +1185,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &lead_key,
-            meerkat_id: &MeerkatId::from("lead-1"),
+            agent_identity: &MeerkatId::from("lead-1"),
             profile: lead,
             definition: &def,
             external_tools: None,
@@ -1234,7 +1234,7 @@ mod tests {
         let config = build_agent_config(BuildAgentConfigParams {
             mob_id: &def.id,
             profile_name: &ProfileName::from("worker"),
-            meerkat_id: &MeerkatId::from("w-1"),
+            agent_identity: &MeerkatId::from("w-1"),
             profile: worker,
             definition: &def,
             external_tools: None,

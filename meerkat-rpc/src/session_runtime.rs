@@ -225,6 +225,7 @@ fn profile_to_capability_surface(
         vision: profile.vision,
         image_tool_results: profile.image_tool_results,
         supports_web_search: profile.supports_web_search,
+        realtime: profile.realtime,
         call_timeout_secs: profile.call_timeout_secs,
     }
 }

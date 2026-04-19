@@ -425,3 +425,48 @@ pub trait AuthLeaseHandle: Send + Sync {
     /// Observe the current DSL-level state of a binding.
     fn snapshot(&self, binding_key: &str) -> AuthLeaseSnapshot;
 }
+
+// ---------------------------------------------------------------------------
+// McpServerLifecycleHandle (Phase 5G / T5g)
+// ---------------------------------------------------------------------------
+
+/// MCP client handshake lifecycle DSL handle (session-scoped).
+///
+/// Routes each per-server MCP handshake event into the MeerkatMachine DSL's
+/// `mcp_server_states` substate. Distinct from the external-tool surface
+/// lifecycle (which tracks staged/pending *tool surface* intents): this handle
+/// tracks per-server *connection* lifecycle (PendingConnect → Connected |
+/// Failed | Disconnected), keyed by the configured MCP server name.
+///
+/// Read side (`pending_server_ids`) is the authoritative source for the
+/// `[MCP_PENDING]` system-notice toggle — any server in `PendingConnect` means
+/// the notice is emitted; otherwise the notice is suppressed.
+///
+/// Concrete impls live in `meerkat-runtime`; standalone callers (tests,
+/// fixtures) pass `None` for the handle and the router's shell-level behavior
+/// remains identical (DSL record-keeping is skipped, which is fine because
+/// there is no session DSL to mirror into).
+pub trait McpServerLifecycleHandle: Send + Sync {
+    /// Fire `McpServerConnectPending { server_id }` — server staged for
+    /// background connect.
+    fn apply_connect_pending(&self, server_id: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `McpServerConnected { server_id }` — handshake succeeded.
+    fn apply_connected(&self, server_id: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `McpServerFailed { server_id, error }` — handshake failed.
+    fn apply_failed(&self, server_id: &str, error: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `McpServerDisconnected { server_id }` — connection closed.
+    fn apply_disconnected(&self, server_id: &str) -> Result<(), DslTransitionError>;
+
+    /// Fire `McpServerReload { server_id }` — reload requested; server returns
+    /// to `PendingConnect` while the shell tears down and redials.
+    fn apply_reload(&self, server_id: &str) -> Result<(), DslTransitionError>;
+
+    /// Observe the set of server ids currently in `PendingConnect`.
+    ///
+    /// Used by the agent loop to drive the `[MCP_PENDING]` system-notice
+    /// lifecycle: non-empty → emit notice; empty → strip notice.
+    fn pending_server_ids(&self) -> BTreeSet<String>;
+}

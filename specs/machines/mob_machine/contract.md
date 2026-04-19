@@ -13,7 +13,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_run_count`: `u64`
 - `pending_spawn_count`: `u64`
 - `coordinator_bound`: `Bool`
-- `member_voice_intent`: `Set<AgentIdentity>`
+- `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
+- `wiring_edges`: `Set<WiringEdge>`
+- `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
+- `tasks`: `Map<TaskId, MobTask>`
+- `in_progress_task_ids`: `Set<TaskId>`
+- `completed_task_ids`: `Set<TaskId>`
 
 ## Inputs
 - `RunFlow`
@@ -35,8 +40,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Complete`
 - `Reset`
 - `Destroy`
-- `TaskCreate`
-- `TaskUpdate`
+- `TaskCreate`(task_id: TaskId, task_payload: MobTask)
+- `TaskUpdate`(task_id: TaskId, new_status: TaskStatus)
 - `TaskList`
 - `TaskGet`
 - `McpServerStates`
@@ -55,8 +60,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
-- `RealtimeAttach`(agent_identity: AgentIdentity)
-- `RealtimeDetach`(agent_identity: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -120,8 +123,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
-- `MemberVoiceIntentSet`(agent_identity: AgentIdentity)
-- `MemberVoiceIntentCleared`(agent_identity: AgentIdentity)
 
 ## Invariants
 
@@ -296,13 +297,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `TaskCreateRunning`
 - From: `Running`
-- On: `TaskCreate`()
+- On: `TaskCreate`(task_id, task_payload)
+- Guards:
+  - `task_id_unused`
 - Emits: `EmitTaskNotice`
 - To: `Running`
 
-### `TaskUpdateRunning`
+### `TaskUpdateRunningPending`
 - From: `Running`
-- On: `TaskUpdate`()
+- On: `TaskUpdate`(task_id, new_status)
+- Guards:
+  - `target_pending`
+  - `task_known`
+  - `not_completed`
+- Emits: `EmitTaskNotice`
+- To: `Running`
+
+### `TaskUpdateRunningInProgress`
+- From: `Running`
+- On: `TaskUpdate`(task_id, new_status)
+- Guards:
+  - `target_in_progress`
+  - `task_known`
+  - `not_completed`
+- Emits: `EmitTaskNotice`
+- To: `Running`
+
+### `TaskUpdateRunningCompleted`
+- From: `Running`
+- On: `TaskUpdate`(task_id, new_status)
+- Guards:
+  - `target_completed`
+  - `task_known`
+- Emits: `EmitTaskNotice`
+- To: `Running`
+
+### `TaskUpdateRunningCancelled`
+- From: `Running`
+- On: `TaskUpdate`(task_id, new_status)
+- Guards:
+  - `target_cancelled`
+  - `task_known`
+  - `not_completed`
 - Emits: `EmitTaskNotice`
 - To: `Running`
 
@@ -645,18 +681,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `active_members_present`
   - `current_binding_matches`
 - Emits: `FlowTerminalized`
-- To: `Running`
-
-### `RealtimeAttach`
-- From: `Running`
-- On: `RealtimeAttach`(agent_identity)
-- Emits: `MemberVoiceIntentSet`
-- To: `Running`
-
-### `RealtimeDetach`
-- From: `Running`
-- On: `RealtimeDetach`(agent_identity)
-- Emits: `MemberVoiceIntentCleared`
 - To: `Running`
 
 ## Coverage

@@ -14,11 +14,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pre_run_phase`: `Option<String>`
 - `silent_intent_overrides`: `Set<String>`
 - `realtime_intent_present`: `Bool`
-- `realtime_binding_state`: `String`
+- `realtime_binding_state`: `RealtimeBindingState`
 - `realtime_binding_authority_epoch`: `Option<u64>`
 - `realtime_reattach_required`: `Bool`
 - `realtime_next_authority_epoch`: `u64`
 - `live_topology_phase`: `String`
+- `mcp_server_states`: `Map<McpServerId, McpServerState>`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -64,7 +65,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ReplaceRealtimeBinding`
 - `DetachRealtimeBinding`
 - `RequireRealtimeReattach`
-- `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: String)
+- `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: RealtimeBindingState)
+- `McpServerConnectPending`(server_id: McpServerId)
+- `McpServerConnected`(server_id: McpServerId)
+- `McpServerFailed`(server_id: McpServerId, error: String)
+- `McpServerDisconnected`(server_id: McpServerId)
+- `McpServerReload`(server_id: McpServerId)
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
 - `ApplyLiveTopologyIdentity`
@@ -150,6 +156,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RejectSurfaceCall`
 - `RealtimeIntentProjected`(present: Bool)
 - `RealtimeBindingRotated`(authority_epoch: u64)
+- `McpServerStateChanged`(server_id: McpServerId, new_state: McpServerState)
+- `McpServerReloadRequested`(server_id: McpServerId)
 - `LiveTopologyPhaseChanged`
 
 ## Invariants
@@ -1449,6 +1457,206 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `authority_matches_current`
   - `no_topology_reconfigure_in_progress`
   - `valid_next_state`
+- To: `Stopped`
+
+### `McpServerConnectPendingIdle`
+- From: `Idle`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Idle`
+
+### `McpServerConnectPendingAttached`
+- From: `Attached`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Attached`
+
+### `McpServerConnectPendingRunning`
+- From: `Running`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Running`
+
+### `McpServerConnectPendingRetired`
+- From: `Retired`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Retired`
+
+### `McpServerConnectPendingStopped`
+- From: `Stopped`
+- On: `McpServerConnectPending`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Stopped`
+
+### `McpServerConnectedIdle`
+- From: `Idle`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Idle`
+
+### `McpServerConnectedAttached`
+- From: `Attached`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Attached`
+
+### `McpServerConnectedRunning`
+- From: `Running`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Running`
+
+### `McpServerConnectedRetired`
+- From: `Retired`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Retired`
+
+### `McpServerConnectedStopped`
+- From: `Stopped`
+- On: `McpServerConnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Stopped`
+
+### `McpServerFailedIdle`
+- From: `Idle`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Idle`
+
+### `McpServerFailedAttached`
+- From: `Attached`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Attached`
+
+### `McpServerFailedRunning`
+- From: `Running`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Running`
+
+### `McpServerFailedRetired`
+- From: `Retired`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Retired`
+
+### `McpServerFailedStopped`
+- From: `Stopped`
+- On: `McpServerFailed`(server_id, error)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Stopped`
+
+### `McpServerDisconnectedIdle`
+- From: `Idle`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Idle`
+
+### `McpServerDisconnectedAttached`
+- From: `Attached`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Attached`
+
+### `McpServerDisconnectedRunning`
+- From: `Running`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Running`
+
+### `McpServerDisconnectedRetired`
+- From: `Retired`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Retired`
+
+### `McpServerDisconnectedStopped`
+- From: `Stopped`
+- On: `McpServerDisconnected`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerStateChanged`
+- To: `Stopped`
+
+### `McpServerReloadIdle`
+- From: `Idle`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerReloadRequested`, `McpServerStateChanged`
+- To: `Idle`
+
+### `McpServerReloadAttached`
+- From: `Attached`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerReloadRequested`, `McpServerStateChanged`
+- To: `Attached`
+
+### `McpServerReloadRunning`
+- From: `Running`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerReloadRequested`, `McpServerStateChanged`
+- To: `Running`
+
+### `McpServerReloadRetired`
+- From: `Retired`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerReloadRequested`, `McpServerStateChanged`
+- To: `Retired`
+
+### `McpServerReloadStopped`
+- From: `Stopped`
+- On: `McpServerReload`(server_id)
+- Guards:
+  - `session_registered`
+- Emits: `McpServerReloadRequested`, `McpServerStateChanged`
 - To: `Stopped`
 
 ### `BeginLiveTopologyReconfigureIdle`

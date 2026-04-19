@@ -28,17 +28,20 @@ pub use mcp_live::{
 pub use mob::{
     MobBackendConfigInput, MobCollectionPolicyInput, MobConditionExprInput, MobCreateParams,
     MobCreateResult, MobDefinitionInput, MobDependencyModeInput, MobDispatchModeInput,
+    MobEnsureMemberOutcomeWire, MobEnsureMemberParams, MobEnsureMemberResult,
     MobEventRouterConfigInput, MobExternalBackendConfigInput, MobFlowNodeInput, MobFlowSpecInput,
     MobFlowStepInput, MobFrameSpecInput, MobFrameStepInput, MobLimitsSpecInput,
-    MobMcpServerConfigInput, MobMemberSendParams, MobMemberSendResult, MobOrchestratorInput,
-    MobPeerTarget, MobPolicyModeInput, MobProfileBindingInput, MobProfileInput,
-    MobRealtimeAttachParams, MobRealtimeAttachResult, MobRealtimeDetachParams,
-    MobRealtimeDetachResult, MobRepeatUntilInput, MobRoleWiringRuleInput, MobSkillSourceInput,
-    MobSpawnPolicyInput, MobStepOutputFormatInput, MobSupervisorSpecInput, MobToolConfigInput,
-    MobTopologyRuleInput, MobTopologySpecInput, MobUnwireParams, MobUnwireResult, MobWireParams,
-    MobWireResult, MobWiringRulesInput, WireAgentRuntimeId, WireHandlingMode, WireMobBackendKind,
-    WireMobRuntimeMode, WireRenderClass, WireRenderMetadata, WireRenderSalience,
-    WireRuntimeBinding, WireTrustedPeerSpec,
+    MobListMembersMatchingParams, MobListMembersMatchingResult, MobMcpServerConfigInput,
+    MobMemberFilterWire, MobMemberSendParams, MobMemberSendResult, MobMemberSpecWire,
+    MobOrchestratorInput, MobPeerTarget, MobPolicyModeInput, MobProfileBindingInput,
+    MobProfileInput, MobReconcileFailureWire, MobReconcileOptionsWire, MobReconcileParams,
+    MobReconcileReportWire, MobReconcileResult, MobRepeatUntilInput, MobRoleWiringRuleInput,
+    MobSkillSourceInput, MobSpawnPolicyInput, MobSpawnReceiptWire, MobStepOutputFormatInput,
+    MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput,
+    MobUnwireParams, MobUnwireResult, MobWireParams, MobWireResult, MobWiringRulesInput,
+    WireAgentRuntimeId, WireHandlingMode, WireMemberState, WireMobBackendKind, WireMobRuntimeMode,
+    WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
+    WireTrustedPeerSpec,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelProfile, WireModelTier,
@@ -60,11 +63,12 @@ pub use realtime::{
 pub use result::WireRunResult;
 pub use runtime::{
     InputListParams, InputListResult, InputStateParams, InputStateResult, RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult, RuntimeResetParams, RuntimeResetResult,
-    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
-    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry,
-    WireRealtimeAttachmentStatus, WireRuntimeState,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusEntry,
+    RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
+    RuntimeRealtimeAttachmentStatusesParams, RuntimeRealtimeAttachmentStatusesResult,
+    RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams, RuntimeRetireResult,
+    RuntimeStateParams, RuntimeStateResult, WireInputLifecycleState, WireInputState,
+    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
 };
 pub use schedule::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,

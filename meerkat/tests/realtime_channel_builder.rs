@@ -26,8 +26,8 @@ fn session_realtime_channel_builds_default_open_request() {
 }
 
 #[test]
-fn member_realtime_channel_carries_overrides() {
-    let request = RealtimeChannel::mob_member("mob-1", "agent-a")
+fn session_realtime_channel_carries_overrides() {
+    let request = RealtimeChannel::session("session-builder")
         .role(RealtimeChannelRole::Observer)
         .turning_mode(RealtimeTurningMode::ExplicitCommit)
         .reconnect_policy(RealtimeReconnectPolicy {
@@ -40,9 +40,8 @@ fn member_realtime_channel_carries_overrides() {
 
     assert_eq!(
         request.target,
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id: "mob-1".to_string(),
-            agent_identity: "agent-a".to_string(),
+        RealtimeChannelTarget::SessionTarget {
+            session_id: "session-builder".to_string(),
         }
     );
     assert_eq!(request.role, RealtimeChannelRole::Observer);

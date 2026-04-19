@@ -229,6 +229,12 @@
       "result_type": "RuntimeRealtimeAttachmentStatusResult"
     },
     {
+      "description": "Batch: realtime attachment statuses for many sessions in one round-trip",
+      "name": "runtime/realtime_attachment_statuses",
+      "params_type": "RuntimeRealtimeAttachmentStatusesParams",
+      "result_type": "RuntimeRealtimeAttachmentStatusesResult"
+    },
+    {
       "description": "Accept a runtime input for a session",
       "name": "runtime/accept",
       "params_type": "RuntimeAcceptParams",
@@ -283,6 +289,24 @@
     {
       "description": "Spawn multiple new mob members",
       "name": "mob/spawn_many"
+    },
+    {
+      "description": "Declarative: spawn if absent, otherwise return the existing roster entry",
+      "name": "mob/ensure_member",
+      "params_type": "MobEnsureMemberParams",
+      "result_type": "MobEnsureMemberResult"
+    },
+    {
+      "description": "Declarative: drive the roster toward a desired set of specs",
+      "name": "mob/reconcile",
+      "params_type": "MobReconcileParams",
+      "result_type": "MobReconcileResult"
+    },
+    {
+      "description": "List roster members that match a filter",
+      "name": "mob/list_members_matching",
+      "params_type": "MobListMembersMatchingParams",
+      "result_type": "MobListMembersMatchingResult"
     },
     {
       "description": "Retire a mob member",
@@ -349,18 +373,6 @@
     {
       "description": "Force-cancel a mob member",
       "name": "mob/force_cancel"
-    },
-    {
-      "description": "Attach live voice intent to a mob member",
-      "name": "mob/realtime_attach",
-      "params_type": "MobRealtimeAttachParams",
-      "result_type": "MobRealtimeAttachResult"
-    },
-    {
-      "description": "Detach live voice intent from a mob member",
-      "name": "mob/realtime_detach",
-      "params_type": "MobRealtimeDetachParams",
-      "result_type": "MobRealtimeDetachResult"
     },
     {
       "description": "Start a turn on a mob member by identity",

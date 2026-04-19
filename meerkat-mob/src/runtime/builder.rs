@@ -28,10 +28,39 @@ enum BuilderMode {
     Resume,
 }
 
+/// Construct a `MobMachineAuthority` whose `lifecycle_phase` matches the
+/// `initial_phase` threaded from the builder's reconstruction logic.
+///
+/// The DSL `init(Running)` clause always starts the authority in
+/// `MobPhase::Running`; for resumes that landed in `Stopped`, `Completed`,
+/// or `Destroyed` we overwrite the phase field directly before handing the
+/// authority to the actor. This is the seam that used to live in the
+/// separate `Arc<AtomicU8>` projection: with the shadow deleted (dogma
+/// #1/#13/#17), the DSL authority becomes the single source of truth at
+/// construction time too.
+fn seed_mob_authority(
+    initial_phase: MobState,
+) -> crate::machines::mob_machine::MobMachineAuthority {
+    use crate::machines::mob_machine::{MobMachineAuthority, MobPhase};
+    let mut authority = MobMachineAuthority::new();
+    let dsl_phase = match initial_phase {
+        MobState::Creating | MobState::Running => MobPhase::Running,
+        MobState::Stopped => MobPhase::Stopped,
+        MobState::Completed => MobPhase::Completed,
+        MobState::Destroyed => MobPhase::Destroyed,
+    };
+    authority.state.lifecycle_phase = dsl_phase;
+    authority
+}
+
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
-    state: Arc<AtomicU8>,
+    /// Resumed-or-initial phase threaded from the builder's reconstruction
+    /// logic into `start_runtime_with_components` where it seeds the DSL
+    /// authority. The DSL authority is the single source of truth for the
+    /// lifecycle phase — no atomic shadow exists (dogma #1, #13, #17).
+    initial_phase: MobState,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
@@ -443,7 +472,6 @@ impl MobBuilder {
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
-        let state = Arc::new(AtomicU8::new(resumed_state as u8));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
             definition
                 .mcp_servers
@@ -462,10 +490,14 @@ impl MobBuilder {
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
+        // Preview phase watch so the preview handle can answer status()
+        // before the actor spawns. The real actor-side sender replaces
+        // this once start_runtime_with_components owns the final pair.
+        let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
         let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
-            state: state.clone(),
+            initial_phase: resumed_state,
             restore_diagnostics: restore_diagnostics.clone(),
             runtime_metadata: storage.runtime_metadata.clone(),
             supervisor_bridge: supervisor_bridge.clone(),
@@ -477,12 +509,12 @@ impl MobBuilder {
             command_tx: command_tx.clone(),
             roster: roster_state.clone(),
             definition: definition.clone(),
-            state: state.clone(),
             events: storage.events.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: session_service.clone(),
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics,
+            phase_watch_rx: preview_phase_rx,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -762,17 +794,11 @@ impl MobBuilder {
                 continue;
             };
             if active_ids.contains(&bridge_session_id) {
-                Self::restore_realtime_attachment_intent_if_needed(
-                    runtime_adapter.as_ref(),
-                    entry,
-                    &bridge_session_id,
-                )
-                .await;
                 continue;
             }
             let record_restore_failure = |reason: String| async {
                 tool_handle.restore_diagnostics.write().await.insert(
-                    entry.meerkat_id.clone(),
+                    entry.agent_identity.clone(),
                     super::handle::RestoreFailureDiagnostic {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason,
@@ -808,7 +834,7 @@ impl MobBuilder {
                         base: build::BuildAgentConfigParams {
                             mob_id: &definition.id,
                             profile_name: &entry.role,
-                            meerkat_id: &entry.meerkat_id,
+                            agent_identity: &entry.agent_identity,
                             profile,
                             definition,
                             external_tools: compose_external_tools_for_profile(
@@ -844,27 +870,21 @@ impl MobBuilder {
                 resumed_config.llm_client_override = Some(reconcile_client);
                 let prompt = format!(
                     "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                    entry.meerkat_id, entry.role, definition.id
+                    entry.agent_identity, entry.role, definition.id
                 );
                 let req = build::to_create_session_request(&resumed_config, prompt.into());
                 match session_service.create_session(req).await {
                     Ok(created) => {
                         let created_bridge_session_id = created.session_id;
                         let _ = roster.set_bridge_session_id(
-                            &entry.meerkat_id,
+                            &entry.agent_identity,
                             created_bridge_session_id.clone(),
                         );
                         tool_handle
                             .restore_diagnostics
                             .write()
                             .await
-                            .remove(&entry.meerkat_id);
-                        Self::restore_realtime_attachment_intent_if_needed(
-                            runtime_adapter.as_ref(),
-                            entry,
-                            &created_bridge_session_id,
-                        )
-                        .await;
+                            .remove(&entry.agent_identity);
                     }
                     Err(error) => {
                         record_restore_failure(format!(
@@ -883,7 +903,7 @@ impl MobBuilder {
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &definition.id,
                 profile_name: &entry.role,
-                meerkat_id: &entry.meerkat_id,
+                agent_identity: &entry.agent_identity,
                 profile: &profile,
                 definition,
                 external_tools: compose_external_tools_for_profile(
@@ -912,24 +932,18 @@ impl MobBuilder {
             config.llm_client_override = Some(reconcile_client);
             let prompt = format!(
                 "You have been spawned as '{}' (role: {}) in mob '{}'.",
-                entry.meerkat_id, entry.role, definition.id
+                entry.agent_identity, entry.role, definition.id
             );
             let req = build::to_create_session_request(&config, prompt.into());
             let created = session_service.create_session(req).await?;
             let created_bridge_session_id = created.session_id;
-            let _ =
-                roster.set_bridge_session_id(&entry.meerkat_id, created_bridge_session_id.clone());
+            let _ = roster
+                .set_bridge_session_id(&entry.agent_identity, created_bridge_session_id.clone());
             tool_handle
                 .restore_diagnostics
                 .write()
                 .await
-                .remove(&entry.meerkat_id);
-            Self::restore_realtime_attachment_intent_if_needed(
-                runtime_adapter.as_ref(),
-                entry,
-                &created_bridge_session_id,
-            )
-            .await;
+                .remove(&entry.agent_identity);
         }
 
         // Re-establish trust from projected wiring and prune stale trust so
@@ -943,8 +957,8 @@ impl MobBuilder {
             .cloned()
             .collect::<HashSet<_>>();
         for entry in &entries {
-            if broken_members.contains(&entry.meerkat_id) {
-                let _ = roster.set_peer_id(&entry.meerkat_id, None);
+            if broken_members.contains(&entry.agent_identity) {
+                let _ = roster.set_peer_id(&entry.agent_identity, None);
                 continue;
             }
             let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
@@ -952,10 +966,10 @@ impl MobBuilder {
                 let key_a = comms_a.public_key().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume requires public key for wired member '{}'",
-                        entry.meerkat_id
+                        entry.agent_identity
                     ))
                 })?;
-                let _ = roster.set_peer_id(&entry.meerkat_id, Some(key_a.clone()));
+                let _ = roster.set_peer_id(&entry.agent_identity, Some(key_a.clone()));
             } else if entry.wired_to.is_empty() {
                 continue;
             }
@@ -963,21 +977,21 @@ impl MobBuilder {
             let mut candidate_specs = Vec::new();
 
             for peer_entry in &entries {
-                if peer_entry.meerkat_id == entry.meerkat_id
-                    || broken_members.contains(&peer_entry.meerkat_id)
+                if peer_entry.agent_identity == entry.agent_identity
+                    || broken_members.contains(&peer_entry.agent_identity)
                 {
                     continue;
                 }
                 let name_b = format!(
                     "{}/{}/{}",
-                    definition.id, peer_entry.role, peer_entry.meerkat_id
+                    definition.id, peer_entry.role, peer_entry.agent_identity
                 );
                 let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
                 {
                     Some(comms_b) => comms_b.public_key().ok_or_else(|| {
                         MobError::WiringError(format!(
                             "resume requires public key for '{}' -> '{}'",
-                            entry.meerkat_id, peer_entry.meerkat_id
+                            entry.agent_identity, peer_entry.agent_identity
                         ))
                     })?,
                     None => match &peer_entry.member_ref {
@@ -989,7 +1003,7 @@ impl MobBuilder {
                         _ => {
                             return Err(MobError::WiringError(format!(
                                 "resume requires comms runtime for '{}' -> '{}'",
-                                entry.meerkat_id, peer_entry.meerkat_id
+                                entry.agent_identity, peer_entry.agent_identity
                             )));
                         }
                     },
@@ -1010,7 +1024,7 @@ impl MobBuilder {
                 let peer_entry = roster.get(&peer_meerkat_id).cloned().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume wiring target '{}' missing for '{}'",
-                        peer_identity, entry.meerkat_id
+                        peer_identity, entry.agent_identity
                     ))
                 })?;
                 if broken_members.contains(&peer_meerkat_id) {
@@ -1018,14 +1032,14 @@ impl MobBuilder {
                 }
                 let name_b = format!(
                     "{}/{}/{}",
-                    definition.id, peer_entry.role, peer_entry.meerkat_id
+                    definition.id, peer_entry.role, peer_entry.agent_identity
                 );
                 let fallback_peer_id = match provisioner.comms_runtime(&peer_entry.member_ref).await
                 {
                     Some(comms_b) => comms_b.public_key().ok_or_else(|| {
                         MobError::WiringError(format!(
                             "resume requires public key for '{}' -> '{}'",
-                            entry.meerkat_id, peer_identity
+                            entry.agent_identity, peer_identity
                         ))
                     })?,
                     None => match &peer_entry.member_ref {
@@ -1037,7 +1051,7 @@ impl MobBuilder {
                         _ => {
                             return Err(MobError::WiringError(format!(
                                 "resume requires comms runtime for '{}' -> '{}'",
-                                entry.meerkat_id, peer_identity
+                                entry.agent_identity, peer_identity
                             )));
                         }
                     },
@@ -1058,9 +1072,9 @@ impl MobBuilder {
             && let Some(orchestrator) = &definition.orchestrator
             && let Some(orchestrator_entry) = roster.by_profile(&orchestrator.profile).next()
         {
-            if broken_members.contains(&orchestrator_entry.meerkat_id) {
+            if broken_members.contains(&orchestrator_entry.agent_identity) {
                 tracing::warn!(
-                    member_id = %orchestrator_entry.meerkat_id,
+                    member_id = %orchestrator_entry.agent_identity,
                     "Skipping orchestrator resume notification because the orchestrator is Broken"
                 );
                 return Ok(());
@@ -1088,7 +1102,7 @@ impl MobBuilder {
                         .ok_or_else(|| {
                             MobError::Internal(format!(
                                 "orchestrator '{}' missing event injector during resume notification",
-                                orchestrator_entry.meerkat_id
+                                orchestrator_entry.agent_identity
                             ))
                         })?;
                     injector
@@ -1101,7 +1115,7 @@ impl MobBuilder {
                         .map_err(|error| {
                             MobError::Internal(format!(
                                 "orchestrator resume inject failed for '{}': {}",
-                                orchestrator_entry.meerkat_id, error
+                                orchestrator_entry.agent_identity, error
                             ))
                         })?;
                 }
@@ -1129,43 +1143,6 @@ impl MobBuilder {
     }
 
     #[cfg(feature = "runtime-adapter")]
-    async fn restore_realtime_attachment_intent_if_needed(
-        runtime_adapter: Option<&Arc<meerkat_runtime::MeerkatMachine>>,
-        entry: &crate::roster::RosterEntry,
-        bridge_session_id: &SessionId,
-    ) {
-        let Some(runtime_adapter) = runtime_adapter else {
-            return;
-        };
-
-        if let Err(error) = runtime_adapter
-            .project_realtime_attachment_intent(bridge_session_id, entry.voice_intent_present)
-            .await
-        {
-            tracing::warn!(
-                member = %entry.meerkat_id,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to project durable live attachment intent during resume"
-            );
-            return;
-        }
-
-        if !entry.voice_intent_present {
-            return;
-        }
-
-        if let Err(error) = runtime_adapter.attach_live(bridge_session_id).await {
-            tracing::warn!(
-                member = %entry.meerkat_id,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to reattach live voice during resume"
-            );
-        }
-    }
-
-    #[cfg(feature = "runtime-adapter")]
     #[allow(clippy::too_many_arguments)]
     fn start_runtime(
         definition: Arc<MobDefinition>,
@@ -1185,7 +1162,6 @@ impl MobBuilder {
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
-        let state = Arc::new(AtomicU8::new(initial_state as u8));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
             definition
                 .mcp_servers
@@ -1207,7 +1183,7 @@ impl MobBuilder {
         let wiring = RuntimeWiring {
             roster,
             task_board,
-            state,
+            initial_phase: initial_state,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1247,7 +1223,7 @@ impl MobBuilder {
         let RuntimeWiring {
             roster,
             task_board,
-            state,
+            initial_phase: wiring_initial_phase,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1257,16 +1233,20 @@ impl MobBuilder {
         } = wiring;
         let external_backend = definition.backend.external.clone();
         let handle_session_service = session_service.clone();
+        // Terminal-phase watch: seed with the initial phase so a status()
+        // call before any DSL transition returns the right answer.
+        let (phase_watch_tx_actor, phase_watch_rx) =
+            tokio::sync::watch::channel(wiring_initial_phase);
         let handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster.clone(),
             definition: definition.clone(),
-            state: state.clone(),
             events: events.clone(),
             flow_streams: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
             session_service: handle_session_service.clone(),
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
+            phase_watch_rx,
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(
             MultiBackendProvisioner::new(
@@ -1296,13 +1276,10 @@ impl MobBuilder {
         ));
         // Normalize initial phase: fresh creation + stale Creating restores both
         // become Running. Persisted Stopped/Completed/Destroyed are preserved.
-        let initial_phase = match MobState::from_u8(state.load(Ordering::Acquire)) {
+        let initial_phase = match wiring_initial_phase {
             MobState::Creating => MobState::Running,
             phase => phase,
         };
-        // Publish the normalized phase to the observable atomic (the DSL
-        // authority's write-back path relies on this cache being current).
-        state.store(initial_phase as u8, Ordering::Release);
         // Plain mobs (orchestrator: None in the definition) skip orchestrator
         // guards entirely; mobs with an orchestrator bind the topology
         // coordinator when entering Running.
@@ -1334,7 +1311,6 @@ impl MobBuilder {
             definition,
             roster,
             task_board,
-            state,
             events,
             run_store,
             provisioner,
@@ -1363,7 +1339,8 @@ impl MobBuilder {
             supervisor_bridge,
             task_board_service,
             spawn_policy,
-            dsl_authority: crate::machines::mob_machine::MobMachineAuthority::new(),
+            dsl_authority: seed_mob_authority(initial_phase),
+            phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,
         };

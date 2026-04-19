@@ -63,7 +63,7 @@ fn resolve_binding(
     backend: Option<crate::MobBackendKind>,
     profile_backend: Option<crate::MobBackendKind>,
     definition_default: crate::MobBackendKind,
-    meerkat_id: &MeerkatId,
+    agent_identity: &MeerkatId,
 ) -> Result<crate::RuntimeBinding, MobError> {
     if let Some(b) = binding {
         return Ok(b);
@@ -72,7 +72,7 @@ fn resolve_binding(
     match kind {
         crate::MobBackendKind::Session => Ok(crate::RuntimeBinding::Session),
         crate::MobBackendKind::External => Err(MobError::WiringError(format!(
-            "external backend requires explicit RuntimeBinding for '{meerkat_id}'"
+            "external backend requires explicit RuntimeBinding for '{agent_identity}'"
         ))),
     }
 }
@@ -84,6 +84,19 @@ fn normalize_runtime_mode_for_binding(
     match binding {
         crate::RuntimeBinding::External { .. } => crate::MobRuntimeMode::TurnDriven,
         crate::RuntimeBinding::Session => runtime_mode,
+    }
+}
+
+/// Project a DSL `MobPhase` into the shell `MobState` enum. Used by
+/// `MobActor::state()` and by the `MobCommand::QueryPhase` reply so that
+/// external `MobHandle::status()` callers observe the same DSL-authority
+/// value the actor uses internally (dogma #1, #13, #17).
+fn project_dsl_phase(phase: mob_dsl::MobPhase) -> MobState {
+    match phase {
+        mob_dsl::MobPhase::Running => MobState::Running,
+        mob_dsl::MobPhase::Stopped => MobState::Stopped,
+        mob_dsl::MobPhase::Completed => MobState::Completed,
+        mob_dsl::MobPhase::Destroyed => MobState::Destroyed,
     }
 }
 
@@ -175,7 +188,7 @@ pub(super) struct McpServerEntry {
 
 pub(super) struct PendingSpawn {
     pub(super) profile_name: ProfileName,
-    pub(super) meerkat_id: MeerkatId,
+    pub(super) agent_identity: MeerkatId,
     pub(super) prompt: ContentInput,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
@@ -186,7 +199,6 @@ pub(super) struct PendingSpawn {
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     /// Persisted in the roster so respawn/restore can use it.
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
-    pub(super) voice_intent_present: bool,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
 }
@@ -218,7 +230,6 @@ struct RespawnSnapshot {
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
-    voice_intent_present: bool,
 }
 
 struct FinalizeSpawnOutcome {
@@ -246,7 +257,6 @@ pub(super) struct MobActor {
     pub(super) definition: Arc<MobDefinition>,
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) task_board: Arc<RwLock<TaskBoard>>,
-    pub(super) state: Arc<AtomicU8>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
@@ -284,6 +294,15 @@ pub(super) struct MobActor {
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
+    /// Terminal-phase projection for external observers. Written by the
+    /// actor after every DSL phase transition and once more right before
+    /// the actor task exits. `MobHandle::status()` falls back to this
+    /// `watch` receiver when the command channel has closed (actor has
+    /// exited post-Shutdown/Destroy). The watch is an explicit dogma-#13
+    /// projection: the actor owns the sole writer, external handles hold
+    /// read-only receivers, and the source of truth remains the DSL
+    /// authority inside the actor.
+    pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
 }
@@ -663,19 +682,19 @@ impl MobActor {
 
     async fn restore_failure_for(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
     ) -> Option<super::handle::RestoreFailureDiagnostic> {
         self.restore_diagnostics
             .read()
             .await
-            .get(meerkat_id)
+            .get(agent_identity)
             .cloned()
     }
 
-    async fn ensure_member_not_broken(&self, meerkat_id: &MeerkatId) -> Result<(), MobError> {
-        if let Some(diag) = self.restore_failure_for(meerkat_id).await {
+    async fn ensure_member_not_broken(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+        if let Some(diag) = self.restore_failure_for(agent_identity).await {
             return Err(MobError::MemberRestoreFailed {
-                member_id: meerkat_id.clone(),
+                member_id: agent_identity.clone(),
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
             });
@@ -683,8 +702,12 @@ impl MobActor {
         Ok(())
     }
 
+    /// Project the DSL authority's `lifecycle_phase` into the shell
+    /// `MobState` enum. The DSL authority is the single source of truth
+    /// for the mob phase; external observers read the same value via
+    /// `MobCommand::QueryPhase` (dogma #1, #13, #17).
     fn state(&self) -> MobState {
-        MobState::from_u8(self.state.load(Ordering::Acquire))
+        project_dsl_phase(self.dsl_authority.state.lifecycle_phase)
     }
 
     fn apply_dsl_input(
@@ -695,16 +718,10 @@ impl MobActor {
         let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
             .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
         if transition.from_phase != transition.to_phase {
-            let mob_phase = match transition.to_phase {
-                mob_dsl::MobPhase::Running => MobState::Running,
-                mob_dsl::MobPhase::Stopped => MobState::Stopped,
-                mob_dsl::MobPhase::Completed => MobState::Completed,
-                mob_dsl::MobPhase::Destroyed => MobState::Destroyed,
-            };
-            self.state
-                .store(mob_phase as u8, std::sync::atomic::Ordering::Release);
-            // Explicitly update DSL state's lifecycle_phase
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            // Publish the projected phase for external observers. This is
+            // the sole write seam for the dogma-#13 projection watch.
+            let _ = self.phase_watch_tx.send(self.state());
         }
         Ok(())
     }
@@ -719,38 +736,39 @@ impl MobActor {
             .apply_signal(signal)
             .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
         if transition.from_phase != transition.to_phase {
-            let mob_phase = match transition.to_phase {
-                mob_dsl::MobPhase::Running => MobState::Running,
-                mob_dsl::MobPhase::Stopped => MobState::Stopped,
-                mob_dsl::MobPhase::Completed => MobState::Completed,
-                mob_dsl::MobPhase::Destroyed => MobState::Destroyed,
-            };
-            self.state
-                .store(mob_phase as u8, std::sync::atomic::Ordering::Release);
-            // Explicitly update DSL state's lifecycle_phase
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            let _ = self.phase_watch_tx.send(self.state());
         }
         Ok(())
     }
 
-    async fn sync_dsl_roster_state(&mut self) {
-        let roster = self.roster.read().await;
-        let mut live_ids = std::collections::BTreeSet::new();
-        let mut fence_map = std::collections::BTreeMap::new();
-        for entry in roster.list() {
-            let rid = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-            live_ids.insert(rid.clone());
-            fence_map.insert(rid, mob_dsl::FenceToken::from_domain(entry.fence_token));
-        }
-        drop(roster);
-        self.dsl_authority.state.live_runtime_ids = live_ids;
-        self.dsl_authority.state.runtime_fence_tokens = fence_map;
+    /// Snapshot the DSL's current `member_state_markers` as a set of
+    /// runtime-id keys (in their stringified DSL form) currently marked
+    /// `Retiring`. The stringified form matches
+    /// `AgentRuntimeId::Display` (`"identity:generation"`), which is what
+    /// `mob_dsl::AgentRuntimeId::from_domain` produces.
+    fn retiring_runtime_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
+        self.dsl_authority
+            .state
+            .member_state_markers
+            .iter()
+            .filter_map(|(runtime_id, member_state)| match member_state {
+                mob_dsl::MobMemberState::Retiring => Some(runtime_id.0.clone()),
+                mob_dsl::MobMemberState::Active => None,
+            })
+            .collect()
     }
 
-    #[allow(dead_code)]
-    fn sync_dsl_run_state(&mut self) {
-        let active_run_count = self.machine_active_run_count() as u64;
-        self.dsl_authority.state.active_run_count = active_run_count;
+    /// Re-project the DSL's `member_state_markers` onto the shell's
+    /// [`Roster::state`] field. Called by callers who have just applied
+    /// a DSL transition that mutated the marker map (Retire /
+    /// RetireMember / ObserveRuntimeRetired / DestroyMob /
+    /// ObserveRuntimeDestroyed). See `MemberState` docs for the
+    /// projection contract.
+    async fn sync_retiring_projection_into_roster(&self) {
+        let retiring = self.retiring_runtime_ids_from_dsl();
+        let mut roster = self.roster.write().await;
+        roster.sync_retiring_projection(&retiring);
     }
 
     fn mob_handle_for_tools(&self) -> MobHandle {
@@ -758,19 +776,19 @@ impl MobActor {
             command_tx: self.command_tx.clone(),
             roster: self.roster.clone(),
             definition: self.definition.clone(),
-            state: self.state.clone(),
             events: self.events.clone(),
             flow_streams: self.flow_streams.clone(),
             session_service: self.session_service.clone(),
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
+            phase_watch_rx: self.phase_watch_tx.subscribe(),
         }
     }
 
     async fn persist_kickoff_state(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         phase: crate::roster::MobMemberKickoffPhase,
         error: Option<String>,
     ) -> Result<(), MobError> {
@@ -784,7 +802,7 @@ impl MobActor {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::MemberKickoffUpdated {
-                    member: AgentIdentity::from(meerkat_id.as_str()),
+                    member: AgentIdentity::from(agent_identity.as_str()),
                     kickoff: kickoff.clone(),
                 },
             })
@@ -793,19 +811,54 @@ impl MobActor {
         self.roster
             .write()
             .await
-            .set_kickoff(meerkat_id, Some(kickoff));
+            .set_kickoff(agent_identity, Some(kickoff));
         Ok(())
     }
 
     async fn kickoff_phase_for(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
     ) -> Option<crate::roster::MobMemberKickoffPhase> {
         self.roster
             .read()
             .await
-            .get(meerkat_id)
+            .get(agent_identity)
             .and_then(|entry| entry.kickoff.as_ref().map(|snapshot| snapshot.phase))
+    }
+
+    /// Project the shell-side [`TaskStatus`] onto the DSL bridging enum
+    /// consumed by `MobMachineInput::TaskUpdate` guards. Shell's `Open` is
+    /// the "not-started, accepting-claims" state; the DSL names that state
+    /// `Pending`.
+    fn task_status_to_dsl(status: crate::tasks::TaskStatus) -> mob_dsl::TaskStatus {
+        match status {
+            crate::tasks::TaskStatus::Open => mob_dsl::TaskStatus::Pending,
+            crate::tasks::TaskStatus::InProgress => mob_dsl::TaskStatus::InProgress,
+            crate::tasks::TaskStatus::Completed => mob_dsl::TaskStatus::Completed,
+            crate::tasks::TaskStatus::Cancelled => mob_dsl::TaskStatus::Cancelled,
+        }
+    }
+
+    /// Build the DSL's opaque [`MobTask`] payload from the shell-side
+    /// `subject` / `description` / `blocked_by` on a newly-created task.
+    /// The DSL only observes `tasks.contains_key(id)` in guards, so the
+    /// richer shell fields (`created_at`, `updated_at`, `id`) do not need
+    /// to survive projection.
+    fn task_payload_to_dsl(
+        subject: &str,
+        description: &str,
+        blocked_by: &[crate::ids::TaskId],
+    ) -> mob_dsl::MobTask {
+        mob_dsl::MobTask {
+            subject: subject.to_string(),
+            description: description.to_string(),
+            status: mob_dsl::TaskStatus::Pending,
+            owner: None,
+            blocked_by: blocked_by
+                .iter()
+                .map(|id| mob_dsl::TaskId::from(id.as_str()))
+                .collect(),
+        }
     }
 
     fn kickoff_phase_to_dsl(phase: crate::roster::MobMemberKickoffPhase) -> mob_dsl::KickoffPhase {
@@ -860,36 +913,36 @@ impl MobActor {
         }
     }
 
-    async fn clear_kickoff_state(&mut self, meerkat_id: &MeerkatId) {
+    async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
         self.dsl_authority
             .state
             .member_kickoff_pending
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_starting
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_callback_pending
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_started
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_failed
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_cancelled
-            .remove(&meerkat_id.to_string());
+            .remove(&agent_identity.to_string());
         self.dsl_authority
             .state
             .member_kickoff_error
-            .remove(&meerkat_id.to_string());
-        self.roster.write().await.set_kickoff(meerkat_id, None);
+            .remove(&agent_identity.to_string());
+        self.roster.write().await.set_kickoff(agent_identity, None);
     }
 
     async fn fail_startup_to_stopped(&mut self, failure_label: &'static str) {
@@ -921,89 +974,95 @@ impl MobActor {
 
     async fn apply_kickoff_input(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         input: mob_dsl::MobMachineInput,
     ) -> Result<bool, MobError> {
         if !self
             .dsl_authority
             .state
             .member_kickoff_pending
-            .contains(&meerkat_id.to_string())
+            .contains(&agent_identity.to_string())
             && !self
                 .dsl_authority
                 .state
                 .member_kickoff_starting
-                .contains(&meerkat_id.to_string())
+                .contains(&agent_identity.to_string())
             && !self
                 .dsl_authority
                 .state
                 .member_kickoff_callback_pending
-                .contains(&meerkat_id.to_string())
+                .contains(&agent_identity.to_string())
             && !self
                 .dsl_authority
                 .state
                 .member_kickoff_started
-                .contains(&meerkat_id.to_string())
+                .contains(&agent_identity.to_string())
             && !self
                 .dsl_authority
                 .state
                 .member_kickoff_failed
-                .contains(&meerkat_id.to_string())
+                .contains(&agent_identity.to_string())
             && !self
                 .dsl_authority
                 .state
                 .member_kickoff_cancelled
-                .contains(&meerkat_id.to_string())
-            && let Some(current_phase) = self.kickoff_phase_for(meerkat_id).await
+                .contains(&agent_identity.to_string())
+            && let Some(current_phase) = self.kickoff_phase_for(agent_identity).await
         {
             match Self::kickoff_phase_to_dsl(current_phase) {
                 mob_dsl::KickoffPhase::Pending => {
                     self.dsl_authority
                         .state
                         .member_kickoff_pending
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
                 mob_dsl::KickoffPhase::Starting => {
                     self.dsl_authority
                         .state
                         .member_kickoff_starting
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
                 mob_dsl::KickoffPhase::CallbackPending => {
                     self.dsl_authority
                         .state
                         .member_kickoff_callback_pending
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
                 mob_dsl::KickoffPhase::Started => {
                     self.dsl_authority
                         .state
                         .member_kickoff_started
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
                 mob_dsl::KickoffPhase::Failed => {
                     self.dsl_authority
                         .state
                         .member_kickoff_failed
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
                 mob_dsl::KickoffPhase::Cancelled => {
                     self.dsl_authority
                         .state
                         .member_kickoff_cancelled
-                        .insert(meerkat_id.to_string());
+                        .insert(agent_identity.to_string());
                 }
             }
-            if let Some(error) = self.roster.read().await.get(meerkat_id).and_then(|entry| {
-                entry
-                    .kickoff
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.error.clone())
-            }) {
+            if let Some(error) = self
+                .roster
+                .read()
+                .await
+                .get(agent_identity)
+                .and_then(|entry| {
+                    entry
+                        .kickoff
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.error.clone())
+                })
+            {
                 self.dsl_authority
                     .state
                     .member_kickoff_error
-                    .insert(meerkat_id.to_string(), error);
+                    .insert(agent_identity.to_string(), error);
             }
         }
 
@@ -1019,7 +1078,8 @@ impl MobActor {
                     phase,
                 } => {
                     let phase = Self::kickoff_phase_from_dsl(phase);
-                    self.persist_kickoff_state(meerkat_id, phase, None).await?;
+                    self.persist_kickoff_state(agent_identity, phase, None)
+                        .await?;
                 }
                 mob_dsl::MobMachineEffect::PersistKickoffFailureUpdate {
                     member_id: _,
@@ -1027,7 +1087,7 @@ impl MobActor {
                     error,
                 } => {
                     let phase = Self::kickoff_phase_from_dsl(phase);
-                    self.persist_kickoff_state(meerkat_id, phase, Some(error))
+                    self.persist_kickoff_state(agent_identity, phase, Some(error))
                         .await?;
                 }
                 mob_dsl::MobMachineEffect::EmitKickoffLifecycleNotice {
@@ -1035,11 +1095,12 @@ impl MobActor {
                     intent,
                 } => {
                     if let Some(notice_intent) = Self::kickoff_notice_intent(&intent)
-                        && let Err(error) =
-                            self.notify_kickoff_event(meerkat_id, notice_intent).await
+                        && let Err(error) = self
+                            .notify_kickoff_event(agent_identity, notice_intent)
+                            .await
                     {
                         tracing::warn!(
-                            meerkat_id = %meerkat_id,
+                            agent_identity = %agent_identity,
                             error = %error,
                             intent = %intent,
                             "failed to emit kickoff lifecycle notice"
@@ -1053,6 +1114,7 @@ impl MobActor {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     fn machine_active_run_count(&self) -> u32 {
         self.run_cancel_tokens.len() as u32
     }
@@ -1084,101 +1146,25 @@ impl MobActor {
         !self.has_orchestrator || self.dsl_authority.state.coordinator_bound
     }
 
-    fn require_mob_machine_stop(&self) -> Result<(), MobError> {
-        if self.state() != MobState::Running {
+    /// Probe a DSL input against a clone of current state — returns
+    /// `InvalidTransition` if the DSL rejects the input, without
+    /// mutating the live authority. Used as the pre-admission gate for
+    /// lifecycle commands so side effects (notifications, cleanup) only
+    /// fire when the DSL would actually accept the transition.
+    ///
+    /// `target` is used purely for the `InvalidTransition` error hint
+    /// (the phase the caller is trying to reach). The DSL rejects on the
+    /// guard level, not a phase comparison.
+    fn probe_mob_machine_input(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        target: MobState,
+    ) -> Result<(), MobError> {
+        let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+        if mob_dsl::MobMachineMutator::apply(&mut probe, input).is_err() {
             return Err(MobError::InvalidTransition {
                 from: self.state(),
-                to: MobState::Stopped,
-            });
-        }
-        if self.machine_active_run_count() != 0 {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Stopped,
-            });
-        }
-        Ok(())
-    }
-
-    fn require_mob_machine_resume(&self) -> Result<(), MobError> {
-        if self.state() == MobState::Stopped {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
-            })
-        }
-    }
-
-    fn require_mob_machine_complete(&self) -> Result<(), MobError> {
-        if self.state() == MobState::Running {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Completed,
-            })
-        }
-    }
-
-    fn require_mob_machine_destroy(&self) -> Result<(), MobError> {
-        if matches!(
-            self.state(),
-            MobState::Running | MobState::Stopped | MobState::Completed
-        ) {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Destroyed,
-            })
-        }
-    }
-
-    fn require_mob_machine_reset(&self) -> Result<(), MobError> {
-        if matches!(
-            self.state(),
-            MobState::Running | MobState::Stopped | MobState::Completed
-        ) {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
-            })
-        }
-    }
-
-    fn require_mob_machine_shutdown(&self) -> Result<(), MobError> {
-        if matches!(
-            self.state(),
-            MobState::Running | MobState::Stopped | MobState::Completed
-        ) {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Stopped,
-            })
-        }
-    }
-
-    fn require_mob_machine_spawn(&self) -> Result<(), MobError> {
-        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
-            });
-        }
-        Ok(())
-    }
-
-    fn require_mob_machine_run_flow(&self) -> Result<(), MobError> {
-        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
+                to: target,
             });
         }
         Ok(())
@@ -1235,7 +1221,7 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let member_ref = orchestrator_entry.member_ref;
         let runtime_mode = orchestrator_entry.runtime_mode;
-        let meerkat_id = orchestrator_entry.meerkat_id;
+        let agent_identity = orchestrator_entry.agent_identity;
         self.lifecycle_tasks.spawn(async move {
             let result = match runtime_mode {
                 crate::MobRuntimeMode::AutonomousHost => {
@@ -1257,7 +1243,7 @@ impl MobActor {
                         )
                         .map_err(|error| {
                             MobError::Internal(format!(
-                                "orchestrator lifecycle inject failed for '{meerkat_id}': {error}"
+                                "orchestrator lifecycle inject failed for '{agent_identity}': {error}"
                             ))
                         })
                 }
@@ -1291,10 +1277,10 @@ impl MobActor {
         });
     }
 
-    fn retire_event_key(meerkat_id: &MeerkatId, member_ref: &MemberRef) -> String {
+    fn retire_event_key(agent_identity: &MeerkatId, member_ref: &MemberRef) -> String {
         let member =
             serde_json::to_string(member_ref).unwrap_or_else(|_| format!("{member_ref:?}"));
-        format!("{meerkat_id}|{member}")
+        format!("{agent_identity}|{member}")
     }
 
     fn pending_spawn_maps_aligned(&self) -> bool {
@@ -1580,10 +1566,14 @@ impl MobActor {
         Ok(())
     }
 
-    fn fallback_spawn_prompt(&self, profile_name: &ProfileName, meerkat_id: &MeerkatId) -> String {
+    fn fallback_spawn_prompt(
+        &self,
+        profile_name: &ProfileName,
+        agent_identity: &MeerkatId,
+    ) -> String {
         format!(
             "You have been spawned as '{}' (role: {}) in mob '{}'.",
-            meerkat_id, profile_name, self.definition.id
+            agent_identity, profile_name, self.definition.id
         )
     }
 
@@ -1602,22 +1592,22 @@ impl MobActor {
     #[cfg(feature = "runtime-adapter")]
     async fn start_autonomous_member(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
         prompt: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
-        self.ensure_autonomous_runtime_ready(meerkat_id, member_ref)
+        self.ensure_autonomous_runtime_ready(agent_identity, member_ref)
             .await?;
 
         let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
-                "autonomous member '{meerkat_id}' must be session-backed"
+                "autonomous member '{agent_identity}' must be session-backed"
             ))
         })?;
 
         let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
             MobError::Internal(format!(
-                "autonomous member '{meerkat_id}' requires admission-capable substrate (runtime adapter)"
+                "autonomous member '{agent_identity}' requires admission-capable substrate (runtime adapter)"
             ))
         })?;
 
@@ -1650,12 +1640,12 @@ impl MobActor {
                 .await
                 .map_err(|e| {
                     MobError::Internal(format!(
-                        "autonomous prompt admission failed for '{meerkat_id}': {e}"
+                        "autonomous prompt admission failed for '{agent_identity}': {e}"
                     ))
                 })?;
 
             // Spawn background task for completion wait.
-            let log_id = meerkat_id.clone();
+            let log_id = agent_identity.clone();
             let completion_command_tx = self.command_tx.clone();
             let handle = tokio::spawn(async move {
                 if let Some(h) = completion_handle {
@@ -1663,7 +1653,7 @@ impl MobActor {
                     let (ack_tx, ack_rx) = oneshot::channel();
                     if completion_command_tx
                         .send(MobCommand::KickoffOutcomeResolved {
-                            meerkat_id: log_id.clone(),
+                            agent_identity: log_id.clone(),
                             outcome,
                             ack_tx,
                         })
@@ -1671,7 +1661,7 @@ impl MobActor {
                         .is_err()
                     {
                         tracing::warn!(
-                            meerkat_id = %log_id,
+                            agent_identity = %log_id,
                             "mob actor dropped before kickoff outcome could be recorded"
                         );
                     } else {
@@ -1683,16 +1673,16 @@ impl MobActor {
             self.autonomous_initial_turns
                 .lock()
                 .await
-                .insert(meerkat_id.clone(), InitialTurnHandle { handle });
+                .insert(agent_identity.clone(), InitialTurnHandle { handle });
         }
 
-        tracing::debug!(meerkat_id = %meerkat_id, "autonomous member started");
+        tracing::debug!(agent_identity = %agent_identity, "autonomous member started");
         Ok(())
     }
 
     async fn ensure_autonomous_runtime_ready(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         // Session registration + RuntimeLoop attachment is owned by the
@@ -1703,7 +1693,7 @@ impl MobActor {
         {
             let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
                 MobError::Internal(format!(
-                    "autonomous member '{meerkat_id}' must be session-backed for runtime readiness"
+                    "autonomous member '{agent_identity}' must be session-backed for runtime readiness"
                 ))
             })?;
 
@@ -1714,7 +1704,7 @@ impl MobActor {
                     .await;
                 if spawned {
                     tracing::debug!(
-                        meerkat_id = %meerkat_id,
+                        agent_identity = %agent_identity,
                         bridge_session_id = %bridge_session_id,
                         "updated peer ingress for autonomous member"
                     );
@@ -1722,7 +1712,7 @@ impl MobActor {
             }
         }
 
-        self.ensure_autonomous_dispatch_capability(meerkat_id, member_ref)
+        self.ensure_autonomous_dispatch_capability(agent_identity, member_ref)
             .await
     }
 
@@ -1737,12 +1727,12 @@ impl MobActor {
 
     async fn ensure_autonomous_dispatch_capability_for_provisioner(
         provisioner: &Arc<dyn MobProvisioner>,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(
-                "autonomous member '{meerkat_id}' must be session-backed for injector dispatch"
+                "autonomous member '{agent_identity}' must be session-backed for injector dispatch"
             ))
         })?;
         if provisioner
@@ -1751,7 +1741,7 @@ impl MobActor {
             .is_none()
         {
             return Err(MobError::Internal(format!(
-                "autonomous member '{meerkat_id}' is missing event injector capability"
+                "autonomous member '{agent_identity}' is missing event injector capability"
             )));
         }
         Ok(())
@@ -1760,14 +1750,14 @@ impl MobActor {
     #[cfg(feature = "runtime-adapter")]
     async fn resolve_kickoff_outcome(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
     ) -> Result<(), MobError> {
         if let meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } =
             &outcome
         {
             tracing::debug!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 tool_name = %tool_name,
                 args = ?args,
                 "autonomous kickoff reached callback-pending boundary"
@@ -1776,9 +1766,9 @@ impl MobActor {
 
         let _ = self
             .apply_kickoff_input(
-                meerkat_id,
+                agent_identity,
                 mob_dsl::MobMachineInput::KickoffResolveOutcome {
-                    member_id: meerkat_id.to_string(),
+                    member_id: agent_identity.to_string(),
                     outcome: Self::kickoff_outcome_string(&outcome),
                 },
             )
@@ -1786,18 +1776,18 @@ impl MobActor {
         Ok(())
     }
 
-    async fn maybe_mark_kickoff_cancelled(&mut self, meerkat_id: &MeerkatId) {
+    async fn maybe_mark_kickoff_cancelled(&mut self, agent_identity: &MeerkatId) {
         if let Err(error) = self
             .apply_kickoff_input(
-                meerkat_id,
+                agent_identity,
                 mob_dsl::MobMachineInput::KickoffCancelRequested {
-                    member_id: meerkat_id.to_string(),
+                    member_id: agent_identity.to_string(),
                 },
             )
             .await
         {
             tracing::warn!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 error = %error,
                 "failed to apply kickoff cancellation transition"
             );
@@ -1806,12 +1796,12 @@ impl MobActor {
 
     async fn ensure_autonomous_dispatch_capability(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         Self::ensure_autonomous_dispatch_capability_for_provisioner(
             &self.provisioner,
-            meerkat_id,
+            agent_identity,
             member_ref,
         )
         .await
@@ -1823,7 +1813,7 @@ impl MobActor {
     /// This allows resume to re-spawn the comms drain without re-registering.
     async fn stop_autonomous_member(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         // Abort any in-flight initial turn.
@@ -1831,15 +1821,15 @@ impl MobActor {
             .autonomous_initial_turns
             .lock()
             .await
-            .contains_key(meerkat_id);
+            .contains_key(agent_identity);
         if had_kickoff_handle {
-            self.maybe_mark_kickoff_cancelled(meerkat_id).await;
+            self.maybe_mark_kickoff_cancelled(agent_identity).await;
         }
         if let Some(handle) = self
             .autonomous_initial_turns
             .lock()
             .await
-            .remove(meerkat_id)
+            .remove(agent_identity)
         {
             handle.abort();
         }
@@ -1875,7 +1865,7 @@ impl MobActor {
         if still_active {
             tracing::warn!(
                 mob_id = %self.definition.id,
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 "autonomous member stop polling exhausted before member became idle"
             );
         }
@@ -1897,9 +1887,9 @@ impl MobActor {
         let mut first_error: Option<MobError> = None;
         for entry in entries {
             let result = self.stop_autonomous_member_entry(entry).await;
-            if let Err((meerkat_id, error)) = result {
+            if let Err((agent_identity, error)) = result {
                 tracing::warn!(
-                    meerkat_id = %meerkat_id,
+                    agent_identity = %agent_identity,
                     error = %error,
                     "failed stopping autonomous member"
                 );
@@ -1919,9 +1909,9 @@ impl MobActor {
         &mut self,
         entry: RosterEntry,
     ) -> Result<(), (MeerkatId, MobError)> {
-        self.stop_autonomous_member(&entry.meerkat_id, &entry.member_ref)
+        self.stop_autonomous_member(&entry.agent_identity, &entry.member_ref)
             .await
-            .map_err(|error| (entry.meerkat_id, error))
+            .map_err(|error| (entry.agent_identity, error))
     }
 
     /// Ensure all autonomous roster members have their runtime ready.
@@ -1943,7 +1933,7 @@ impl MobActor {
                 .list()
                 .filter(|entry| {
                     entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost
-                        && !broken_members.contains(&entry.meerkat_id)
+                        && !broken_members.contains(&entry.agent_identity)
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -1955,11 +1945,11 @@ impl MobActor {
         let mut first_error: Option<MobError> = None;
         for entry in &entries {
             if let Err(error) = self
-                .ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
+                .ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref)
                 .await
             {
                 tracing::warn!(
-                    meerkat_id = %entry.meerkat_id,
+                    agent_identity = %entry.agent_identity,
                     error = %error,
                     "failed ensuring autonomous runtime ready"
                 );
@@ -2011,8 +2001,11 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
-                    if let Err(error) = self.require_mob_machine_spawn() {
-                        let _ = reply_tx.send(Err(error));
+                    if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+                        let _ = reply_tx.send(Err(MobError::InvalidTransition {
+                            from: self.state(),
+                            to: MobState::Running,
+                        }));
                         continue;
                     }
                     Box::pin(self.enqueue_spawn(
@@ -2045,37 +2038,44 @@ impl MobActor {
                     self.handle_spawn_provisioned_batch(completions).await;
                 }
                 MobCommand::Retire {
-                    meerkat_id,
+                    agent_identity,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
                         Ok(()) => {
                             let canceled = self.cancel_pending_spawns_for_member(
-                                &meerkat_id,
+                                &agent_identity,
                                 "retire command received",
                             );
                             if canceled > 0 {
                                 tracing::info!(
-                                    meerkat_id = %meerkat_id,
+                                    agent_identity = %agent_identity,
                                     canceled,
                                     "retire canceled pending spawn lineage before roster retirement"
                                 );
                             }
-                            self.handle_retire(meerkat_id).await
+                            self.handle_retire(agent_identity).await
                         }
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Respawn {
-                    meerkat_id,
+                    agent_identity,
                     initial_message,
                     reply_tx,
                 } => {
-                    let result = match self.require_mob_machine_spawn() {
-                        Ok(()) => Box::pin(self.handle_respawn(meerkat_id, initial_message)).await,
-                        Err(error) => Err(super::handle::MobRespawnError::from(error)),
-                    };
+                    let result =
+                        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+                            Err(super::handle::MobRespawnError::from(
+                                MobError::InvalidTransition {
+                                    from: self.state(),
+                                    to: MobState::Running,
+                                },
+                            ))
+                        } else {
+                            Box::pin(self.handle_respawn(agent_identity, initial_message)).await
+                        };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
@@ -2108,7 +2108,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ExternalTurn {
-                    meerkat_id,
+                    agent_identity,
                     content,
                     handling_mode,
                     render_metadata,
@@ -2117,7 +2117,7 @@ impl MobActor {
                     let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => {
                             Box::pin(self.handle_external_turn(
-                                meerkat_id,
+                                agent_identity,
                                 content,
                                 handling_mode,
                                 render_metadata,
@@ -2129,25 +2129,26 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::InternalTurn {
-                    meerkat_id,
+                    agent_identity,
                     content,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_internal_turn(meerkat_id, content).await,
+                        Ok(()) => self.handle_internal_turn(agent_identity, content).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
                 }
                 #[cfg(feature = "runtime-adapter")]
                 MobCommand::KickoffOutcomeResolved {
-                    meerkat_id,
+                    agent_identity,
                     outcome,
                     ack_tx,
                 } => {
-                    if let Err(error) = self.resolve_kickoff_outcome(&meerkat_id, outcome).await {
+                    if let Err(error) = self.resolve_kickoff_outcome(&agent_identity, outcome).await
+                    {
                         tracing::warn!(
-                            meerkat_id = %meerkat_id,
+                            agent_identity = %agent_identity,
                             error = %error,
                             "failed to persist kickoff outcome"
                         );
@@ -2160,13 +2161,16 @@ impl MobActor {
                     scoped_event_tx,
                     reply_tx,
                 } => {
-                    let result = match self.require_mob_machine_run_flow() {
-                        Ok(()) => {
+                    let result =
+                        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
+                            Err(MobError::InvalidTransition {
+                                from: self.state(),
+                                to: MobState::Running,
+                            })
+                        } else {
                             self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
                                 .await
-                        }
-                        Err(error) => Err(error),
-                    };
+                        };
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::CancelFlow { run_id, reply_tx } => {
@@ -2223,8 +2227,22 @@ impl MobActor {
                         cleanup_pending: false,
                     });
                 }
+                #[cfg(test)]
+                MobCommand::DslT2Snapshot { reply_tx } => {
+                    let dsl = &self.dsl_authority.state;
+                    let _ = reply_tx.send(super::state::MobDslT2Snapshot {
+                        member_state_markers: dsl.member_state_markers.clone(),
+                        wiring_edges: dsl.wiring_edges.clone(),
+                        identity_to_runtime: dsl.identity_to_runtime.clone(),
+                        tasks: dsl.tasks.clone(),
+                        in_progress_task_ids: dsl.in_progress_task_ids.clone(),
+                        completed_task_ids: dsl.completed_task_ids.clone(),
+                    });
+                }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.require_mob_machine_stop() {
+                    let result = match self
+                        .probe_mob_machine_input(mob_dsl::MobMachineInput::Stop, MobState::Stopped)
+                    {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
@@ -2301,7 +2319,10 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self.require_mob_machine_resume() {
+                    let result = match self.probe_mob_machine_input(
+                        mob_dsl::MobMachineInput::Resume,
+                        MobState::Running,
+                    ) {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
@@ -2392,7 +2413,10 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.require_mob_machine_complete() {
+                    let result = match self.probe_mob_machine_input(
+                        mob_dsl::MobMachineInput::Complete,
+                        MobState::Completed,
+                    ) {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is completing").await;
                             self.handle_complete().await
@@ -2402,7 +2426,10 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Destroy { reply_tx } => {
-                    if let Err(error) = self.require_mob_machine_destroy() {
+                    if let Err(error) = self.probe_mob_machine_input(
+                        mob_dsl::MobMachineInput::Destroy,
+                        MobState::Destroyed,
+                    ) {
                         let _ = reply_tx.send(Err(super::handle::MobDestroyError::Mob(error)));
                         continue;
                     }
@@ -2441,7 +2468,9 @@ impl MobActor {
                     }
                 }
                 MobCommand::Reset { reply_tx } => {
-                    if let Err(error) = self.require_mob_machine_reset() {
+                    if let Err(error) = self
+                        .probe_mob_machine_input(mob_dsl::MobMachineInput::Reset, MobState::Running)
+                    {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -2495,7 +2524,7 @@ impl MobActor {
                     let _ = reply_tx.send(states);
                 }
                 MobCommand::SubscribeAgentEvents {
-                    meerkat_id,
+                    agent_identity,
                     reply_tx,
                 } => {
                     let result = async {
@@ -2503,8 +2532,8 @@ impl MobActor {
                             .roster
                             .read()
                             .await
-                            .entry(&meerkat_id)
-                            .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
+                            .entry(&agent_identity)
+                            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
                         let session_id = match entry.member_ref.bridge_session_id().cloned() {
                             Some(session_id) => session_id,
                             None => {
@@ -2521,7 +2550,7 @@ impl MobActor {
                         .await
                         .map_err(|e| {
                             MobError::Internal(format!(
-                                "failed to subscribe to agent events for '{meerkat_id}': {e}"
+                                "failed to subscribe to agent events for '{agent_identity}': {e}"
                             ))
                         })
                     }
@@ -2550,10 +2579,10 @@ impl MobActor {
                             .map_err(|e| {
                                 MobError::Internal(format!(
                                     "failed to subscribe to agent events for '{}': {e}",
-                                    entry.meerkat_id
+                                    entry.agent_identity
                                 ))
                             })?;
-                            streams.push((entry.meerkat_id.clone(), stream));
+                            streams.push((entry.agent_identity.clone(), stream));
                         }
                         if streams.is_empty()
                             && let Some(mode) = unsupported_mode
@@ -2613,39 +2642,11 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ForceCancel {
-                    meerkat_id,
+                    agent_identity,
                     reply_tx,
                 } => {
                     let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_force_cancel(meerkat_id).await,
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::RealtimeAttach {
-                    meerkat_id,
-                    reply_tx,
-                } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
-                        Ok(()) => self.handle_realtime_attach(meerkat_id).await,
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::RealtimeDetach {
-                    meerkat_id,
-                    reply_tx,
-                } => {
-                    let result = match self.require_state(&[
-                        MobState::Running,
-                        MobState::Creating,
-                        MobState::Stopped,
-                    ]) {
-                        Ok(()) => self.handle_realtime_detach(meerkat_id).await,
+                        Ok(()) => self.handle_force_cancel(agent_identity).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -2654,8 +2655,14 @@ impl MobActor {
                     self.spawn_policy.set(policy).await;
                     let _ = reply_tx.send(());
                 }
+                MobCommand::QueryPhase { reply_tx } => {
+                    let _ = reply_tx.send(self.state());
+                }
                 MobCommand::Shutdown { reply_tx } => {
-                    if let Err(error) = self.require_mob_machine_shutdown() {
+                    if let Err(error) = self.probe_mob_machine_input(
+                        mob_dsl::MobMachineInput::Shutdown,
+                        MobState::Stopped,
+                    ) {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -2716,16 +2723,16 @@ impl MobActor {
 
         for slot in self.pending_spawns.drain_all() {
             let spawn_ticket = slot.ticket;
-            let meerkat_id = slot.spawn.meerkat_id.clone();
+            let agent_identity = slot.spawn.agent_identity.clone();
             self.complete_orchestrator_spawn(
                 Some(spawn_ticket),
                 "lifecycle transition cleared pending spawn",
             );
             self.abort_pending_spawn_slot(&slot, reason).await;
-            slot.fail(&format!("spawn canceled for '{meerkat_id}': {reason}"));
+            slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 "failed pending spawn due to lifecycle transition"
             );
         }
@@ -2769,7 +2776,7 @@ impl MobActor {
         {
             tracing::warn!(
                 spawn_ticket = slot.ticket,
-                meerkat_id = %slot.spawn.meerkat_id,
+                agent_identity = %slot.spawn.agent_identity,
                 operation_id = %operation_id,
                 error = %error,
                 "failed to abort pending member provision during lifecycle drain"
@@ -2777,12 +2784,16 @@ impl MobActor {
         }
     }
 
-    fn cancel_pending_spawns_for_member(&mut self, meerkat_id: &MeerkatId, reason: &str) -> usize {
-        let slots = self.pending_spawns.take_for_member(meerkat_id);
+    fn cancel_pending_spawns_for_member(
+        &mut self,
+        agent_identity: &MeerkatId,
+        reason: &str,
+    ) -> usize {
+        let slots = self.pending_spawns.take_for_member(agent_identity);
         if slots.is_empty() {
             if let Some(message) = self.pending_spawn_alignment_violation() {
                 tracing::error!(
-                    meerkat_id = %meerkat_id,
+                    agent_identity = %agent_identity,
                     reason,
                     message = %message,
                     "pending spawn alignment violated while canceling member-specific pending spawns"
@@ -2804,7 +2815,7 @@ impl MobActor {
             .map(|slot| {
                 (
                     slot.ticket,
-                    slot.spawn.meerkat_id.clone(),
+                    slot.spawn.agent_identity.clone(),
                     slot.spawn.progress.clone(),
                 )
             })
@@ -2812,7 +2823,7 @@ impl MobActor {
         let provisioner = self.provisioner.clone();
         let reason_owned = reason.to_string();
         tokio::spawn(async move {
-            for (spawn_ticket, meerkat_id, progress) in pending_abortions {
+            for (spawn_ticket, agent_identity, progress) in pending_abortions {
                 let snapshot = {
                     let progress = progress
                         .lock()
@@ -2833,7 +2844,7 @@ impl MobActor {
                 {
                     tracing::warn!(
                         spawn_ticket,
-                        meerkat_id = %meerkat_id,
+                        agent_identity = %agent_identity,
                         operation_id = %operation_id,
                         error = %error,
                         "failed to abort pending member provision during member-specific cancellation"
@@ -2844,10 +2855,10 @@ impl MobActor {
 
         for slot in slots {
             let spawn_ticket = slot.ticket;
-            slot.fail(&format!("spawn canceled for '{meerkat_id}': {reason}"));
+            slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
             tracing::debug!(
                 spawn_ticket,
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 "canceled pending spawn for member lifecycle command"
             );
         }
@@ -2855,7 +2866,7 @@ impl MobActor {
         self.debug_assert_pending_spawn_alignment();
         if let Some(message) = self.pending_spawn_alignment_violation() {
             tracing::error!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 message = %message,
                 "pending spawn alignment violated after member-specific cancellation"
             );
@@ -2892,7 +2903,7 @@ impl MobActor {
             override_profile,
             connection_ref,
         } = spec;
-        let meerkat_id = MeerkatId::from(identity.as_str());
+        let agent_identity = MeerkatId::from(identity.as_str());
         // Normalize launch-mode resume/fork details for the provisioning path.
         let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
         let fork_spec = match launch_mode {
@@ -2903,36 +2914,36 @@ impl MobActor {
             _ => None,
         };
         let prepare_result = async {
-            if meerkat_id
+            if agent_identity
                 .as_str()
                 .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
             {
                 return Err(MobError::WiringError(format!(
-                    "meerkat id '{meerkat_id}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                    "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
                 )));
             }
             tracing::debug!(
                 mob_id = %self.definition.id,
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 profile = %profile_name,
                 "MobActor::enqueue_spawn start"
             );
 
-            if self.pending_spawns.contains_member(&meerkat_id) {
-                return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
+            if self.pending_spawns.contains_member(&agent_identity) {
+                return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
             }
 
             {
                 let roster = self.roster.read().await;
-                if roster.get(&meerkat_id).is_some() {
-                    return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
+                if roster.get(&agent_identity).is_some() {
+                    return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
                 }
                 if roster
                     .list()
-                    .any(|entry| entry.external_peer_specs.contains_key(&meerkat_id))
+                    .any(|entry| entry.external_peer_specs.contains_key(&agent_identity))
                 {
                     return Err(MobError::WiringError(format!(
-                        "meerkat id '{meerkat_id}' collides with an existing external peer name"
+                        "meerkat id '{agent_identity}' collides with an existing external peer name"
                     )));
                 }
             }
@@ -2972,7 +2983,7 @@ impl MobActor {
                     .await
                     .map_err(|e| {
                         MobError::Internal(format!(
-                            "resume bridge session check failed for '{meerkat_id}': {e}"
+                            "resume bridge session check failed for '{agent_identity}': {e}"
                         ))
                     })?;
                 if is_active.unwrap_or(false) {
@@ -2981,7 +2992,7 @@ impl MobActor {
                         && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
                     {
                         return Err(MobError::Internal(format!(
-                            "resumed session '{resume_id}' has no event injector for autonomous '{meerkat_id}'"
+                            "resumed session '{resume_id}' has no event injector for autonomous '{agent_identity}'"
                         )));
                     }
 
@@ -2996,18 +3007,18 @@ impl MobActor {
                             .is_none()
                     {
                         return Err(MobError::Internal(format!(
-                            "resumed session '{resume_id}' has no comms runtime for '{meerkat_id}'"
+                            "resumed session '{resume_id}' has no comms runtime for '{agent_identity}'"
                         )));
                     }
 
                     let prompt = initial_message.clone().unwrap_or_else(|| {
-                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
                     });
                     let resolved_labels = labels.unwrap_or_default();
 
                     return Ok((
                         profile_name,
-                        meerkat_id,
+                        agent_identity,
                         prompt,
                         selected_runtime_mode,
                         resolved_labels,
@@ -3037,7 +3048,7 @@ impl MobActor {
                             base: build::BuildAgentConfigParams {
                                 mob_id: &self.definition.id,
                                 profile_name: &profile_name,
-                                meerkat_id: &meerkat_id,
+                                agent_identity: &agent_identity,
                                 profile: &profile,
                                 definition: &self.definition,
                                 external_tools,
@@ -3060,7 +3071,7 @@ impl MobActor {
                     }
 
                     let prompt = initial_message.clone().unwrap_or_else(|| {
-                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                        ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
                     });
                     let req = build::to_create_session_request(&config, prompt.clone());
                     let selected_binding = resolve_binding(
@@ -3068,11 +3079,11 @@ impl MobActor {
                         backend,
                         profile.backend,
                         self.definition.backend.default,
-                        &meerkat_id,
+                        &agent_identity,
                     )?;
                     let selected_runtime_mode =
                         normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-                    let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+                    let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
                     let provision_request = ProvisionMemberRequest {
                         create_session: req,
                         binding: selected_binding,
@@ -3083,7 +3094,7 @@ impl MobActor {
                     let resolved_labels = labels.unwrap_or_default();
                     return Ok((
                         profile_name,
-                        meerkat_id,
+                        agent_identity,
                         prompt,
                         selected_runtime_mode,
                         resolved_labels,
@@ -3096,7 +3107,7 @@ impl MobActor {
                 }
 
                 return Err(MobError::Internal(format!(
-                    "resumed session '{resume_id}' not found or inactive for '{meerkat_id}'"
+                    "resumed session '{resume_id}' not found or inactive for '{agent_identity}'"
                 )));
             }
 
@@ -3167,7 +3178,7 @@ impl MobActor {
             let mut config = build::build_agent_config(build::BuildAgentConfigParams {
                 mob_id: &self.definition.id,
                 profile_name: &profile_name,
-                meerkat_id: &meerkat_id,
+                agent_identity: &agent_identity,
                 profile: &profile,
                 definition: &self.definition,
                 external_tools,
@@ -3190,7 +3201,7 @@ impl MobActor {
             }
 
             let base_prompt = initial_message.clone().unwrap_or_else(|| {
-                ContentInput::from(self.fallback_spawn_prompt(&profile_name, &meerkat_id))
+                ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
             });
             let prompt = if let Some(fork_text) = fork_context_text {
                 let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
@@ -3207,11 +3218,11 @@ impl MobActor {
                 backend,
                 profile.backend,
                 self.definition.backend.default,
-                &meerkat_id,
+                &agent_identity,
             )?;
             let selected_runtime_mode =
                 normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
-            let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+            let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
             let provision_request = ProvisionMemberRequest {
                 create_session: req,
                 binding: selected_binding,
@@ -3222,7 +3233,7 @@ impl MobActor {
             let resolved_labels = labels.unwrap_or_default();
             Ok((
                 profile_name,
-                meerkat_id,
+                agent_identity,
                 prompt,
                 selected_runtime_mode,
                 resolved_labels,
@@ -3237,7 +3248,7 @@ impl MobActor {
 
         let (
             profile_name,
-            meerkat_id,
+            agent_identity,
             prompt,
             selected_runtime_mode,
             resolved_labels,
@@ -3272,7 +3283,7 @@ impl MobActor {
                 .await
                 .ok_or_else(|| {
                     MobError::Internal(format!(
-                        "resumed member '{meerkat_id}' has no tracked mob child operation"
+                        "resumed member '{agent_identity}' has no tracked mob child operation"
                     ))
                 });
             let operation_id = match operation_id {
@@ -3283,13 +3294,13 @@ impl MobActor {
                 }
             };
             let provision =
-                PendingProvision::new(member_ref, meerkat_id.clone(), self.provisioner.clone());
+                PendingProvision::new(member_ref, agent_identity.clone(), self.provisioner.clone());
             // Go straight to finalization — no async provisioning task needed.
             let fence = self.issue_fence_token();
             let result = self
                 .finalize_spawn_from_pending(
                     &profile_name,
-                    &meerkat_id,
+                    &agent_identity,
                     crate::ids::Generation::INITIAL,
                     fence,
                     selected_runtime_mode,
@@ -3301,7 +3312,6 @@ impl MobActor {
                     auto_wire_parent,
                     None,
                     effective_profile_override,
-                    false,
                 )
                 .await
                 .map(|outcome| outcome.receipt);
@@ -3319,7 +3329,7 @@ impl MobActor {
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
-        let spawn_meerkat_id = meerkat_id.clone();
+        let spawn_meerkat_id = agent_identity.clone();
         let spawn_meerkat_id_for_log = spawn_meerkat_id.clone();
         let spawn_runtime_mode = selected_runtime_mode;
         let pending_progress = Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default()));
@@ -3331,7 +3341,7 @@ impl MobActor {
 
         let pending = PendingSpawn {
             profile_name,
-            meerkat_id,
+            agent_identity,
             prompt,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
@@ -3339,7 +3349,6 @@ impl MobActor {
             auto_wire_parent,
             restore_wiring: None,
             effective_profile_override,
-            voice_intent_present: false,
             progress: pending_progress.clone(),
             reply_tx,
         };
@@ -3425,7 +3434,7 @@ impl MobActor {
 
         tracing::debug!(
             spawn_ticket,
-            meerkat_id = %spawn_meerkat_id_for_log,
+            agent_identity = %spawn_meerkat_id_for_log,
             runtime_mode = ?spawn_runtime_mode,
             "MobActor::enqueue_spawn queued provisioning task"
         );
@@ -3480,7 +3489,7 @@ impl MobActor {
         for (pending, result) in pending_items {
             let PendingSpawn {
                 profile_name,
-                meerkat_id,
+                agent_identity,
                 prompt,
                 runtime_mode,
                 labels,
@@ -3488,7 +3497,6 @@ impl MobActor {
                 auto_wire_parent,
                 restore_wiring,
                 effective_profile_override,
-                voice_intent_present,
                 progress: _,
                 reply_tx,
             } = pending;
@@ -3496,13 +3504,13 @@ impl MobActor {
                 Ok(spawn_receipt) => {
                     let provision = PendingProvision::new(
                         spawn_receipt.member_ref.clone(),
-                        meerkat_id.clone(),
+                        agent_identity.clone(),
                         self.provisioner.clone(),
                     );
                     if let Err(error) = self.require_state(&[MobState::Running]) {
                         if let Err(retire_error) = provision.rollback().await {
                             Err(MobError::Internal(format!(
-                                "spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
+                                "spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
                             )))
                         } else {
                             Err(error)
@@ -3511,7 +3519,7 @@ impl MobActor {
                         let fence = self.issue_fence_token();
                         self.finalize_spawn_from_pending(
                             &profile_name,
-                            &meerkat_id,
+                            &agent_identity,
                             crate::ids::Generation::INITIAL,
                             fence,
                             runtime_mode,
@@ -3523,7 +3531,6 @@ impl MobActor {
                             auto_wire_parent,
                             restore_wiring,
                             effective_profile_override,
-                            voice_intent_present,
                         )
                         .await
                         .map(|outcome| outcome.receipt)
@@ -3546,33 +3553,33 @@ impl MobActor {
 
     async fn spawn_from_policy_inline(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         spawn_spec: super::spawn_policy::SpawnSpec,
     ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
         self.ensure_pending_spawn_alignment("spawn_from_policy_inline preflight")?;
 
-        if meerkat_id
+        if agent_identity
             .as_str()
             .starts_with(FLOW_SYSTEM_MEMBER_ID_PREFIX)
         {
             return Err(MobError::WiringError(format!(
-                "meerkat id '{meerkat_id}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
+                "meerkat id '{agent_identity}' uses reserved system prefix '{FLOW_SYSTEM_MEMBER_ID_PREFIX}'"
             )));
         }
-        if self.pending_spawns.contains_member(meerkat_id) {
-            return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
+        if self.pending_spawns.contains_member(agent_identity) {
+            return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
         }
         {
             let roster = self.roster.read().await;
-            if roster.get(meerkat_id).is_some() {
-                return Err(MobError::MemberAlreadyExists(meerkat_id.clone()));
+            if roster.get(agent_identity).is_some() {
+                return Err(MobError::MemberAlreadyExists(agent_identity.clone()));
             }
             if roster
                 .list()
-                .any(|entry| entry.external_peer_specs.contains_key(meerkat_id))
+                .any(|entry| entry.external_peer_specs.contains_key(agent_identity))
             {
                 return Err(MobError::WiringError(format!(
-                    "meerkat id '{meerkat_id}' collides with an existing external peer name"
+                    "meerkat id '{agent_identity}' collides with an existing external peer name"
                 )));
             }
         }
@@ -3588,7 +3595,7 @@ impl MobActor {
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &profile_name,
-            meerkat_id,
+            agent_identity,
             profile: &profile,
             definition: &self.definition,
             external_tools,
@@ -3605,16 +3612,16 @@ impl MobActor {
             config.llm_client_override = Some(client.clone());
         }
 
-        let prompt = ContentInput::from(self.fallback_spawn_prompt(&profile_name, meerkat_id));
+        let prompt = ContentInput::from(self.fallback_spawn_prompt(&profile_name, agent_identity));
         let req = build::to_create_session_request(&config, prompt.clone());
         let selected_binding = resolve_binding(
             None,
             None,
             profile.backend,
             self.definition.backend.default,
-            meerkat_id,
+            agent_identity,
         )?;
-        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, meerkat_id);
+        let peer_name = format!("{}/{}/{}", self.definition.id, profile_name, agent_identity);
         let provision_request = ProvisionMemberRequest {
             create_session: req,
             binding: selected_binding,
@@ -3629,7 +3636,7 @@ impl MobActor {
         let (pending_reply_tx, _pending_reply_rx) = oneshot::channel();
         let pending = PendingSpawn {
             profile_name: profile_name.clone(),
-            meerkat_id: meerkat_id.clone(),
+            agent_identity: agent_identity.clone(),
             prompt: prompt.clone(),
             runtime_mode,
             labels: labels.clone(),
@@ -3637,7 +3644,6 @@ impl MobActor {
             auto_wire_parent: false,
             restore_wiring: None,
             effective_profile_override: None,
-            voice_intent_present: false,
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: pending_reply_tx,
         };
@@ -3649,7 +3655,7 @@ impl MobActor {
             self.ensure_pending_spawn_alignment("spawn_from_policy_inline staged pending")
         {
             tracing::error!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 error = %error,
                 "pending spawn alignment violated while staging inline policy spawn"
             );
@@ -3666,7 +3672,7 @@ impl MobActor {
                 && let Err(capability_error) =
                     Self::ensure_autonomous_dispatch_capability_for_provisioner(
                         &self.provisioner,
-                        meerkat_id,
+                        agent_identity,
                         &spawn_receipt.member_ref,
                     )
                     .await
@@ -3677,20 +3683,20 @@ impl MobActor {
                     .await
                 {
                     return Err(MobError::Internal(format!(
-                        "autonomous capability check failed for '{meerkat_id}': {capability_error}; cleanup retire failed: {retire_error}"
+                        "autonomous capability check failed for '{agent_identity}': {capability_error}; cleanup retire failed: {retire_error}"
                     )));
                 }
                 return Err(capability_error);
             }
             let provision = PendingProvision::new(
                 spawn_receipt.member_ref.clone(),
-                meerkat_id.clone(),
+                agent_identity.clone(),
                 self.provisioner.clone(),
             );
             if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
-                        "policy spawn completed while mob state changed for '{meerkat_id}': {error}; cleanup retire failed: {retire_error}"
+                        "policy spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
                     )));
                 }
                 return Err(error);
@@ -3698,7 +3704,7 @@ impl MobActor {
             let fence = self.issue_fence_token();
             self.finalize_spawn_from_pending(
                 &profile_name,
-                meerkat_id,
+                agent_identity,
                 crate::ids::Generation::INITIAL,
                 fence,
                 runtime_mode,
@@ -3710,7 +3716,6 @@ impl MobActor {
                 false,
                 None,
                 None, // policy spawns use definition profiles, no override
-                false,
             )
             .await
             .map(|outcome| outcome.receipt)
@@ -3726,7 +3731,7 @@ impl MobActor {
             self.ensure_pending_spawn_alignment("spawn_from_policy_inline completion")
         {
             tracing::error!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 error = %error,
                 "pending spawn alignment violated after inline policy spawn completion"
             );
@@ -3744,7 +3749,7 @@ impl MobActor {
     async fn finalize_spawn_from_pending(
         &mut self,
         profile_name: &ProfileName,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         generation: crate::ids::Generation,
         fence_token: crate::ids::FenceToken,
         runtime_mode: crate::MobRuntimeMode,
@@ -3756,9 +3761,8 @@ impl MobActor {
         auto_wire_parent: bool,
         restore_wiring: Option<RestoreWiringPlan>,
         effective_profile_override: Option<crate::profile::Profile>,
-        voice_intent_present: bool,
     ) -> Result<FinalizeSpawnOutcome, MobError> {
-        let identity = crate::ids::AgentIdentity::from(meerkat_id.as_str());
+        let identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let agent_runtime_id = crate::ids::AgentRuntimeId::new(identity.clone(), generation);
         let overlay_record =
             self.external_binding_overlay_record(&identity, generation, provision.member_ref());
@@ -3797,7 +3801,7 @@ impl MobActor {
             }
             if let Err(rollback_error) = provision.rollback().await {
                 return Err(MobError::Internal(format!(
-                    "spawn append failed for '{meerkat_id}': {append_error}; archive compensation failed: {rollback_error}"
+                    "spawn append failed for '{agent_identity}': {append_error}; archive compensation failed: {rollback_error}"
                 )));
             }
             return Err(MobError::from(append_error));
@@ -3812,59 +3816,92 @@ impl MobActor {
             .await
             .and_then(|comms| comms.public_key());
 
+        // Resolve `external_addressable` from the effective profile so we
+        // can inform both the shell roster and the DSL (see the
+        // `MobMachineInput::Spawn` dispatch below). Honours any override
+        // previously applied via `SpawnTooling::Profile` resolution.
+        let external_addressable = if let Some(profile) = effective_profile_override.as_ref() {
+            profile.external_addressable
+        } else {
+            self.definition
+                .resolve_profile(profile_name, self.realm_profile_store.as_ref())
+                .await
+                .map(|profile| profile.external_addressable)
+                .unwrap_or(false)
+        };
+
         {
             let mut roster = self.roster.write().await;
             let inserted = roster.add_member(crate::roster::RosterAddEntry {
                 agent_identity: identity.clone(),
                 generation,
                 fence_token,
-                agent_runtime_id,
-                meerkat_id: meerkat_id.clone(),
+                agent_runtime_id: agent_runtime_id.clone(),
                 role: profile_name.clone(),
                 runtime_mode,
                 member_ref: member_ref.clone(),
                 peer_id,
                 labels,
                 effective_profile_override,
-                voice_intent_present,
             });
             debug_assert!(
                 inserted,
                 "duplicate meerkat insert should be prevented before add()"
             );
         }
-        self.restore_diagnostics.write().await.remove(meerkat_id);
-        #[cfg(feature = "runtime-adapter")]
-        self.restore_realtime_attachment_intent_if_needed(
-            &member_ref,
-            runtime_mode,
-            voice_intent_present,
-        )
-        .await;
+
+        // Feed `Spawn` into the MobMachine DSL so it populates
+        // `live_runtime_ids` + `externally_addressable_runtime_ids` and
+        // downstream guards (Retire, SubmitWork, …) operate on authoritative
+        // membership state instead of shell-only roster tracking.
+        if let Err(error) = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::Spawn {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                generation: mob_dsl::Generation::from_domain(generation),
+                external_addressable,
+            },
+            "finalize_spawn_from_pending_dsl_spawn",
+        ) {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                agent_runtime_id = %agent_runtime_id,
+                %error,
+                "Spawn DSL input rejected; downstream DSL membership guards may diverge from roster"
+            );
+        }
+        self.restore_diagnostics
+            .write()
+            .await
+            .remove(agent_identity);
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
                 .apply_kickoff_input(
-                    meerkat_id,
+                    agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkPending {
-                        member_id: meerkat_id.to_string(),
+                        member_id: agent_identity.to_string(),
                     },
                 )
                 .await?;
         }
         tracing::debug!(
-            meerkat_id = %meerkat_id,
+            agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending roster updated"
         );
 
-        let planned_wiring_targets = self.spawn_wiring_targets(profile_name, meerkat_id).await;
+        let planned_wiring_targets = self
+            .spawn_wiring_targets(profile_name, agent_identity)
+            .await;
 
         let (wired_spawn_targets, wiring_error) = self
-            .apply_spawn_wiring(meerkat_id, &planned_wiring_targets)
+            .apply_spawn_wiring(agent_identity, &planned_wiring_targets)
             .await;
         if let Some(wiring_error) = wiring_error {
             if let Err(rollback_error) = self
                 .rollback_failed_spawn(
-                    meerkat_id,
+                    agent_identity,
                     profile_name,
                     &member_ref,
                     &wired_spawn_targets,
@@ -3873,7 +3910,7 @@ impl MobActor {
                 .await
             {
                 return Err(MobError::Internal(format!(
-                    "spawn wiring failed for '{meerkat_id}': {wiring_error}; rollback failed: {rollback_error}"
+                    "spawn wiring failed for '{agent_identity}': {wiring_error}; rollback failed: {rollback_error}"
                 )));
             }
             return Err(wiring_error);
@@ -3883,20 +3920,20 @@ impl MobActor {
         if runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             let _ = self
                 .apply_kickoff_input(
-                    meerkat_id,
+                    agent_identity,
                     mob_dsl::MobMachineInput::KickoffMarkStarting {
-                        member_id: meerkat_id.to_string(),
+                        member_id: agent_identity.to_string(),
                     },
                 )
                 .await?;
             if let Err(start_error) = self
-                .start_autonomous_member(meerkat_id, &member_ref, prompt)
+                .start_autonomous_member(agent_identity, &member_ref, prompt)
                 .await
             {
-                self.clear_kickoff_state(meerkat_id).await;
+                self.clear_kickoff_state(agent_identity).await;
                 if let Err(rollback_error) = self
                     .rollback_failed_spawn(
-                        meerkat_id,
+                        agent_identity,
                         profile_name,
                         &member_ref,
                         &wired_spawn_targets,
@@ -3905,7 +3942,7 @@ impl MobActor {
                     .await
                 {
                     return Err(MobError::Internal(format!(
-                        "spawn host-loop start failed for '{meerkat_id}': {start_error}; rollback failed: {rollback_error}"
+                        "spawn host-loop start failed for '{agent_identity}': {start_error}; rollback failed: {rollback_error}"
                     )));
                 }
                 return Err(start_error);
@@ -3916,9 +3953,9 @@ impl MobActor {
         // request came from a session-owned mob tool call.
         if auto_wire_parent
             && let Some(parent_id) = self
-                .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), meerkat_id)
+                .resolve_auto_wire_parent_target(owner_bridge_session_id.as_ref(), agent_identity)
                 .await
-            && let Err(error) = self.do_wire(meerkat_id, &parent_id).await
+            && let Err(error) = self.do_wire(agent_identity, &parent_id).await
         {
             tracing::warn!(
                 error = %error,
@@ -3935,9 +3972,9 @@ impl MobActor {
             for peer_id in wiring
                 .local_peers
                 .into_iter()
-                .filter(|peer_id| peer_id != meerkat_id)
+                .filter(|peer_id| peer_id != agent_identity)
             {
-                if let Err(e) = self.do_wire(meerkat_id, &peer_id).await {
+                if let Err(e) = self.do_wire(agent_identity, &peer_id).await {
                     tracing::warn!(
                         error = %e,
                         peer = %peer_id,
@@ -3949,10 +3986,10 @@ impl MobActor {
             wiring.external_peers.sort_by(|a, b| a.name.cmp(&b.name));
             wiring.external_peers.dedup_by(|a, b| a.name == b.name);
             for spec in wiring.external_peers {
-                if spec.name == meerkat_id.as_str() {
+                if spec.name == agent_identity.as_str() {
                     continue;
                 }
-                if let Err(e) = self.do_wire_external(meerkat_id, &spec).await {
+                if let Err(e) = self.do_wire_external(agent_identity, &spec).await {
                     tracing::warn!(
                         error = %e,
                         peer = %spec.name,
@@ -3967,7 +4004,7 @@ impl MobActor {
         failed_restore_peer_ids.dedup();
 
         tracing::debug!(
-            meerkat_id = %meerkat_id,
+            agent_identity = %agent_identity,
             "MobActor::finalize_spawn_from_pending done"
         );
         Ok(FinalizeSpawnOutcome {
@@ -3982,7 +4019,7 @@ impl MobActor {
     async fn spawn_wiring_targets(
         &self,
         profile_name: &ProfileName,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
     ) -> Vec<MeerkatId> {
         let mut targets = Vec::new();
         let broken_members = self
@@ -4003,13 +4040,13 @@ impl MobActor {
                     .by_profile(&orchestrator.profile)
                     .filter(|entry| {
                         entry.state == crate::roster::MemberState::Active
-                            && !broken_members.contains(&entry.meerkat_id)
+                            && !broken_members.contains(&entry.agent_identity)
                     })
-                    .map(|entry| entry.meerkat_id.clone())
+                    .map(|entry| entry.agent_identity.clone())
                     .collect::<Vec<_>>()
             };
             for orchestrator_id in orchestrator_ids {
-                if orchestrator_id != *meerkat_id && !targets.contains(&orchestrator_id) {
+                if orchestrator_id != *agent_identity && !targets.contains(&orchestrator_id) {
                     targets.push(orchestrator_id);
                 }
             }
@@ -4030,10 +4067,10 @@ impl MobActor {
                         .by_profile(target_profile)
                         .filter(|entry| {
                             entry.state == crate::roster::MemberState::Active
-                                && !broken_members.contains(&entry.meerkat_id)
-                                && entry.meerkat_id != *meerkat_id
+                                && !broken_members.contains(&entry.agent_identity)
+                                && entry.agent_identity != *agent_identity
                         })
-                        .map(|entry| entry.meerkat_id.clone())
+                        .map(|entry| entry.agent_identity.clone())
                         .collect::<Vec<_>>()
                 };
                 for target_id in target_ids {
@@ -4065,11 +4102,11 @@ impl MobActor {
             .list()
             .find(|entry| {
                 entry.state == crate::roster::MemberState::Active
-                    && entry.meerkat_id != *spawned_meerkat_id
-                    && !broken_members.contains(&entry.meerkat_id)
+                    && entry.agent_identity != *spawned_meerkat_id
+                    && !broken_members.contains(&entry.agent_identity)
                     && entry.member_ref.bridge_session_id() == Some(owner_bridge_session_id)
             })
-            .map(|entry| entry.meerkat_id.clone())
+            .map(|entry| entry.agent_identity.clone())
     }
 
     /// P1-T05: retire() removes a meerkat.
@@ -4077,121 +4114,38 @@ impl MobActor {
     ///
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
-    async fn handle_force_cancel(&self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    async fn handle_force_cancel(&self, agent_identity: MeerkatId) -> Result<(), MobError> {
         let roster = self.roster.read().await;
         let entry = roster
-            .get(&meerkat_id)
-            .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
+            .get(&agent_identity)
+            .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
         let member_ref = entry.member_ref.clone();
         drop(roster);
 
         self.provisioner.interrupt_member(&member_ref).await
     }
 
-    async fn handle_realtime_attach(&mut self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
-        self.ensure_pending_spawn_alignment("handle_realtime_attach preflight")?;
-        let entry = {
-            let roster = self.roster.read().await;
-            roster
-                .get(&meerkat_id)
-                .cloned()
-                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
-        };
-
-        if !entry.voice_intent_present {
-            // DELETE_ME A4 + B6: apply the DSL RealtimeAttach input so
-            // `member_voice_intent` in the MobMachine DSL state is the
-            // canonical durable-intent fact. The previous shape
-            // appended the event + mutated the roster directly, which
-            // left the DSL field inert and created parallel truth
-            // between DSL and roster. Per dogma principles #1 and #2,
-            // MobMachine owns the intent; the roster becomes a
-            // rebuildable projection (dogma #11).
-            self.apply_dsl_input(
-                mob_dsl::MobMachineInput::RealtimeAttach {
-                    agent_identity: mob_dsl::AgentIdentity::from(entry.agent_identity.as_str()),
-                },
-                "realtime_attach_input",
-            )
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "MobMachine RealtimeAttach transition rejected: {error}"
-                ))
-            })?;
-            self.append_voice_intent_set_event(&meerkat_id).await?;
-            self.roster
-                .write()
-                .await
-                .set_voice_intent_by_identity(&entry.agent_identity, true);
-        }
-        #[cfg(feature = "runtime-adapter")]
-        self.reconcile_realtime_attachment_runtime(&entry.member_ref, entry.runtime_mode, true)
-            .await;
-        self.ensure_pending_spawn_alignment("handle_realtime_attach completion")?;
-        Ok(true)
-    }
-
-    async fn handle_realtime_detach(&mut self, meerkat_id: MeerkatId) -> Result<bool, MobError> {
-        self.ensure_pending_spawn_alignment("handle_realtime_detach preflight")?;
-        let entry = {
-            let roster = self.roster.read().await;
-            roster
-                .get(&meerkat_id)
-                .cloned()
-                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
-        };
-
-        if entry.voice_intent_present {
-            // DELETE_ME A4 + B6: see handle_realtime_attach above for
-            // the canonical DSL-authority rationale. Detach clears
-            // the same `member_voice_intent` field through the DSL
-            // RealtimeDetach transition.
-            self.apply_dsl_input(
-                mob_dsl::MobMachineInput::RealtimeDetach {
-                    agent_identity: mob_dsl::AgentIdentity::from(entry.agent_identity.as_str()),
-                },
-                "realtime_detach_input",
-            )
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "MobMachine RealtimeDetach transition rejected: {error}"
-                ))
-            })?;
-            self.append_voice_intent_cleared_event(&meerkat_id).await?;
-            self.roster
-                .write()
-                .await
-                .set_voice_intent_by_identity(&entry.agent_identity, false);
-        }
-        #[cfg(feature = "runtime-adapter")]
-        self.reconcile_realtime_attachment_runtime(&entry.member_ref, entry.runtime_mode, false)
-            .await;
-        self.ensure_pending_spawn_alignment("handle_realtime_detach completion")?;
-        Ok(true)
-    }
-
     ///
     /// Mark-then-best-effort-cleanup: event first, mark Retiring, disposal
     /// pipeline (policy-driven), then unconditional roster removal.
-    async fn handle_retire(&mut self, meerkat_id: MeerkatId) -> Result<(), MobError> {
+    async fn handle_retire(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
-        self.handle_retire_inner(&meerkat_id, false, true).await?;
+        self.handle_retire_inner(&agent_identity, false).await?;
         self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
     async fn handle_retire_inner(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         bulk: bool,
-        clear_voice_intent: bool,
     ) -> Result<(), MobError> {
         // Idempotent: already retired / never existed is success.
         let entry = {
             let roster = self.roster.read().await;
-            let Some(entry) = roster.get(meerkat_id).cloned() else {
+            let Some(entry) = roster.get(agent_identity).cloned() else {
                 tracing::warn!(
                     mob_id = %self.definition.id,
-                    meerkat_id = %meerkat_id,
+                    agent_identity = %agent_identity,
                     "retire requested for unknown meerkat id"
                 );
                 return Ok(());
@@ -4199,28 +4153,43 @@ impl MobActor {
             entry
         };
 
-        if clear_voice_intent && entry.voice_intent_present {
-            self.append_voice_intent_cleared_event(meerkat_id).await?;
-        }
-
         // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
-            .retire_event_exists(meerkat_id, &entry.member_ref)
+            .retire_event_exists(agent_identity, &entry.member_ref)
             .await?;
         if !retire_event_already_present {
-            self.append_retire_event(meerkat_id, &entry.role, &entry.member_ref)
+            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
                 .await?;
         }
 
-        // Mark as Retiring (blocks re-spawn with same ID).
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring(meerkat_id);
+        // Mark as Retiring in the DSL (blocks re-spawn with same ID).
+        // Shell roster does not carry authoritative state; `member_state_markers`
+        // in the DSL is the source of truth and overlays the read-only projection
+        // on snapshot construction.
+        //
+        // The DSL guards reject Retire when the runtime_id is absent from
+        // `live_runtime_ids` or the phase forbids it. That matches the existing
+        // idempotent semantics of handle_retire_inner (already-retired / unknown
+        // => no-op), so a guard rejection is logged but does not fail the retire.
+        if let Err(error) = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::Retire {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+            },
+            "handle_retire_inner_mark_retiring",
+        ) {
+            tracing::debug!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                agent_runtime_id = %entry.agent_runtime_id,
+                %error,
+                "Retire DSL input rejected (likely already retiring); continuing disposal"
+            );
         }
+        self.sync_retiring_projection_into_roster().await;
 
         // Snapshot context and run disposal pipeline.
         let ctx = self
-            .disposal_context_from_entry(meerkat_id, &entry, clear_voice_intent)
+            .disposal_context_from_entry(agent_identity, &entry)
             .await;
         let mut policy: Box<dyn ErrorPolicy> = if bulk {
             Box::new(BulkBestEffort)
@@ -4264,7 +4233,7 @@ impl MobActor {
     /// structured error on failure.
     async fn handle_respawn(
         &mut self,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         initial_message: Option<ContentInput>,
     ) -> Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError> {
         use super::handle::{MemberRespawnReceipt, MobRespawnError};
@@ -4273,12 +4242,12 @@ impl MobActor {
             .map_err(MobRespawnError::from)?;
 
         let canceled = self.cancel_pending_spawns_for_member(
-            &meerkat_id,
+            &agent_identity,
             "respawn command superseded pending spawn",
         );
         if canceled > 0 {
             tracing::info!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 canceled,
                 "respawn canceled pending spawn lineage before replacement workflow"
             );
@@ -4288,9 +4257,9 @@ impl MobActor {
         let snapshot = {
             let roster = self.roster.read().await;
             let entry = roster
-                .get(&meerkat_id)
+                .get(&agent_identity)
                 .cloned()
-                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
+                .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
@@ -4318,32 +4287,29 @@ impl MobActor {
                         .filter_map(|peer_id| {
                             roster
                                 .get_by_identity(peer_id)
-                                .map(|e| e.meerkat_id.clone())
+                                .map(|e| e.agent_identity.clone())
                         })
                         .collect(),
                     external_peers: entry.external_peer_specs.values().cloned().collect(),
                 },
                 binding,
                 effective_profile_override: entry.effective_profile_override,
-                voice_intent_present: entry.voice_intent_present,
             }
         };
 
         let replacement_generation = snapshot.generation.next();
 
         // 2. Retire the existing member (archives the session, removes from roster).
-        // Respawn preserves voice intent: use the voice-preserving retire_inner
-        // variant (clear_voice_intent=false) instead of handle_retire.
-        if let Err(error) = self.handle_retire_inner(&meerkat_id, false, false).await {
+        if let Err(error) = self.handle_retire_inner(&agent_identity, false).await {
             let roster_still_contains_member = {
                 let roster = self.roster.read().await;
-                roster.get(&meerkat_id).is_some()
+                roster.get(&agent_identity).is_some()
             };
             if roster_still_contains_member {
                 return Err(MobRespawnError::from(error));
             }
             let mut cleanup_report = super::handle::PreviousMemberCleanupReport {
-                identity: AgentIdentity::from(meerkat_id.as_str()),
+                identity: AgentIdentity::from(agent_identity.as_str()),
                 agent_runtime_id: snapshot.old_runtime_id.clone(),
                 fence_token: snapshot.old_fence_token,
                 retire_attempted: true,
@@ -4412,7 +4378,7 @@ impl MobActor {
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
         let prompt = initial_message.unwrap_or_else(|| {
-            ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &meerkat_id))
+            ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity))
         });
         // Prefer roster's effective_profile_override on respawn for lifecycle safety.
         let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
@@ -4426,7 +4392,7 @@ impl MobActor {
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
             profile_name: &snapshot.profile_name,
-            meerkat_id: &meerkat_id,
+            agent_identity: &agent_identity,
             profile: &profile,
             definition: &self.definition,
             external_tools,
@@ -4445,7 +4411,7 @@ impl MobActor {
         let req = build::to_create_session_request(&config, prompt.clone());
         let peer_name = format!(
             "{}/{}/{}",
-            self.definition.id, snapshot.profile_name, meerkat_id
+            self.definition.id, snapshot.profile_name, agent_identity
         );
         let provision_request = ProvisionMemberRequest {
             create_session: req,
@@ -4459,13 +4425,13 @@ impl MobActor {
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
         self.stage_orchestrator_spawn()
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(meerkat_id.as_str()),
+                identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: format!("failed to stage respawn replacement spawn: {error}"),
             })?;
         let (respawn_inline_reply_tx, _respawn_inline_reply_rx) = oneshot::channel();
         let respawn_pending = PendingSpawn {
             profile_name: snapshot.profile_name.clone(),
-            meerkat_id: meerkat_id.clone(),
+            agent_identity: agent_identity.clone(),
             prompt: prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
@@ -4475,7 +4441,6 @@ impl MobActor {
                 || !snapshot.restore_wiring.external_peers.is_empty())
             .then_some(snapshot.restore_wiring.clone()),
             effective_profile_override: snapshot.effective_profile_override.clone(),
-            voice_intent_present: snapshot.voice_intent_present,
             progress: Arc::new(std::sync::Mutex::new(PendingSpawnProgress::default())),
             reply_tx: respawn_inline_reply_tx,
         };
@@ -4486,7 +4451,7 @@ impl MobActor {
         if let Err(error) = self.ensure_pending_spawn_alignment("handle_respawn staged replacement")
         {
             tracing::error!(
-                meerkat_id = %meerkat_id,
+                agent_identity = %agent_identity,
                 error = %error,
                 "pending spawn alignment violated while staging respawn replacement"
             );
@@ -4495,7 +4460,7 @@ impl MobActor {
             )
             .await;
             return Err(MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(meerkat_id.as_str()),
+                identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             });
         }
@@ -4508,14 +4473,14 @@ impl MobActor {
                 .provision_member(provision_request)
                 .await
                 .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(meerkat_id.as_str()),
+                    identity: AgentIdentity::from(agent_identity.as_str()),
                     reason: error.to_string(),
                 })?;
             if snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost
                 && let Err(capability_error) =
                     Self::ensure_autonomous_dispatch_capability_for_provisioner(
                         &self.provisioner,
-                        &meerkat_id,
+                        &agent_identity,
                         &spawn_receipt.member_ref,
                     )
                     .await
@@ -4526,34 +4491,34 @@ impl MobActor {
                     .await
                 {
                     return Err(MobRespawnError::SpawnAfterRetire {
-                        identity: AgentIdentity::from(meerkat_id.as_str()),
+                        identity: AgentIdentity::from(agent_identity.as_str()),
                         reason: format!(
                             "autonomous capability check failed: {capability_error}; cleanup retire failed: {retire_error}"
                         ),
                     });
                 }
                 return Err(MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(meerkat_id.as_str()),
+                    identity: AgentIdentity::from(agent_identity.as_str()),
                     reason: capability_error.to_string(),
                 });
             }
 
             let provision = PendingProvision::new(
                 spawn_receipt.member_ref.clone(),
-                meerkat_id.clone(),
+                agent_identity.clone(),
                 self.provisioner.clone(),
             );
             if let Err(error) = self.require_state(&[MobState::Running]) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
-                        identity: AgentIdentity::from(meerkat_id.as_str()),
+                        identity: AgentIdentity::from(agent_identity.as_str()),
                         reason: format!(
                             "mob state changed before respawn finalization: {error}; cleanup retire failed: {retire_error}"
                         ),
                     });
                 }
                 return Err(MobRespawnError::SpawnAfterRetire {
-                    identity: AgentIdentity::from(meerkat_id.as_str()),
+                    identity: AgentIdentity::from(agent_identity.as_str()),
                     reason: error.to_string(),
                 });
             }
@@ -4562,7 +4527,7 @@ impl MobActor {
                 || !snapshot.restore_wiring.external_peers.is_empty()
             {
                 tracing::info!(
-                    meerkat_id = %meerkat_id,
+                    agent_identity = %agent_identity,
                     local_peers = ?snapshot.restore_wiring.local_peers,
                     external_peers = ?snapshot.restore_wiring.external_peers,
                     "respawn: restoring peer wiring during replacement finalization"
@@ -4573,7 +4538,7 @@ impl MobActor {
             let finalized = self
                 .finalize_spawn_from_pending(
                 &snapshot.profile_name,
-                &meerkat_id,
+                &agent_identity,
                 replacement_generation,
                 respawn_fence,
                 snapshot.runtime_mode,
@@ -4587,11 +4552,10 @@ impl MobActor {
                     || !snapshot.restore_wiring.external_peers.is_empty())
                 .then_some(snapshot.restore_wiring.clone()),
                 snapshot.effective_profile_override.clone(),
-                snapshot.voice_intent_present,
             )
             .await
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(meerkat_id.as_str()),
+                identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             })?;
 
@@ -4600,9 +4564,9 @@ impl MobActor {
             } else {
                 Err(MobRespawnError::TopologyRestoreFailed {
                     receipt: super::handle::MemberRespawnReceipt::new(
-                        AgentIdentity::from(meerkat_id.as_str()),
+                        AgentIdentity::from(agent_identity.as_str()),
                         crate::ids::AgentRuntimeId::new(
-                            AgentIdentity::from(meerkat_id.as_str()),
+                            AgentIdentity::from(agent_identity.as_str()),
                             replacement_generation,
                         ),
                         snapshot.old_fence_token,
@@ -4621,23 +4585,23 @@ impl MobActor {
         }
         self.ensure_pending_spawn_alignment("handle_respawn completion")
             .map_err(|error| MobRespawnError::SpawnAfterRetire {
-                identity: AgentIdentity::from(meerkat_id.as_str()),
+                identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             })?;
         let _replacement = replacement_result?;
 
         // 5. Build the receipt from the committed replacement member reference.
         Ok(MemberRespawnReceipt::new(
-            AgentIdentity::from(meerkat_id.as_str()),
+            AgentIdentity::from(agent_identity.as_str()),
             crate::ids::AgentRuntimeId::new(
-                AgentIdentity::from(meerkat_id.as_str()),
+                AgentIdentity::from(agent_identity.as_str()),
                 replacement_generation,
             ),
             snapshot.old_fence_token,
             self.roster
                 .read()
                 .await
-                .get(&meerkat_id)
+                .get(&agent_identity)
                 .map(|entry| entry.fence_token)
                 .unwrap_or(snapshot.old_fence_token),
         ))
@@ -4650,19 +4614,17 @@ impl MobActor {
     /// Snapshot member state for disposal from a roster entry.
     async fn disposal_context_from_entry(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         entry: &RosterEntry,
-        clear_voice_intent: bool,
     ) -> DisposalContext {
         let retiring_key = self
             .provisioner_comms(&entry.member_ref)
             .await
             .and_then(|comms| comms.public_key());
         DisposalContext {
-            meerkat_id: meerkat_id.clone(),
+            agent_identity: agent_identity.clone(),
             entry: entry.clone(),
             retiring_key,
-            clear_voice_intent,
         }
     }
 
@@ -4710,7 +4672,6 @@ impl MobActor {
             DisposalStep::StopHostLoop => self.dispose_stop_host_loop(ctx).await,
             DisposalStep::NotifyPeers => self.dispose_notify_peers(ctx).await,
             DisposalStep::RemoveTrustEdges => self.dispose_remove_trust_edges(ctx).await,
-            DisposalStep::RealtimeDetach => self.dispose_realtime_detach(ctx).await,
             DisposalStep::ArchiveSession => self.dispose_archive_session(ctx).await,
         }
     }
@@ -4718,7 +4679,7 @@ impl MobActor {
     /// Stop the autonomous member and unregister session (disposal only).
     async fn dispose_stop_host_loop(&mut self, ctx: &DisposalContext) -> Result<(), MobError> {
         if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
-            self.stop_autonomous_member(&ctx.meerkat_id, &ctx.entry.member_ref)
+            self.stop_autonomous_member(&ctx.agent_identity, &ctx.entry.member_ref)
                 .await?;
             // Full teardown: unregister from MeerkatMachine.
             // stop_autonomous_member only aborts the drain; disposal also
@@ -4747,7 +4708,7 @@ impl MobActor {
             let Some(peer_entry) = peer_entry else {
                 tracing::debug!(
                     mob_id = %self.definition.id,
-                    meerkat_id = %ctx.meerkat_id,
+                    agent_identity = %ctx.agent_identity,
                     peer_id = %peer_identity,
                     "dispose_notify_peers: skipping absent peer"
                 );
@@ -4763,7 +4724,7 @@ impl MobActor {
             if let Err(error) = self
                 .notify_peer_retired(
                     &recipient_spec,
-                    &ctx.meerkat_id,
+                    &ctx.agent_identity,
                     &ctx.entry,
                     &retiring_comms,
                 )
@@ -4807,7 +4768,7 @@ impl MobActor {
             let Some(peer_member_ref) = peer_member_ref else {
                 tracing::debug!(
                     mob_id = %self.definition.id,
-                    meerkat_id = %ctx.meerkat_id,
+                    agent_identity = %ctx.agent_identity,
                     peer_id = %peer_identity,
                     "dispose_remove_trust_edges: skipping absent peer"
                 );
@@ -4826,38 +4787,6 @@ impl MobActor {
             Some(error) => Err(error),
             None => Ok(()),
         }
-    }
-
-    /// Detach runtime-owned live voice mechanics before session archival.
-    async fn dispose_realtime_detach(&self, ctx: &DisposalContext) -> Result<(), MobError> {
-        #[cfg(feature = "runtime-adapter")]
-        {
-            let (Some(adapter), Some(session_id)) = (
-                &self.runtime_adapter,
-                ctx.entry.member_ref.bridge_session_id(),
-            ) else {
-                return Ok(());
-            };
-
-            adapter.detach_live(session_id).await.map_err(|error| {
-                MobError::Internal(format!("failed to detach live voice: {error}"))
-            })?;
-
-            if ctx.clear_voice_intent {
-                adapter
-                    .project_realtime_attachment_intent(session_id, false)
-                    .await
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "failed to clear projected live voice intent during retire: {error}"
-                        ))
-                    })?;
-            }
-        }
-        #[cfg(not(feature = "runtime-adapter"))]
-        let _ = ctx;
-
-        Ok(())
     }
 
     /// Archive the member's session. Treats NotFound as success.
@@ -4879,18 +4808,18 @@ impl MobActor {
 
     /// Prune edge locks for the member. Infallible.
     async fn dispose_prune_edge_locks(&self, ctx: &DisposalContext) {
-        self.edge_locks.prune(ctx.meerkat_id.as_str()).await;
+        self.edge_locks.prune(ctx.agent_identity.as_str()).await;
     }
 
     /// Remove the member from the roster. Infallible.
     pub(super) async fn dispose_remove_from_roster(&self, ctx: &DisposalContext) {
         let mut roster = self.roster.write().await;
-        roster.remove_member(&ctx.meerkat_id);
+        roster.remove_member(&ctx.agent_identity);
         drop(roster);
         self.restore_diagnostics
             .write()
             .await
-            .remove(&ctx.meerkat_id);
+            .remove(&ctx.agent_identity);
     }
 
     /// P1-T06: wire() establishes local or external trust.
@@ -5656,7 +5585,7 @@ impl MobActor {
         entry: RosterEntry,
     ) -> RemoteDestroyOutcome {
         let identity = entry.agent_identity.clone();
-        let meerkat_id = entry.meerkat_id.clone();
+        let agent_identity = entry.agent_identity.clone();
         let mut outcome = RemoteDestroyOutcome {
             identity: identity.clone(),
             force_destroyed: false,
@@ -5672,12 +5601,12 @@ impl MobActor {
         };
 
         match self
-            .retire_event_exists(&meerkat_id, &entry.member_ref)
+            .retire_event_exists(&agent_identity, &entry.member_ref)
             .await
         {
             Ok(false) => {
                 if let Err(error) = self
-                    .append_retire_event(&meerkat_id, &entry.role, &entry.member_ref)
+                    .append_retire_event(&agent_identity, &entry.role, &entry.member_ref)
                     .await
                 {
                     outcome
@@ -5691,13 +5620,28 @@ impl MobActor {
                 .push(format!("retire event lookup failed: {error}")),
         }
 
-        {
-            let mut roster = self.roster.write().await;
-            roster.mark_retiring(&meerkat_id);
+        // Mark as Retiring in the DSL (blocks re-spawn with same ID).
+        // See handle_retire_inner for the rationale; DSL guards reject Retire
+        // when the runtime_id is absent or the phase forbids it, which matches
+        // the existing idempotent semantics here.
+        if let Err(error) = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::Retire {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+            },
+            "destroy_remote_member_for_destroy_mark_retiring",
+        ) {
+            tracing::debug!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                agent_runtime_id = %entry.agent_runtime_id,
+                %error,
+                "Retire DSL input rejected (likely already retiring); continuing destroy"
+            );
         }
+        self.sync_retiring_projection_into_roster().await;
 
         let ctx = self
-            .disposal_context_from_entry(&meerkat_id, &entry, true)
+            .disposal_context_from_entry(&agent_identity, &entry)
             .await;
         let mut policy = BulkBestEffort;
         let disposal = self.dispose_member(&ctx, &mut policy).await;
@@ -5895,10 +5839,7 @@ impl MobActor {
             .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
 
         for entry in local_entries {
-            if let Err(error) = self
-                .handle_retire_inner(&entry.meerkat_id, true, true)
-                .await
-            {
+            if let Err(error) = self.handle_retire_inner(&entry.agent_identity, true).await {
                 report.push_error(error.to_string());
                 return Err(MobDestroyError::Incomplete { report });
             }
@@ -6297,7 +6238,7 @@ impl MobActor {
             let roster = self.roster.read().await;
             roster
                 .list_all()
-                .map(|entry| entry.meerkat_id.clone())
+                .map(|entry| entry.agent_identity.clone())
                 .collect::<Vec<_>>()
         };
         if ids.is_empty() {
@@ -6310,7 +6251,7 @@ impl MobActor {
             if let Err((id, error)) = result {
                 tracing::warn!(
                     mob_id = %self.definition.id,
-                    meerkat_id = %id,
+                    agent_identity = %id,
                     error = %error,
                     "{context}: retire failed for member"
                 );
@@ -6330,24 +6271,46 @@ impl MobActor {
     }
 
     async fn retire_one(&mut self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(&id, true, true)
+        self.handle_retire_inner(&id, true)
             .await
             .map_err(|error| (id, error))
     }
 
     async fn handle_task_create(
-        &self,
+        &mut self,
         subject: String,
         description: String,
         blocked_by: Vec<TaskId>,
     ) -> Result<TaskId, MobError> {
-        self.task_board_service
-            .create_task(subject, description, blocked_by)
-            .await
+        let task_id = self
+            .task_board_service
+            .create_task(subject.clone(), description.clone(), blocked_by.clone())
+            .await?;
+        // Route the authoritative creation through the DSL so
+        // `MobMachine::tasks` and the guard-visible id set stay in lock
+        // step with the event-sourced shell projection. Guard rejects
+        // duplicates via the id-uniqueness check; the event-sourced
+        // TaskId is a fresh UUID, so insertion always succeeds here on
+        // the happy path.
+        if let Err(error) = self.apply_dsl_input(
+            mob_dsl::MobMachineInput::TaskCreate {
+                task_id: mob_dsl::TaskId::from(task_id.as_str()),
+                task_payload: Self::task_payload_to_dsl(&subject, &description, &blocked_by),
+            },
+            "handle_task_create",
+        ) {
+            tracing::warn!(
+                mob_id = %self.definition.id,
+                task_id = %task_id,
+                %error,
+                "TaskCreate DSL input rejected; DSL and event-sourced task board may diverge"
+            );
+        }
+        Ok(task_id)
     }
 
     async fn handle_task_update(
-        &self,
+        &mut self,
         task_id: TaskId,
         status: TaskStatus,
         owner: Option<AgentIdentity>,
@@ -6355,13 +6318,29 @@ impl MobActor {
         // TLA+ TaskBindingInvariant: owner must be a known identity (roster member).
         if let Some(ref owner_id) = owner {
             let roster = self.roster.read().await;
-            let meerkat_id = MeerkatId::from(owner_id.as_str());
-            if roster.get(&meerkat_id).is_none() {
+            let agent_identity = MeerkatId::from(owner_id.as_str());
+            if roster.get(&agent_identity).is_none() {
                 return Err(MobError::Internal(format!(
                     "TaskBindingInvariant violated: task owner '{owner_id}' is not in the roster",
                 )));
             }
         }
+        // Gate the status transition through the DSL guard set before
+        // applying the shell-side event-sourced update. Rolling back from
+        // a terminal status (Completed / Cancelled) is rejected here
+        // rather than by the event projection.
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::TaskUpdate {
+                task_id: mob_dsl::TaskId::from(task_id.as_str()),
+                new_status: Self::task_status_to_dsl(status),
+            },
+            "handle_task_update",
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "task update rejected by MobMachine guards: {error}"
+            ))
+        })?;
         self.task_board_service
             .update_task(task_id, status, owner)
             .await
@@ -6375,7 +6354,7 @@ impl MobActor {
     /// completes.
     async fn handle_external_turn(
         &mut self,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
@@ -6384,43 +6363,43 @@ impl MobActor {
         // Look up the entry
         let entry = {
             let roster = self.roster.read().await;
-            roster.get(&meerkat_id).cloned()
+            roster.get(&agent_identity).cloned()
         };
         let entry = match entry {
             Some(e) => {
                 if e.state != crate::roster::MemberState::Active {
-                    return Err(MobError::MemberNotFound(meerkat_id));
+                    return Err(MobError::MemberNotFound(agent_identity));
                 }
-                self.ensure_member_not_broken(&e.meerkat_id).await?;
+                self.ensure_member_not_broken(&e.agent_identity).await?;
                 e
             }
             None => {
-                let agent_identity = AgentIdentity::from(meerkat_id.as_str());
+                let agent_identity = AgentIdentity::from(agent_identity.as_str());
                 if let Some(spec) = self.spawn_policy.resolve(&agent_identity).await {
-                    Box::pin(self.spawn_from_policy_inline(&meerkat_id, spec))
+                    Box::pin(self.spawn_from_policy_inline(&agent_identity, spec))
                         .await
                         .map_err(|error| {
                             MobError::Internal(format!(
-                                "auto-spawn failed for '{meerkat_id}': {error}"
+                                "auto-spawn failed for '{agent_identity}': {error}"
                             ))
                         })?;
                     let spawned_entry = {
                         let roster = self.roster.read().await;
-                        roster.get(&meerkat_id).cloned()
+                        roster.get(&agent_identity).cloned()
                     }
                     .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "auto-spawned member '{meerkat_id}' missing from roster after completion"
+                            "auto-spawned member '{agent_identity}' missing from roster after completion"
                         ))
                     })?;
                     if spawned_entry.state != crate::roster::MemberState::Active {
                         return Err(MobError::Internal(format!(
-                            "auto-spawned member '{meerkat_id}' is not active"
+                            "auto-spawned member '{agent_identity}' is not active"
                         )));
                     }
                     spawned_entry
                 } else {
-                    return Err(MobError::MemberNotFound(meerkat_id));
+                    return Err(MobError::MemberNotFound(agent_identity));
                 }
             }
         };
@@ -6435,7 +6414,7 @@ impl MobActor {
         };
 
         if !profile.external_addressable {
-            return Err(MobError::NotExternallyAddressable(meerkat_id));
+            return Err(MobError::NotExternallyAddressable(agent_identity));
         }
 
         self.dispatch_member_turn(&entry, content, handling_mode, render_metadata)
@@ -6445,21 +6424,21 @@ impl MobActor {
     /// Internal-turn path bypasses external_addressable checks.
     async fn handle_internal_turn(
         &self,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: ContentInput,
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_internal_turn preflight")?;
         let entry = {
             let roster = self.roster.read().await;
             roster
-                .get(&meerkat_id)
+                .get(&agent_identity)
                 .cloned()
-                .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?
+                .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?
         };
         if entry.state != crate::roster::MemberState::Active {
-            return Err(MobError::MemberNotFound(meerkat_id));
+            return Err(MobError::MemberNotFound(agent_identity));
         }
-        self.ensure_member_not_broken(&entry.meerkat_id).await?;
+        self.ensure_member_not_broken(&entry.agent_identity).await?;
 
         self.dispatch_member_turn(
             &entry,
@@ -6484,7 +6463,7 @@ impl MobActor {
                     Self::peer_only_member_control_error(entry.runtime_mode, "direct turn delivery")
                 })?;
 
-                self.ensure_autonomous_runtime_ready(&entry.meerkat_id, &entry.member_ref)
+                self.ensure_autonomous_runtime_ready(&entry.agent_identity, &entry.member_ref)
                     .await?;
 
                 let injector = self
@@ -6494,7 +6473,7 @@ impl MobActor {
                     .ok_or_else(|| {
                         MobError::Internal(format!(
                             "missing event injector for autonomous member '{}'",
-                            entry.meerkat_id
+                            entry.agent_identity
                         ))
                     })?;
                 injector
@@ -6507,7 +6486,7 @@ impl MobActor {
                     .map_err(|error| {
                         MobError::Internal(format!(
                             "autonomous dispatch inject failed for '{}': {}",
-                            entry.meerkat_id, error
+                            entry.agent_identity, error
                         ))
                     })?;
                 Ok(())
@@ -6544,7 +6523,6 @@ impl MobActor {
             .flow_kernel
             .create_pending_run(&config, activation_params.clone())
             .await?;
-        self.sync_dsl_roster_state().await;
         if self.has_orchestrator
             && let Err(error) =
                 self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartFlow, "start_flow")
@@ -6703,6 +6681,7 @@ impl MobActor {
         }
 
         self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "flow_cleanup")?;
+        self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishRun, "flow_cleanup")?;
 
         let _ = self.run_tasks.remove(&run_id);
         let _ = self.run_cancel_tokens.remove(&run_id);
@@ -6739,6 +6718,12 @@ impl MobActor {
                 .terminalize_canceled(run_id.clone(), flow_id)
                 .await?;
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_flow_no_handle")
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "flow canceled cleanup (no task handle): lifecycle CompleteFlow transition failed for run {run_id}: {error}"
+                    ))
+                })?;
+            self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishRun, "cancel_flow_no_handle")
                 .map_err(|error| {
                     MobError::Internal(format!(
                         "flow canceled cleanup (no task handle): lifecycle FinishRun transition failed for run {run_id}: {error}"
@@ -6843,6 +6828,7 @@ impl MobActor {
                 .await?;
 
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_all_flow")?;
+            self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishRun, "cancel_all_flow")?;
 
             let _ = self.run_cancel_tokens.remove(&run_id);
         }
@@ -6862,7 +6848,7 @@ impl MobActor {
     /// parallelism to reduce spawn fan-out latency.
     async fn apply_spawn_wiring(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         wiring_targets: &[MeerkatId],
     ) -> (Vec<MeerkatId>, Option<MobError>) {
         if wiring_targets.is_empty() {
@@ -6879,7 +6865,7 @@ impl MobActor {
             let Some(target_id) = remaining.next() else {
                 break;
             };
-            in_flight.push(self.wire_spawn_target(meerkat_id, target_id));
+            in_flight.push(self.wire_spawn_target(agent_identity, target_id));
         }
 
         while let Some(result) = in_flight.next().await {
@@ -6892,7 +6878,7 @@ impl MobActor {
                 }
             }
             if let Some(target_id) = remaining.next() {
-                in_flight.push(self.wire_spawn_target(meerkat_id, target_id));
+                in_flight.push(self.wire_spawn_target(agent_identity, target_id));
             }
         }
 
@@ -6901,29 +6887,32 @@ impl MobActor {
 
     async fn wire_spawn_target(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         target_id: MeerkatId,
     ) -> Result<MeerkatId, MobError> {
-        self.do_wire(meerkat_id, &target_id).await.map_err(|e| {
-            MobError::WiringError(format!(
-                "role_wiring fan-out failed for {meerkat_id} <-> {target_id}: {e}"
-            ))
-        })?;
+        self.do_wire(agent_identity, &target_id)
+            .await
+            .map_err(|e| {
+                MobError::WiringError(format!(
+                    "role_wiring fan-out failed for {agent_identity} <-> {target_id}: {e}"
+                ))
+            })?;
         Ok(target_id)
     }
 
     /// Compensate a failed spawn wiring path to avoid partial state.
     async fn rollback_failed_spawn(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         profile_name: &ProfileName,
         member_ref: &MemberRef,
         successful_wiring_targets: &[MeerkatId],
         planned_wiring_targets: &[MeerkatId],
     ) -> Result<(), MobError> {
-        let retire_event_already_present = self.retire_event_exists(meerkat_id, member_ref).await?;
+        let retire_event_already_present =
+            self.retire_event_exists(agent_identity, member_ref).await?;
         if !retire_event_already_present {
-            self.append_retire_event(meerkat_id, profile_name, member_ref)
+            self.append_retire_event(agent_identity, profile_name, member_ref)
                 .await?;
         }
 
@@ -6933,13 +6922,13 @@ impl MobActor {
 
         let mut cleanup_peers = wired_peers.clone();
         for peer_id in planned_wiring_targets {
-            if peer_id != meerkat_id && !cleanup_peers.contains(peer_id) {
+            if peer_id != agent_identity && !cleanup_peers.contains(peer_id) {
                 cleanup_peers.push(peer_id.clone());
             }
         }
         let spawned_entry = {
             let roster = self.roster.read().await;
-            roster.get(meerkat_id).cloned()
+            roster.get(agent_identity).cloned()
         };
         let spawned_comms = self.provisioner_comms(member_ref).await;
         let mut rollback = LifecycleRollback::new("spawn rollback");
@@ -6947,7 +6936,7 @@ impl MobActor {
         if !wired_peers.is_empty() {
             let spawned_entry = spawned_entry.as_ref().ok_or_else(|| {
                 MobError::WiringError(format!(
-                    "spawn rollback requires roster entry for '{meerkat_id}'"
+                    "spawn rollback requires roster entry for '{agent_identity}'"
                 ))
             })?;
             let spawned_sender = self
@@ -6955,7 +6944,7 @@ impl MobActor {
                 .await
                 .ok_or_else(|| {
                     MobError::WiringError(format!(
-                        "spawn rollback requires sender runtime for '{meerkat_id}'"
+                        "spawn rollback requires sender runtime for '{agent_identity}'"
                     ))
                 })?;
             for peer_meerkat_id in &wired_peers {
@@ -6975,20 +6964,27 @@ impl MobActor {
                         | WiringEndpoint::PeerOnly { spec, .. } => spec,
                     }
                 };
-                self.notify_peer_retired(&peer_spec, meerkat_id, spawned_entry, &spawned_sender)
-                    .await?;
+                self.notify_peer_retired(
+                    &peer_spec,
+                    agent_identity,
+                    spawned_entry,
+                    &spawned_sender,
+                )
+                .await?;
                 rollback.defer(
-                    format!("compensating mob.peer_added '{meerkat_id}' -> '{peer_meerkat_id}'"),
+                    format!(
+                        "compensating mob.peer_added '{agent_identity}' -> '{peer_meerkat_id}'"
+                    ),
                     {
                         let spawned_sender = spawned_sender.clone();
                         let peer_spec = peer_spec.clone();
                         let spawned_entry = spawned_entry.clone();
-                        let meerkat_id = meerkat_id.clone();
+                        let agent_identity = agent_identity.clone();
                         move || async move {
                             self.notify_peer_added(
                                 &spawned_sender,
                                 &peer_spec,
-                                &meerkat_id,
+                                &agent_identity,
                                 &spawned_entry,
                             )
                             .await
@@ -7023,7 +7019,7 @@ impl MobActor {
                     if is_wired_peer {
                         return Err(rollback
                             .fail(MobError::Internal(format!(
-                                "spawn rollback cannot remove trust for '{meerkat_id}': wired peer '{peer_meerkat_id}' missing from roster"
+                                "spawn rollback cannot remove trust for '{agent_identity}': wired peer '{peer_meerkat_id}' missing from roster"
                             )))
                             .await);
                     }
@@ -7034,7 +7030,7 @@ impl MobActor {
                     if is_wired_peer {
                         return Err(rollback
                             .fail(MobError::Internal(format!(
-                                "spawn rollback cannot remove trust for '{meerkat_id}': comms runtime missing for wired peer '{peer_meerkat_id}'"
+                                "spawn rollback cannot remove trust for '{agent_identity}': comms runtime missing for wired peer '{peer_meerkat_id}'"
                             )))
                             .await);
                     }
@@ -7044,7 +7040,7 @@ impl MobActor {
                     if is_wired_peer {
                         return Err(rollback
                             .fail(MobError::Internal(format!(
-                                "spawn rollback cannot remove trust for '{meerkat_id}' from wired peer '{peer_meerkat_id}': {error}"
+                                "spawn rollback cannot remove trust for '{agent_identity}' from wired peer '{peer_meerkat_id}': {error}"
                             )))
                             .await);
                     }
@@ -7053,7 +7049,7 @@ impl MobActor {
                 if let Some(spawned_spec) = spawned_spec.clone() {
                     rollback.defer(
                         format!(
-                            "restore trust '{peer_meerkat_id}' -> '{meerkat_id}' during spawn rollback"
+                            "restore trust '{peer_meerkat_id}' -> '{agent_identity}' during spawn rollback"
                         ),
                         {
                             let peer_comms = peer_comms.clone();
@@ -7069,21 +7065,19 @@ impl MobActor {
 
         // Reuse disposal pipeline methods for session archive + roster removal.
         let rollback_ctx = DisposalContext {
-            meerkat_id: meerkat_id.clone(),
+            agent_identity: agent_identity.clone(),
             entry: spawned_entry.clone().unwrap_or_else(|| {
-                let identity = AgentIdentity::from(meerkat_id.as_str());
+                let identity = AgentIdentity::from(agent_identity.as_str());
                 RosterEntry {
                     agent_identity: identity.clone(),
                     generation: crate::ids::Generation::INITIAL,
                     fence_token: crate::ids::FenceToken::new(0),
                     agent_runtime_id: crate::ids::AgentRuntimeId::initial(identity),
-                    meerkat_id: meerkat_id.clone(),
                     role: profile_name.clone(),
                     member_ref: member_ref.clone(),
                     runtime_mode: crate::MobRuntimeMode::TurnDriven,
                     peer_id: spawned_comms.as_ref().and_then(|c| c.public_key()),
                     state: crate::roster::MemberState::Active,
-                    voice_intent_present: false,
                     wired_to: std::collections::BTreeSet::new(),
                     external_peer_specs: std::collections::BTreeMap::new(),
                     labels: std::collections::BTreeMap::new(),
@@ -7092,7 +7086,6 @@ impl MobActor {
                 }
             }),
             retiring_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
-            clear_voice_intent: false,
         };
         if let Err(error) = self.dispose_archive_session(&rollback_ctx).await {
             return Err(rollback.fail(error).await);
@@ -7128,27 +7121,27 @@ impl MobActor {
 
     async fn retire_event_exists(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         member_ref: &MemberRef,
     ) -> Result<bool, MobError> {
-        let key = Self::retire_event_key(meerkat_id, member_ref);
+        let key = Self::retire_event_key(agent_identity, member_ref);
         let index = self.retired_event_index.read().await;
         Ok(index.contains(&key))
     }
 
     async fn append_retire_event(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         profile_name: &ProfileName,
         member_ref: &MemberRef,
     ) -> Result<(), MobError> {
         // Look up identity-native fields from the roster for the 0.6 event model.
-        let (agent_identity, generation) = {
+        let (resolved_identity, generation) = {
             let roster = self.roster.read().await;
-            match roster.get(meerkat_id) {
+            match roster.get(agent_identity) {
                 Some(entry) => (entry.agent_identity.clone(), entry.generation),
                 None => (
-                    AgentIdentity::from(meerkat_id.as_str()),
+                    AgentIdentity::from(agent_identity.as_str()),
                     Generation::INITIAL,
                 ),
             }
@@ -7158,175 +7151,15 @@ impl MobActor {
                 mob_id: self.definition.id.clone(),
                 timestamp: None,
                 kind: MobEventKind::MemberRetired {
-                    agent_identity,
+                    agent_identity: resolved_identity,
                     generation,
                     role: profile_name.clone(),
                 },
             })
             .await?;
-        let key = Self::retire_event_key(meerkat_id, member_ref);
+        let key = Self::retire_event_key(agent_identity, member_ref);
         self.retired_event_index.write().await.insert(key);
         Ok(())
-    }
-
-    async fn append_voice_intent_cleared_event(
-        &self,
-        meerkat_id: &MeerkatId,
-    ) -> Result<(), MobError> {
-        let agent_identity = {
-            let roster = self.roster.read().await;
-            roster
-                .get(meerkat_id)
-                .map(|entry| entry.agent_identity.clone())
-                .unwrap_or_else(|| AgentIdentity::from(meerkat_id.as_str()))
-        };
-
-        self.events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MemberVoiceIntentCleared { agent_identity },
-            })
-            .await?;
-        Ok(())
-    }
-
-    async fn append_voice_intent_set_event(&self, meerkat_id: &MeerkatId) -> Result<(), MobError> {
-        let agent_identity = {
-            let roster = self.roster.read().await;
-            roster
-                .get(meerkat_id)
-                .map(|entry| entry.agent_identity.clone())
-                .unwrap_or_else(|| AgentIdentity::from(meerkat_id.as_str()))
-        };
-
-        self.events
-            .append(NewMobEvent {
-                mob_id: self.definition.id.clone(),
-                timestamp: None,
-                kind: MobEventKind::MemberVoiceIntentSet { agent_identity },
-            })
-            .await?;
-        Ok(())
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn reconcile_realtime_attachment_runtime(
-        &self,
-        member_ref: &MemberRef,
-        runtime_mode: crate::MobRuntimeMode,
-        intent_present: bool,
-    ) {
-        let (Some(runtime_adapter), Some(bridge_session_id)) =
-            (&self.runtime_adapter, member_ref.bridge_session_id())
-        else {
-            return;
-        };
-
-        if runtime_mode == crate::MobRuntimeMode::TurnDriven {
-            // Transitional but architecturally intentional: realtime-attached
-            // turn-driven members need a live comms drain so correlated peer
-            // responses become canonical runtime inputs between spoken user
-            // turns. Autonomous members already own a keep-alive drain through
-            // their host loop; this extra drain is only for active realtime
-            // turn-driven sessions until the machine/DSL seam models channel-
-            // scoped peer ingress ownership directly.
-            let comms_runtime = if intent_present {
-                self.provisioner.comms_runtime(member_ref).await
-            } else {
-                None
-            };
-            let _ = runtime_adapter
-                .maybe_spawn_comms_drain(bridge_session_id, intent_present, comms_runtime)
-                .await;
-        }
-
-        if let Err(error) = runtime_adapter
-            .project_realtime_attachment_intent(bridge_session_id, intent_present)
-            .await
-        {
-            tracing::warn!(
-                member_ref = ?member_ref,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to project durable live attachment intent during mob voice update"
-            );
-            return;
-        }
-
-        if intent_present {
-            if let Err(error) = runtime_adapter.attach_live(bridge_session_id).await {
-                tracing::warn!(
-                    member_ref = ?member_ref,
-                    session_id = %bridge_session_id,
-                    error = %error,
-                    "failed to attach live voice during mob voice update"
-                );
-            }
-            return;
-        }
-
-        if let Err(error) = runtime_adapter.detach_live(bridge_session_id).await {
-            tracing::warn!(
-                member_ref = ?member_ref,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to detach live voice during mob voice update"
-            );
-        }
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    async fn restore_realtime_attachment_intent_if_needed(
-        &self,
-        member_ref: &MemberRef,
-        runtime_mode: crate::MobRuntimeMode,
-        voice_intent_present: bool,
-    ) {
-        let (Some(runtime_adapter), Some(bridge_session_id)) =
-            (&self.runtime_adapter, member_ref.bridge_session_id())
-        else {
-            return;
-        };
-
-        if voice_intent_present && runtime_mode == crate::MobRuntimeMode::TurnDriven {
-            // Transitional companion to reconcile_realtime_attachment_runtime():
-            // when a turn-driven member resumes/spawns with an active realtime
-            // attachment intent, it must immediately regain a comms drain so
-            // peer responses can re-enter the runtime before the next spoken
-            // turn. This should collapse into the machine-owned channel seam
-            // once the DSL branch lands.
-            let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
-            let _ = runtime_adapter
-                .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
-                .await;
-        }
-
-        if let Err(error) = runtime_adapter
-            .project_realtime_attachment_intent(bridge_session_id, voice_intent_present)
-            .await
-        {
-            tracing::warn!(
-                member_ref = ?member_ref,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to project durable live attachment intent during spawn finalization"
-            );
-            return;
-        }
-
-        if !voice_intent_present {
-            return;
-        }
-
-        if let Err(error) = runtime_adapter.attach_live(bridge_session_id).await {
-            tracing::warn!(
-                member_ref = ?member_ref,
-                session_id = %bridge_session_id,
-                error = %error,
-                "failed to reattach live voice during spawn finalization"
-            );
-        }
     }
 
     /// Internal wire operation (used by handle_wire and auto_wire/role_wiring).
@@ -7780,7 +7613,10 @@ impl MobActor {
 
     /// Generate the comms name for a roster entry.
     fn comms_name_for(&self, entry: &RosterEntry) -> String {
-        format!("{}/{}/{}", self.definition.id, entry.role, entry.meerkat_id)
+        format!(
+            "{}/{}/{}",
+            self.definition.id, entry.role, entry.agent_identity
+        )
     }
 
     async fn resolve_wiring_endpoint(
@@ -7793,7 +7629,7 @@ impl MobActor {
             let public_key = comms.public_key().ok_or_else(|| {
                 MobError::WiringError(format!(
                     "{context} requires public key for '{}'",
-                    entry.meerkat_id
+                    entry.agent_identity
                 ))
             })?;
             let spec = self
@@ -7819,14 +7655,14 @@ impl MobActor {
                     binding: Self::runtime_binding_for_entry(entry).ok_or_else(|| {
                         MobError::WiringError(format!(
                             "{context} requires external runtime binding for '{}'",
-                            entry.meerkat_id
+                            entry.agent_identity
                         ))
                     })?,
                 })
             }
             MemberRef::Session { .. } => Err(MobError::WiringError(format!(
                 "{context} requires comms runtime for '{}'",
-                entry.meerkat_id
+                entry.agent_identity
             ))),
         }
     }
@@ -7933,18 +7769,18 @@ impl MobActor {
 
     async fn notify_kickoff_event(
         &self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         intent: &'static str,
     ) -> Result<(), MobError> {
         let (entry, wired_peers) = {
             let roster = self.roster.read().await;
-            let Some(entry) = roster.get(meerkat_id).cloned() else {
+            let Some(entry) = roster.get(agent_identity).cloned() else {
                 return Ok(());
             };
             let wired_peers: Vec<MeerkatId> = entry
                 .wired_to
                 .iter()
-                .filter_map(|id| roster.get_by_identity(id).map(|e| e.meerkat_id.clone()))
+                .filter_map(|id| roster.get_by_identity(id).map(|e| e.agent_identity.clone()))
                 .collect();
             (entry, wired_peers)
         };
@@ -7981,8 +7817,14 @@ impl MobActor {
             {
                 WiringEndpoint::Local { spec, .. } | WiringEndpoint::PeerOnly { spec, .. } => spec,
             };
-            self.notify_peer_event(intent, &recipient_spec, meerkat_id, &entry, &sender_comms)
-                .await?;
+            self.notify_peer_event(
+                intent,
+                &recipient_spec,
+                agent_identity,
+                &entry,
+                &sender_comms,
+            )
+            .await?;
         }
         Ok(())
     }

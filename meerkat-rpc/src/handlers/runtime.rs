@@ -5,11 +5,12 @@ use serde_json::value::RawValue;
 
 use meerkat_contracts::{
     InputListParams, InputListResult, InputStateParams, RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult, RuntimeResetParams, RuntimeResetResult,
-    RuntimeRetireParams, RuntimeRetireResult, RuntimeStateParams, RuntimeStateResult,
-    WireInputLifecycleState, WireInputState, WireInputStateHistoryEntry,
-    WireRealtimeAttachmentStatus, WireRuntimeState,
+    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusEntry,
+    RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
+    RuntimeRealtimeAttachmentStatusesParams, RuntimeRealtimeAttachmentStatusesResult,
+    RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams, RuntimeRetireResult,
+    RuntimeStateParams, RuntimeStateResult, WireInputLifecycleState, WireInputState,
+    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
 };
 use meerkat_core::{InputId, SessionId};
 use meerkat_runtime::RuntimeState;
@@ -237,6 +238,53 @@ pub async fn handle_runtime_realtime_attachment_status(
         ),
         Err(e) => RpcResponse::error(id, crate::error::INVALID_PARAMS, e.to_string()),
     }
+}
+
+/// Handle `runtime/realtime_attachment_statuses` — batch variant of
+/// `runtime/realtime_attachment_status`.
+///
+/// Preserves request order in the response so clients can zip by index.
+/// Per-session failures (bad id, adapter error) are captured in the entry's
+/// `error` field rather than failing the entire RPC — a partial answer is
+/// more useful to a dashboard than a hard error.
+pub async fn handle_runtime_realtime_attachment_statuses(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    adapter: &dyn SessionServiceRuntimeExt,
+) -> RpcResponse {
+    let params: RuntimeRealtimeAttachmentStatusesParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+
+    let mut entries = Vec::with_capacity(params.session_ids.len());
+    for raw_session_id in params.session_ids {
+        let session_id = match SessionId::parse(&raw_session_id) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                entries.push(RuntimeRealtimeAttachmentStatusEntry {
+                    session_id: raw_session_id,
+                    status: None,
+                    error: Some(err.to_string()),
+                });
+                continue;
+            }
+        };
+        match adapter.realtime_attachment_status(&session_id).await {
+            Ok(status) => entries.push(RuntimeRealtimeAttachmentStatusEntry {
+                session_id: raw_session_id,
+                status: Some(to_wire_realtime_attachment_status(status)),
+                error: None,
+            }),
+            Err(err) => entries.push(RuntimeRealtimeAttachmentStatusEntry {
+                session_id: raw_session_id,
+                status: None,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    RpcResponse::success(id, RuntimeRealtimeAttachmentStatusesResult { entries })
 }
 
 /// Handle `runtime/accept` — accept an input for a session.

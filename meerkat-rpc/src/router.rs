@@ -493,8 +493,6 @@ impl MethodRouter {
             SessionId::parse(session_id)
                 .map(Some)
                 .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
-        } else if target_type == "mob_member_target" {
-            Ok(None)
         } else {
             Err(RpcResponse::error(
                 id,
@@ -840,6 +838,16 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/spawn_many" => handlers::mob::handle_spawn_many(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
+            "mob/ensure_member" => {
+                handlers::mob::handle_ensure_member(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
+            "mob/reconcile" => handlers::mob::handle_reconcile(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
+            "mob/list_members_matching" => {
+                handlers::mob::handle_list_members_matching(id, params, &self.mob_state).await
+            }
+            #[cfg(feature = "mob")]
             "mob/members" => handlers::mob::handle_members(id, params, &self.mob_state).await,
             #[cfg(feature = "mob")]
             "mob/retire" => handlers::mob::handle_retire(id, params, &self.mob_state).await,
@@ -901,14 +909,6 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             "mob/force_cancel" => {
                 handlers::mob::handle_force_cancel(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/realtime_attach" => {
-                handlers::mob::handle_realtime_attach(id, params, &self.mob_state).await
-            }
-            #[cfg(feature = "mob")]
-            "mob/realtime_detach" => {
-                handlers::mob::handle_realtime_detach(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
             "mob/member_status" => {
@@ -1058,21 +1058,10 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
-                        #[cfg(feature = "mob")]
-                        {
-                            Some(self.mob_state.as_ref())
-                        }
-                        #[cfg(not(feature = "mob"))]
-                        {
-                            None
-                        }
-                    };
                     handlers::realtime::handle_realtime_open_info(
                         id,
                         params,
                         self.runtime_adapter.as_ref(),
-                        mob_inspector,
                         self.realtime_ws_host.as_deref(),
                         self.runtime.realm_id(),
                     )
@@ -1100,21 +1089,10 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
-                        #[cfg(feature = "mob")]
-                        {
-                            Some(self.mob_state.as_ref())
-                        }
-                        #[cfg(not(feature = "mob"))]
-                        {
-                            None
-                        }
-                    };
                     handlers::realtime::handle_realtime_status(
                         id,
                         params,
                         self.runtime_adapter.as_ref(),
-                        mob_inspector,
                     )
                     .await
                 }
@@ -1140,21 +1118,10 @@ impl MethodRouter {
                     {
                         return Some(response.with_id(id));
                     }
-                    let mob_inspector: Option<&dyn handlers::realtime::RealtimeMobInspector> = {
-                        #[cfg(feature = "mob")]
-                        {
-                            Some(self.mob_state.as_ref())
-                        }
-                        #[cfg(not(feature = "mob"))]
-                        {
-                            None
-                        }
-                    };
                     handlers::realtime::handle_realtime_capabilities(
                         id,
                         params,
                         self.runtime_adapter.as_ref(),
-                        mob_inspector,
                         self.realtime_ws_host.as_deref(),
                     )
                     .await
@@ -1211,6 +1178,28 @@ impl MethodRouter {
                         return Some(response.with_id(id));
                     }
                     handlers::runtime::handle_runtime_realtime_attachment_status(
+                        id,
+                        params,
+                        self.runtime_adapter.as_ref(),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "runtime/realtime_attachment_statuses" => {
+                // Batch variant (D2): one round-trip for N mob members.
+                // Per-session failures surface in the entry's `error` field
+                // rather than as an RPC error, so we don't pre-register
+                // sessions here — each entry is resolved independently.
+                if self.runtime_adapter.runtime_mode() != meerkat_runtime::RuntimeMode::V9Compliant
+                {
+                    RpcResponse::error(
+                        id,
+                        error::METHOD_NOT_FOUND,
+                        "Method not found: runtime/realtime_attachment_statuses",
+                    )
+                } else {
+                    handlers::runtime::handle_runtime_realtime_attachment_statuses(
                         id,
                         params,
                         self.runtime_adapter.as_ref(),

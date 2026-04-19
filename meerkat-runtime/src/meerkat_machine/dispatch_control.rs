@@ -435,21 +435,21 @@ impl MeerkatMachine {
 fn project_realtime_attachment_status(
     state: &super::dsl::MeerkatMachineState,
 ) -> crate::meerkat_machine_types::RealtimeAttachmentStatus {
+    use super::dsl::RealtimeBindingState;
     use crate::meerkat_machine_types::RealtimeAttachmentStatus;
     if state.realtime_reattach_required {
         return RealtimeAttachmentStatus::ReattachRequired;
     }
-    match state.realtime_binding_state.as_str() {
-        "Unbound" => {
+    match state.realtime_binding_state {
+        RealtimeBindingState::Unbound => {
             if state.realtime_intent_present {
                 RealtimeAttachmentStatus::IntentPresentUnbound
             } else {
                 RealtimeAttachmentStatus::Unattached
             }
         }
-        "BindingNotReady" => RealtimeAttachmentStatus::BindingNotReady,
-        "BindingReady" => RealtimeAttachmentStatus::BindingReady,
-        "ReplacementPending" => RealtimeAttachmentStatus::ReplacementPending,
-        _ => RealtimeAttachmentStatus::Unattached,
+        RealtimeBindingState::BindingNotReady => RealtimeAttachmentStatus::BindingNotReady,
+        RealtimeBindingState::BindingReady => RealtimeAttachmentStatus::BindingReady,
+        RealtimeBindingState::ReplacementPending => RealtimeAttachmentStatus::ReplacementPending,
     }
 }

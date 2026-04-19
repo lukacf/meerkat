@@ -2,6 +2,7 @@ use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::types::SessionId;
+use std::collections::BTreeSet;
 
 mod sealed {
     pub trait Sealed {}
@@ -15,8 +16,10 @@ mod sealed {
 /// without touching the underlying projection directly.
 pub(crate) trait RosterMutator: sealed::Sealed {
     fn add_member(&mut self, entry: RosterAddEntry) -> bool;
-    fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool;
-    fn remove_member(&mut self, meerkat_id: &MeerkatId) -> bool;
+    /// Re-project the `Retiring` marker set from the DSL. See
+    /// [`Roster::sync_retiring_projection`].
+    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>);
+    fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool;
     fn wire_members(&mut self, a: &MeerkatId, b: &MeerkatId);
     fn wire_external_peer(
         &mut self,
@@ -28,7 +31,7 @@ pub(crate) trait RosterMutator: sealed::Sealed {
     fn unwire_external_peer(&mut self, local: &MeerkatId, peer_name: &MeerkatId);
     fn set_kickoff(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool;
 }
@@ -63,8 +66,8 @@ impl RosterAuthority {
         self.roster.clone()
     }
 
-    pub(crate) fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
-        self.roster.get(meerkat_id)
+    pub(crate) fn get(&self, agent_identity: &MeerkatId) -> Option<&RosterEntry> {
+        self.roster.get(agent_identity)
     }
 
     pub(crate) fn get_by_identity(&self, identity: &AgentIdentity) -> Option<&RosterEntry> {
@@ -95,8 +98,8 @@ impl RosterAuthority {
 
     /// Get a specific roster entry.
     #[allow(dead_code)]
-    pub(crate) fn entry(&self, meerkat_id: &MeerkatId) -> Option<RosterEntry> {
-        self.roster.get(meerkat_id).cloned()
+    pub(crate) fn entry(&self, agent_identity: &MeerkatId) -> Option<RosterEntry> {
+        self.roster.get(agent_identity).cloned()
     }
 
     /// List all members currently `Active`.
@@ -119,11 +122,11 @@ impl RosterAuthority {
     #[allow(dead_code)]
     pub(crate) fn set_bridge_session_id(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         bridge_session_id: SessionId,
     ) -> bool {
         self.roster
-            .set_bridge_session_id(meerkat_id, bridge_session_id)
+            .set_bridge_session_id(agent_identity, bridge_session_id)
     }
 
     pub(crate) fn replace_backend_peer_binding_by_peer_id(
@@ -140,14 +143,6 @@ impl RosterAuthority {
             bootstrap_token,
         )
     }
-
-    pub(crate) fn set_voice_intent_by_identity(
-        &mut self,
-        identity: &AgentIdentity,
-        present: bool,
-    ) -> bool {
-        self.roster.set_voice_intent_by_identity(identity, present)
-    }
 }
 
 impl RosterMutator for RosterAuthority {
@@ -155,13 +150,13 @@ impl RosterMutator for RosterAuthority {
         self.roster.add(entry)
     }
 
-    fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool {
-        self.roster.mark_retiring(meerkat_id)
+    fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>) {
+        self.roster.sync_retiring_projection(retiring_runtime_ids);
     }
 
-    fn remove_member(&mut self, meerkat_id: &MeerkatId) -> bool {
-        if self.roster.get(meerkat_id).is_some() {
-            self.roster.remove(meerkat_id);
+    fn remove_member(&mut self, agent_identity: &MeerkatId) -> bool {
+        if self.roster.get(agent_identity).is_some() {
+            self.roster.remove(agent_identity);
             true
         } else {
             false
@@ -191,9 +186,9 @@ impl RosterMutator for RosterAuthority {
 
     fn set_kickoff(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &MeerkatId,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool {
-        self.roster.set_kickoff(meerkat_id, kickoff)
+        self.roster.set_kickoff(agent_identity, kickoff)
     }
 }

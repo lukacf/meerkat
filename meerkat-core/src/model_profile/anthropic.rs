@@ -167,6 +167,7 @@ pub fn fallback_caps(model: &str) -> Option<ModelCapabilities> {
         vision: true,
         image_tool_results: true,
         inline_video: false,
+        realtime: false,
         supports_temperature: shape.temperature,
         supports_top_p: shape.top_p,
         supports_top_k: shape.top_k,

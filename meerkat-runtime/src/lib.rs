@@ -66,8 +66,8 @@ pub use driver::{EphemeralRuntimeDriver, PersistentRuntimeDriver, PostAdmissionS
 pub use durability::{DurabilityError, validate_durability};
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
-    RuntimeExternalToolSurfaceHandle, RuntimePeerCommsHandle, RuntimeSessionAdmissionHandle,
-    RuntimeTurnStateHandle,
+    RuntimeExternalToolSurfaceHandle, RuntimeMcpServerLifecycleHandle, RuntimePeerCommsHandle,
+    RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,

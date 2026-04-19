@@ -10948,7 +10948,22 @@ fn test_llm_capability_surface(image_tool_results: bool) -> SessionLlmCapability
         vision: true,
         image_tool_results,
         supports_web_search: true,
+        realtime: false,
         call_timeout_secs: Some(60),
+    }
+}
+
+fn test_llm_capability_surface_realtime() -> SessionLlmCapabilitySurface {
+    SessionLlmCapabilitySurface {
+        supports_temperature: true,
+        supports_thinking: false,
+        supports_reasoning: false,
+        inline_video: false,
+        vision: false,
+        image_tool_results: false,
+        supports_web_search: false,
+        realtime: true,
+        call_timeout_secs: None,
     }
 }
 
@@ -11607,8 +11622,8 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
         .await;
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
-        model: "claude-sonnet-4-5".to_string(),
-        provider: meerkat_core::Provider::Anthropic,
+        model: "gpt-realtime".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
         self_hosted_server_id: None,
         provider_params: None,
         connection_ref: None,
@@ -11616,18 +11631,23 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
     let current_visibility_state = Arc::new(std::sync::Mutex::new(
         meerkat_core::SessionToolVisibilityState::default(),
     ));
+    // Both current and target are realtime-capable: the test verifies that
+    // realtime survives a model-to-model reconfigure. Previously this targeted
+    // gpt-5.2 (no realtime capability) which relied on the silent-fallback
+    // behavior that D5 deleted; post-D5 the reconfigure must stay within
+    // realtime-capable models.
     adapter.set_session_llm_reconfigure_host(Arc::new(TestLlmReconfigureHost {
         current_identity: Arc::clone(&current_identity),
         current_visibility_state: Arc::clone(&current_visibility_state),
         target_identity: meerkat_core::SessionLlmIdentity {
-            model: "gpt-5.2".to_string(),
+            model: "gpt-realtime".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
             connection_ref: None,
         },
-        current_capability_surface: Some(test_llm_capability_surface(true)),
-        target_capability_surface: test_llm_capability_surface(false),
+        current_capability_surface: Some(test_llm_capability_surface_realtime()),
+        target_capability_surface: test_llm_capability_surface_realtime(),
         base_tool_names: [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
             .into_iter()
             .collect(),
@@ -11668,7 +11688,7 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
                 .reconfigure_live_topology(
                     authority,
                     SessionLlmReconfigureRequest {
-                        model: Some("gpt-5.2".to_string()),
+                        model: Some("gpt-realtime".to_string()),
                         provider: Some("openai".to_string()),
                         provider_params: None,
                         connection_ref: None,
@@ -11711,7 +11731,7 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .model,
-        "gpt-5.2",
+        "gpt-realtime",
         "topology success should install the target identity"
     );
 }

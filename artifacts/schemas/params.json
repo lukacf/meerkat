@@ -1501,44 +1501,6 @@
     "title": "MobCreateParams",
     "type": "object"
   },
-  "MobRealtimeAttachParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for `mob/realtime_attach`.",
-    "properties": {
-      "agent_identity": {
-        "type": "string"
-      },
-      "mob_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "mob_id",
-      "agent_identity"
-    ],
-    "title": "MobRealtimeAttachParams",
-    "type": "object"
-  },
-  "MobRealtimeDetachParams": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "description": "Request payload for `mob/realtime_detach`.",
-    "properties": {
-      "agent_identity": {
-        "type": "string"
-      },
-      "mob_id": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "mob_id",
-      "agent_identity"
-    ],
-    "title": "MobRealtimeDetachParams",
-    "type": "object"
-  },
   "MobUnwireParams": {
     "$defs": {
       "MobPeerTarget": {
@@ -1690,7 +1652,7 @@
   "RealtimeCapabilitiesParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.",
+        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
         "oneOf": [
           {
             "properties": {
@@ -1705,26 +1667,6 @@
             "required": [
               "type",
               "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "agent_identity": {
-                "type": "string"
-              },
-              "mob_id": {
-                "type": "string"
-              },
-              "type": {
-                "const": "mob_member_target",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "mob_id",
-              "agent_identity"
             ],
             "type": "object"
           }
@@ -1770,7 +1712,7 @@
         "type": "string"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.",
+        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
         "oneOf": [
           {
             "properties": {
@@ -1785,26 +1727,6 @@
             "required": [
               "type",
               "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "agent_identity": {
-                "type": "string"
-              },
-              "mob_id": {
-                "type": "string"
-              },
-              "type": {
-                "const": "mob_member_target",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "mob_id",
-              "agent_identity"
             ],
             "type": "object"
           }
@@ -1896,7 +1818,7 @@
   "RealtimeStatusParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.",
+        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
         "oneOf": [
           {
             "properties": {
@@ -1911,26 +1833,6 @@
             "required": [
               "type",
               "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "agent_identity": {
-                "type": "string"
-              },
-              "mob_id": {
-                "type": "string"
-              },
-              "type": {
-                "const": "mob_member_target",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "mob_id",
-              "agent_identity"
             ],
             "type": "object"
           }

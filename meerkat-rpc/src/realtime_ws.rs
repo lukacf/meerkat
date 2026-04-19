@@ -68,6 +68,10 @@ struct PendingOpenEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RealtimeTargetKey {
     Session(String),
+    // Placeholder variant retained for pattern-exhaustiveness on binding
+    // enum (T5i kept the empty variant for the SocketBinding pattern match);
+    // never constructed post-T5i.
+    #[allow(dead_code)]
     MobMember {
         mob_id: String,
         agent_identity: String,
@@ -80,13 +84,6 @@ impl From<&meerkat_contracts::RealtimeChannelTarget> for RealtimeTargetKey {
             meerkat_contracts::RealtimeChannelTarget::SessionTarget { session_id } => {
                 Self::Session(session_id.clone())
             }
-            meerkat_contracts::RealtimeChannelTarget::MobMemberTarget {
-                mob_id,
-                agent_identity,
-            } => Self::MobMember {
-                mob_id: mob_id.clone(),
-                agent_identity: agent_identity.clone(),
-            },
         }
     }
 }
@@ -100,20 +97,8 @@ struct ActiveTargetEntry {
 
 #[derive(Debug, Clone)]
 enum RealtimeSocketBinding {
-    SessionPrimary {
-        session_id: SessionId,
-    },
-    SessionObserver {
-        session_id: SessionId,
-    },
-    MemberPrimary {
-        mob_id: String,
-        agent_identity: String,
-    },
-    MemberObserver {
-        mob_id: String,
-        agent_identity: String,
-    },
+    SessionPrimary { session_id: SessionId },
+    SessionObserver { session_id: SessionId },
 }
 
 #[derive(Debug, Default)]
@@ -1163,24 +1148,6 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         )
                                                         .await;
                                                     }
-                                                } else if let Some(RealtimeSocketBinding::MemberPrimary {
-                                                    mob_id,
-                                                    agent_identity,
-                                                }) = binding.as_ref()
-                                                {
-                                                    if let Err(error) = interrupt_member_target(
-                                                        &state.runtime,
-                                                        mob_id,
-                                                        agent_identity,
-                                                    )
-                                                    .await
-                                                    {
-                                                        let _ = send_server_frame(
-                                                            &mut socket,
-                                                            &RealtimeServerFrame::ChannelError(error),
-                                                        )
-                                                        .await;
-                                                    }
                                                 } else {
                                                     let _ = send_protocol_error(
                                                         &mut socket,
@@ -1449,6 +1416,28 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                 if updated_at <= projection_known_updated_at {
                                     continue;
                                 }
+                                // D4 / issue #260: drain sibling notifies that were queued while
+                                // this one was in flight (our own turn may have produced several
+                                // commits back-to-back), then re-read current_projection_updated_at
+                                // and skip if the runtime has since caught up to or beyond the
+                                // notify — this absorbs our own-turn race without reopening the
+                                // provider session.
+                                let mut max_notified = updated_at;
+                                while let Ok(next_notified) = projection_refresh_rx.try_recv() {
+                                    if next_notified > max_notified {
+                                        max_notified = next_notified;
+                                    }
+                                }
+                                if let Ok(current_updated_at) = current_projection_updated_at(
+                                    &state.runtime,
+                                    binding.as_ref(),
+                                )
+                                .await
+                                    && current_updated_at >= max_notified
+                                {
+                                    projection_known_updated_at = current_updated_at;
+                                    continue;
+                                }
                                 if let Some(product_session) = product_session.as_mut() {
                                     if product_turn_in_flight {
                                         projection_refresh_dirty = true;
@@ -1611,6 +1600,41 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             product_turn_in_flight = false;
                                             product_turn_committed = false;
                                             product_output_started = false;
+                                            // D4 / issue #260: dirty semantics are "external
+                                            // mutation happened during this turn that our provider
+                                            // session hasn't absorbed." Our own-turn commits
+                                            // (user transcript append on TurnCommitted; assistant
+                                            // output append on Finalize) also trigger the projection
+                                            // refresh task's notify — but those aren't external.
+                                            // Drain any pending notifies, advance
+                                            // projection_known_updated_at to the current runtime
+                                            // state, and if known == current (no mutation beyond
+                                            // our own commits is pending) clear the dirty flag
+                                            // before deciding whether to refresh.
+                                            while let Ok(notified_at) = projection_refresh_rx.try_recv() {
+                                                if notified_at > projection_known_updated_at {
+                                                    projection_known_updated_at = notified_at;
+                                                }
+                                            }
+                                            if let Ok(current_updated_at) = current_projection_updated_at(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                            )
+                                            .await
+                                            {
+                                                if current_updated_at > projection_known_updated_at {
+                                                    projection_known_updated_at = current_updated_at;
+                                                }
+                                                if projection_refresh_dirty
+                                                    && current_updated_at == projection_known_updated_at
+                                                {
+                                                    // No external mutation — the "dirty" notify we
+                                                    // saw was our own turn's commit. Clear dirty so
+                                                    // we don't reconstruct the provider session for
+                                                    // state the session already produced.
+                                                    projection_refresh_dirty = false;
+                                                }
+                                            }
                                             if projection_refresh_dirty
                                                 && let Some(product_session) = product_session.as_mut()
                                             {
@@ -2108,9 +2132,6 @@ async fn bind_realtime_target(
                 ))
             }
         }
-        meerkat_contracts::RealtimeChannelTarget::MobMemberTarget { .. } => {
-            bind_member_target(runtime, accepted, session_factory).await
-        }
     }
 }
 
@@ -2182,17 +2203,6 @@ async fn cleanup_realtime_binding(
             let _ = session_id;
             Ok(())
         }
-        Some(RealtimeSocketBinding::MemberPrimary {
-            mob_id,
-            agent_identity,
-        }) => detach_member_target(runtime, mob_id, agent_identity).await,
-        Some(RealtimeSocketBinding::MemberObserver {
-            mob_id,
-            agent_identity,
-        }) => {
-            let _ = (mob_id, agent_identity);
-            Ok(())
-        }
         None => Ok(()),
     }
 }
@@ -2252,16 +2262,6 @@ async fn current_binding_projection(
             .await
             .map(session_projection_from_runtime)
             .map_err(|err| runtime_error_frame(err, "status")),
-        Some(
-            RealtimeSocketBinding::MemberPrimary {
-                mob_id,
-                agent_identity,
-            }
-            | RealtimeSocketBinding::MemberObserver {
-                mob_id,
-                agent_identity,
-            },
-        ) => member_binding_projection(runtime, mob_id, agent_identity).await,
         None => Err(RealtimeChannelErrorFrame {
             code: RealtimeErrorCode::ChannelNotBound,
             message: "realtime frame routing is not wired to the substrate yet".to_string(),
@@ -2292,24 +2292,6 @@ fn session_projection_from_runtime(
         meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => {
             RealtimeBindingProjection::ReattachRequired
         }
-    }
-}
-
-fn member_projection_from_status_str(
-    status: &str,
-) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
-    match status {
-        "unattached" => Ok(RealtimeBindingProjection::Unattached),
-        "intent_present_unbound" => Ok(RealtimeBindingProjection::IntentPresentUnbound),
-        "binding_not_ready" => Ok(RealtimeBindingProjection::BindingNotReady),
-        "binding_ready" => Ok(RealtimeBindingProjection::BindingReady),
-        "replacement_pending" => Ok(RealtimeBindingProjection::ReplacementPending),
-        "reattach_required" => Ok(RealtimeBindingProjection::ReattachRequired),
-        other => Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::RuntimeInternal,
-            message: format!("unsupported mob live attachment status '{other}'"),
-            details: None,
-        }),
     }
 }
 
@@ -2370,35 +2352,13 @@ async fn attempt_realtime_reconnect(
                 Ok(None)
             }
         }
-        Some(RealtimeSocketBinding::MemberPrimary {
-            mob_id,
-            agent_identity,
-        }) => {
-            attach_member_target(runtime, mob_id, agent_identity).await?;
-            if let Some(session_factory) = session_factory {
-                let session_id =
-                    resolve_member_primary_session_id(runtime, mob_id, agent_identity).await?;
-                let (_status, bridge) = open_product_session_bridge(
-                    runtime,
-                    &session_id,
-                    turning_mode,
-                    session_factory,
-                )
-                .await?;
-                Ok(Some(bridge))
-            } else {
-                Ok(None)
-            }
+        Some(RealtimeSocketBinding::SessionObserver { .. }) | None => {
+            Err(RealtimeChannelErrorFrame {
+                code: RealtimeErrorCode::ChannelNotBound,
+                message: "observer channels do not own realtime reconnect attempts".to_string(),
+                details: None,
+            })
         }
-        Some(
-            RealtimeSocketBinding::SessionObserver { .. }
-            | RealtimeSocketBinding::MemberObserver { .. },
-        )
-        | None => Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::ChannelNotBound,
-            message: "observer channels do not own realtime reconnect attempts".to_string(),
-            details: None,
-        }),
     }
 }
 
@@ -2436,23 +2396,7 @@ async fn require_product_session_reattach(
             .require_realtime_attachment_reattach(session_id)
             .await
             .map_err(|err| runtime_error_frame(err, "reattach")),
-        Some(RealtimeSocketBinding::MemberPrimary {
-            mob_id,
-            agent_identity,
-        }) => {
-            let session_id =
-                resolve_member_primary_session_id(runtime, mob_id, agent_identity).await?;
-            runtime
-                .runtime_adapter()
-                .require_realtime_attachment_reattach(&session_id)
-                .await
-                .map_err(|err| runtime_error_frame(err, "reattach"))
-        }
-        Some(
-            RealtimeSocketBinding::SessionObserver { .. }
-            | RealtimeSocketBinding::MemberObserver { .. },
-        )
-        | None => Ok(()),
+        Some(RealtimeSocketBinding::SessionObserver { .. }) | None => Ok(()),
     }
 }
 
@@ -2904,12 +2848,9 @@ async fn resolve_primary_session_id(
     binding: Option<&RealtimeSocketBinding>,
     not_bound_message: &str,
 ) -> Result<SessionId, RealtimeChannelErrorFrame> {
+    let _ = runtime;
     match binding {
         Some(RealtimeSocketBinding::SessionPrimary { session_id }) => Ok(session_id.clone()),
-        Some(RealtimeSocketBinding::MemberPrimary {
-            mob_id,
-            agent_identity,
-        }) => resolve_member_primary_session_id(runtime, mob_id, agent_identity).await,
         _ => Err(RealtimeChannelErrorFrame {
             code: RealtimeErrorCode::ChannelNotBound,
             message: not_bound_message.to_string(),
@@ -3189,49 +3130,6 @@ async fn append_external_assistant_output(
     Ok(vec![channel_event(RealtimeEvent::TurnCompleted)])
 }
 
-#[cfg(feature = "mob")]
-async fn resolve_member_primary_session_id(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<SessionId, RealtimeChannelErrorFrame> {
-    let Some(mob_state) = runtime.mob_state() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: "mob-backed realtime targets are unavailable on this surface build"
-                .to_string(),
-            details: None,
-        });
-    };
-    let bridge_session_id = mob_state
-        .mob_resolve_bridge_session_id(
-            &meerkat_mob::MobId::from(mob_id),
-            &meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map_err(|err| mob_error_frame(err, "resolve_current_session"))?;
-    bridge_session_id.ok_or_else(|| RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::RuntimeNotReady,
-        message: format!(
-            "realtime member target '{mob_id}/{agent_identity}' has no current bridge session"
-        ),
-        details: None,
-    })
-}
-
-#[cfg(not(feature = "mob"))]
-async fn resolve_member_primary_session_id(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<SessionId, RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
 fn runtime_error_frame(err: RuntimeDriverError, action: &str) -> RealtimeChannelErrorFrame {
     match err {
         RuntimeDriverError::NotReady {
@@ -3306,304 +3204,6 @@ fn preemptive_interrupt_can_be_ignored(error: &RealtimeChannelErrorFrame) -> boo
         && error.message.contains("realtime interrupt failed")
 }
 
-#[cfg(feature = "mob")]
-async fn member_binding_projection(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
-    let Some(mob_state) = runtime.mob_state() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: "mob-backed realtime targets are unavailable on this surface build"
-                .to_string(),
-            details: None,
-        });
-    };
-
-    let snapshot = mob_state
-        .mob_member_status(
-            &meerkat_mob::MobId::from(mob_id),
-            &meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map_err(|err| mob_error_frame(err, "status"))?;
-    let serialized = serde_json::to_value(snapshot.realtime_attachment_status).map_err(|err| {
-        RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::RuntimeInternal,
-            message: format!("failed to serialize member realtime status: {err}"),
-            details: None,
-        }
-    })?;
-    let Some(status) = serialized.as_str() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::RuntimeInternal,
-            message: "mob member live attachment status should serialize as a string".to_string(),
-            details: None,
-        });
-    };
-    member_projection_from_status_str(status)
-}
-
-#[cfg(not(feature = "mob"))]
-async fn member_binding_projection(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<RealtimeBindingProjection, RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
-#[cfg(feature = "mob")]
-async fn member_channel_status(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<RealtimeChannelStatus, RealtimeChannelErrorFrame> {
-    member_binding_projection(runtime, mob_id, agent_identity)
-        .await
-        .map(projection_to_channel_status)
-}
-
-#[cfg(not(feature = "mob"))]
-async fn member_channel_status(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<RealtimeChannelStatus, RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
-#[cfg(feature = "mob")]
-async fn attach_member_target(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    let Some(mob_state) = runtime.mob_state() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: "mob-backed realtime targets are unavailable on this surface build"
-                .to_string(),
-            details: None,
-        });
-    };
-
-    mob_state
-        .mob_realtime_attach(
-            &meerkat_mob::MobId::from(mob_id),
-            meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| mob_error_frame(err, "attach"))
-}
-
-#[cfg(not(feature = "mob"))]
-async fn attach_member_target(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
-#[cfg(feature = "mob")]
-async fn detach_member_target(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    let Some(mob_state) = runtime.mob_state() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: "mob-backed realtime targets are unavailable on this surface build"
-                .to_string(),
-            details: None,
-        });
-    };
-
-    mob_state
-        .mob_realtime_detach(
-            &meerkat_mob::MobId::from(mob_id),
-            meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| mob_error_frame(err, "detach"))
-}
-
-#[cfg(not(feature = "mob"))]
-async fn detach_member_target(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
-async fn bind_member_target(
-    runtime: &SessionRuntime,
-    accepted: &AcceptedRealtimeOpen,
-    session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
-) -> Result<
-    (
-        RealtimeChannelStatus,
-        Option<RealtimeSocketBinding>,
-        Option<RealtimeProductSessionBridge>,
-    ),
-    RealtimeChannelErrorFrame,
-> {
-    let meerkat_contracts::RealtimeChannelTarget::MobMemberTarget {
-        mob_id,
-        agent_identity,
-    } = &accepted.request.target
-    else {
-        unreachable!("bind_member_target only handles mob member targets");
-    };
-
-    if matches!(
-        accepted.request.role,
-        meerkat_contracts::RealtimeChannelRole::Primary
-    ) {
-        attach_member_target(runtime, mob_id, agent_identity).await?;
-        let session_id =
-            match resolve_member_primary_session_id(runtime, mob_id, agent_identity).await {
-                Ok(session_id) => session_id,
-                Err(error) => {
-                    let _ = detach_member_target(runtime, mob_id, agent_identity).await;
-                    return Err(error);
-                }
-            };
-        if let Some(session_factory) = session_factory {
-            let (status, bridge) = match open_product_session_bridge(
-                runtime,
-                &session_id,
-                accepted.request.turning_mode,
-                session_factory,
-            )
-            .await
-            {
-                Ok(bound) => bound,
-                Err(error) => {
-                    let _ = detach_member_target(runtime, mob_id, agent_identity).await;
-                    return Err(error);
-                }
-            };
-            Ok((
-                status,
-                Some(RealtimeSocketBinding::MemberPrimary {
-                    mob_id: mob_id.clone(),
-                    agent_identity: agent_identity.clone(),
-                }),
-                Some(bridge),
-            ))
-        } else {
-            let status = match member_channel_status(runtime, mob_id, agent_identity).await {
-                Ok(status) => status,
-                Err(error) => {
-                    let _ = detach_member_target(runtime, mob_id, agent_identity).await;
-                    return Err(error);
-                }
-            };
-            Ok((
-                status,
-                Some(RealtimeSocketBinding::MemberPrimary {
-                    mob_id: mob_id.clone(),
-                    agent_identity: agent_identity.clone(),
-                }),
-                None,
-            ))
-        }
-    } else {
-        let status = member_channel_status(runtime, mob_id, agent_identity).await?;
-        Ok((
-            status,
-            Some(RealtimeSocketBinding::MemberObserver {
-                mob_id: mob_id.clone(),
-                agent_identity: agent_identity.clone(),
-            }),
-            None,
-        ))
-    }
-}
-
-#[cfg(feature = "mob")]
-async fn interrupt_member_target(
-    runtime: &SessionRuntime,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    let Some(mob_state) = runtime.mob_state() else {
-        return Err(RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::InvalidTarget,
-            message: "mob-backed realtime targets are unavailable on this surface build"
-                .to_string(),
-            details: None,
-        });
-    };
-    mob_state
-        .mob_force_cancel(
-            &meerkat_mob::MobId::from(mob_id),
-            meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map_err(|err| mob_error_frame(err, "interrupt"))
-}
-
-#[cfg(not(feature = "mob"))]
-async fn interrupt_member_target(
-    _runtime: &SessionRuntime,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<(), RealtimeChannelErrorFrame> {
-    Err(RealtimeChannelErrorFrame {
-        code: RealtimeErrorCode::InvalidTarget,
-        message: "mob-backed realtime targets are unavailable on this surface build".to_string(),
-        details: None,
-    })
-}
-
-#[cfg(feature = "mob")]
-fn mob_error_frame(err: meerkat_mob::MobError, action: &str) -> RealtimeChannelErrorFrame {
-    match err {
-        meerkat_mob::MobError::MemberNotFound(_) | meerkat_mob::MobError::ProfileNotFound(_) => {
-            RealtimeChannelErrorFrame {
-                code: RealtimeErrorCode::InvalidTarget,
-                message: format!("realtime {action} target is unavailable"),
-                details: None,
-            }
-        }
-        meerkat_mob::MobError::MemberRestoreFailed { reason, .. }
-        | meerkat_mob::MobError::UnsupportedForMode { reason, .. } => RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::RuntimeNotReady,
-            message: format!("realtime {action} requires a ready member runtime: {reason}"),
-            details: None,
-        },
-        other => RealtimeChannelErrorFrame {
-            code: RealtimeErrorCode::RuntimeInternal,
-            message: other.to_string(),
-            details: None,
-        },
-    }
-}
-
 async fn send_error_and_close(
     socket: &mut WebSocket,
     error: RealtimeChannelErrorFrame,
@@ -3642,9 +3242,9 @@ mod tests {
 
     use super::{
         RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion, RealtimeReconnectFailure,
-        RealtimeReconnectOverlay, RealtimeTurnCompletionDisposition, RealtimeWsHost,
-        product_turn_completion_disposition, product_turn_completion_is_logically_terminal,
-        should_preempt_product_turn_on_input,
+        RealtimeReconnectOverlay, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
+        RealtimeWsHost, product_turn_completion_disposition,
+        product_turn_completion_is_logically_terminal, should_preempt_product_turn_on_input,
     };
     use tokio::time::Instant;
 
@@ -3704,6 +3304,20 @@ mod tests {
             product_turn_completion_is_logically_terminal(StopReason::EndTurn),
             "ordinary provider turn completions remain terminal"
         );
+    }
+
+    #[test]
+    fn realtime_socket_binding_has_no_mob_member_variants() {
+        // Lock-in: after Phase 5G/T5i there are no mob-member realtime bindings.
+        // The exhaustive match below won't compile if MemberPrimary or
+        // MemberObserver variants ever reappear — absence of those arms is the
+        // proof.
+        fn _proof(binding: RealtimeSocketBinding) {
+            match binding {
+                RealtimeSocketBinding::SessionPrimary { .. } => {}
+                RealtimeSocketBinding::SessionObserver { .. } => {}
+            }
+        }
     }
 
     #[test]

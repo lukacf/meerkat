@@ -1396,24 +1396,6 @@ class MeerkatClient:
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
 
-    async def attach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
-        await self._request_with_member_identity_compat(
-            "mob/realtime_attach",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
-        )
-
-    async def detach_mob_member_live(self, mob_id: str, agent_identity: str) -> None:
-        await self._request_with_member_identity_compat(
-            "mob/realtime_detach",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
-        )
-
-    async def attach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
-        await self.attach_mob_member_live(mob_id, agent_identity)
-
-    async def detach_mob_member_voice(self, mob_id: str, agent_identity: str) -> None:
-        await self.detach_mob_member_live(mob_id, agent_identity)
-
     async def mob_turn_start(
         self,
         mob_id: str,
@@ -2035,6 +2017,55 @@ class MeerkatClient:
             {"session_id": session_id},
         )
         return RuntimeRealtimeAttachmentStatusResult(**raw)
+
+    async def runtime_realtime_attachment_statuses(
+        self, session_ids: list[str]
+    ) -> dict[str, Any]:
+        """Batch realtime attachment statuses for multiple session IDs.
+
+        Returns a typed-dict-shaped payload with a `statuses` list; callers
+        downcast per their schema types.
+        """
+        return await self._request(
+            "runtime/realtime_attachment_statuses",
+            {"session_ids": session_ids},
+        )
+
+    async def mob_ensure_member(
+        self, mob_id: str, spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Idempotent spawn: spawns the member or returns the existing entry.
+
+        Wraps `mob/ensure_member`.
+        """
+        return await self._request(
+            "mob/ensure_member",
+            {"mob_id": mob_id, "spec": spec},
+        )
+
+    async def mob_reconcile(
+        self,
+        mob_id: str,
+        desired: list[dict[str, Any]],
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Declarative reconcile: converge roster to the desired spec list.
+
+        Wraps `mob/reconcile`.
+        """
+        params: dict[str, Any] = {"mob_id": mob_id, "desired": desired}
+        if options is not None:
+            params["options"] = options
+        return await self._request("mob/reconcile", params)
+
+    async def mob_list_members_matching(
+        self, mob_id: str, filter: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Label-filtered member listing. Wraps `mob/list_members_matching`."""
+        return await self._request(
+            "mob/list_members_matching",
+            {"mob_id": mob_id, "filter": filter},
+        )
 
     async def realtime_open_info(
         self, request: RealtimeOpenRequest | dict[str, Any]

@@ -124,7 +124,7 @@ string_newtype!(
 ///
 /// Collapsing the type (`pub type MeerkatId = AgentIdentity;`) unifies
 /// the ownership without forcing a rename of every generated DSL
-/// command variant field (`Retire { meerkat_id }`, `Wire { local }`,
+/// command variant field (`Retire { agent_identity }`, `Wire { local }`,
 /// etc.) in a single pass — those field names are now just aliases
 /// that read as `AgentIdentity`. Follow-up passes can rename the
 /// fields to `agent_identity` incrementally without breaking the

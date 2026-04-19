@@ -46,9 +46,9 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     ) -> Result<MobEvent, MobError> {
-        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
+        let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepDispatched {
             run_id,
             step_id,
@@ -61,9 +61,9 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     ) -> Result<MobEvent, MobError> {
-        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
+        let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepTargetCompleted {
             run_id,
             step_id,
@@ -76,10 +76,10 @@ impl MobEventEmitter {
         &self,
         run_id: RunId,
         step_id: StepId,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         reason: String,
     ) -> Result<MobEvent, MobError> {
-        let target = AgentRuntimeId::initial(AgentIdentity::from(meerkat_id.as_str()));
+        let target = AgentRuntimeId::initial(AgentIdentity::from(agent_identity.as_str()));
         self.append(MobEventKind::StepTargetFailed {
             run_id,
             step_id,

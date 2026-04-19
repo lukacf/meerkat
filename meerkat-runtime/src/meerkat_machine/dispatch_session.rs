@@ -307,6 +307,11 @@ impl MeerkatMachine {
                             )),
                         ),
                         auth_lease: Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
+                        mcp_server_lifecycle: Arc::new(
+                            crate::handles::RuntimeMcpServerLifecycleHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
+                        ),
                     },
                 ))
             }

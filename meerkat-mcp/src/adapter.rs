@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
+use meerkat_core::handles::McpServerLifecycleHandle;
 use meerkat_core::{
     ExternalToolDelta, ExternalToolSurfaceSnapshot, ExternalToolUpdate, ToolCallView,
     ToolCatalogCapabilities, ToolCatalogEntry, ToolDef, ToolResult, agent::AgentToolDispatcher,
@@ -28,6 +29,12 @@ pub struct McpRouterAdapter {
     catalog_cache: StdRwLock<Arc<[ToolCatalogEntry]>>,
     pending_sources_cache: StdRwLock<Arc<[String]>>,
     surface_snapshot_cache: StdRwLock<Option<ExternalToolSurfaceSnapshot>>,
+    /// Shared handle slot for the session's MCP server lifecycle DSL handle
+    /// (Phase 5G / T5g). Cloned from the inner router at adapter construction
+    /// so the sync `AgentToolDispatcher::bind_mcp_server_lifecycle_handle`
+    /// trait method can write into it without acquiring the async router
+    /// lock.
+    mcp_lifecycle_handle: Arc<StdRwLock<Option<Arc<dyn McpServerLifecycleHandle>>>>,
 }
 
 impl McpRouterAdapter {
@@ -37,6 +44,7 @@ impl McpRouterAdapter {
         let catalog = AgentToolDispatcher::tool_catalog(&router);
         let pending_sources: Arc<[String]> = router.pending_sources_snapshot().into();
         let surface_snapshot = McpRouter::external_tool_surface_snapshot(&router);
+        let mcp_lifecycle_handle = router.mcp_lifecycle_handle_slot();
         Self {
             router: AsyncRwLock::new(Some(router)),
             has_pending: AtomicBool::new(has_pending),
@@ -44,6 +52,7 @@ impl McpRouterAdapter {
             catalog_cache: StdRwLock::new(catalog),
             pending_sources_cache: StdRwLock::new(pending_sources),
             surface_snapshot_cache: StdRwLock::new(Some(surface_snapshot)),
+            mcp_lifecycle_handle,
         }
     }
 
@@ -385,6 +394,39 @@ impl AgentToolDispatcher for McpRouterAdapter {
     fn pending_catalog_sources(&self) -> Arc<[String]> {
         self.cached_pending_sources()
     }
+
+    fn bind_mcp_server_lifecycle_handle(&self, handle: Arc<dyn McpServerLifecycleHandle>) {
+        // Seed the session DSL with any servers that were staged / are
+        // currently connecting from *before* the handle was bound (router is
+        // typically constructed and stage_add'd prior to the agent build that
+        // owns the runtime bindings). Without this seed, `pending_server_ids`
+        // from the DSL would return empty even while the shell router has
+        // real background connections in flight — the `[MCP_PENDING]` notice
+        // would then go silent immediately after bind.
+        let pending_before_bind: Vec<String> =
+            self.cached_pending_sources().iter().cloned().collect();
+        for server_name in &pending_before_bind {
+            if let Err(error) = handle.apply_connect_pending(server_name) {
+                tracing::debug!(
+                    server = %server_name,
+                    error = %error,
+                    "seed apply_connect_pending on bind rejected by DSL"
+                );
+            }
+        }
+
+        // Write into the shared slot cloned from the inner router; no async
+        // lock is acquired. Subsequent router handshake events flow through
+        // this handle into the session's MeerkatMachine DSL.
+        let mut slot = match self.mcp_lifecycle_handle.write() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                tracing::warn!("McpRouterAdapter mcp_lifecycle_handle RwLock poisoned; recovering");
+                poisoned.into_inner()
+            }
+        };
+        *slot = Some(handle);
+    }
 }
 
 #[cfg(test)]
@@ -441,6 +483,149 @@ mod tests {
             "empty MCP adapters should preserve exact deferred catalogs on other tool planes"
         );
         assert!(adapter.tools().is_empty());
+    }
+
+    // Mock handle used to observe Phase 5G / T5g MCP server lifecycle events
+    // routed through `McpServerLifecycleHandle`.
+    struct MockMcpServerLifecycleHandle {
+        events: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockMcpServerLifecycleHandle {
+        fn new() -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn push(&self, kind: &str, server_id: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((kind.to_string(), server_id.to_string()));
+        }
+
+        fn events(&self) -> Vec<(String, String)> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl meerkat_core::handles::McpServerLifecycleHandle for MockMcpServerLifecycleHandle {
+        fn apply_connect_pending(
+            &self,
+            server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.push("connect_pending", server_id);
+            Ok(())
+        }
+        fn apply_connected(
+            &self,
+            server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.push("connected", server_id);
+            Ok(())
+        }
+        fn apply_failed(
+            &self,
+            server_id: &str,
+            _error: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.push("failed", server_id);
+            Ok(())
+        }
+        fn apply_disconnected(
+            &self,
+            server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.push("disconnected", server_id);
+            Ok(())
+        }
+        fn apply_reload(
+            &self,
+            server_id: &str,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            self.push("reload", server_id);
+            Ok(())
+        }
+        fn pending_server_ids(&self) -> std::collections::BTreeSet<String> {
+            std::collections::BTreeSet::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn router_stage_add_fires_connect_pending_on_bound_lifecycle_handle() {
+        let mut router = McpRouter::new();
+        let handle = Arc::new(MockMcpServerLifecycleHandle::new());
+        // Bind via the shared slot (the path the adapter uses internally).
+        let handle_slot = router.mcp_lifecycle_handle_slot();
+        {
+            let mut slot = handle_slot.write().unwrap();
+            *slot = Some(
+                Arc::clone(&handle) as Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>
+            );
+        }
+
+        let cfg = meerkat_core::McpServerConfig::stdio(
+            "srv-alpha",
+            "/bin/echo",
+            Vec::<String>::new(),
+            HashMap::new(),
+        );
+        router.stage_add(cfg);
+
+        let events = handle.events();
+        assert_eq!(
+            events,
+            vec![("connect_pending".to_string(), "srv-alpha".to_string())],
+            "stage_add on a fresh router should fire exactly apply_connect_pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_bind_seeds_pre_bind_pending_servers_into_dsl() {
+        let Some(server_path) = skip_if_no_test_server() else {
+            return;
+        };
+        let mut router = McpRouter::new();
+        router.stage_add(test_server_config("srv-beta", &server_path));
+        // Simulate the CLI flow: stage_add + apply_staged run before the
+        // agent-factory bind happens. After apply_staged, pending_sources
+        // reflects the in-flight background connect tasks.
+        router.apply_staged().await.expect("apply staged");
+
+        let adapter = McpRouterAdapter::new(router);
+        // Adapter construction captured pending_sources_snapshot via
+        // the cached_pending_sources buffer; that's what bind seeds from.
+        let handle = Arc::new(MockMcpServerLifecycleHandle::new());
+        adapter.bind_mcp_server_lifecycle_handle(
+            Arc::clone(&handle) as Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>
+        );
+
+        let events = handle.events();
+        assert!(
+            events
+                .iter()
+                .any(|(kind, name)| kind == "connect_pending" && name == "srv-beta"),
+            "bind should seed apply_connect_pending for pre-bind pending servers, got {events:?}"
+        );
+
+        adapter.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn router_lifecycle_handle_none_is_noop() {
+        // Standalone router without a bound handle: every lifecycle seam
+        // must still function (no panic, no fatal error).
+        let mut router = McpRouter::new();
+        let cfg = meerkat_core::McpServerConfig::stdio(
+            "srv-standalone",
+            "/bin/echo",
+            Vec::<String>::new(),
+            HashMap::new(),
+        );
+        router.stage_add(cfg);
+        router.stage_reload("srv-standalone");
+        // Nothing panicked; standalone path remains intact.
     }
 
     #[tokio::test]

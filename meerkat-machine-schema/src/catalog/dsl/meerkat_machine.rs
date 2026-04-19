@@ -18,13 +18,18 @@ machine! {
             // machine with monotonic authority epochs for provider-callback
             // validation. See docs/architecture/realtime-259-port-plan.md.
             realtime_intent_present: bool,
-            realtime_binding_state: String,
+            realtime_binding_state: Enum<RealtimeBindingState>,
             realtime_binding_authority_epoch: Option<u64>,
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
             // Live-topology reconfigure phase — temporarily blocks realtime
             // publishes/attaches while an LLM-identity swap is in progress.
             live_topology_phase: String,
+            // MCP server connection authority. Keyed on the configured server
+            // name (McpServerId). The runtime reads this map to drive the
+            // deterministic [MCP_PENDING] system-notice toggle and to gate
+            // tool availability as servers complete their handshakes.
+            mcp_server_states: Map<McpServerId, Enum<McpServerState>>,
         }
 
         init(Initializing) {
@@ -35,11 +40,12 @@ machine! {
             pre_run_phase = None,
             silent_intent_overrides = EmptySet,
             realtime_intent_present = false,
-            realtime_binding_state = "Unbound",
+            realtime_binding_state = RealtimeBindingState::Unbound,
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
             live_topology_phase = "Idle",
+            mcp_server_states = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -119,7 +125,16 @@ machine! {
             ReplaceRealtimeBinding,
             DetachRealtimeBinding,
             RequireRealtimeReattach,
-            PublishRealtimeSignal { authority_epoch: u64, next_binding_state: String },
+            PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
+            // MCP server lifecycle inputs. The shell translates MCP connection
+            // events into these inputs so the DSL owns authoritative per-server
+            // state; tool availability and the `[MCP_PENDING]` notice are then
+            // pure reads off `self.mcp_server_states`.
+            McpServerConnectPending { server_id: McpServerId },
+            McpServerConnected { server_id: McpServerId },
+            McpServerFailed { server_id: McpServerId, error: String },
+            McpServerDisconnected { server_id: McpServerId },
+            McpServerReload { server_id: McpServerId },
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -211,6 +226,11 @@ machine! {
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
+            // MCP server lifecycle effects. Emitted on each per-server state
+            // transition so the shell can toggle the `[MCP_PENDING]` system
+            // notice and refresh tool availability deterministically.
+            McpServerStateChanged { server_id: McpServerId, new_state: Enum<McpServerState> },
+            McpServerReloadRequested { server_id: McpServerId },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -261,6 +281,8 @@ machine! {
         disposition RejectSurfaceCall => external,
         disposition RealtimeIntentProjected => external,
         disposition RealtimeBindingRotated => external,
+        disposition McpServerStateChanged => external,
+        disposition McpServerReloadRequested => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -286,7 +308,7 @@ machine! {
         // Prevents Unbound+Some(epoch) and BindingReady+None from being
         // representable as a derived TLC fact.
         invariant realtime_binding_epoch_consistency {
-            (self.realtime_binding_state == "Unbound")
+            (self.realtime_binding_state == RealtimeBindingState::Unbound)
             == (self.realtime_binding_authority_epoch == None)
         }
 
@@ -1405,7 +1427,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
             update {
-                self.realtime_binding_state = "BindingNotReady";
+                self.realtime_binding_state = RealtimeBindingState::BindingNotReady;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1420,7 +1442,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
             update {
-                self.realtime_binding_state = "ReplacementPending";
+                self.realtime_binding_state = RealtimeBindingState::ReplacementPending;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1434,7 +1456,7 @@ machine! {
             on input DetachRealtimeBinding
             guard "session_registered" { self.session_id != None }
             update {
-                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1447,7 +1469,7 @@ machine! {
             on input RequireRealtimeReattach
             guard "session_registered" { self.session_id != None }
             update {
-                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1461,15 +1483,88 @@ machine! {
             guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
             guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
             guard "valid_next_state" {
-                next_binding_state == "BindingNotReady"
-                || next_binding_state == "BindingReady"
-                || next_binding_state == "ReplacementPending"
+                next_binding_state == RealtimeBindingState::BindingNotReady
+                || next_binding_state == RealtimeBindingState::BindingReady
+                || next_binding_state == RealtimeBindingState::ReplacementPending
             }
             update {
                 self.realtime_binding_state = next_binding_state;
                 self.realtime_reattach_required = false;
             }
             to Idle
+        }
+
+        // =====================================================================
+        // MCP server lifecycle transitions
+        // =====================================================================
+        //
+        // Each MCP server is keyed by its configured `McpServerId` in the
+        // `mcp_server_states` map. The shell translates incoming connection
+        // events into these inputs; each input rewrites that key's state and
+        // emits `McpServerStateChanged` so downstream consumers (the
+        // `[MCP_PENDING]` system-notice toggle and tool-availability filter)
+        // can stay pure reads off DSL state.
+
+        transition McpServerConnectPending {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input McpServerConnectPending { server_id }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.mcp_server_states.insert(server_id, McpServerState::PendingConnect);
+            }
+            to Idle
+            emit McpServerStateChanged { server_id: server_id, new_state: McpServerState::PendingConnect }
+        }
+
+        transition McpServerConnected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input McpServerConnected { server_id }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.mcp_server_states.insert(server_id, McpServerState::Connected);
+            }
+            to Idle
+            emit McpServerStateChanged { server_id: server_id, new_state: McpServerState::Connected }
+        }
+
+        transition McpServerFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input McpServerFailed { server_id, error }
+            guard "session_registered" { self.session_id != None }
+            update {
+                // The catalog DSL cannot carry payloads on enum state
+                // variants, so the error detail lives on the input and the
+                // emitted effect; state just records the `Failed` category.
+                self.mcp_server_states.insert(server_id, McpServerState::Failed);
+            }
+            to Idle
+            emit McpServerStateChanged { server_id: server_id, new_state: McpServerState::Failed }
+        }
+
+        transition McpServerDisconnected {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input McpServerDisconnected { server_id }
+            guard "session_registered" { self.session_id != None }
+            update {
+                self.mcp_server_states.insert(server_id, McpServerState::Disconnected);
+            }
+            to Idle
+            emit McpServerStateChanged { server_id: server_id, new_state: McpServerState::Disconnected }
+        }
+
+        transition McpServerReload {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input McpServerReload { server_id }
+            guard "session_registered" { self.session_id != None }
+            update {
+                // Reload moves the server back to PendingConnect; the shell is
+                // expected to tear down the prior connection and drive a fresh
+                // Connected / Failed transition on completion.
+                self.mcp_server_states.insert(server_id, McpServerState::PendingConnect);
+            }
+            to Idle
+            emit McpServerReloadRequested { server_id: server_id }
+            emit McpServerStateChanged { server_id: server_id, new_state: McpServerState::PendingConnect }
         }
 
         // =====================================================================
@@ -1511,7 +1606,7 @@ machine! {
             update {
                 self.live_topology_phase = "Detached";
                 // Compose the detach into the binding authority.
-                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1579,7 +1674,7 @@ machine! {
             }
             update {
                 self.live_topology_phase = "Idle";
-                self.realtime_binding_state = "Unbound";
+                self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
@@ -1621,6 +1716,42 @@ stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
 stub_newtype!(Generation);
+
+pub use crate::types::McpServerId;
+
+/// Per-server MCP connection lifecycle state.
+///
+/// Unit variants only: the catalog DSL (TLC-facing twin) does not model
+/// variant payloads in state. The `Failed` category is carried through the
+/// `McpServerFailed` input and the `McpServerStateChanged` effect with an
+/// `error: String` companion field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum McpServerState {
+    #[default]
+    PendingConnect,
+    Connected,
+    Failed,
+    Disconnected,
+}
+
+/// Per-session realtime binding-state lifecycle.
+///
+/// Unit variants only — this enum models the binding-state machine as a
+/// closed set of phases carried inside `MeerkatMachine` state. The default
+/// (`Unbound`) is paired with `realtime_binding_authority_epoch == None`
+/// by the `realtime_binding_epoch_consistency` invariant.
+///
+/// Default serde tagging reuses the variant names as string values
+/// (`"Unbound"`, `"BindingNotReady"`, `"BindingReady"`, `"ReplacementPending"`)
+/// to preserve wire-format compatibility with earlier stringly-typed clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeBindingState {
+    #[default]
+    Unbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum OperationKind {

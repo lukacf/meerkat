@@ -60,6 +60,8 @@ pub struct AgentBuilder {
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    pub(super) mcp_server_lifecycle_handle:
+        Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
     pub(super) connection_ref_binding_key: Option<String>,
 }
 
@@ -96,6 +98,7 @@ impl AgentBuilder {
             turn_state_handle: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
+            mcp_server_lifecycle_handle: None,
             connection_ref_binding_key: None,
         }
     }
@@ -335,6 +338,7 @@ impl AgentBuilder {
             runtime_execution_kind: None,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
+            mcp_server_lifecycle_handle: self.mcp_server_lifecycle_handle,
             connection_ref_binding_key: self.connection_ref_binding_key,
             cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
@@ -552,6 +556,21 @@ impl AgentBuilder {
         handle: Arc<dyn crate::handles::AuthLeaseHandle>,
     ) -> Self {
         self.auth_lease_handle = Some(handle);
+        self
+    }
+
+    /// Set the runtime-backed MCP server lifecycle handle for this build
+    /// (Phase 5G / T5g).
+    ///
+    /// When set, the agent loop reads `pending_server_ids()` from this handle
+    /// to decide whether to emit the `[MCP_PENDING]` system notice at each
+    /// CallingLlm boundary — authoritative DSL state replaces the shell-level
+    /// `ext.pending` check.
+    pub fn with_mcp_server_lifecycle_handle(
+        mut self,
+        handle: Arc<dyn crate::handles::McpServerLifecycleHandle>,
+    ) -> Self {
+        self.mcp_server_lifecycle_handle = Some(handle);
         self
     }
 

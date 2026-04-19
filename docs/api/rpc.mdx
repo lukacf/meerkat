@@ -69,7 +69,8 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
 | `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
 | `runtime/state` | Runtime | Read runtime-backed ingress state |
-| `runtime/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status |
+| `runtime/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status for a session |
+| `runtime/realtime_attachment_statuses` | Runtime | Batch read realtime attachment statuses for many sessions |
 | `runtime/accept` | Runtime | Admit external work directly into runtime ingress |
 | `runtime/retire` | Runtime | Retire runtime-backed ingress |
 | `runtime/reset` | Runtime | Reset runtime-backed ingress |
@@ -97,11 +98,12 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | Get flow run status (mob feature) |
 | `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |
+| `mob/ensure_member` | Mob | Idempotent spawn — returns existing entry if member already exists (mob feature) |
+| `mob/reconcile` | Mob | Declarative roster reconcile against a desired spec list (mob feature) |
+| `mob/list_members_matching` | Mob | Label-filtered member listing with server-side filter (mob feature) |
 | `mob/spawn_helper` | Mob | Spawn a helper member and wait for its result (mob feature) |
 | `mob/fork_helper` | Mob | Fork a helper from an existing member and wait for its result (mob feature) |
 | `mob/force_cancel` | Mob | Force-cancel a member's active work (mob feature) |
-| `mob/realtime_attach` | Mob | Attach realtime attachment intent to a member (mob feature) |
-| `mob/realtime_detach` | Mob | Detach realtime attachment intent from a member (mob feature) |
 | `mob/turn_start` | Mob | Start a turn on a mob member by identity (mob feature) |
 | `mob/member_status` | Mob | Read canonical status for a specific member (mob feature) |
 | `mob/snapshot` | Mob | Point-in-time aggregate of mob status plus member list (mob feature) |
@@ -158,8 +160,13 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 </Note>
 
 <Note>
-Public documentation uses `runtime/realtime_attachment_status`,
-`mob/realtime_attach`, and `mob/realtime_detach` for the realtime attachment capability.
+Realtime is a delivery mode of the session's LLM, driven by
+`ModelCapabilities.realtime`. To enable realtime audio on a session,
+create the session with a realtime-capable model (for example
+`gpt-realtime`); transport attach/detach is managed automatically by
+the runtime. Observe status via `runtime/realtime_attachment_status`
+(single) or `runtime/realtime_attachment_statuses` (batch). There is no
+caller-initiated attach/detach RPC.
 </Note>
 
 <Note>
@@ -230,7 +237,7 @@ Handshake. Returns server capabilities.
       "capabilities/get", "models/catalog",
       "skills/list", "skills/inspect",
       "realtime/open_info", "realtime/status", "realtime/capabilities",
-      "runtime/state", "runtime/realtime_attachment_status", "runtime/accept", "runtime/retire", "runtime/reset",
+      "runtime/state", "runtime/realtime_attachment_status", "runtime/realtime_attachment_statuses", "runtime/accept", "runtime/retire", "runtime/reset",
       "input/state", "input/list",
       "session/stream_open", "session/stream_close",
       "mob/create", "mob/list", "mob/status",
@@ -240,7 +247,7 @@ Handshake. Returns server capabilities.
       "mob/events", "mob/stream_open", "mob/stream_close",
       "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
       "mob/flow_status", "mob/flow_cancel",
-      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/realtime_attach", "mob/realtime_detach", "mob/member_status",
+      "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
       "mob/wait_kickoff", "mob/turn_start",
       "mob/profile/create", "mob/profile/get", "mob/profile/list",
       "mob/profile/update", "mob/profile/delete",
@@ -776,71 +783,33 @@ Inspect a skill's full content (body).
 
 ## Realtime attachment methods
 
-Attach, detach, and inspect the runtime-owned realtime (audio) channel bound to a session or mob member. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, the `RealtimeAttachmentSignalAuthority` authority-epoch model, and the `reconfigure_live_topology` flow for swapping provider/model on a realtime-attached session.
+Enable realtime on a session by pointing it at a realtime-capable model, then observe the runtime-owned attachment status for that session. The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no caller-initiated attach/detach RPC. See the [Realtime voice guide](/guides/realtime) for the full capability-driven model, the attachment state machine, and the `RealtimeAttachmentSignalAuthority` authority-epoch token.
 
-### mob/realtime_attach
+### Enabling realtime on a session
 
-Stage durable realtime intent for a mob member. Intent is keyed on `AgentIdentity` and survives member respawn; the underlying binding epoch rotates per-runtime.
+Realtime is enabled by pointing the session at a realtime-capable model.
+To make a session realtime, set its model to `gpt-realtime` at
+`session/create`:
 
-<CodeGroup>
-```json Request
+```json
 {
   "jsonrpc": "2.0",
-  "id": 20,
-  "method": "mob/realtime_attach",
+  "id": 19,
+  "method": "session/create",
   "params": {
-    "mob_id": "release-triage",
-    "agent_identity": "lead-1"
+    "prompt": "Let's talk.",
+    "model": "gpt-realtime",
+    "provider": "openai"
   }
 }
 ```
 
-```json Response
-{"jsonrpc": "2.0", "id": 20, "result": {"attached": true}}
-```
-</CodeGroup>
-
-<ParamField body="mob_id" type="string" required>
-  Mob ID.
-</ParamField>
-
-<ParamField body="agent_identity" type="string" required>
-  Stable per-member identity. Must reference an existing mob member.
-</ParamField>
-
-Typed wire contract: `MobRealtimeAttachParams` / `MobRealtimeAttachResult`.
-
-### mob/realtime_detach
-
-Clear realtime intent for a mob member. Idempotent.
-
-<CodeGroup>
-```json Request
-{
-  "jsonrpc": "2.0",
-  "id": 21,
-  "method": "mob/realtime_detach",
-  "params": {
-    "mob_id": "release-triage",
-    "agent_identity": "lead-1"
-  }
-}
-```
-
-```json Response
-{"jsonrpc": "2.0", "id": 21, "result": {"detached": true}}
-```
-</CodeGroup>
-
-<ParamField body="mob_id" type="string" required>
-  Mob ID.
-</ParamField>
-
-<ParamField body="agent_identity" type="string" required>
-  Stable per-member identity.
-</ParamField>
-
-Typed wire contract: `MobRealtimeDetachParams` / `MobRealtimeDetachResult`.
+The runtime inspects `ModelCapabilities.realtime` for the resolved
+model and brings up the OpenAI Realtime transport automatically. Poll
+`runtime/realtime_attachment_status` to confirm the binding reaches
+`binding_ready`, then call `realtime/open_info` to obtain a bootstrap
+token for the audio WebSocket. See the [Realtime voice
+guide](/guides/realtime) for the full flow.
 
 ### runtime/realtime_attachment_status
 
@@ -872,19 +841,52 @@ Read the runtime-owned realtime attachment status projection for a session.
 
 Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime voice guide](/guides/realtime#attachment-states) for the full state table and mermaid transition diagram.
 
-`mob/member_status` responses include the same value under the `realtime_attachment_status` field for session IDs bound to mob members.
+`mob/member_status` responses include the same value under the `realtime_attachment_status` field for sessions bound to mob members.
+
+### runtime/realtime_attachment_statuses
+
+Batch read of realtime attachment status for multiple sessions in a single round trip. Useful for observing all members of a mob at once.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "method": "runtime/realtime_attachment_statuses",
+  "params": {
+    "session_ids": [
+      "01936f8a-7b2c-7000-8000-000000000001",
+      "01936f8a-7b2c-7000-8000-000000000002"
+    ]
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 23,
+  "result": {
+    "statuses": [
+      {"session_id": "01936f8a-7b2c-7000-8000-000000000001", "status": "binding_ready"},
+      {"session_id": "01936f8a-7b2c-7000-8000-000000000002", "status": "unattached"}
+    ]
+  }
+}
+```
+</CodeGroup>
 
 ### Realtime bootstrap methods (`realtime/*`)
 
-In addition to the attachment lifecycle above, three product-layer methods handle opening and inspecting realtime WebSocket channels:
+In addition to attachment status observation, three product-layer methods handle opening and inspecting realtime WebSocket channels:
 
 | Method | Purpose |
 |--------|---------|
 | `realtime/open_info` | Issue a single-use bootstrap token for opening a realtime channel |
-| `realtime/status` | Read product-layer realtime channel status for a session or mob member |
+| `realtime/status` | Read product-layer realtime channel status for a session |
 | `realtime/capabilities` | Read product-layer realtime capabilities (supported input/output kinds, interrupt/transcript support) |
 
-These are emitted by `rkat-rpc`'s realtime WebSocket listener. The lifecycle methods above (`mob/realtime_attach`, `mob/realtime_detach`, `runtime/realtime_attachment_status`) are the authoritative attachment surface — the `realtime/*` methods are the public product layer built on top.
+These are emitted by `rkat-rpc`'s realtime WebSocket listener. They are the public product layer on top of the capability-driven attachment — the runtime manages attach/detach automatically based on `ModelCapabilities.realtime`, and these methods let callers discover the actual transport and open the audio socket.
 
 ## MCP methods
 

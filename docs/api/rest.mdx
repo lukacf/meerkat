@@ -67,8 +67,6 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
-| `POST` | `/mob/{id}/members/{agent_identity}/realtime/attach` | Attach realtime (audio) channel intent to a mob member (mob feature) |
-| `POST` | `/mob/{id}/members/{agent_identity}/realtime/detach` | Detach realtime channel intent from a mob member (mob feature) |
 | `GET` | `/runtime/{id}/realtime_attachment_status` | Read the runtime-owned realtime attachment status for a session |
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/skills/{id}` | Inspect a skill's full content |
@@ -851,31 +849,23 @@ List discoverable peers for a session. Requires the `comms` feature.
 
 ## Realtime attachment
 
-Attach or detach a realtime (audio) channel to a specific mob member, or read the runtime-owned attachment status for a session. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, authority-epoch model, and live-topology reconfigure flow.
+Realtime is a delivery mode of the session's LLM, driven by
+`ModelCapabilities.realtime`. To enable realtime audio on a session,
+create it with a realtime-capable model (for example `gpt-realtime`):
 
-### POST /mob/\{id\}/members/\{agent_identity\}/realtime/attach
-
-Stage realtime (audio) intent for a mob member. Durable: intent survives member respawn. Requires the `mob` feature.
-
-```bash Request
-curl -X POST http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/attach
+```bash
+curl -X POST http://127.0.0.1:8080/sessions \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Ready for voice.","model":"gpt-realtime","provider":"openai"}'
 ```
 
-```json Response
-{"attached": true}
-```
-
-### POST /mob/\{id\}/members/\{agent_identity\}/realtime/detach
-
-Clear realtime intent for a mob member. Idempotent. Requires the `mob` feature.
-
-```bash Request
-curl -X POST http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/detach
-```
-
-```json Response
-{"detached": true}
-```
+The runtime attaches the OpenAI Realtime transport automatically and
+the status endpoint below reports `binding_ready` once the provider
+confirms. There is no caller-initiated attach/detach endpoint — swap
+the session's model (or choose a realtime-capable default) to control
+whether the session runs in realtime mode. See the [Realtime voice
+guide](/guides/realtime) for the full capability-driven model, state
+machine, and reconfigure flow.
 
 ### GET /runtime/\{id\}/realtime_attachment_status
 

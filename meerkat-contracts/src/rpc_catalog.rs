@@ -278,6 +278,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "RuntimeRealtimeAttachmentStatusResult",
             ),
             RpcMethodDescriptor::typed(
+                "runtime/realtime_attachment_statuses",
+                "Batch: realtime attachment statuses for many sessions in one round-trip",
+                "RuntimeRealtimeAttachmentStatusesParams",
+                "RuntimeRealtimeAttachmentStatusesResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "runtime/accept",
                 "Accept a runtime input for a session",
                 "RuntimeAcceptParams",
@@ -323,6 +329,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::basic("mob/lifecycle", "Apply a mob lifecycle action"),
             RpcMethodDescriptor::basic("mob/spawn", "Spawn a new mob member"),
             RpcMethodDescriptor::basic("mob/spawn_many", "Spawn multiple new mob members"),
+            RpcMethodDescriptor::typed(
+                "mob/ensure_member",
+                "Declarative: spawn if absent, otherwise return the existing roster entry",
+                "MobEnsureMemberParams",
+                "MobEnsureMemberResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/reconcile",
+                "Declarative: drive the roster toward a desired set of specs",
+                "MobReconcileParams",
+                "MobReconcileResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "mob/list_members_matching",
+                "List roster members that match a filter",
+                "MobListMembersMatchingParams",
+                "MobListMembersMatchingResult",
+            ),
             RpcMethodDescriptor::basic("mob/retire", "Retire a mob member"),
             RpcMethodDescriptor::basic("mob/respawn", "Respawn a mob member with topology restore"),
             RpcMethodDescriptor::typed(
@@ -362,18 +386,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Fork a helper member and wait for completion",
             ),
             RpcMethodDescriptor::basic("mob/force_cancel", "Force-cancel a mob member"),
-            RpcMethodDescriptor::typed(
-                "mob/realtime_attach",
-                "Attach live voice intent to a mob member",
-                "MobRealtimeAttachParams",
-                "MobRealtimeAttachResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "mob/realtime_detach",
-                "Detach live voice intent from a mob member",
-                "MobRealtimeDetachParams",
-                "MobRealtimeDetachResult",
-            ),
             RpcMethodDescriptor::basic(
                 "mob/turn_start",
                 "Start a turn on a mob member by identity",

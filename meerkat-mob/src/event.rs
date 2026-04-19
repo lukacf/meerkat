@@ -294,16 +294,6 @@ pub enum MobEventKind {
         /// Current kickoff snapshot.
         kickoff: MobMemberKickoffSnapshot,
     },
-    /// Durable intent that this member should have voice attached.
-    MemberVoiceIntentSet {
-        /// Member whose durable voice intent is now present.
-        agent_identity: AgentIdentity,
-    },
-    /// Durable voice intent was cleared for this member.
-    MemberVoiceIntentCleared {
-        /// Member whose durable voice intent is now absent.
-        agent_identity: AgentIdentity,
-    },
     /// Bidirectional trust was established between two members.
     MembersWired {
         /// First member.
@@ -676,16 +666,6 @@ mod tests {
             task_id: TaskId::from("task-001"),
             status: TaskStatus::InProgress,
             owner: Some(AgentIdentity::from("agent-1")),
-        });
-    }
-
-    #[test]
-    fn test_member_voice_intent_variants_roundtrip() {
-        roundtrip(&MobEventKind::MemberVoiceIntentSet {
-            agent_identity: AgentIdentity::from("agent-1"),
-        });
-        roundtrip(&MobEventKind::MemberVoiceIntentCleared {
-            agent_identity: AgentIdentity::from("agent-1"),
         });
     }
 

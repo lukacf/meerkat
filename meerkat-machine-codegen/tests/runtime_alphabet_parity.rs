@@ -38,6 +38,15 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "CompleteLiveTopology",
         "AbortLiveTopologyBeforeDetach",
         "FailLiveTopologyAfterDetach",
+        // Phase 5G / T5g: MCP server handshake lifecycle is driven via
+        // `McpServerLifecycleHandle` trait (meerkat-core/src/handles.rs)
+        // staged by the MCP router shell, not through
+        // `MeerkatMachineCommand`.
+        "McpServerConnectPending",
+        "McpServerConnected",
+        "McpServerDisconnected",
+        "McpServerFailed",
+        "McpServerReload",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()
@@ -53,9 +62,20 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
 #[test]
 fn mob_machine_inputs_equal_runtime_manifest_exactly() {
     let schema = mob_machine();
+    // Phase 5G declarative API additions (T4a/T4b/T5d) introduced
+    // `EnsureMember`, `Reconcile`, and `ListMembersMatching` as
+    // runtime-command composition helpers that dispatch through the
+    // MobHandle without their own DSL transition entries — they layer on
+    // top of `Spawn`/`Retire`/`ListMembers` rather than adding new
+    // semantic facts. Exclude them from the exact-parity assertion until
+    // the DSL schema is extended to model their composition seams (if
+    // ever; they may stay shell-level by design).
+    const RUNTIME_COMPOSITION_ONLY_COMMANDS: &[&str] =
+        &["EnsureMember", "Reconcile", "ListMembersMatching"];
     let actual = variant_names(&schema.inputs.variants);
     let expected: BTreeSet<&str> = canonical_mob_machine_command_manifest()
         .into_iter()
+        .filter(|name| !RUNTIME_COMPOSITION_ONLY_COMMANDS.contains(name))
         .collect();
 
     assert_eq!(actual, expected);

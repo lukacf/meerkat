@@ -37,7 +37,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::process::{Child, Command};
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -92,6 +91,7 @@ mod pending_spawn_lineage;
 mod provision_guard;
 mod provisioner;
 pub mod pump;
+pub mod reconcile;
 pub mod recovery;
 mod roster_authority;
 mod session_service;
@@ -135,10 +135,16 @@ pub use handle::{
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use pump::{SchedulerGrant, pump_schedulers_to_exhaustion};
+pub use reconcile::{
+    EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
+    ReconcileStage,
+};
 pub use recovery::RestoreIncompatible;
 use roster_authority::{RosterAuthority, RosterMutator};
 pub use session_service::MobSessionService;
 pub use spawn_policy::{SpawnPolicy, SpawnSpec};
+#[cfg(test)]
+pub(crate) use state::MobDslT2Snapshot;
 #[cfg(test)]
 pub(crate) use state::MobLifecycleSnapshot;
 pub use state::MobOrchestratorSnapshot;

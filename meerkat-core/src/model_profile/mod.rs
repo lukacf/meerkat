@@ -50,6 +50,10 @@ pub struct ModelProfile {
     /// Whether the model can process image blocks in tool results.
     /// When false, `view_image` is hidden from the tool list.
     pub image_tool_results: bool,
+    /// Whether the model supports a realtime bidirectional streaming transport
+    /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints). Drives
+    /// capability-based realtime transport attach/detach in the runtime.
+    pub realtime: bool,
     /// Whether the model supports provider-native web search tools.
     pub supports_web_search: bool,
     /// JSON Schema describing accepted provider-specific parameters.
@@ -98,6 +102,7 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         inline_video: caps.inline_video,
         vision: caps.vision,
         image_tool_results: caps.image_tool_results,
+        realtime: caps.realtime,
         params_schema: schema_builder::build_params_schema(caps),
         call_timeout_secs: caps.call_timeout_secs,
     }

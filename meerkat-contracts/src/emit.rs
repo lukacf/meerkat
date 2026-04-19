@@ -120,8 +120,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobCreateParams": schema_for!(crate::wire::MobCreateParams),
         "MobWireParams": schema_for!(crate::wire::MobWireParams),
         "MobUnwireParams": schema_for!(crate::wire::MobUnwireParams),
-        "MobRealtimeAttachParams": schema_for!(crate::wire::MobRealtimeAttachParams),
-        "MobRealtimeDetachParams": schema_for!(crate::wire::MobRealtimeDetachParams),
         "RealtimeOpenRequest": schema_for!(crate::wire::RealtimeOpenRequest),
         "RealtimeStatusParams": schema_for!(crate::wire::RealtimeStatusParams),
         "RealtimeCapabilitiesParams": schema_for!(crate::wire::RealtimeCapabilitiesParams),

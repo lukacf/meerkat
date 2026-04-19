@@ -7,7 +7,8 @@ use crate::tokio;
 // MobState
 // ---------------------------------------------------------------------------
 
-/// Lifecycle state of a mob, stored as `Arc<AtomicU8>` for lock-free reads.
+/// Lifecycle state of a mob. Projected from the DSL authority on demand —
+/// no shadow truth (see dogma #1, #13, #17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MobState {
@@ -19,21 +20,6 @@ pub enum MobState {
 }
 
 impl MobState {
-    pub(super) fn from_u8(v: u8) -> Self {
-        match v {
-            0 => Self::Creating,
-            1 => Self::Running,
-            2 => Self::Stopped,
-            3 => Self::Completed,
-            4 => Self::Destroyed,
-            _ => {
-                debug_assert!(false, "invalid mob lifecycle state byte: {v}");
-                tracing::error!(state_byte = v, "invalid mob lifecycle state byte");
-                Self::Destroyed
-            }
-        }
-    }
-
     /// Human-readable name for the state.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -103,6 +89,31 @@ impl Default for MobLifecycleSnapshot {
     }
 }
 
+/// Test-only projection of the Phase 5G / T2 DSL fields. Cloned from
+/// `MobMachineAuthority.state` inside the actor so the shell sees the DSL
+/// authority directly (dogma #1, #13) with no shadow truth on the handle.
+/// Types mirror the DSL-scoped types declared by `machines::mob_machine` —
+/// they are distinct from the public `crate::ids::*` types.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MobDslT2Snapshot {
+    pub member_state_markers: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentRuntimeId,
+        crate::machines::mob_machine::MobMemberState,
+    >,
+    pub wiring_edges: std::collections::BTreeSet<crate::machines::mob_machine::WiringEdge>,
+    pub identity_to_runtime: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::AgentRuntimeId,
+    >,
+    pub tasks: std::collections::BTreeMap<
+        crate::machines::mob_machine::TaskId,
+        crate::machines::mob_machine::MobTask,
+    >,
+    pub in_progress_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
+    pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
+}
+
 // ---------------------------------------------------------------------------
 // MobCommand
 // ---------------------------------------------------------------------------
@@ -120,11 +131,11 @@ pub(super) enum MobCommand {
         result: Result<super::handle::MemberSpawnReceipt, MobError>,
     },
     Retire {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     Respawn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         initial_message: Option<ContentInput>,
         reply_tx: oneshot::Sender<
             Result<super::handle::MemberRespawnReceipt, super::handle::MobRespawnError>,
@@ -144,20 +155,20 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ExternalTurn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     InternalTurn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     #[cfg(feature = "runtime-adapter")]
     KickoffOutcomeResolved {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         outcome: meerkat_runtime::completion::CompletionOutcome,
         ack_tx: oneshot::Sender<()>,
     },
@@ -192,6 +203,15 @@ pub(super) enum MobCommand {
     #[cfg(test)]
     LifecycleSnapshot {
         reply_tx: oneshot::Sender<MobLifecycleSnapshot>,
+    },
+    /// Snapshot the T2 DSL field projections (member state markers, wiring
+    /// edges, identity→runtime map, tasks + task id sets) directly from the
+    /// DSL authority. Test-only read seam used by the runtime-parity
+    /// snapshot so external shell code never has to keep a shadow copy
+    /// (dogma #1, #13).
+    #[cfg(test)]
+    DslT2Snapshot {
+        reply_tx: oneshot::Sender<MobDslT2Snapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
@@ -233,7 +253,7 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<BTreeMap<String, bool>>,
     },
     SubscribeAgentEvents {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         reply_tx: oneshot::Sender<Result<EventStream, MobError>>,
     },
     SubscribeAllAgentEvents {
@@ -256,16 +276,8 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     ForceCancel {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    RealtimeAttach {
-        meerkat_id: MeerkatId,
-        reply_tx: oneshot::Sender<Result<bool, MobError>>,
-    },
-    RealtimeDetach {
-        meerkat_id: MeerkatId,
-        reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
     SetSpawnPolicy {
         policy: Option<Arc<dyn super::spawn_policy::SpawnPolicy>>,
@@ -273,5 +285,12 @@ pub(super) enum MobCommand {
     },
     Shutdown {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Read the current lifecycle phase directly from the DSL authority.
+    /// Routes through the command channel so the actor returns the single
+    /// canonical DSL-authority value; there is no atomic shadow (dogma #1,
+    /// #13, #17).
+    QueryPhase {
+        reply_tx: oneshot::Sender<MobState>,
     },
 }

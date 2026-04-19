@@ -250,6 +250,7 @@ fn realtime_status_from_runtime(
     }
 }
 
+#[allow(dead_code)]
 fn realtime_status_from_mob_status(status: &Value) -> Result<RealtimeChannelStatus, McpToolError> {
     let Some(status) = status.as_str() else {
         return Err(McpToolError::internal(
@@ -301,29 +302,6 @@ async fn realtime_status_payload(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             realtime_status_from_runtime(status)
         }
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id,
-            agent_identity,
-        } => {
-            if mob_id.trim().is_empty() {
-                return Err(McpToolError::invalid_params("mob_id must not be empty"));
-            }
-            if agent_identity.trim().is_empty() {
-                return Err(McpToolError::invalid_params(
-                    "agent_identity must not be empty",
-                ));
-            }
-            let snapshot = state
-                .mob_member_status(
-                    &parse_mob_id(&mob_id)?,
-                    &meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
-                )
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let serialized = serde_json::to_value(snapshot.realtime_attachment_status)
-                .map_err(|err| McpToolError::internal(err.to_string()))?;
-            realtime_status_from_mob_status(&serialized)?
-        }
     };
     Ok(RealtimeStatusResult { status })
 }
@@ -338,26 +316,6 @@ async fn realtime_capabilities_payload(
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             state
                 .realtime_validate_session_target(&session_id)
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-        }
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id,
-            agent_identity,
-        } => {
-            if mob_id.trim().is_empty() {
-                return Err(McpToolError::invalid_params("mob_id must not be empty"));
-            }
-            if agent_identity.trim().is_empty() {
-                return Err(McpToolError::invalid_params(
-                    "agent_identity must not be empty",
-                ));
-            }
-            state
-                .mob_member_status(
-                    &parse_mob_id(&mob_id)?,
-                    &meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
-                )
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
         }
@@ -706,19 +664,6 @@ pub async fn handle_public_tools_call(
                     meerkat_core::types::SessionId::parse(session_id)
                         .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
                 }
-                RealtimeChannelTarget::MobMemberTarget {
-                    mob_id,
-                    agent_identity,
-                } => {
-                    if mob_id.trim().is_empty() {
-                        return Err(McpToolError::invalid_params("mob_id must not be empty"));
-                    }
-                    if agent_identity.trim().is_empty() {
-                        return Err(McpToolError::invalid_params(
-                            "agent_identity must not be empty",
-                        ));
-                    }
-                }
             }
             if let Some(addr) = state.realtime_rpc_tcp_addr() {
                 return proxy_realtime_open_info_over_tcp(&addr, &input).await;
@@ -729,18 +674,6 @@ pub async fn handle_public_tools_call(
                         .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
                     state
                         .realtime_validate_session_target(&session_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                }
-                RealtimeChannelTarget::MobMemberTarget {
-                    mob_id,
-                    agent_identity,
-                } => {
-                    state
-                        .mob_member_status(
-                            &parse_mob_id(mob_id)?,
-                            &meerkat_mob::AgentIdentity::from(agent_identity.as_str()),
-                        )
                         .await
                         .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
                 }
@@ -1298,6 +1231,7 @@ mod tests {
     use super::*;
     use crate::MobMcpState;
 
+    #[allow(dead_code)]
     async fn spawn_realtime_open_info_stub(
         open_info: Value,
     ) -> (
@@ -1376,6 +1310,7 @@ mod tests {
         (addr, captured_rx, task)
     }
 
+    #[allow(dead_code)]
     fn live_test_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
@@ -1472,202 +1407,5 @@ mod tests {
         assert!(names.contains(&"meerkat_realtime_open_info".to_string()));
         assert!(names.contains(&"meerkat_realtime_status".to_string()));
         assert!(names.contains(&"meerkat_realtime_capabilities".to_string()));
-    }
-
-    #[tokio::test]
-    async fn public_tools_realtime_status_projects_member_truth() {
-        let state = MobMcpState::new_in_memory();
-        let mob_id = state
-            .mob_create_definition(live_test_definition("mob-realtime-mcp"))
-            .await
-            .expect("create realtime test mob");
-        state
-            .mob_spawn(
-                &mob_id,
-                meerkat_mob::ProfileName::from("worker"),
-                meerkat_mob::AgentIdentity::from("worker-1"),
-                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-        state
-            .mob_realtime_attach(&mob_id, meerkat_mob::AgentIdentity::from("worker-1"))
-            .await
-            .expect("live attach should succeed");
-
-        let payload = handle_public_tools_call(
-            &state,
-            "meerkat_realtime_status",
-            &json!({
-                "target": {
-                    "type": "mob_member_target",
-                    "mob_id": mob_id.to_string(),
-                    "agent_identity": "worker-1",
-                }
-            }),
-        )
-        .await
-        .expect("realtime status tool should succeed");
-        assert_eq!(payload["status"]["state"], "opening");
-    }
-
-    #[tokio::test]
-    async fn public_tools_realtime_open_info_reports_transport_unavailable() {
-        let state = MobMcpState::new_in_memory();
-        let mob_id = state
-            .mob_create_definition(live_test_definition("mob-realtime-open-info"))
-            .await
-            .expect("create realtime test mob");
-        state
-            .mob_spawn(
-                &mob_id,
-                meerkat_mob::ProfileName::from("worker"),
-                meerkat_mob::AgentIdentity::from("worker-1"),
-                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-        let err = handle_public_tools_call(
-            &state,
-            "meerkat_realtime_open_info",
-            &json!({
-                "target": {
-                    "type": "mob_member_target",
-                    "mob_id": mob_id.to_string(),
-                    "agent_identity": "worker-1",
-                },
-                "role": "primary",
-                "turning_mode": "provider_managed",
-            }),
-        )
-        .await
-        .expect_err("open_info should stay unavailable until websocket host exists");
-        assert_eq!(
-            err.code,
-            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
-        );
-    }
-
-    #[tokio::test]
-    async fn public_tools_realtime_open_info_proxies_to_realtime_rpc_host() {
-        let (addr, captured_rx, task) = spawn_realtime_open_info_stub(json!({
-            "ws_url": "ws://127.0.0.1:43211/realtime/ws",
-            "open_token": "mcp-proxy-token",
-            "expires_at": "2026-04-15T12:05:00Z",
-            "target": {
-                "type": "mob_member_target",
-                "mob_id": "mob-realtime-open-info-proxy",
-                "agent_identity": "worker-1",
-            },
-            "supported_protocol_versions": ["2026-04-01"],
-            "default_protocol_version": "2026-04-01",
-            "capabilities": {
-                "input_kinds": ["text", "audio"],
-                "output_kinds": ["text", "audio"],
-                "turning_modes": ["provider_managed"],
-                "interrupt_supported": true,
-                "transcript_supported": true,
-                "tool_lifecycle_events_supported": false,
-                "video_supported": false,
-            }
-        }))
-        .await;
-
-        let mut state = MobMcpState::new_in_memory();
-        std::sync::Arc::get_mut(&mut state)
-            .expect("new_in_memory should return a unique Arc")
-            .set_realtime_rpc_tcp_addr(Some(addr));
-        let mob_id = state
-            .mob_create_definition(live_test_definition("mob-realtime-open-info-proxy"))
-            .await
-            .expect("create realtime test mob");
-        state
-            .mob_spawn(
-                &mob_id,
-                meerkat_mob::ProfileName::from("worker"),
-                meerkat_mob::AgentIdentity::from("worker-1"),
-                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-
-        let request = json!({
-            "target": {
-                "type": "mob_member_target",
-                "mob_id": mob_id.to_string(),
-                "agent_identity": "worker-1",
-            },
-            "role": "primary",
-            "turning_mode": "provider_managed",
-        });
-
-        let payload = handle_public_tools_call(&state, "meerkat_realtime_open_info", &request)
-            .await
-            .expect("open_info should proxy through realtime rpc host");
-        assert_eq!(payload["open_token"], "mcp-proxy-token");
-        assert_eq!(payload["target"], request["target"]);
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request);
-        task.await.expect("realtime rpc stub should join");
-    }
-
-    #[tokio::test]
-    async fn public_tools_realtime_open_info_proxy_skips_local_member_lookup_when_rpc_host_exists()
-    {
-        let (addr, captured_rx, task) = spawn_realtime_open_info_stub(json!({
-            "ws_url": "ws://127.0.0.1:43212/realtime/ws",
-            "open_token": "mcp-proxy-skip-local",
-            "expires_at": "2026-04-15T12:06:00Z",
-            "target": {
-                "type": "mob_member_target",
-                "mob_id": "missing-local-mob",
-                "agent_identity": "worker-1",
-            },
-            "supported_protocol_versions": ["2026-04-01"],
-            "default_protocol_version": "2026-04-01",
-            "capabilities": {
-                "input_kinds": ["text", "audio"],
-                "output_kinds": ["text", "audio"],
-                "turning_modes": ["provider_managed"],
-                "interrupt_supported": true,
-                "transcript_supported": true,
-                "tool_lifecycle_events_supported": false,
-                "video_supported": false,
-            }
-        }))
-        .await;
-
-        let mut state = MobMcpState::new_in_memory();
-        std::sync::Arc::get_mut(&mut state)
-            .expect("new_in_memory should return a unique Arc")
-            .set_realtime_rpc_tcp_addr(Some(addr));
-
-        let request = json!({
-            "target": {
-                "type": "mob_member_target",
-                "mob_id": "missing-local-mob",
-                "agent_identity": "worker-1",
-            },
-            "role": "primary",
-            "turning_mode": "provider_managed",
-        });
-
-        let payload = handle_public_tools_call(&state, "meerkat_realtime_open_info", &request)
-            .await
-            .expect("open_info should proxy through the realtime rpc host without local mob state");
-        assert_eq!(payload["open_token"], "mcp-proxy-skip-local");
-        assert_eq!(payload["target"], request["target"]);
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request);
-        task.await.expect("realtime rpc stub should join");
     }
 }

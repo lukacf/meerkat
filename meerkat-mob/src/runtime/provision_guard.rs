@@ -22,7 +22,7 @@ use std::sync::Arc;
 #[must_use = "provisioned member must be committed or rolled back"]
 pub(super) struct PendingProvision {
     member_ref: Option<MemberRef>,
-    meerkat_id: MeerkatId,
+    agent_identity: MeerkatId,
     provisioner: Arc<dyn MobProvisioner>,
     committed: bool,
 }
@@ -30,12 +30,12 @@ pub(super) struct PendingProvision {
 impl PendingProvision {
     pub(super) fn new(
         member_ref: MemberRef,
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         provisioner: Arc<dyn MobProvisioner>,
     ) -> Self {
         Self {
             member_ref: Some(member_ref),
-            meerkat_id,
+            agent_identity,
             provisioner,
             committed: false,
         }
@@ -81,7 +81,7 @@ impl PendingProvision {
     /// The meerkat ID associated with this provision.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn meerkat_id(&self) -> &MeerkatId {
-        &self.meerkat_id
+        &self.agent_identity
     }
 
     /// Extract the member ref, returning an error if already consumed.
@@ -89,7 +89,7 @@ impl PendingProvision {
         self.member_ref.take().ok_or_else(|| {
             MobError::Internal(format!(
                 "PendingProvision::{caller} called after prior consumption for '{}'",
-                self.meerkat_id,
+                self.agent_identity,
             ))
         })
     }
@@ -100,7 +100,7 @@ impl Drop for PendingProvision {
         if !self.committed {
             let member_ref = self.member_ref.take();
             tracing::error!(
-                meerkat_id = %self.meerkat_id,
+                meerkat_id = %self.agent_identity,
                 member_ref = ?member_ref,
                 "PendingProvision dropped without commit or rollback — resource leak"
             );

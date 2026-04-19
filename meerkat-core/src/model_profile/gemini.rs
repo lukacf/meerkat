@@ -60,6 +60,7 @@ pub fn fallback_caps(model: &str) -> Option<ModelCapabilities> {
         vision: true,
         image_tool_results: true,
         inline_video: true,
+        realtime: m.contains("live"),
         supports_temperature: true,
         supports_top_p: true,
         supports_top_k: true,

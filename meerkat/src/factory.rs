@@ -2169,6 +2169,15 @@ impl AgentFactory {
             "tool composition: base dispatcher built"
         );
 
+        // Bind the session's MCP server lifecycle DSL handle into the tool
+        // dispatcher before any composition. Dispatchers that manage per-server
+        // MCP handshakes (like `McpRouterAdapter`) use this handle to mirror
+        // connection state into MeerkatMachine's `mcp_server_states`. Others
+        // are no-ops.
+        if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
+            tools.bind_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+        }
+
         // 7. Create session store adapter (override > factory > feature-flag default)
         let store_adapter: Arc<dyn AgentSessionStore> =
             if let Some(store) = build_config.session_store_override.take() {
@@ -2704,6 +2713,8 @@ impl AgentFactory {
             builder = builder
                 .with_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
             builder = builder.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+            builder = builder
+                .with_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
         }
         // Phase 1.5-rev: identify which connection_ref this agent routes
         // through so the runner can key auth-lease lifecycle transitions.

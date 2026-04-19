@@ -219,6 +219,58 @@ async fn build_agent_with_google_connection_ref_resolves_through_registry() {
 }
 
 // ---------------------------------------------------------------------
+// Capability-driven routing: realtime-capable OpenAI models must go
+// through `OpenAiRealtimeTextAdapter`, not the Responses-API client.
+// The pair below proves the two legs of the `cfg(feature)` gate: with
+// the feature on, `build_agent` succeeds (only the realtime branch
+// can produce an `Arc<dyn LlmClient>` here, since `realtime_route` is
+// true for this model); with the feature off, the same build returns
+// a typed `ConnectionResolution` naming the missing feature.
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "openai-realtime")]
+#[tokio::test]
+async fn build_agent_with_gpt_realtime_selects_realtime_text_adapter() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = config_with_realm();
+
+    let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
+    build.connection_ref = Some(conn_ref("default_openai"));
+
+    let agent = factory
+        .build_agent(build, &config)
+        .await
+        .expect("gpt-realtime-1.5 routes through OpenAiRealtimeTextAdapter");
+    let metadata = agent
+        .session()
+        .session_metadata()
+        .expect("session metadata written");
+    assert_eq!(metadata.provider, Provider::OpenAI);
+}
+
+#[cfg(not(feature = "openai-realtime"))]
+#[tokio::test]
+async fn build_agent_with_gpt_realtime_without_feature_returns_typed_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = config_with_realm();
+
+    let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
+    build.connection_ref = Some(conn_ref("default_openai"));
+
+    let result = factory.build_agent(build, &config).await;
+    match result {
+        Err(BuildAgentError::ConnectionResolution(msg)) => assert!(
+            msg.contains("openai-realtime") && msg.contains("feature"),
+            "error must name the missing feature; got: {msg}"
+        ),
+        Err(other) => panic!("expected ConnectionResolution, got {other:?}"),
+        Ok(_) => panic!("expected error when openai-realtime feature is absent"),
+    }
+}
+
+// ---------------------------------------------------------------------
 // Negative: unknown binding → typed ConnectionResolution error (not a
 // silent fall-through to the flat path)
 // ---------------------------------------------------------------------

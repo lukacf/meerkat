@@ -113,7 +113,7 @@ machine! {
             RuntimeState { runtime_id: String },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
-            AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, run_id: RunId },
+            AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool, run_id: RunId },
             AcceptWithoutWake { input_id: InputId },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
@@ -921,10 +921,20 @@ machine! {
             emit IngressNotice
         }
 
-        // 25. AcceptWithCompletion: complex, multiple variants per phase
+        // 25. AcceptWithCompletion: complex, multiple variants per phase.
+        //
+        // The `wake_if_idle` flag is the machine-owned truth for "this
+        // input must wake the runtime loop when it reaches idle" (e.g.
+        // peer_response_terminal queued while the session is running).
+        // Idle/Attached queued arms already emit WakeLoop
+        // unconditionally — the caller is about to wake — so
+        // wake_if_idle is ignored in those guards. The Running+Queued
+        // path splits on it: passive (no signal) vs WakeIfIdle (emit
+        // WakeLoop for the next idle reach).
+        //
         // Idle + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionIdleQueued {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -936,7 +946,7 @@ machine! {
         }
         // Idle + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionIdleImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Idle }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }
@@ -948,7 +958,7 @@ machine! {
         }
         // Attached + immediate → Running (phase change!)
         transition AcceptWithCompletionAttachedImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }
@@ -964,7 +974,7 @@ machine! {
         }
         // Attached + queued (immediate=false, interrupt_yielding=false)
         transition AcceptWithCompletionAttachedQueued {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -974,20 +984,42 @@ machine! {
             emit IngressAccepted
             emit PostAdmissionSignal { signal: "WakeLoop" }
         }
-        // Running + queued passive (immediate=false, interrupt_yielding=false)
+        // Running + queued passive (immediate=false, interrupt_yielding=false, wake_if_idle=false)
         transition AcceptWithCompletionRunningQueuedPassive {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
             guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == false }
             update {}
             to Running
             emit IngressAccepted
         }
+        // Running + queued wake-if-idle (immediate=false, interrupt_yielding=false, wake_if_idle=true)
+        //
+        // The input is staged for the next run boundary *and* the machine
+        // records a pending `WakeLoop` so the runtime loop observes the
+        // wake on its first idle re-check. Drives the turn-driven
+        // realtime async-peer-response path: an operator that called
+        // send_request and is waiting must not strand the response on
+        // durable context alone — the admission signal becomes the
+        // authority that schedules the next turn.
+        transition AcceptWithCompletionRunningQueuedWakeIfIdle {
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "request_immediate_processing" { request_immediate_processing == false }
+            guard "interrupt_yielding" { interrupt_yielding == false }
+            guard "wake_if_idle" { wake_if_idle == true }
+            update {}
+            to Running
+            emit IngressAccepted
+            emit PostAdmissionSignal { signal: "WakeLoop" }
+        }
         // Running + interrupt_yielding (immediate=false, interrupt_yielding=true)
         transition AcceptWithCompletionRunningInterruptYielding {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == false }
@@ -999,7 +1031,7 @@ machine! {
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
-            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }
+            on input AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             guard "request_immediate_processing" { request_immediate_processing == true }

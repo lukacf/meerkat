@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
-#[ignore = "Phase 1 red-ok server surface E2E suite"]
+
 fn runtime_backed_ingress_red_ok_mcp_tools_list_exposes_run_and_resume_surfaces() {
     let tools = tools_list();
     assert!(tools.iter().any(|tool| tool["name"] == "meerkat_run"));
@@ -49,7 +49,7 @@ fn unique_root(prefix: &str) -> PathBuf {
 }
 
 #[tokio::test]
-#[ignore = "Phase 9 runtime-backed MCP regression suite"]
+
 async fn runtime_backed_ingress_red_ok_mcp_run_and_resume_reuse_the_same_runtime_session() {
     let root = unique_root("mcp-run-resume");
     let state = MeerkatMcpState::new_with_bootstrap_and_test_client(

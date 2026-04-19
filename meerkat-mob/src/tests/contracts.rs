@@ -73,7 +73,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     let receipt = CoreCommsRuntime::send(&sender, request_cmd)
         .await
         .expect("PeerRequest send should succeed");
-    let (request_envelope_id, local_interaction_id) = match receipt {
+    let (request_envelope_id, request_interaction_id) = match receipt {
         SendReceipt::PeerRequestSent {
             envelope_id,
             interaction_id,
@@ -81,9 +81,9 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         } => (envelope_id, interaction_id),
         other => panic!("expected PeerRequestSent, got: {other:?}"),
     };
-    assert!(
-        request_envelope_id != local_interaction_id.0,
-        "peer request receipt should return a transport envelope id distinct from the local interaction reservation id"
+    assert_eq!(
+        request_envelope_id, request_interaction_id.0,
+        "peer request receipt should expose the canonical request envelope id as its raw interaction id"
     );
     assert_ne!(
         request_envelope_id,

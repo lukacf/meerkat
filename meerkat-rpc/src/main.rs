@@ -52,6 +52,30 @@ enum RealmBackendArg {
     Sqlite,
 }
 
+/// Non-blocking shared-lock file writer for `tracing_subscriber`'s
+/// `with_writer`. Flushes on every write so live scenarios see events as
+/// they land. Errors are swallowed — the primary stderr layer is still
+/// present, so this path cannot drop a scenario.
+struct FileTraceWriter {
+    inner: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+impl std::io::Write for FileTraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut guard) = self.inner.lock() {
+            let _ = guard.write_all(buf);
+            let _ = guard.flush();
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Ok(mut guard) = self.inner.lock() {
+            let _ = guard.flush();
+        }
+        Ok(())
+    }
+}
+
 impl From<RealmBackendArg> for RealmBackend {
     fn from(value: RealmBackendArg) -> Self {
         match value {
@@ -63,13 +87,39 @@ impl From<RealmBackendArg> for RealmBackend {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .init();
+    // Optional on-disk trace sink: when `RKAT_RPC_TRACE_FILE` is set,
+    // append-write every tracing event to the given path in addition to
+    // the usual stderr writer. Targeted debugging helper for live smoke
+    // scenarios where stderr might be consumed by a pump/harness.
+    let file_writer = std::env::var("RKAT_RPC_TRACE_FILE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .ok()
+                .map(std::sync::Mutex::new)
+                .map(std::sync::Arc::new)
+        });
+    let registry = tracing_subscriber::registry().with(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    );
+    if let Some(file_writer) = file_writer {
+        let make_writer = move || FileTraceWriter {
+            inner: file_writer.clone(),
+        };
+        registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(tracing_subscriber::fmt::layer().with_writer(make_writer))
+            .init();
+    } else {
+        registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
+    }
 
     let cli = Cli::parse();
     let selection = RealmConfig::selection_from_inputs(

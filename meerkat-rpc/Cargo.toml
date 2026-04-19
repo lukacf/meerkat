@@ -33,7 +33,7 @@ name = "tcp_e2e"
 path = "tests/tcp_e2e.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
 meerkat-models = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }

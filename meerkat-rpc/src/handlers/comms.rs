@@ -53,6 +53,47 @@ fn normalize_send_error(
     }
 }
 
+fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
+    match receipt {
+        meerkat_core::comms::SendReceipt::InputAccepted {
+            interaction_id,
+            stream_reserved,
+        } => {
+            serde_json::json!({
+                "kind": "input_accepted",
+                "interaction_id": interaction_id.0.to_string(),
+                "stream_reserved": stream_reserved,
+            })
+        }
+        meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
+            serde_json::json!({
+                "kind": "peer_message_sent",
+                "envelope_id": envelope_id.to_string(),
+                "acked": acked,
+            })
+        }
+        meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved,
+        } => serde_json::json!({
+            "kind": "peer_request_sent",
+            "envelope_id": envelope_id.to_string(),
+            "interaction_id": interaction_id.0.to_string(),
+            "request_id": envelope_id.to_string(),
+            "stream_reserved": stream_reserved,
+        }),
+        meerkat_core::comms::SendReceipt::PeerResponseSent {
+            envelope_id,
+            in_reply_to,
+        } => serde_json::json!({
+            "kind": "peer_response_sent",
+            "envelope_id": envelope_id.to_string(),
+            "in_reply_to": in_reply_to.0.to_string(),
+        }),
+    }
+}
+
 /// Parameters for `comms/send`.
 #[derive(Deserialize)]
 pub struct CommsSendParams {
@@ -135,47 +176,7 @@ pub async fn handle_send(
     };
 
     match comms.send(cmd).await {
-        Ok(receipt) => {
-            let result = match receipt {
-                meerkat_core::comms::SendReceipt::InputAccepted {
-                    interaction_id,
-                    stream_reserved,
-                } => {
-                    serde_json::json!({
-                        "kind": "input_accepted",
-                        "interaction_id": interaction_id.0.to_string(),
-                        "stream_reserved": stream_reserved,
-                    })
-                }
-                meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
-                    serde_json::json!({
-                        "kind": "peer_message_sent",
-                        "envelope_id": envelope_id.to_string(),
-                        "acked": acked,
-                    })
-                }
-                meerkat_core::comms::SendReceipt::PeerRequestSent {
-                    envelope_id,
-                    interaction_id,
-                    stream_reserved,
-                } => serde_json::json!({
-                    "kind": "peer_request_sent",
-                    "envelope_id": envelope_id.to_string(),
-                    "interaction_id": interaction_id.0.to_string(),
-                    "request_id": interaction_id.0.to_string(),
-                    "stream_reserved": stream_reserved,
-                }),
-                meerkat_core::comms::SendReceipt::PeerResponseSent {
-                    envelope_id,
-                    in_reply_to,
-                } => serde_json::json!({
-                    "kind": "peer_response_sent",
-                    "envelope_id": envelope_id.to_string(),
-                    "in_reply_to": in_reply_to.0.to_string(),
-                }),
-            };
-            RpcResponse::success(id, result)
-        }
+        Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
         Err(e) => {
             let normalized = normalize_send_error(params.to.as_deref(), &e);
             let message = normalized
@@ -411,5 +412,26 @@ mod tests {
         );
         assert_eq!(errors[0]["field"], "source");
         assert_eq!(errors[0]["issue"], "invalid_value");
+    }
+
+    #[test]
+    fn test_handler_send_receipt_json_peer_request_uses_envelope_id_as_request_id() {
+        let envelope_id = uuid::Uuid::new_v4();
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+
+        let payload = send_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved: true,
+        });
+
+        assert_eq!(
+            payload["request_id"],
+            serde_json::json!(envelope_id.to_string())
+        );
+        assert_eq!(
+            payload["interaction_id"],
+            serde_json::json!(interaction_id.0.to_string())
+        );
     }
 }

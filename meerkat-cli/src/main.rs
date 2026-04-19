@@ -12760,7 +12760,6 @@ printf '\0\141\163\155' > "$out_dir/runtime_bg.wasm"
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    #[ignore = "requires runtime metadata store in MobStorage after supervisor bridge changes"]
     async fn test_run_mob_tools_persist_across_context_rebuild() {
         let temp = tempfile::tempdir().expect("tempdir must be created");
         let scope = test_scope_with_context(temp.path().to_path_buf());

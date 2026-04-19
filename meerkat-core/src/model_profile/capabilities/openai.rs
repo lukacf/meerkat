@@ -106,9 +106,9 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         beta_headers: &[],
         call_timeout_secs: Some(600),
     },
-    // gpt-realtime
+    // gpt-realtime-1.5
     //
-    // OpenAI's canonical realtime model (supersedes gpt-4o-realtime-preview).
+    // OpenAI's canonical realtime model (supersedes gpt-realtime / gpt-4o-realtime-preview).
     // Audio-first streaming model used via the realtime WebSocket API.
     // Tool-calling supported via realtime session function declarations.
     //
@@ -117,13 +117,13 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //   - https://platform.openai.com/docs/guides/realtime
     //
     // Session capability meaning: realtime=true unlocks the realtime transport
-    // substrate on a session whose current LLM is gpt-realtime. Sessions on
-    // non-realtime models (gpt-5.4, etc.) must `session/reconfigure_llm` to
-    // gpt-realtime before opening a realtime channel.
+    // substrate on a session whose current LLM is a realtime-capable model.
+    // Sessions on non-realtime models (gpt-5.4, etc.) must `session/reconfigure_llm`
+    // to a realtime-capable model before opening a realtime channel.
     ModelCapabilities {
-        id: "gpt-realtime",
+        id: "gpt-realtime-1.5",
         provider: "openai",
-        display_name: "GPT Realtime",
+        display_name: "GPT Realtime 1.5",
         tier: ModelTier::Recommended,
         model_family: "gpt-realtime",
         context_window: 128_000,
@@ -150,6 +150,41 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         // Realtime is streaming (WebSocket) — per-call timeout here is a
         // loose ceiling on synchronous fallback paths. Realtime transport
         // owns its own reconnect/heartbeat policy.
+        call_timeout_secs: Some(600),
+    },
+    // gpt-realtime (supported alias for gpt-realtime-1.5 predecessor)
+    //
+    // OpenAI's prior canonical realtime model. Retained in the catalog as a
+    // Supported-tier alias so existing configs referencing `gpt-realtime`
+    // keep resolving to a realtime-capable capability row during the
+    // 1.5 rollout window.
+    ModelCapabilities {
+        id: "gpt-realtime",
+        provider: "openai",
+        display_name: "GPT Realtime (legacy alias)",
+        tier: ModelTier::Supported,
+        model_family: "gpt-realtime",
+        context_window: 128_000,
+        max_output_tokens: 4_096,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: false,
+        image_tool_results: false,
+        inline_video: false,
+        realtime: true,
+        supports_temperature: true,
+        supports_top_p: true,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: false,
+        effort_levels: REALTIME_NO_EFFORT,
+        supports_web_search: false,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
         call_timeout_secs: Some(600),
     },
 ];

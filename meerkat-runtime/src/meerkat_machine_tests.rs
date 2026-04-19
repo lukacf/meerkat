@@ -13257,6 +13257,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 KernelValue::Bool(true),
             ),
             ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
             ("run_id".to_string(), runtime_modeled_run_id_value()),
         ]),
     };
@@ -13318,6 +13319,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
                 KernelValue::Bool(false),
             ),
             ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
             ("run_id".to_string(), runtime_modeled_run_id_value()),
         ]),
     };
@@ -13526,6 +13528,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
                 KernelValue::Bool(true),
             ),
             ("interrupt_yielding".to_string(), KernelValue::Bool(false)),
+            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
             ("run_id".to_string(), runtime_modeled_run_id_value()),
         ]),
     };
@@ -13640,6 +13643,7 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
                 KernelValue::Bool(false),
             ),
             ("interrupt_yielding".to_string(), KernelValue::Bool(true)),
+            ("wake_if_idle".to_string(), KernelValue::Bool(false)),
             ("run_id".to_string(), runtime_modeled_run_id_value()),
         ]),
     };

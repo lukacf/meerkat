@@ -119,7 +119,7 @@ fn rid() -> LogicalRuntimeId {
 // ---------------------------------------------------------------------------
 // §1: Completed response triggers continuation (wake) when idle
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn completed_response_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -206,7 +206,7 @@ async fn accepted_response_no_wake() {
 // ---------------------------------------------------------------------------
 // §3: Failed response triggers continuation (wake) when idle
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn failed_response_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -239,7 +239,7 @@ async fn failed_response_idle_wakes() {
 // ---------------------------------------------------------------------------
 // §4: Response + passthrough message: both queued
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn response_with_passthrough_message_both_queued() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -267,7 +267,7 @@ async fn response_with_passthrough_message_both_queued() {
 // ---------------------------------------------------------------------------
 // §5: Response after completed host turn triggers continuation
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn response_after_completed_turn_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -360,7 +360,7 @@ async fn silent_intent_maps_to_request_with_wake() {
 // ---------------------------------------------------------------------------
 // §9: Non-silent comms intent triggers LLM turn
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn non_silent_intent_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -383,7 +383,7 @@ async fn non_silent_intent_triggers_wake() {
 // ---------------------------------------------------------------------------
 // §10: Message interaction triggers host-mode run
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn message_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -409,7 +409,7 @@ async fn message_triggers_wake() {
 // ---------------------------------------------------------------------------
 // §11: Request interaction triggers host-mode run
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn request_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -426,7 +426,6 @@ async fn request_triggers_wake() {
     );
 }
 
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
 #[tokio::test]
 async fn request_prompt_uses_rendered_text_projection() {
     let interaction = make_request("peer-1", "custom.action");
@@ -439,7 +438,6 @@ async fn request_prompt_uses_rendered_text_projection() {
     }
 }
 
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
 #[tokio::test]
 async fn response_prompt_uses_rendered_text_projection() {
     let interaction = make_response("peer-1", ResponseStatus::Completed);
@@ -481,7 +479,7 @@ async fn no_input_no_wake() {
 // ---------------------------------------------------------------------------
 // Additional: Message while running — queue policy, cooperative interrupt
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn message_while_running_requests_cooperative_interrupt() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -516,7 +514,7 @@ async fn message_while_running_requests_cooperative_interrupt() {
 // Additional: Terminal response while running — staged for the next run and
 // guaranteed to wake the loop once the active turn reaches idle.
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn terminal_response_while_running_requests_idle_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -545,7 +543,7 @@ async fn terminal_response_while_running_requests_idle_wake() {
 // ---------------------------------------------------------------------------
 // §13: Terminal response produces exactly one Peer input — no synthetic Continuation
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn drain_terminal_response_produces_exactly_one_peer_input() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
@@ -639,7 +637,7 @@ async fn terminal_response_with_steer_policy_while_running() {
 // ---------------------------------------------------------------------------
 // §15: Terminal response + Steer handling_mode while idle
 // ---------------------------------------------------------------------------
-#[ignore = "wip: admission signal + peer_response_terminal policy refactor pending codex/machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn terminal_response_with_steer_policy_while_idle() {
     // Build a terminal response with Steer handling_mode.

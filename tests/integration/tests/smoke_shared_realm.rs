@@ -1636,6 +1636,9 @@ async fn spawn_stdio_process(
         "RKAT_OPENAI_REALTIME_TRACE_JSON",
         "RKAT_OPENAI_REALTIME_TRACE_LIFECYCLE",
         "RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE",
+        "RKAT_RPC_TRACE_FILE",
+        "RUST_LOG",
+        "RUST_BACKTRACE",
     ] {
         if let Ok(value) = std::env::var(passthrough) {
             cmd.env(passthrough, value);
@@ -6849,7 +6852,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             }
         };
         eprintln!("[scenario 72] collect turn 1 output");
-        match collect_realtime_frames_until_output_settles(&mut receiver, 120).await {
+        match settle_realtime_turn_after_commit(&mut receiver, &turn1_capture, 120).await {
             Ok(capture) => turn1_capture.merge_from(capture),
             Err(error) => {
                 let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
@@ -6940,7 +6943,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             }
         };
         eprintln!("[scenario 72] collect turn 2 output");
-        match collect_realtime_frames_until_output_settles(&mut receiver, 120).await {
+        match settle_realtime_turn_after_commit(&mut receiver, &turn2_capture, 120).await {
             Ok(capture) => turn2_capture.merge_from(capture),
             Err(error) => {
                 let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;

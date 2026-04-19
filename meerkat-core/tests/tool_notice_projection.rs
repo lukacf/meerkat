@@ -5,7 +5,7 @@ use meerkat_core::event::ToolConfigChangeOperation;
 use meerkat_core::{ExternalToolDelta, ExternalToolDeltaPhase, ExternalToolUpdate};
 
 #[test]
-#[ignore = "Phase 1 red-ok external-tool integration suite"]
+
 fn tool_notice_projection_red_ok_typed_notices_remain_separate_from_pending_state() {
     let update = ExternalToolUpdate {
         notices: vec![

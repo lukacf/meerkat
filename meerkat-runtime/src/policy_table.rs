@@ -173,31 +173,43 @@ impl DefaultPolicyTable {
                 true,
             ),
 
-            // PeerInput(ResponseTerminal) — InjectNow, WakeIfIdle
+            // PeerInput(ResponseTerminal) — StageRunStart, WakeIfIdle, Fifo
             //
-            // Even while a run is currently active, terminal peer responses
-            // must request a loop wake so they cannot strand in the queue after
-            // the active turn finishes. The runtime now projects these inputs
-            // onto the durable system-context append path instead of staging
-            // them as ordinary user appends, because terminal peer responses
-            // are authoritative semantic facts for later turns rather than
-            // transient next-turn prompts.
+            // Terminal peer responses are both authoritative system-context
+            // facts for later turns AND turn-kicking events for turn-driven
+            // async request/response flows: a peer that issued `send_request`
+            // and is waiting for the response would otherwise strand on an
+            // idle session after the response lands. Staging as a runnable
+            // input with `QueueMode::Fifo` queues a turn-start so the runtime
+            // loop's `WakeIfIdle` path has something to dequeue and execute.
+            //
+            // The payload still flows through the durable system-context
+            // append path (`input_to_context_append`), so the rendered
+            // `[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]` text is deduped on
+            // `peer_response_terminal:{peer_id}:{request_id}` rather than
+            // stacking as ordinary user appends (`input_to_append` returns
+            // `None` for this convention).
+            //
+            // Autonomous-host members are unaffected: their continuous loop
+            // dequeues and runs a turn regardless; turn-driven members (the
+            // realtime audio case) now react to the response instead of
+            // sitting on the appended context forever.
             ("peer_response_terminal", true) => pd(
-                ApplyMode::InjectNow,
+                ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
-                QueueMode::None,
-                ConsumePoint::OnApply,
-                DrainPolicy::Immediate,
-                RoutingDisposition::Immediate,
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
             ("peer_response_terminal", false) => pd(
-                ApplyMode::InjectNow,
+                ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
-                QueueMode::None,
-                ConsumePoint::OnApply,
-                DrainPolicy::Immediate,
-                RoutingDisposition::Immediate,
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                DrainPolicy::QueueNextTurn,
+                RoutingDisposition::Queue,
                 true,
             ),
 
@@ -425,10 +437,10 @@ mod tests {
         assert_cell(
             "peer_response_terminal",
             true,
-            ApplyMode::InjectNow,
+            ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
-            QueueMode::None,
-            ConsumePoint::OnApply,
+            QueueMode::Fifo,
+            ConsumePoint::OnRunComplete,
             true,
         );
     }
@@ -437,10 +449,10 @@ mod tests {
         assert_cell(
             "peer_response_terminal",
             false,
-            ApplyMode::InjectNow,
+            ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
-            QueueMode::None,
-            ConsumePoint::OnApply,
+            QueueMode::Fifo,
+            ConsumePoint::OnRunComplete,
             true,
         );
     }
@@ -787,11 +799,14 @@ mod tests {
             None,
         );
         let decision = DefaultPolicyTable::resolve(&input, true);
-        // Kind default for peer_response_terminal idle: Immediate durable
-        // context projection with WakeIfIdle so later turns can observe the
-        // authoritative result without helper-local shadow state.
-        assert_eq!(decision.routing_disposition, RoutingDisposition::Immediate);
-        assert_eq!(decision.apply_mode, ApplyMode::InjectNow);
+        // Kind default for peer_response_terminal idle: queue a turn-start so
+        // turn-driven async request/response flows (realtime audio members
+        // waiting for `send_response`) react to the response instead of
+        // stranding on durable context. The rendered notice still flows
+        // through `input_to_context_append` for authoritative system-context
+        // dedup on `peer_response_terminal:{peer_id}:{request_id}`.
+        assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
+        assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
     }
 }

@@ -19,7 +19,7 @@ fn invalid_server_config(name: &str) -> McpServerConfig {
 }
 
 #[tokio::test]
-#[ignore = "Phase 1 red-ok external-tool integration suite"]
+
 async fn external_tool_integration_red_ok_failed_add_surfaces_typed_notice_update() {
     let adapter = McpRouterAdapter::new(McpRouter::new());
     adapter

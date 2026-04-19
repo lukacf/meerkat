@@ -2286,7 +2286,7 @@ fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value 
             "kind": "peer_request_sent",
             "envelope_id": envelope_id.to_string(),
             "interaction_id": interaction_id.0.to_string(),
-            "request_id": interaction_id.0.to_string(),
+            "request_id": envelope_id.to_string(),
             "stream_reserved": stream_reserved,
         }),
         meerkat_core::comms::SendReceipt::PeerResponseSent {
@@ -3233,6 +3233,34 @@ mod tests {
 
         let value = config_envelope_value(snapshot, true).expect("envelope value");
         assert!(value.get("resolved_paths").is_some());
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_build_comms_receipt_json_peer_request_uses_envelope_id_as_request_id() {
+        let envelope_id = "550e8400-e29b-41d4-a716-446655440000"
+            .parse()
+            .expect("valid envelope uuid");
+        let interaction_id = meerkat_core::interaction::InteractionId(
+            "550e8400-e29b-41d4-a716-446655440001"
+                .parse()
+                .expect("valid interaction uuid"),
+        );
+
+        let payload = build_comms_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved: true,
+        });
+
+        assert_eq!(
+            payload["request_id"],
+            serde_json::json!(envelope_id.to_string())
+        );
+        assert_eq!(
+            payload["interaction_id"],
+            serde_json::json!(interaction_id.0.to_string())
+        );
     }
 
     #[test]

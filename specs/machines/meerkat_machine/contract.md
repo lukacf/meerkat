@@ -54,7 +54,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RuntimeState`(runtime_id: String)
 - `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
-- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, run_id: RunId)
+- `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool, run_id: RunId)
 - `AcceptWithoutWake`(input_id: InputId)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
@@ -789,7 +789,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionIdleQueued`
 - From: `Idle`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
@@ -799,7 +799,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionIdleImmediate`
 - From: `Idle`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
@@ -809,7 +809,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionAttachedImmediate`
 - From: `Attached`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
@@ -819,7 +819,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionAttachedQueued`
 - From: `Attached`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
@@ -829,17 +829,29 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionRunningQueuedPassive`
 - From: `Running`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
+  - `wake_if_idle`
 - Emits: `IngressAccepted`
+- To: `Running`
+
+### `AcceptWithCompletionRunningQueuedWakeIfIdle`
+- From: `Running`
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
+- Guards:
+  - `session_registered`
+  - `request_immediate_processing`
+  - `interrupt_yielding`
+  - `wake_if_idle`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`
 - To: `Running`
 
 ### `AcceptWithCompletionRunningInterruptYielding`
 - From: `Running`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`
@@ -849,7 +861,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AcceptWithCompletionRunningImmediate`
 - From: `Running`
-- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, run_id)
+- On: `AcceptWithCompletion`(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id)
 - Guards:
   - `session_registered`
   - `request_immediate_processing`

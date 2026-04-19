@@ -444,7 +444,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
 
                 if stream_reserved {
-                    // Register reservation BEFORE sending so stream() can attach.
+                    // Reserve under the canonical request envelope id so
+                    // replies can correlate via in_reply_to without an extra
+                    // local-id translation map.
                     let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
                     self.subscriber_registry
                         .lock()
@@ -456,8 +458,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 }
 
                 let envelope_id = match self
-                    .send_peer_command(
+                    .send_peer_command_with_id(
                         to.as_str(),
+                        interaction_id,
                         crate::types::MessageKind::Request {
                             intent,
                             params,
@@ -565,7 +568,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
             } => {
-                // Reserve a local interaction stream, then send the peer request.
+                // Reserve under the canonical request envelope id so the same
+                // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
                 let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
                 self.subscriber_registry
@@ -577,8 +581,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 );
 
                 let envelope_id = match self
-                    .send_peer_command(
+                    .send_peer_command_with_id(
                         to.as_str(),
+                        interaction_id,
                         crate::types::MessageKind::Request {
                             intent,
                             params,
@@ -1587,13 +1592,23 @@ impl CommsRuntime {
         peer_name: &str,
         kind: crate::types::MessageKind,
     ) -> Result<Uuid, SendError> {
+        self.send_peer_command_with_id(peer_name, Uuid::new_v4(), kind)
+            .await
+    }
+
+    async fn send_peer_command_with_id(
+        &self,
+        peer_name: &str,
+        envelope_id: Uuid,
+        kind: crate::types::MessageKind,
+    ) -> Result<Uuid, SendError> {
         let resolved = self.resolved_peers_snapshot().await;
         self.reconcile_peer_directory(&resolved);
         let resolved_peer = resolved
             .into_iter()
             .find(|peer| peer.name.as_str() == peer_name);
         let kind = self.hydrate_message_kind_for_transport(kind).await?;
-        let result = self.router.send(peer_name, kind).await;
+        let result = self.router.send_with_id(peer_name, envelope_id, kind).await;
         match result {
             Ok(envelope_id) => {
                 if let Some(peer) = resolved_peer.as_ref() {
@@ -2357,6 +2372,50 @@ mod tests {
         assert!(first.is_some(), "subscriber should be found");
         let second = CoreCommsRuntime::interaction_subscriber(&runtime, &tracked_id);
         assert!(second.is_none(), "subscriber should be one-shot");
+    }
+
+    #[tokio::test]
+    async fn test_peer_request_reserved_stream_correlates_via_request_envelope_id() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("corr-peer-{suffix}");
+        let runtime_name = format!("corr-runtime-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
+        {
+            let mut trusted = runtime.trusted_peers.write();
+            trusted.upsert(crate::TrustedPeer {
+                name: peer_name.clone(),
+                pubkey: peer.public_key(),
+                addr: format!("inproc://{peer_name}"),
+                meta: crate::PeerMeta::default(),
+            });
+        }
+
+        let receipt = CoreCommsRuntime::send(
+            &runtime,
+            CommsCommand::PeerRequest {
+                to: PeerName::new(peer_name).expect("peer_name is valid"),
+                intent: "checksum".to_string(),
+                params: serde_json::json!({"path": "README.md"}),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                stream: InputStreamMode::ReserveInteraction,
+            },
+        )
+        .await
+        .expect("peer request send should succeed");
+
+        let envelope_id = match receipt {
+            SendReceipt::PeerRequestSent { envelope_id, .. } => envelope_id,
+            other => panic!("expected PeerRequestSent, got {other:?}"),
+        };
+
+        let subscriber =
+            CoreCommsRuntime::interaction_subscriber(&runtime, &InteractionId(envelope_id));
+        assert!(
+            subscriber.is_some(),
+            "reserved peer-request stream should correlate via the request envelope id carried in in_reply_to"
+        );
     }
 
     #[tokio::test]

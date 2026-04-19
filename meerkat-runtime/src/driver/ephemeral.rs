@@ -227,14 +227,45 @@ impl EphemeralRuntimeDriver {
     /// Apply a DSL input locally, mapping any rejection into a driver error.
     /// Used inside the ingress/input lifecycle paths that previously flowed
     /// through the deleted `RuntimeIngressAuthority` helper.
+    ///
+    /// Effects emitted by the transition are absorbed into the driver's
+    /// machine-owned projections — notably `PostAdmissionSignal` is
+    /// promoted into `self.post_admission_signal` so the runtime loop
+    /// observes the wake/interrupt/immediate intent without a shell
+    /// accumulator. Monotonic: only stronger signals overwrite.
     fn dsl_apply(
         &mut self,
         input: mm_dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<(), RuntimeDriverError> {
-        mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input)
-            .map(|_| ())
-            .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))
+        let transition =
+            mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map_err(|err| {
+                RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}"))
+            })?;
+        self.absorb_dsl_effects(&transition.effects);
+        Ok(())
+    }
+
+    /// Walk the effects emitted by a DSL transition and project any machine-
+    /// owned signals into the driver's accumulated state. `PostAdmissionSignal`
+    /// is the primary consumer today: it captures the typed admission signal
+    /// the DSL decided (WakeLoop / InterruptYielding / RequestImmediateProcessing)
+    /// so the runtime loop's `take_post_admission_signal` / `take_wake_requested`
+    /// observe exactly what the machine authorized.
+    fn absorb_dsl_effects(&mut self, effects: &[mm_dsl::MeerkatMachineEffect]) {
+        for effect in effects {
+            if let mm_dsl::MeerkatMachineEffect::PostAdmissionSignal { signal } = effect {
+                let new_signal = match signal.as_str() {
+                    "WakeLoop" => PostAdmissionSignal::WakeLoop,
+                    "InterruptYielding" => PostAdmissionSignal::InterruptYielding,
+                    "RequestImmediateProcessing" => PostAdmissionSignal::RequestImmediateProcessing,
+                    _ => continue,
+                };
+                if new_signal > self.post_admission_signal {
+                    self.post_admission_signal = new_signal;
+                }
+            }
+        }
     }
 
     fn dsl_key(input_id: &InputId) -> String {
@@ -1892,6 +1923,41 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
         }
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
+
+        // Driver-side projection of the machine-owned admission signal.
+        //
+        // Long-form intent: the MeerkatMachine DSL's `AcceptWithCompletion`
+        // transitions are the canonical authority for the typed admission
+        // signal (WakeLoop / InterruptYielding / RequestImmediateProcessing).
+        // In production that transition runs on the machine's per-session
+        // DSL authority in `dispatch_ingress::stage_session_dsl_input`,
+        // where `session_id` / `lifecycle_phase` are kept in sync with the
+        // control projection. The driver's *local* DSL authority is a
+        // parallel copy whose `session_id` / `lifecycle_phase` are not
+        // synchronized from `contract_set_control_projection`, so firing
+        // `AcceptWithCompletion` on the driver-local DSL in this path
+        // silently rejects on the `session_registered` / phase guards.
+        //
+        // Until the two DSL authorities collapse into one (the right
+        // architectural endpoint, but a separate PR), mirror the policy
+        // decision directly into the driver-owned accumulator so
+        // `take_post_admission_signal` / `take_wake_requested` observe the
+        // same signal the DSL would have emitted:
+        //   - Idle runtime: the outcome-side signal is the authority and
+        //     the caller wakes the loop themselves; the driver stores
+        //     nothing.
+        //   - Running + `WakeIfIdle`: accumulate `WakeLoop` so the loop's
+        //     next idle re-check fires.
+        //   - `InterruptYielding` is a right-now cooperative interrupt,
+        //     not persisted for later — dropping it if missed is correct.
+        //
+        // Monotonic; never demote a stronger signal already set elsewhere.
+        if !runtime_idle
+            && matches!(resolved.policy.wake_mode, crate::WakeMode::WakeIfIdle)
+            && PostAdmissionSignal::WakeLoop > self.post_admission_signal
+        {
+            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
+        }
 
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or_else(|| state);
         Ok(AcceptOutcome::Accepted {

@@ -143,7 +143,7 @@ fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {
 // while the result-side contract is already in place. The
 // `codex/machine-dls-completion` rebase is expected to finish retiring
 // the driver-side signal; ignore these tests until then.
-#[ignore = "wip: driver-owned post-admission signal still mirrors machine-owned signal pending machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn accept_prompt_idle_queues_and_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -176,7 +176,7 @@ async fn accept_prompt_running_queues_and_wakes() {
 
 // WIP: see `accept_prompt_idle_queues_and_wakes` for the shared
 // machine-owned vs driver-owned admission signal transition note.
-#[ignore = "wip: driver-owned post-admission signal still mirrors machine-owned signal pending machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn accept_peer_terminal_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -197,9 +197,15 @@ async fn accept_peer_terminal_idle_wakes() {
 // `InjectNow` with `WakeIfIdle` (even while running, it requests a wake
 // so a late terminal does not strand). The test's original assumption
 // that running peer terminals produce no wake is out of date.
-#[ignore = "wip: driver-owned post-admission signal still mirrors machine-owned signal pending machine-dls-completion rebase"]
+
 #[tokio::test]
-async fn accept_peer_terminal_running_no_wake() {
+async fn accept_peer_terminal_running_queues_wake_for_next_idle() {
+    // Policy refactor (2026-04-19): `peer_response_terminal` is
+    // `StageRunStart + WakeIfIdle + Fifo` — while running, the late
+    // terminal stages for the next run boundary *and* the driver
+    // accumulates `WakeLoop` so the runtime loop sees the wake when
+    // the active turn completes. This replaces the earlier no-wake
+    // contract that stranded turn-driven async peer-response flows.
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     bind_running(&mut driver, RunId::new(), RuntimeState::Idle);
 
@@ -207,7 +213,7 @@ async fn accept_peer_terminal_running_no_wake() {
     let result = driver.accept_input(input).await.unwrap();
 
     assert!(result.is_accepted());
-    assert!(!driver.take_wake_requested()); // Running → no wake
+    assert!(driver.take_wake_requested());
 }
 
 #[tokio::test]
@@ -232,7 +238,7 @@ async fn accept_progress_no_wake() {
 // Moving this test's expectation into the machine-owned admission signal
 // seam is tracked by the incoming `codex/machine-dls-completion` rebase;
 // ignore it here so CI stays green until that seam lands.
-#[ignore = "wip: continuation idle post-admission signal shape pending machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn accept_continuation_idle_wakes_and_requests_processing() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -910,7 +916,7 @@ fn post_admission_signal_should_process_immediately() {
 }
 
 // WIP: same machine-owned vs driver-owned admission signal transition.
-#[ignore = "wip: driver-owned post-admission signal still mirrors machine-owned signal pending machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn post_admission_signal_accumulates_strongest() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
@@ -927,7 +933,7 @@ async fn post_admission_signal_accumulates_strongest() {
 }
 
 // WIP: same machine-owned vs driver-owned admission signal transition.
-#[ignore = "wip: driver-owned post-admission signal still mirrors machine-owned signal pending machine-dls-completion rebase"]
+
 #[tokio::test]
 async fn post_admission_signal_steer_is_request_immediate() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));

@@ -47,6 +47,11 @@ impl MeerkatMachine {
 
                 let request_immediate_processing =
                     crate::accept::requests_immediate_processing(&input);
+                // Machine-owned wake-if-idle intent: derived from the
+                // kind-level policy so the DSL's Running+Queued split
+                // picks the `AcceptWithCompletionRunningQueuedWakeIfIdle`
+                // arm (emit WakeLoop) vs the passive arm (no emit).
+                let wake_if_idle = crate::accept::requests_wake_if_idle(&input);
 
                 // DSL-first: validate the coarse AcceptWithCompletion transition
                 // before the driver realizes the effect.
@@ -65,6 +70,7 @@ impl MeerkatMachine {
                             // We don't know interrupt_yielding yet (depends on outcome),
                             // but the DSL transition doesn't gate on this field.
                             interrupt_yielding: false,
+                            wake_if_idle,
                             run_id: crate::meerkat_machine::dsl::RunId::from_domain(
                                 &run_id_for_dsl,
                             ),

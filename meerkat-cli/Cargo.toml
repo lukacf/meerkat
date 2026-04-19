@@ -41,7 +41,7 @@ path = "tests/cli_mobpack_live_smoke.rs"
 required-features = ["integration-real-tests"]
 
 [dependencies]
-meerkat = { workspace = true }
+meerkat = { workspace = true, features = ["openai-realtime"] }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "native-keyring", "refresh-file-lock"] }

@@ -28,4 +28,4 @@ pub use server::{
 };
 
 /// Default capacity for notification / event channels throughout the crate.
-pub const NOTIFICATION_CHANNEL_CAPACITY: usize = 256;
+pub const NOTIFICATION_CHANNEL_CAPACITY: usize = 4096;

@@ -622,6 +622,9 @@ impl FlowRunKernel {
 
         for attempt in 0..5u32 {
             let run = self.require_run(&run_id).await?;
+            if run.status.is_terminal() {
+                return Ok(TerminalizationOutcome::Noop);
+            }
             let next_state = self.transition_state(&run.flow_state, variant, BTreeMap::new())?;
             let transitioned = self
                 .run_store
@@ -2473,6 +2476,80 @@ mod tests {
             .expect("load")
             .expect("exists");
         assert!(run.status.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn flow_run_kernel_terminalize_canceled_is_noop_for_failed_run() {
+        let run_store = Arc::new(InMemoryMobRunStore::new());
+        let events = Arc::new(InMemoryMobEventStore::new());
+        let kernel = FlowRunKernel::new(
+            MobId::from("mob-terminal-noop"),
+            run_store.clone(),
+            events.clone(),
+        );
+        let config = FlowRunConfig {
+            flow_id: FlowId::from("demo"),
+            flow_spec: crate::definition::FlowSpec {
+                description: None,
+                steps: indexmap::IndexMap::from([(
+                    crate::ids::StepId::from("step-1"),
+                    crate::definition::FlowStepSpec {
+                        role: crate::ids::ProfileName::from("worker"),
+                        message: meerkat_core::types::ContentInput::from("do it"),
+                        depends_on: Vec::new(),
+                        dispatch_mode: crate::definition::DispatchMode::FanOut,
+                        collection_policy: crate::definition::CollectionPolicy::All,
+                        condition: None,
+                        timeout_ms: None,
+                        expected_schema_ref: None,
+                        branch: None,
+                        depends_on_mode: crate::definition::DependencyMode::All,
+                        allowed_tools: None,
+                        blocked_tools: None,
+                        output_format: crate::definition::StepOutputFormat::Json,
+                    },
+                )]),
+                root: None,
+            },
+            topology: None,
+            supervisor: None,
+            limits: None,
+            orchestrator_role: None,
+        };
+
+        let run_id = kernel
+            .create_pending_run(&config, serde_json::json!({}))
+            .await
+            .expect("create pending run");
+        kernel.start_run(&run_id).await.expect("start run");
+        let first = kernel
+            .terminalize_failed(run_id.clone(), FlowId::from("demo"), "boom".to_string())
+            .await
+            .expect("terminalize failed");
+        assert_eq!(first, TerminalizationOutcome::Transitioned);
+
+        let second = kernel
+            .terminalize_canceled(run_id.clone(), FlowId::from("demo"))
+            .await
+            .expect("terminalize canceled after failure should no-op");
+        assert_eq!(second, TerminalizationOutcome::Noop);
+
+        let run = run_store
+            .get_run(&run_id)
+            .await
+            .expect("load run")
+            .expect("run exists");
+        assert_eq!(run.status, crate::run::MobRunStatus::Failed);
+
+        let replay = events.replay_all().await.expect("replay events");
+        let canceled_events = replay
+            .iter()
+            .filter(|event| matches!(&event.kind, MobEventKind::FlowCanceled { run_id: id, .. } if id == &run_id))
+            .count();
+        assert_eq!(
+            canceled_events, 0,
+            "no FlowCanceled event should be emitted for noop terminalization"
+        );
     }
 
     #[tokio::test]

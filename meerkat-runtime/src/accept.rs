@@ -218,6 +218,22 @@ pub fn requests_immediate_processing(input: &Input) -> bool {
     matches!(input.handling_mode(), Some(HandlingMode::Steer))
 }
 
+/// Whether this input carries the "wake the runtime loop once the session
+/// reaches idle" intent.
+///
+/// Derived from the kind-level policy with `runtime_idle = false` (the
+/// Running-phase arm is where this flag actually matters; the Idle /
+/// Attached queued arms already emit `WakeLoop` unconditionally). Drives
+/// the DSL `wake_if_idle` field on `AcceptWithCompletion` so the machine
+/// emits `PostAdmissionSignal::WakeLoop` for late peer-response terminals
+/// and other queue-bound wake-if-idle inputs that arrive mid-turn.
+pub fn requests_wake_if_idle(input: &Input) -> bool {
+    matches!(
+        DefaultPolicyTable::resolve(input, false).wake_mode,
+        crate::WakeMode::WakeIfIdle,
+    )
+}
+
 /// Resolve the machine-owned semantic admission path for an accepted input.
 ///
 /// Runtime helpers may still perform mechanical queue lookups (for example,

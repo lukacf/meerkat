@@ -889,6 +889,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         appends: Vec<PendingSystemContextAppend>,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_context_appends_with_boundary(
+            id,
+            run_id,
+            appends,
+            RunApplyBoundary::Immediate,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    pub async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
         if let Err(SessionError::NotFound { .. }) = self
             .inner
             .apply_runtime_system_context(id, appends.clone())
@@ -976,7 +994,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .commit_runtime_apply(
                 id,
                 run_id,
-                RunApplyBoundary::Immediate,
+                boundary,
                 &persisted_session,
                 &session_snapshot,
                 &contributing_input_ids,

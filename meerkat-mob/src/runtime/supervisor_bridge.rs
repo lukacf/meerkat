@@ -240,8 +240,73 @@ impl MobSupervisorBridge {
 
         match status {
             meerkat_core::interaction::ResponseStatus::Completed
-            | meerkat_core::interaction::ResponseStatus::Accepted
             | meerkat_core::interaction::ResponseStatus::Failed => Ok(Some(result.clone())),
+            meerkat_core::interaction::ResponseStatus::Accepted => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use meerkat_core::PeerInputClass;
+    use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
+
+    fn response_candidate(
+        request_envelope_id: uuid::Uuid,
+        status: ResponseStatus,
+        result: serde_json::Value,
+    ) -> PeerInputCandidate {
+        PeerInputCandidate {
+            interaction: InboxInteraction {
+                id: InteractionId(uuid::Uuid::new_v4()),
+                from: "worker-rt".to_string(),
+                content: InteractionContent::Response {
+                    in_reply_to: InteractionId(request_envelope_id),
+                    status,
+                    result,
+                },
+                rendered_text: "[worker-rt]: response".to_string(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            class: PeerInputClass::Response,
+            lifecycle_peer: None,
+        }
+    }
+
+    #[test]
+    fn response_value_completed_returns_payload() {
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let expected = serde_json::json!({"ok": true});
+        let candidate = response_candidate(
+            request_envelope_id,
+            ResponseStatus::Completed,
+            expected.clone(),
+        );
+
+        let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
+            .expect("completed response should parse");
+
+        assert_eq!(value, Some(expected));
+    }
+
+    #[test]
+    fn response_value_accepted_is_not_terminal() {
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let candidate = response_candidate(
+            request_envelope_id,
+            ResponseStatus::Accepted,
+            serde_json::json!({"phase": "queued"}),
+        );
+
+        let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
+            .expect("accepted response should parse");
+
+        assert!(
+            value.is_none(),
+            "Accepted is progress and must not satisfy wait_for_response"
+        );
     }
 }

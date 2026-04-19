@@ -64,6 +64,13 @@ pub fn spawn_comms_drain(
     let runtime_id = LogicalRuntimeId::new(session_id.to_string());
 
     crate::tokio::spawn(async move {
+        if std::env::var_os("RKAT_TRACE_COMMS_DRAIN_BIND").is_some() {
+            tracing::info!(
+                %session_id,
+                comms_ptr = ?Arc::as_ptr(&comms_runtime),
+                "comms_drain task started"
+            );
+        }
         let inbox_notify = comms_runtime.inbox_notify();
         // Per-drain supervisor state — no global registry needed.
         let mut supervisor_state: Option<AuthorizedSupervisorState> = None;
@@ -158,7 +165,19 @@ pub fn spawn_comms_drain(
                             // carries ResponseTerminal convention which the
                             // policy table maps to WakeIfIdle/Steer as needed.
                             // No synthetic Continuation required.
-                            let interaction_id = candidate.interaction.id;
+                            let interaction_id = match &candidate.interaction.content {
+                                meerkat_core::interaction::InteractionContent::Response {
+                                    in_reply_to,
+                                    ..
+                                } => *in_reply_to,
+                                other => {
+                                    tracing::warn!(
+                                        content = ?other,
+                                        "comms_drain: terminal response candidate missing response content"
+                                    );
+                                    continue;
+                                }
+                            };
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let content_input =
                                 classified_interaction_to_runtime_input(&candidate, &runtime_id);

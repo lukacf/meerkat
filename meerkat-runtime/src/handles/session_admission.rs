@@ -53,6 +53,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         input_id: &InputId,
         request_immediate_processing: bool,
         interrupt_yielding: bool,
+        wake_if_idle: bool,
         run_id: &RunId,
     ) -> Result<(), DslTransitionError> {
         self.dsl.apply_input(
@@ -60,6 +61,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
                 input_id: mm_dsl::InputId::from_domain(input_id),
                 request_immediate_processing,
                 interrupt_yielding,
+                wake_if_idle,
                 run_id: mm_dsl::RunId::from_domain(run_id),
             },
             "SessionAdmissionHandle::accept_with_completion",

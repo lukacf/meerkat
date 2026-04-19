@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::SessionService;
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
@@ -148,6 +148,41 @@ impl PersistentRuntimeExecutor {
     }
 }
 
+fn pending_system_context_appends(
+    primitive: &RunPrimitive,
+) -> Option<Vec<meerkat_core::PendingSystemContextAppend>> {
+    let RunPrimitive::StagedInput(staged) = primitive else {
+        return None;
+    };
+    if !staged.appends.is_empty() || staged.context_appends.is_empty() {
+        return None;
+    }
+
+    Some(
+        staged
+            .context_appends
+            .iter()
+            .map(|append| meerkat_core::PendingSystemContextAppend {
+                text: match &append.content {
+                    CoreRenderable::Text { text } => text.clone(),
+                    CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+                    CoreRenderable::Json { value } => {
+                        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                    }
+                    CoreRenderable::Reference { uri, label } => match label {
+                        Some(label) => format!("{label}: {uri}"),
+                        None => uri.clone(),
+                    },
+                    _ => String::new(),
+                },
+                source: Some(append.key.clone()),
+                idempotency_key: Some(append.key.clone()),
+                accepted_at: meerkat_core::time_compat::SystemTime::now(),
+            })
+            .collect(),
+    )
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for PersistentRuntimeExecutor {
     async fn apply(
@@ -155,6 +190,22 @@ impl CoreExecutor for PersistentRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
+        if let Some(appends) = pending_system_context_appends(&primitive) {
+            return self
+                .service
+                .apply_runtime_context_appends_with_boundary(
+                    &self.session_id,
+                    run_id,
+                    appends,
+                    primitive.apply_boundary(),
+                    primitive.contributing_input_ids().to_vec(),
+                )
+                .await
+                .map_err(|error| CoreExecutorError::ApplyFailed {
+                    reason: error.to_string(),
+                });
+        }
+
         let prompt = primitive.extract_content_input();
         let req = StartTurnRequest {
             prompt,
@@ -686,6 +737,98 @@ mod tests {
                 .is_some_and(|metadata| metadata.keep_alive),
             "explicit peer ingress configuration must not mutate persisted keep_alive metadata"
         );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_routes_context_only_staged_input_through_runtime_context_appends()
+     {
+        use futures::StreamExt;
+        use meerkat_core::event::AgentEvent;
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        )
+        .await
+        .expect("materialize session");
+
+        let mut events = service
+            .subscribe_session_events(&result.session_id)
+            .await
+            .expect("subscribe_session_events");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let output = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "peer_response_terminal:analyst-rt:req-123".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}.".to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect("context-only staged input should apply");
+
+        assert_eq!(
+            output.receipt.boundary,
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart
+        );
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .expect("run_started timeout")
+            .expect("run_started event should exist");
+        assert!(matches!(started.payload, AgentEvent::RunStarted { .. }));
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .expect("run_completed timeout")
+            .expect("run_completed event should exist");
+        match completed.payload {
+            AgentEvent::RunCompleted { result, usage, .. } => {
+                assert!(
+                    result.is_empty(),
+                    "context-only runtime apply should not synthesize assistant output"
+                );
+                assert_eq!(usage, meerkat_core::types::Usage::default());
+            }
+            other => panic!("expected run_completed, got {other:?}"),
+        }
 
         service
             .discard_live_session(&result.session_id)

@@ -37,6 +37,34 @@ fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
+#[cfg(feature = "comms")]
+fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
+    match receipt {
+        meerkat_core::comms::SendReceipt::InputAccepted {
+            interaction_id,
+            stream_reserved,
+        } => {
+            json!({"kind":"input_accepted","interaction_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
+        }
+        meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
+            json!({"kind":"peer_message_sent","envelope_id": envelope_id.to_string(),"acked": acked})
+        }
+        meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved,
+        } => {
+            json!({"kind":"peer_request_sent","envelope_id": envelope_id.to_string(),"interaction_id": interaction_id.0.to_string(),"request_id": envelope_id.to_string(),"stream_reserved": stream_reserved})
+        }
+        meerkat_core::comms::SendReceipt::PeerResponseSent {
+            envelope_id,
+            in_reply_to,
+        } => {
+            json!({"kind":"peer_response_sent","envelope_id": envelope_id.to_string(),"in_reply_to": in_reply_to.0.to_string()})
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionOwner {
     Runtime,
@@ -1627,33 +1655,7 @@ impl MethodRouter {
             }
         };
         match comms.send(cmd).await {
-            Ok(receipt) => {
-                let result = match receipt {
-                    meerkat_core::comms::SendReceipt::InputAccepted {
-                        interaction_id,
-                        stream_reserved,
-                    } => {
-                        json!({"kind":"input_accepted","interaction_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
-                    }
-                    meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
-                        json!({"kind":"peer_message_sent","envelope_id": envelope_id.to_string(),"acked": acked})
-                    }
-                    meerkat_core::comms::SendReceipt::PeerRequestSent {
-                        envelope_id,
-                        interaction_id,
-                        stream_reserved,
-                    } => {
-                        json!({"kind":"peer_request_sent","envelope_id": envelope_id.to_string(),"interaction_id": interaction_id.0.to_string(),"request_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
-                    }
-                    meerkat_core::comms::SendReceipt::PeerResponseSent {
-                        envelope_id,
-                        in_reply_to,
-                    } => {
-                        json!({"kind":"peer_response_sent","envelope_id": envelope_id.to_string(),"in_reply_to": in_reply_to.0.to_string()})
-                    }
-                };
-                RpcResponse::success(id, result)
-            }
+            Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
             Err(e) => {
                 let normalized = match &e {
                     meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
@@ -2353,6 +2355,28 @@ mod tests {
     use serde::Serialize;
 
     use crate::protocol::RpcId;
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_router_send_receipt_json_peer_request_uses_envelope_id_as_request_id() {
+        let envelope_id = uuid::Uuid::new_v4();
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+
+        let payload = send_receipt_json(meerkat_core::comms::SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved: true,
+        });
+
+        assert_eq!(
+            payload["request_id"],
+            serde_json::json!(envelope_id.to_string())
+        );
+        assert_eq!(
+            payload["interaction_id"],
+            serde_json::json!(interaction_id.0.to_string())
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Mock LLM client (same as session_runtime tests)
@@ -3465,6 +3489,194 @@ mod tests {
         assert_eq!(result_value(&interrupt_resp)["interrupted"], true);
     }
 
+    #[cfg(all(feature = "mob", feature = "comms", not(feature = "mini-surface")))]
+    #[tokio::test]
+    async fn mob_member_stream_surfaces_run_completed_for_late_terminal_peer_response() {
+        use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerSpec};
+        use meerkat_core::interaction::InteractionId;
+
+        let (router, mut notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "mob-peer-response-run-completed",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-5",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let _spawn_resp = router
+            .dispatch(make_request(
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": &mob_id,
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id =
+            resolve_mob_bridge_session_id(&router, "mob-peer-response-run-completed", "worker-1")
+                .await;
+        let session_id = SessionId::parse(&session_id).expect("valid bridge session id");
+
+        let _turn_resp = router
+            .dispatch(make_request(
+                "mob/turn_start",
+                serde_json::json!({
+                    "mob_id": &mob_id,
+                    "agent_identity": "worker-1",
+                    "prompt": "Reply exactly READY."
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({
+                    "mob_id": &mob_id,
+                    "agent_identity": "worker-1"
+                }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let session_stream_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id.clone() }),
+            ))
+            .await
+            .unwrap();
+        let session_stream_id = result_value(&session_stream_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let operator_comms = router
+            .runtime
+            .comms_runtime(&session_id)
+            .await
+            .expect("worker comms runtime");
+        let sender = std::sync::Arc::new(
+            meerkat::CommsRuntime::inproc_only("router-peer-response-sender")
+                .expect("sender comms runtime"),
+        );
+        let sender_peer_id = sender.public_key().to_peer_id();
+        let sender_addr = sender.advertised_address();
+        let operator_peer_id = operator_comms.public_key().expect("worker peer id");
+        let operator_addr = operator_comms
+            .advertised_address()
+            .expect("worker advertised address");
+
+        CoreCommsRuntime::add_trusted_peer(
+            &*sender,
+            TrustedPeerSpec::new(
+                format!("{mob_id}/worker/worker-1"),
+                operator_peer_id,
+                operator_addr,
+            )
+            .expect("worker trusted peer spec"),
+        )
+        .await
+        .expect("sender trusts worker");
+        CoreCommsRuntime::add_trusted_peer(
+            operator_comms.as_ref(),
+            TrustedPeerSpec::new("router-peer-response-sender", sender_peer_id, sender_addr)
+                .expect("sender trusted peer spec"),
+        )
+        .await
+        .expect("worker trusts sender");
+
+        CoreCommsRuntime::send(
+            &*sender,
+            CommsCommand::PeerResponse {
+                to: PeerName::new(format!("{mob_id}/worker/worker-1")).expect("valid peer name"),
+                in_reply_to: InteractionId(uuid::Uuid::new_v4()),
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({
+                    "request_intent": "checksum_token",
+                    "token": "birch seventeen",
+                }),
+                handling_mode: None,
+            },
+        )
+        .await
+        .expect("send terminal peer response");
+
+        let (mob_run_completed, session_run_completed) = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                loop {
+                    let notif = notif_rx.recv().await.expect("notification");
+                    if notif.method == "mob/stream_event"
+                        && notif.params["stream_id"] == stream_id
+                        && notif.params["event"]["payload"]["type"].as_str()
+                            == Some("run_completed")
+                    {
+                        break (Some(notif), None);
+                    }
+                    if notif.method == "session/stream_event"
+                        && notif.params["stream_id"] == session_stream_id
+                        && notif.params["event"]["payload"]["type"].as_str()
+                            == Some("run_completed")
+                    {
+                        break (None, Some(notif));
+                    }
+                }
+            },
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let runtime_state = router
+                    .runtime_adapter()
+                    .runtime_state(&session_id)
+                    .await
+                    .expect("runtime state");
+                let ingress_snapshot = operator_comms
+                    .peer_ingress_runtime_snapshot()
+                    .await
+                    .expect("peer ingress runtime snapshot");
+                panic!(
+                    "run_completed notification should arrive on one of the subscribed streams; runtime_state={runtime_state:?}; ingress_snapshot={ingress_snapshot:?}"
+                );
+            }
+        };
+
+        assert!(
+            mob_run_completed.is_some() || session_run_completed.is_some(),
+            "expected a run_completed notification on either mob or session stream"
+        );
+        assert!(
+            mob_run_completed.is_some(),
+            "session stream received run_completed but mob stream did not; per-member mob stream forwarding is dropping the event"
+        );
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn session_archive_for_mob_session_retires_member() {
@@ -3510,7 +3722,7 @@ mod tests {
         let archive_resp = router
             .dispatch(make_request(
                 "session/archive",
-                serde_json::json!({ "session_id": session_id }),
+                serde_json::json!({ "session_id": session_id.clone() }),
             ))
             .await
             .unwrap();

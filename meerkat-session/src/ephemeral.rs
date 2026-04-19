@@ -1112,15 +1112,27 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         appends: Vec<PendingSystemContextAppend>,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        self.apply_runtime_system_context(id, appends).await?;
-        self.build_runtime_output(
+        self.apply_runtime_context_appends_with_boundary(
             id,
             run_id,
+            appends,
             RunApplyBoundary::Immediate,
             contributing_input_ids,
-            None,
         )
         .await
+    }
+
+    pub async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        self.apply_runtime_system_context(id, appends).await?;
+        self.build_runtime_output(id, run_id, boundary, contributing_input_ids, None)
+            .await
     }
 
     /// Get the event injector for a session, if available.

@@ -666,6 +666,15 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
 }
 
 impl SessionRuntime {
+    #[cfg(feature = "comms")]
+    async fn preserve_existing_peer_ingress(
+        &self,
+        session_id: &SessionId,
+        requested_keep_alive: bool,
+    ) -> bool {
+        requested_keep_alive || self.runtime_adapter.session_has_comms(session_id).await
+    }
+
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let live = match self.service.export_live_session(session_id).await {
             Ok(session) => session,
@@ -1820,12 +1829,17 @@ impl SessionRuntime {
                     .await
                     .map_err(session_error_to_rpc)?;
             }
-            // Only update peer ingress if we have something to set — don't
-            // downgrade a session that already has comms drain via
-            // enable_comms_drain().
-            if comms_rt.is_some() || keep_alive {
+            let peer_ingress_enabled = self
+                .preserve_existing_peer_ingress(session_id, keep_alive)
+                .await;
+            // Preserve an already-active peer ingress channel for mob-owned /
+            // externally-enabled sessions even when the persisted keep_alive
+            // bit is false. Without this, ordinary turn routing can
+            // accidentally tear down the persistent comms drain that
+            // autonomous peers rely on for between-turn responses.
+            if comms_rt.is_some() || peer_ingress_enabled {
                 self.runtime_adapter
-                    .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                    .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                     .await;
             }
         }
@@ -2175,12 +2189,11 @@ impl SessionRuntime {
                     #[cfg(feature = "comms")]
                     {
                         let comms_rt = self.service.comms_runtime(session_id).await;
+                        let peer_ingress_enabled = self
+                            .preserve_existing_peer_ingress(session_id, build_config.keep_alive)
+                            .await;
                         self.runtime_adapter
-                            .update_peer_ingress_context(
-                                session_id,
-                                build_config.keep_alive,
-                                comms_rt,
-                            )
+                            .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                             .await;
                     }
                 }
@@ -2262,8 +2275,11 @@ impl SessionRuntime {
         #[cfg(feature = "comms")]
         {
             let comms_rt = self.service.comms_runtime(session_id).await;
+            let peer_ingress_enabled = self
+                .preserve_existing_peer_ingress(session_id, keep_alive)
+                .await;
             self.runtime_adapter
-                .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                 .await;
         }
         let (_, output) = self
@@ -4481,6 +4497,239 @@ mod tests {
             }),
             "expected accept_input_with_completion to persist runtime-owned terminal peer response: {projected:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn accept_input_with_completion_emits_run_completed_for_runtime_owned_terminal_peer_response()
+     {
+        use futures::StreamExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("runtime-owned-terminal-peer-response-events".to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        let mut events = runtime
+            .service
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe_session_events");
+
+        let (_outcome, handle) = runtime
+            .runtime_adapter()
+            .accept_input_with_completion(
+                &session_id,
+                meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+                    header: meerkat_runtime::InputHeader {
+                        id: meerkat_core::lifecycle::InputId::new(),
+                        timestamp: chrono::Utc::now(),
+                        source: meerkat_runtime::InputOrigin::Peer {
+                            peer_id: "analyst-rt".to_string(),
+                            runtime_id: None,
+                        },
+                        durability: meerkat_runtime::InputDurability::Durable,
+                        visibility: meerkat_runtime::InputVisibility::default(),
+                        idempotency_key: None,
+                        supersession_key: None,
+                        correlation_id: None,
+                    },
+                    convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
+                        request_id: "req-123".to_string(),
+                        status: meerkat_runtime::ResponseTerminalStatus::Completed,
+                    }),
+                    body: "done".to_string(),
+                    payload: Some(serde_json::json!({
+                        "request_intent": "checksum_token",
+                        "token": "birch seventeen",
+                    })),
+                    blocks: None,
+                    handling_mode: None,
+                }),
+            )
+            .await
+            .expect("accept terminal peer response with completion");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
+            .await
+            .expect("run_started timeout")
+            .expect("run_started event should exist");
+        match started.payload {
+            AgentEvent::RunStarted { prompt, .. } => {
+                let normalized = prompt.to_lowercase();
+                assert!(
+                    normalized.contains("peer_response_terminal:analyst-rt:req-123"),
+                    "run_started prompt should expose runtime system-context source: {prompt}"
+                );
+                assert!(
+                    normalized.contains("birch seventeen"),
+                    "run_started prompt should expose authoritative terminal peer payload: {prompt}"
+                );
+            }
+            other => panic!("expected run_started, got {other:?}"),
+        }
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
+            .await
+            .expect("run_completed timeout")
+            .expect("run_completed event should exist");
+        match completed.payload {
+            AgentEvent::RunCompleted { result, usage, .. } => {
+                assert!(
+                    result.is_empty(),
+                    "context-only runtime apply should not synthesize assistant output: {result:?}"
+                );
+                assert_eq!(
+                    usage,
+                    meerkat_core::types::Usage::default(),
+                    "context-only runtime apply should not report model usage"
+                );
+            }
+            other => panic!("expected run_completed, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn keep_alive_comms_drain_emits_run_completed_for_terminal_peer_response() {
+        use futures::StreamExt;
+        use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+        use meerkat_core::comms::{CommsCommand, PeerName, TrustedPeerSpec};
+        use meerkat_core::interaction::InteractionId;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+
+        let operator_name = "operator-drain-test";
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some(operator_name.to_string());
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let _ = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        let operator_comms = runtime
+            .comms_runtime(&session_id)
+            .await
+            .expect("session comms runtime");
+        runtime
+            .enable_comms_drain(&session_id, operator_comms.clone())
+            .await;
+
+        let sender = Arc::new(
+            meerkat::CommsRuntime::inproc_only("analyst-drain-test").expect("sender comms runtime"),
+        );
+        let sender_peer_id = sender.public_key().to_peer_id();
+        let sender_addr = sender.advertised_address();
+        let operator_peer_id = operator_comms.public_key().expect("operator peer id");
+        let operator_addr = operator_comms
+            .advertised_address()
+            .expect("operator advertised address");
+
+        CoreCommsRuntime::add_trusted_peer(
+            &*sender,
+            TrustedPeerSpec::new(operator_name, operator_peer_id, operator_addr)
+                .expect("operator trusted peer spec"),
+        )
+        .await
+        .expect("sender trusts operator");
+        CoreCommsRuntime::add_trusted_peer(
+            operator_comms.as_ref(),
+            TrustedPeerSpec::new("analyst-drain-test", sender_peer_id, sender_addr)
+                .expect("sender trusted peer spec"),
+        )
+        .await
+        .expect("operator trusts sender");
+
+        let mut events = runtime
+            .service
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe_session_events");
+
+        CoreCommsRuntime::send(
+            &*sender,
+            CommsCommand::PeerResponse {
+                to: PeerName::new(operator_name.to_string()).expect("valid operator peer name"),
+                in_reply_to: InteractionId(uuid::Uuid::new_v4()),
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({
+                    "request_intent": "checksum_token",
+                    "token": "birch seventeen",
+                }),
+                handling_mode: None,
+            },
+        )
+        .await
+        .expect("send terminal peer response");
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+            .await
+            .expect("run_started timeout")
+            .expect("run_started event should exist");
+        assert!(matches!(started.payload, AgentEvent::RunStarted { .. }));
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
+            .await
+            .expect("run_completed timeout")
+            .expect("run_completed event should exist");
+        match completed.payload {
+            AgentEvent::RunCompleted { result, usage, .. } => {
+                assert!(
+                    result.is_empty(),
+                    "context-only drain apply should not synthesize assistant output"
+                );
+                assert_eq!(usage, meerkat_core::types::Usage::default());
+            }
+            other => panic!("expected run_completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

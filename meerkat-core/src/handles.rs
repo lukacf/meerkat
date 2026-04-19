@@ -324,12 +324,22 @@ pub trait SessionAdmissionHandle: Send + Sync {
         origin: &str,
     ) -> Result<(), DslTransitionError>;
 
-    /// Fire the `AcceptWithCompletion { input_id, request_immediate_processing, interrupt_yielding, run_id }` input.
+    /// Fire the `AcceptWithCompletion { input_id, request_immediate_processing,
+    /// interrupt_yielding, wake_if_idle, run_id }` input.
+    ///
+    /// `wake_if_idle` carries the policy-level "this input must wake the
+    /// runtime loop once the session reaches idle" intent (e.g.
+    /// `peer_response_terminal` staged while running): the DSL's
+    /// Running+Queued transition splits on it and emits a
+    /// `PostAdmissionSignal::WakeLoop` so the pending wake lands on the
+    /// next idle reach. Idle/Attached queued arms already wake
+    /// unconditionally, so the flag is ignored in those guards.
     fn accept_with_completion(
         &self,
         input_id: &InputId,
         request_immediate_processing: bool,
         interrupt_yielding: bool,
+        wake_if_idle: bool,
         run_id: &RunId,
     ) -> Result<(), DslTransitionError>;
 

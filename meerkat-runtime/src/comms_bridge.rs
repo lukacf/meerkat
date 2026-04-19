@@ -132,13 +132,16 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
+    // For every content kind, prefer the comms-owned `rendered_text`
+    // projection when present: it already carries the authoritative
+    // `[from]: <kind>` framing that later prompt-rendering relies on
+    // (see `peer_prompt_text`). Fall back to the content-specific
+    // serialization only when rendered_text is empty.
+    if !interaction.rendered_text.is_empty() {
+        return interaction.rendered_text.clone();
+    }
     match &interaction.content {
-        InteractionContent::Message { body, .. } => {
-            if !interaction.rendered_text.is_empty() {
-                return interaction.rendered_text.clone();
-            }
-            body.clone()
-        }
+        InteractionContent::Message { body, .. } => body.clone(),
         InteractionContent::Request { params, .. } => {
             serde_json::to_string(params).unwrap_or_default()
         }
@@ -328,7 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn request_body_uses_structured_json_projection_and_preserves_payload() {
+    fn request_body_prefers_rendered_text_and_preserves_structured_payload() {
+        // Comms-owned `rendered_text` is the authoritative projection for
+        // request/response conventions too (not just messages): it carries
+        // the `[COMMS REQUEST ...]` framing downstream prompt rendering
+        // relies on. The structured JSON still flows through `payload` for
+        // consumers that need the raw params.
         let interaction = InboxInteraction {
             from: "event:webhook".into(),
             content: InteractionContent::Request {
@@ -343,7 +351,10 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "{\"peer\":\"agent-1\"}");
+            assert_eq!(
+                peer.body,
+                "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
+            );
             assert_eq!(peer.payload, Some(serde_json::json!({"peer":"agent-1"})));
         } else {
             panic!("Expected PeerInput");

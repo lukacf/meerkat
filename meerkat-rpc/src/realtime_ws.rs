@@ -1418,25 +1418,15 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                 }
                                 // D4 / issue #260: drain sibling notifies that were queued while
                                 // this one was in flight (our own turn may have produced several
-                                // commits back-to-back), then re-read current_projection_updated_at
-                                // and skip if the runtime has since caught up to or beyond the
-                                // notify — this absorbs our own-turn race without reopening the
-                                // provider session.
+                                // commits back-to-back). For external mutations while the product
+                                // session is idle we must still refresh the provider projection —
+                                // a newer canonical session `updated_at` means there is new state
+                                // the provider session has not absorbed yet.
                                 let mut max_notified = updated_at;
                                 while let Ok(next_notified) = projection_refresh_rx.try_recv() {
                                     if next_notified > max_notified {
                                         max_notified = next_notified;
                                     }
-                                }
-                                if let Ok(current_updated_at) = current_projection_updated_at(
-                                    &state.runtime,
-                                    binding.as_ref(),
-                                )
-                                .await
-                                    && current_updated_at >= max_notified
-                                {
-                                    projection_known_updated_at = current_updated_at;
-                                    continue;
                                 }
                                 if let Some(product_session) = product_session.as_mut() {
                                     if product_turn_in_flight {
@@ -1513,6 +1503,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             }
                                             _ => false,
                                         };
+                                        let tool_call_requested = matches!(
+                                            &event,
+                                            RealtimeSessionEvent::ToolCallRequested { .. }
+                                        );
                                         let turn_committed = matches!(&event, RealtimeSessionEvent::TurnCommitted);
                                         let output_started = matches!(
                                             &event,
@@ -1589,6 +1583,16 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         }
                                         if turn_committed {
                                             product_turn_committed = true;
+                                        }
+                                        if tool_call_requested {
+                                            // A provider-issued tool call is part of the
+                                            // currently active provider-managed turn even if the
+                                            // backend never emitted an explicit TurnStarted
+                                            // marker. Treating it as idle lets the canonical
+                                            // tool-dispatch mutation masquerade as an external
+                                            // between-turn edit and spuriously reconstruct the
+                                            // provider session.
+                                            product_turn_in_flight = true;
                                         }
                                         if output_started {
                                             product_output_started = true;

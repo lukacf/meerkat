@@ -432,6 +432,18 @@ impl InboxSender {
                 }
             };
             if !should_enqueue {
+                if let InboxItem::External { envelope } = &result.item {
+                    tracing::warn!(
+                        peer_id = %envelope.from.to_peer_id(),
+                        from_peer = result.from_peer.as_deref().unwrap_or("<unresolved>"),
+                        class = ?result.class,
+                        kind = ?kind,
+                        request_id = result.request_id.as_deref().unwrap_or("<none>"),
+                        auth_required = ctx.require_peer_auth,
+                        trusted_sender = result.trusted_sender,
+                        "classified inbox dropped external peer ingress at admission"
+                    );
+                }
                 return Ok(());
             }
             let entry = ClassifiedInboxEntry {

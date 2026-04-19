@@ -1219,7 +1219,13 @@ async fn audio_input_uses_product_session_factory_and_streams_provider_events() 
 }
 
 #[tokio::test]
-#[ignore = "flaky: tracked in task #62 — tool-use subresponse boundary sometimes reconstructs provider session mid-turn under CI load"]
+// Re-enabled 2026-04-19: the underlying race (tool-use subresponse
+// boundary sometimes reconstructs the provider session mid-turn under
+// CI load) is kept in check by `.config/nextest.toml`'s retries=2
+// override until the peer-response / admission cluster changes in this
+// PR settle the shell↔admission signal seam end-to-end. The earlier
+// `#[ignore]` was CI hygiene from the B2 split (commit 31a2d55c3) and
+// was never paired with a functional issue that survived retries.
 async fn provider_tool_use_boundary_does_not_surface_public_turn_completed_or_flush_canonical_output()
  {
     let (_temp, runtime, config_store) = build_test_runtime();

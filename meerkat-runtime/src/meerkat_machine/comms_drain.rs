@@ -53,6 +53,7 @@ pub struct CommsDrainSlot {
     pub phase: CommsDrainPhase,
     pub mode: Option<CommsDrainMode>,
     pub handle: Option<tokio::task::JoinHandle<()>>,
+    pub bound_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
 }
 
 impl CommsDrainSlot {
@@ -61,7 +62,14 @@ impl CommsDrainSlot {
             phase: CommsDrainPhase::Inactive,
             mode: None,
             handle: None,
+            bound_runtime: None,
         }
+    }
+
+    fn bound_runtime_matches(&self, runtime: &Arc<dyn meerkat_core::agent::CommsRuntime>) -> bool {
+        self.bound_runtime
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, runtime))
     }
 
     fn can_ensure_running(&self) -> bool {
@@ -73,11 +81,35 @@ impl CommsDrainSlot {
         )
     }
 
-    fn begin_running(&mut self, mode: CommsDrainMode) -> bool {
+    fn begin_running(
+        &mut self,
+        mode: CommsDrainMode,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> bool {
         if !self.can_ensure_running() {
             return false;
         }
         self.mode = Some(mode);
+        self.bound_runtime = Some(runtime);
+        self.phase = CommsDrainPhase::Starting;
+        true
+    }
+
+    fn begin_rebind(
+        &mut self,
+        mode: CommsDrainMode,
+        runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+    ) -> bool {
+        if self.phase != CommsDrainPhase::Running || self.mode != Some(mode) {
+            return false;
+        }
+        if self.bound_runtime_matches(&runtime) {
+            return false;
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+        self.bound_runtime = Some(runtime);
         self.phase = CommsDrainPhase::Starting;
         true
     }
@@ -98,6 +130,7 @@ impl CommsDrainSlot {
             {
                 CommsDrainPhase::ExitedRespawnable
             } else {
+                self.bound_runtime = None;
                 CommsDrainPhase::Stopped
             };
         }
@@ -105,6 +138,7 @@ impl CommsDrainSlot {
 
     pub(crate) fn abort(&mut self) {
         self.phase = CommsDrainPhase::Stopped;
+        self.bound_runtime = None;
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
@@ -194,37 +228,6 @@ impl MeerkatMachine {
             None => return false,
         };
 
-        // Stage DSL SpawnDrain input BEFORE mutating the drain slot.
-        // drain_phase is maintained by DSL transitions (SpawnDrain/StopDrain/
-        // DrainExited*); shell-side slot.phase is not re-projected into DSL.
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id) {
-                let mode_str = format!("{mode:?}");
-                let mut authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Err(err) = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
-                    &mut *authority,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain { mode: mode_str },
-                ) {
-                    tracing::warn!(
-                        %session_id,
-                        error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
-                        "DSL rejected SpawnDrain; skipping drain spawn"
-                    );
-                    return false;
-                }
-            } else {
-                tracing::warn!(
-                    %session_id,
-                    "refusing to spawn comms drain for unregistered session"
-                );
-                return false;
-            }
-        }
-
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(session_id) {
             tracing::warn!(
@@ -240,8 +243,68 @@ impl MeerkatMachine {
             .entry(session_id.clone())
             .or_insert_with(CommsDrainSlot::new);
 
-        if !slot.begin_running(mode) {
+        let needs_rebind = slot.begin_rebind(mode, comms.clone());
+        let needs_spawn = if needs_rebind {
+            false
+        } else {
+            slot.begin_running(mode, comms.clone())
+        };
+
+        if !needs_rebind && !needs_spawn {
             return false;
+        }
+        drop(slots);
+        drop(sessions);
+
+        if needs_spawn {
+            // Stage DSL SpawnDrain only when the machine is transitioning from
+            // not-running into running. A runtime-instance rebind keeps the
+            // conceptual drain alive and only swaps the bound transport task.
+            let mut sessions = self.sessions.write().await;
+            if let Some(entry) = sessions.get_mut(session_id) {
+                let mode_str = format!("{mode:?}");
+                let apply_result = {
+                    let mut authority = entry
+                        .dsl_authority
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                        &mut *authority,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
+                            mode: mode_str,
+                        },
+                    )
+                };
+                if let Err(err) = apply_result {
+                    tracing::warn!(
+                        %session_id,
+                        error = %crate::meerkat_machine::dsl_authority::map_error(err, "SpawnDrain"),
+                        "DSL rejected SpawnDrain; skipping drain spawn"
+                    );
+                    let mut slots = self.comms_drain_slots.write().await;
+                    if let Some(slot) = slots.get_mut(session_id) {
+                        slot.phase = CommsDrainPhase::Stopped;
+                        slot.bound_runtime = None;
+                    }
+                    return false;
+                }
+            } else {
+                tracing::warn!(
+                    %session_id,
+                    "refusing to spawn comms drain for unregistered session"
+                );
+                let mut slots = self.comms_drain_slots.write().await;
+                if let Some(slot) = slots.get_mut(session_id) {
+                    slot.phase = CommsDrainPhase::Stopped;
+                    slot.bound_runtime = None;
+                }
+                return false;
+            }
+        } else if needs_rebind {
+            tracing::warn!(
+                %session_id,
+                "rebinding persistent comms drain to a new comms runtime instance"
+            );
         }
 
         let idle_timeout = match mode {
@@ -254,6 +317,10 @@ impl MeerkatMachine {
             comms.clone(),
             idle_timeout,
         );
+        let mut slots = self.comms_drain_slots.write().await;
+        let slot = slots
+            .entry(session_id.clone())
+            .or_insert_with(CommsDrainSlot::new);
         slot.handle = Some(handle);
         slot.mark_task_spawned();
 
@@ -323,6 +390,14 @@ impl MeerkatMachine {
                     );
                 }
             }
+        }
+        if std::env::var_os("RKAT_TRACE_COMMS_DRAIN_BIND").is_some() {
+            tracing::info!(
+                %session_id,
+                ?reason,
+                respawnable = is_respawnable,
+                "comms drain exited"
+            );
         }
 
         let mut slots = self.comms_drain_slots.write().await;

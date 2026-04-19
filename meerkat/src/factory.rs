@@ -697,6 +697,20 @@ fn synthesize_realm_from_config(
     meerkat_core::RealmConnectionSet::synthesize_env_default(provider)
 }
 
+/// Return `true` when the OpenAI model ID advertises
+/// `ModelCapabilities.realtime == true` in the curated catalog.
+///
+/// Drives the AgentFactory branch that routes text turns over the OpenAI
+/// Realtime WebSocket instead of the Responses API. OpenAI rejects
+/// realtime model IDs on `POST /v1/responses` with
+/// `model_not_found`, so any session whose resolved model is
+/// realtime-capable must use the WebSocket text adapter.
+fn is_openai_realtime_capable(model: &str) -> bool {
+    meerkat_core::model_profile::capabilities::capabilities_for("openai", model)
+        .map(|caps| caps.realtime)
+        .unwrap_or(false)
+}
+
 /// Resolve the API key for `provider` through the canonical
 /// `ProviderRuntimeRegistry` path. Honors the same config→env precedence
 /// as [`synthesize_realm_from_config`]: a realm in `config.realm` that
@@ -1898,9 +1912,46 @@ impl AgentFactory {
                         let _ = bindings.auth_lease.acquire_lease(&binding_key, expires_at);
                     }
 
-                    provider_registry
-                        .build_client(connection)
-                        .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                    // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
+                    // cannot go through the Responses API — POST /v1/responses
+                    // returns 404 model_not_found. Route those through the
+                    // OpenAI Realtime WebSocket via `OpenAiRealtimeTextAdapter`.
+                    // Capability-driven routing owns this decision at the
+                    // composition seam (dogma §9).
+                    let realtime_route = matches!(provider, Provider::OpenAI)
+                        && is_openai_realtime_capable(&build_config.model);
+                    #[cfg(not(feature = "openai-realtime"))]
+                    if realtime_route {
+                        return Err(BuildAgentError::ConnectionResolution(format!(
+                            "model '{}' advertises ModelCapabilities.realtime=true; \
+                             the meerkat facade must be built with the \
+                             `openai-realtime` feature to route text turns over the \
+                             Realtime WebSocket",
+                            build_config.model
+                        )));
+                    }
+                    #[cfg(feature = "openai-realtime")]
+                    if realtime_route {
+                        let secret = connection.resolved_secret().ok_or_else(|| {
+                            BuildAgentError::ConnectionResolution(
+                                "openai realtime text adapter requires an inline API key (\
+                                 dynamic authorizers for realtime WS are not yet supported)"
+                                    .to_string(),
+                            )
+                        })?;
+                        Arc::new(meerkat_openai::OpenAiRealtimeTextAdapter::new(secret))
+                            as Arc<dyn LlmClient>
+                    } else {
+                        provider_registry
+                            .build_client(connection)
+                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                    }
+                    #[cfg(not(feature = "openai-realtime"))]
+                    {
+                        provider_registry
+                            .build_client(connection)
+                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                    }
                 }
             }
         };

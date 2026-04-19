@@ -573,14 +573,14 @@ impl CoreCommsRuntime for CommsRuntime {
                 );
                 if is_terminal_reply && let Some(handle) = self.peer_interaction_handle() {
                     let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
-                    if handle.inbound_state(corr_id).is_some() {
-                        if let Err(err) = handle.response_replied(corr_id) {
-                            tracing::warn!(
-                                error = %err,
-                                corr_id = %corr_id,
-                                "PeerInteractionHandle::response_replied rejected"
-                            );
-                        }
+                    if handle.inbound_state(corr_id).is_some()
+                        && let Err(err) = handle.response_replied(corr_id)
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            corr_id = %corr_id,
+                            "PeerInteractionHandle::response_replied rejected"
+                        );
                     }
                 }
 

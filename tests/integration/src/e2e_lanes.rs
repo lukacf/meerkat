@@ -453,6 +453,13 @@ fn scenario_env(spec: &Spec) -> Result<Vec<(String, String)>, String> {
     // the scenario's main command runs.
     env.entry("CARGO_INCREMENTAL".to_string())
         .or_insert_with(|| "0".to_string());
+    // Live/mob-heavy tests recursively drive the runtime through many
+    // layered async frames (spawn → wire → retire → destroy) which can
+    // exceed the default 2 MiB main-thread stack under debug builds.
+    // Default-raise to 16 MiB for every spec; scenarios can still
+    // override by setting their own `RUST_MIN_STACK` in `spec.env`.
+    env.entry("RUST_MIN_STACK".to_string())
+        .or_insert_with(|| (16 * 1024 * 1024).to_string());
     for (key, value) in spec.env {
         env.insert(
             (*key).to_string(),

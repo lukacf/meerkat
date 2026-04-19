@@ -31,6 +31,7 @@ const DEFAULT_INBOX_CAPACITY: usize = 1024;
 /// reach the agent. Silent `Ok(())` used to mask these; now they are typed,
 /// logged, and counted so tests can pin down "zero drops on the happy path".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DropReason {
     /// `require_peer_auth` is on, the sender is not in the trusted set, and
     /// the envelope is not auth-exempt (e.g. supervisor-bridge bootstrap).
@@ -50,6 +51,7 @@ pub enum DropReason {
 /// call site is a compile error — a drop is never "just success".
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdmissionOutcome {
     Admitted,
     Dropped { reason: DropReason },

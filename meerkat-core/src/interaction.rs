@@ -40,12 +40,14 @@ pub enum ResponseStatus {
 /// rather than re-`match` on `ResponseStatus` — that duplication is how
 /// "terminal" drifts from one call site to another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TerminalityClass {
     Progress,
     Terminal { disposition: TerminalDisposition },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TerminalDisposition {
     Completed,
     Failed,

@@ -12,7 +12,7 @@
 //! - `wire`/`unwire`/`remove` are projection mutations only.
 
 use crate::event::{MemberRef, MobEvent, MobEventKind};
-use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, MeerkatId, ProfileName};
+use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::comms::TrustedPeerSpec;
 use meerkat_core::time_compat::SystemTime;
@@ -20,14 +20,16 @@ use meerkat_core::types::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// Lifecycle state for a roster member.
 ///
 /// `Retiring` is runtime-only — event projection never produces it
 /// (`MemberSpawned` creates `Active`; `MemberRetired` removes entirely).
+///
+/// As of phase 5G, authority over `Retiring` is owned by the `MobMachine`
+/// DSL via its `member_state_markers` map. This enum is now a read-only
+/// projection produced by [`Roster::sync_retiring_projection`] whenever
+/// the DSL marker map changes. Shell code MUST NOT write to
+/// `RosterEntry::state` except through that projection path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemberState {
     #[default]
@@ -61,12 +63,13 @@ pub struct MobMemberKickoffSnapshot {
 /// A single member entry in the roster.
 ///
 /// Public fields use the identity-native model (0.6). Bridge-level fields
-/// (`meerkat_id`, `member_ref`, `peer_id`, `external_peer_specs`) are
+/// (`member_ref`, `peer_id`, `external_peer_specs`) are
 /// `pub(crate)` for internal dispatch only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
     // --- Identity-native public fields ---
     /// Stable member identity.
+    #[serde(alias = "meerkat_id")]
     pub agent_identity: AgentIdentity,
     /// Generation counter for this incarnation.
     pub generation: Generation,
@@ -80,6 +83,14 @@ pub struct RosterEntry {
     #[serde(default)]
     pub runtime_mode: MobRuntimeMode,
     /// Lifecycle state (Active or Retiring).
+    ///
+    /// This is a read-only projection of the `MobMachine` DSL's
+    /// `member_state_markers` map. The actor calls
+    /// [`Roster::sync_retiring_projection`] after any transition that
+    /// mutates the marker map; no shell code should assign this field
+    /// directly. The field exists solely so that cloned/serialized
+    /// `RosterEntry` values can be consumed by read surfaces without
+    /// a back-channel to the DSL authority.
     #[serde(default)]
     pub state: MemberState,
     /// Set of peer identities this member is wired to.
@@ -90,13 +101,8 @@ pub struct RosterEntry {
     /// Projected kickoff state for autonomous initial turn resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
-    /// Durable voice intent projected from the mob event log.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub(crate) voice_intent_present: bool,
 
     // --- Internal bridge fields (pub(crate)) ---
-    /// Legacy meerkat identifier for bridge dispatch.
-    pub(crate) meerkat_id: MeerkatId,
     /// Backend-neutral bridge identity.
     pub(crate) member_ref: MemberRef,
     /// Public comms peer identifier when this member exposes a comms runtime.
@@ -104,7 +110,7 @@ pub struct RosterEntry {
     pub(crate) peer_id: Option<String>,
     /// Trusted specs for external peers keyed by their projected peer name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) external_peer_specs: BTreeMap<MeerkatId, TrustedPeerSpec>,
+    pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerSpec>,
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     ///
     /// When a member is spawned with an explicit tooling profile (inline or realm),
@@ -123,14 +129,12 @@ pub(crate) struct RosterAddEntry {
     pub(crate) generation: Generation,
     pub(crate) fence_token: FenceToken,
     pub(crate) agent_runtime_id: AgentRuntimeId,
-    pub(crate) meerkat_id: MeerkatId,
     pub(crate) role: ProfileName,
     pub(crate) runtime_mode: MobRuntimeMode,
     pub(crate) member_ref: MemberRef,
     pub(crate) peer_id: Option<String>,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
-    pub(crate) voice_intent_present: bool,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -138,15 +142,10 @@ pub(crate) struct RosterAddEntry {
 /// Built by replaying events. Shared via `Arc<RwLock<Roster>>` between
 /// the actor (writes) and handle (reads).
 ///
-/// The primary index is `AgentIdentity`. A secondary `meerkat_index`
-/// maps legacy `MeerkatId` keys to the canonical identity for internal
-/// bridge dispatch.
+/// Keyed by `AgentIdentity`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Roster {
     entries: BTreeMap<AgentIdentity, RosterEntry>,
-    /// Reverse index: MeerkatId -> AgentIdentity for bridge lookup.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    meerkat_index: BTreeMap<MeerkatId, AgentIdentity>,
 }
 
 impl Roster {
@@ -168,7 +167,6 @@ impl Roster {
     pub fn apply(&mut self, event: &MobEvent) {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
-                let meerkat_id = MeerkatId::from(member_spawned.agent_identity.as_str());
                 let member_ref = member_spawned.bridge_member_ref.clone().unwrap_or_else(|| {
                     MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()))
                 });
@@ -177,14 +175,12 @@ impl Roster {
                     generation: member_spawned.generation,
                     fence_token: member_spawned.fence_token,
                     agent_runtime_id: member_spawned.agent_runtime_id.clone(),
-                    meerkat_id,
                     role: member_spawned.role.clone(),
                     runtime_mode: member_spawned.runtime_mode,
                     member_ref,
                     peer_id: None,
                     labels: member_spawned.labels.clone(),
                     effective_profile_override: None,
-                    voice_intent_present: false,
                 });
             }
             MobEventKind::MemberRetired { agent_identity, .. } => {
@@ -209,12 +205,12 @@ impl Roster {
             MobEventKind::ExternalPeerWired { local, spec } => {
                 self.wire_external_identity(
                     local,
-                    &MeerkatId::from(spec.name.clone()),
+                    &AgentIdentity::from(spec.name.clone()),
                     spec.clone(),
                 );
             }
             MobEventKind::ExternalPeerUnwired { local, peer_name } => {
-                self.unwire_external_identity(local, &MeerkatId::from(peer_name.as_str()));
+                self.unwire_external_identity(local, &AgentIdentity::from(peer_name.as_str()));
             }
             MobEventKind::MembersUnwired { a, b } => {
                 self.unwire_identities(a, b);
@@ -222,15 +218,8 @@ impl Roster {
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));
             }
-            MobEventKind::MemberVoiceIntentSet { agent_identity } => {
-                self.set_voice_intent_by_identity(agent_identity, true);
-            }
-            MobEventKind::MemberVoiceIntentCleared { agent_identity } => {
-                self.set_voice_intent_by_identity(agent_identity, false);
-            }
             MobEventKind::MobReset => {
                 self.entries.clear();
-                self.meerkat_index.clear();
             }
             _ => {}
         }
@@ -239,8 +228,6 @@ impl Roster {
     /// Add a member to the roster.
     pub(crate) fn add(&mut self, entry: RosterAddEntry) -> bool {
         let identity = entry.agent_identity.clone();
-        let meerkat_id = entry.meerkat_id.clone();
-        self.meerkat_index.insert(meerkat_id, identity.clone());
         self.entries
             .insert(
                 identity,
@@ -249,7 +236,6 @@ impl Roster {
                     generation: entry.generation,
                     fence_token: entry.fence_token,
                     agent_runtime_id: entry.agent_runtime_id,
-                    meerkat_id: entry.meerkat_id,
                     role: entry.role,
                     member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
@@ -259,7 +245,6 @@ impl Roster {
                     external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
                     kickoff: None,
-                    voice_intent_present: entry.voice_intent_present,
                     effective_profile_override: entry.effective_profile_override,
                 },
             )
@@ -268,8 +253,7 @@ impl Roster {
 
     /// Remove a member by AgentIdentity.
     pub fn remove_by_identity(&mut self, identity: &AgentIdentity) {
-        if let Some(removed) = self.entries.remove(identity) {
-            self.meerkat_index.remove(&removed.meerkat_id);
+        if self.entries.remove(identity).is_some() {
             // Remove this identity from all other entries' wired_to sets
             for entry in self.entries.values_mut() {
                 entry.wired_to.remove(identity);
@@ -277,34 +261,18 @@ impl Roster {
         }
     }
 
-    pub(crate) fn set_voice_intent_by_identity(
-        &mut self,
-        identity: &AgentIdentity,
-        present: bool,
-    ) -> bool {
-        let Some(entry) = self.entries.get_mut(identity) else {
-            return false;
-        };
-        entry.voice_intent_present = present;
-        true
+    /// Remove a member — delegates to identity-based removal.
+    pub(crate) fn remove(&mut self, agent_identity: &AgentIdentity) {
+        self.remove_by_identity(agent_identity);
     }
 
-    /// Remove a member by legacy MeerkatId (bridge lookup).
-    pub(crate) fn remove_by_meerkat_id(&mut self, meerkat_id: &MeerkatId) {
-        if let Some(identity) = self.meerkat_index.remove(meerkat_id) {
-            self.remove_by_identity(&identity);
-        }
-    }
-
-    /// Remove a member — delegates to bridge-based removal.
-    pub(crate) fn remove(&mut self, meerkat_id: &MeerkatId) {
-        self.remove_by_meerkat_id(meerkat_id);
-    }
-
-    /// Resolve a MeerkatId to AgentIdentity via the bridge index.
+    /// Resolve an identity — returns the canonical identity if present.
     #[cfg(test)]
-    pub(crate) fn resolve_identity(&self, meerkat_id: &MeerkatId) -> Option<&AgentIdentity> {
-        self.meerkat_index.get(meerkat_id)
+    pub(crate) fn resolve_identity(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<&AgentIdentity> {
+        self.entries.get(agent_identity).map(|e| &e.agent_identity)
     }
 
     /// Get a roster entry by AgentIdentity.
@@ -321,19 +289,8 @@ impl Roster {
     }
 
     /// Wire two members in the roster projection (bidirectional set update).
-    ///
-    /// Uses MeerkatId bridge lookup, then applies wiring at the identity level.
-    pub(crate) fn wire(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        let id_a = self.meerkat_index.get(a).cloned();
-        let id_b = self.meerkat_index.get(b).cloned();
-        if let (Some(ref id_a), Some(ref id_b)) = (id_a, id_b) {
-            if let Some(entry_a) = self.entries.get_mut(id_a) {
-                entry_a.wired_to.insert(id_b.clone());
-            }
-            if let Some(entry_b) = self.entries.get_mut(id_b) {
-                entry_b.wired_to.insert(id_a.clone());
-            }
-        }
+    pub(crate) fn wire(&mut self, a: &AgentIdentity, b: &AgentIdentity) {
+        self.wire_identities(a, b);
     }
 
     /// Wire two members in the roster projection (identity-native path).
@@ -349,56 +306,38 @@ impl Roster {
     /// Wire a local member to an external peer name.
     pub fn wire_external(
         &mut self,
-        local: &MeerkatId,
-        peer_name: &MeerkatId,
+        local: &AgentIdentity,
+        peer_name: &AgentIdentity,
         spec: TrustedPeerSpec,
     ) {
-        let local_id = self.meerkat_index.get(local).cloned();
-        if let Some(ref local_id) = local_id {
-            let peer_identity = AgentIdentity::from(peer_name.as_str());
-            if let Some(entry) = self.entries.get_mut(local_id) {
-                entry.wired_to.insert(peer_identity);
-                entry.external_peer_specs.insert(peer_name.clone(), spec);
-            }
-        }
+        self.wire_external_identity(local, peer_name, spec);
     }
 
     /// Wire a local member identity to an external peer name.
     pub fn wire_external_identity(
         &mut self,
         local: &AgentIdentity,
-        peer_name: &MeerkatId,
+        peer_name: &AgentIdentity,
         spec: TrustedPeerSpec,
     ) {
         if let Some(entry) = self.entries.get_mut(local) {
-            entry
-                .wired_to
-                .insert(AgentIdentity::from(peer_name.as_str()));
+            entry.wired_to.insert(peer_name.clone());
             entry.external_peer_specs.insert(peer_name.clone(), spec);
         }
     }
 
     pub fn wire_external_peer(
         &mut self,
-        local: &MeerkatId,
-        peer_name: &MeerkatId,
+        local: &AgentIdentity,
+        peer_name: &AgentIdentity,
         spec: TrustedPeerSpec,
     ) {
         self.wire_external(local, peer_name, spec);
     }
 
     /// Unwire two members in the roster projection (bidirectional set update).
-    pub(crate) fn unwire(&mut self, a: &MeerkatId, b: &MeerkatId) {
-        let id_a = self.meerkat_index.get(a).cloned();
-        let id_b = self.meerkat_index.get(b).cloned();
-        if let (Some(ref id_a), Some(ref id_b)) = (id_a, id_b) {
-            if let Some(entry_a) = self.entries.get_mut(id_a) {
-                entry_a.wired_to.remove(id_b);
-            }
-            if let Some(entry_b) = self.entries.get_mut(id_b) {
-                entry_b.wired_to.remove(id_a);
-            }
-        }
+    pub(crate) fn unwire(&mut self, a: &AgentIdentity, b: &AgentIdentity) {
+        self.unwire_identities(a, b);
     }
 
     /// Remove the projection edge between two identities.
@@ -412,27 +351,18 @@ impl Roster {
     }
 
     /// Unwire a local member from an external peer.
-    pub(crate) fn unwire_external(&mut self, local: &MeerkatId, peer_name: &MeerkatId) {
-        let local_id = self.meerkat_index.get(local).cloned();
-        if let Some(ref local_id) = local_id {
-            let peer_identity = AgentIdentity::from(peer_name.as_str());
-            if let Some(entry) = self.entries.get_mut(local_id) {
-                entry.wired_to.remove(&peer_identity);
-                entry.external_peer_specs.remove(peer_name);
-            }
-        }
+    pub(crate) fn unwire_external(&mut self, local: &AgentIdentity, peer_name: &AgentIdentity) {
+        self.unwire_external_identity(local, peer_name);
     }
 
     /// Remove the projected external peer edge from an identity.
     pub(crate) fn unwire_external_identity(
         &mut self,
         local: &AgentIdentity,
-        peer_name: &MeerkatId,
+        peer_name: &AgentIdentity,
     ) {
         if let Some(entry) = self.entries.get_mut(local) {
-            entry
-                .wired_to
-                .remove(&AgentIdentity::from(peer_name.as_str()));
+            entry.wired_to.remove(peer_name);
             entry.external_peer_specs.remove(peer_name);
         }
     }
@@ -475,26 +405,24 @@ impl Roster {
         }
     }
 
-    /// Get a roster entry by meerkat ID (bridge lookup).
+    /// Get a roster entry by identity.
     #[doc(hidden)]
-    pub fn get(&self, meerkat_id: &MeerkatId) -> Option<&RosterEntry> {
-        let identity = self.meerkat_index.get(meerkat_id)?;
-        self.entries.get(identity)
+    pub fn get(&self, agent_identity: &AgentIdentity) -> Option<&RosterEntry> {
+        self.entries.get(agent_identity)
     }
 
-    /// Get a mutable roster entry by meerkat ID (bridge lookup).
-    pub(crate) fn get_mut(&mut self, meerkat_id: &MeerkatId) -> Option<&mut RosterEntry> {
-        let identity = self.meerkat_index.get(meerkat_id)?.clone();
-        self.entries.get_mut(&identity)
+    /// Get a mutable roster entry by identity.
+    pub(crate) fn get_mut(&mut self, agent_identity: &AgentIdentity) -> Option<&mut RosterEntry> {
+        self.entries.get_mut(agent_identity)
     }
 
     /// Update the bridge session ID while preserving backend-specific identity.
     pub(crate) fn set_bridge_session_id(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &AgentIdentity,
         bridge_session_id: SessionId,
     ) -> bool {
-        if let Some(entry) = self.get_mut(meerkat_id) {
+        if let Some(entry) = self.get_mut(agent_identity) {
             entry.member_ref = match &entry.member_ref {
                 MemberRef::Session { .. } => MemberRef::from_bridge_session_id(bridge_session_id),
                 MemberRef::BackendPeer {
@@ -515,8 +443,12 @@ impl Roster {
     }
 
     /// Update the resolved comms peer id for an existing meerkat.
-    pub(crate) fn set_peer_id(&mut self, meerkat_id: &MeerkatId, peer_id: Option<String>) -> bool {
-        if let Some(entry) = self.get_mut(meerkat_id) {
+    pub(crate) fn set_peer_id(
+        &mut self,
+        agent_identity: &AgentIdentity,
+        peer_id: Option<String>,
+    ) -> bool {
+        if let Some(entry) = self.get_mut(agent_identity) {
             entry.peer_id = peer_id;
             return true;
         }
@@ -526,10 +458,10 @@ impl Roster {
     /// Update the projected kickoff state for an existing meerkat.
     pub fn set_kickoff(
         &mut self,
-        meerkat_id: &MeerkatId,
+        agent_identity: &AgentIdentity,
         kickoff: Option<MobMemberKickoffSnapshot>,
     ) -> bool {
-        if let Some(entry) = self.get_mut(meerkat_id) {
+        if let Some(entry) = self.get_mut(agent_identity) {
             entry.kickoff = kickoff;
             return true;
         }
@@ -654,38 +586,36 @@ impl Roster {
             .any(|e| e.state == MemberState::Active)
     }
 
-    /// Mark a member as `Retiring`. Returns `true` if the member was found and
-    /// transitioned (i.e. it was `Active`); `false` otherwise.
-    pub(crate) fn mark_retiring(&mut self, meerkat_id: &MeerkatId) -> bool {
-        if let Some(entry) = self.get_mut(meerkat_id)
-            && entry.state == MemberState::Active
-        {
-            entry.state = MemberState::Retiring;
-            return true;
+    /// Re-project the `Retiring` marker set from the `MobMachine` DSL onto
+    /// the shell's `RosterEntry::state` field.
+    ///
+    /// This is the ONLY path by which `state` may be mutated in phase 5G:
+    /// the actor calls it after any DSL transition that touches
+    /// `member_state_markers`. Entries whose `agent_runtime_id` appears in
+    /// `retiring_runtime_ids` are marked `Retiring`; all others are
+    /// reset to `Active`.
+    ///
+    /// The set is keyed on the DSL's string representation of a runtime id
+    /// (`"{identity}:{generation}"`, matching
+    /// `mob_dsl::AgentRuntimeId::from_domain`). Callers read it directly
+    /// from `MobMachineAuthority::state::member_state_markers` and pass the
+    /// string keys through; no additional conversion is required.
+    pub(crate) fn sync_retiring_projection(&mut self, retiring_runtime_ids: &BTreeSet<String>) {
+        for entry in self.entries.values_mut() {
+            let key = entry.agent_runtime_id.to_string();
+            entry.state = if retiring_runtime_ids.contains(&key) {
+                MemberState::Retiring
+            } else {
+                MemberState::Active
+            };
         }
-        false
     }
 
-    /// Verify that the meerkat_index is coherent with entries.
-    ///
-    /// Returns true if every meerkat_index key points to a valid entry and
-    /// every entry's meerkat_id is in the index.
+    /// Verify that each entry's key matches its `agent_identity` field.
     pub fn is_index_coherent(&self) -> bool {
-        // Every index entry must point to a valid roster entry
-        for (mid, aid) in &self.meerkat_index {
-            match self.entries.get(aid) {
-                Some(entry) if entry.meerkat_id == *mid => {}
-                _ => return false,
-            }
-        }
-        // Every roster entry must have its meerkat_id in the index
-        for entry in self.entries.values() {
-            match self.meerkat_index.get(&entry.meerkat_id) {
-                Some(aid) if *aid == entry.agent_identity => {}
-                _ => return false,
-            }
-        }
-        true
+        self.entries
+            .iter()
+            .all(|(key, entry)| *key == entry.agent_identity)
     }
 }
 
@@ -705,7 +635,7 @@ impl RosterEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::MobId;
+    use crate::ids::{MeerkatId, MobId};
     use chrono::Utc;
     use meerkat_core::comms::TrustedPeerSpec;
     use uuid::Uuid;
@@ -714,41 +644,38 @@ mod tests {
         SessionId::from_uuid(Uuid::new_v4())
     }
 
-    /// Build a RosterAddEntry from legacy-style fields, deriving identity from meerkat_id.
+    /// Build a RosterAddEntry.
     fn make_add_entry(
-        meerkat_id: MeerkatId,
+        agent_identity: AgentIdentity,
         profile: ProfileName,
         runtime_mode: MobRuntimeMode,
         member_ref: MemberRef,
         labels: BTreeMap<String, String>,
     ) -> RosterAddEntry {
-        let identity = AgentIdentity::from(meerkat_id.as_str());
         RosterAddEntry {
-            agent_identity: identity.clone(),
+            agent_identity: agent_identity.clone(),
             generation: Generation::INITIAL,
             fence_token: FenceToken::new(0),
-            agent_runtime_id: AgentRuntimeId::initial(identity),
-            meerkat_id,
+            agent_runtime_id: AgentRuntimeId::initial(agent_identity),
             role: profile,
             runtime_mode,
             member_ref,
             peer_id: None,
             labels,
             effective_profile_override: None,
-            voice_intent_present: false,
         }
     }
 
     /// Test helper: adds a member with no labels.
     fn add_member(
         roster: &mut Roster,
-        meerkat_id: MeerkatId,
+        agent_identity: AgentIdentity,
         profile: ProfileName,
         runtime_mode: MobRuntimeMode,
         member_ref: MemberRef,
     ) -> bool {
         roster.add(make_add_entry(
-            meerkat_id,
+            agent_identity,
             profile,
             runtime_mode,
             member_ref,
@@ -766,13 +693,13 @@ mod tests {
     }
 
     fn spawned_kind(
-        meerkat_id: &str,
+        agent_identity: &str,
         role: &str,
         runtime_mode: MobRuntimeMode,
         member_ref: MemberRef,
         labels: BTreeMap<String, String>,
     ) -> MobEventKind {
-        let agent_identity = AgentIdentity::from(meerkat_id);
+        let agent_identity = AgentIdentity::from(agent_identity);
         let mut event = crate::event::MemberSpawnedEvent::new(
             agent_identity.clone(),
             Generation::INITIAL,
@@ -786,9 +713,9 @@ mod tests {
         MobEventKind::MemberSpawned(event)
     }
 
-    fn retired_kind(meerkat_id: &str, role: &str) -> MobEventKind {
+    fn retired_kind(agent_identity: &str, role: &str) -> MobEventKind {
         MobEventKind::MemberRetired {
-            agent_identity: AgentIdentity::from(meerkat_id),
+            agent_identity: AgentIdentity::from(agent_identity),
             generation: Generation::INITIAL,
             role: ProfileName::from(role),
         }
@@ -798,18 +725,6 @@ mod tests {
         MobEventKind::MembersWired {
             a: AgentIdentity::from(a),
             b: AgentIdentity::from(b),
-        }
-    }
-
-    fn voice_intent_set_kind(identity: &str) -> MobEventKind {
-        MobEventKind::MemberVoiceIntentSet {
-            agent_identity: AgentIdentity::from(identity),
-        }
-    }
-
-    fn voice_intent_cleared_kind(identity: &str) -> MobEventKind {
-        MobEventKind::MemberVoiceIntentCleared {
-            agent_identity: AgentIdentity::from(identity),
         }
     }
 
@@ -856,45 +771,6 @@ mod tests {
         // agent-2 should no longer have agent-1 in wired_to
         let entry2 = roster.get(&MeerkatId::from("agent-2")).unwrap();
         assert!(entry2.wired_to.is_empty());
-    }
-
-    #[test]
-    fn test_roster_projects_voice_intent_set_clear_and_replace() {
-        let mut roster = Roster::new();
-        add_member(
-            &mut roster,
-            MeerkatId::from("agent-1"),
-            ProfileName::from("worker"),
-            MobRuntimeMode::AutonomousHost,
-            MemberRef::from_bridge_session_id(session_id()),
-        );
-
-        roster.apply(&make_event(1, voice_intent_set_kind("agent-1")));
-        assert!(
-            roster
-                .get(&MeerkatId::from("agent-1"))
-                .expect("member entry")
-                .voice_intent_present,
-            "set event should project durable voice intent"
-        );
-
-        roster.apply(&make_event(2, voice_intent_cleared_kind("agent-1")));
-        assert!(
-            !roster
-                .get(&MeerkatId::from("agent-1"))
-                .expect("member entry")
-                .voice_intent_present,
-            "clear event should remove projected durable voice intent"
-        );
-
-        roster.apply(&make_event(3, voice_intent_set_kind("agent-1")));
-        assert!(
-            roster
-                .get(&MeerkatId::from("agent-1"))
-                .expect("member entry")
-                .voice_intent_present,
-            "later set event should restore projected durable voice intent"
-        );
     }
 
     #[test]
@@ -1189,7 +1065,6 @@ mod tests {
             generation: Generation::INITIAL,
             fence_token: FenceToken::new(0),
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
-            meerkat_id: MeerkatId::from("test"),
             role: ProfileName::from("worker"),
             member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
@@ -1203,17 +1078,26 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
-            voice_intent_present: false,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: RosterEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.meerkat_id, entry.meerkat_id);
+        assert_eq!(parsed.agent_identity, entry.agent_identity);
         assert_eq!(parsed.wired_to.len(), 1);
     }
 
+    /// Test helper: build a `Retiring` marker set keyed on the DSL's
+    /// stringified runtime-id form (`"{identity}:{generation}"`). Tests
+    /// spawn members at `Generation::INITIAL`, so the identity stringifies
+    /// to `"<identity>:0"`.
+    fn retiring_set_for(ids: &[&str]) -> BTreeSet<String> {
+        ids.iter()
+            .map(|id| AgentRuntimeId::initial(AgentIdentity::from(*id)).to_string())
+            .collect()
+    }
+
     #[test]
-    fn test_mark_retiring() {
+    fn test_sync_retiring_projection_flips_state() {
         let mut roster = Roster::new();
         add_member(
             &mut roster,
@@ -1222,11 +1106,23 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        assert!(roster.mark_retiring(&MeerkatId::from("a")));
-        // Second call returns false (already Retiring)
-        assert!(!roster.mark_retiring(&MeerkatId::from("a")));
-        // Nonexistent returns false
-        assert!(!roster.mark_retiring(&MeerkatId::from("nope")));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
+        assert_eq!(
+            roster.get(&MeerkatId::from("a")).unwrap().state,
+            MemberState::Retiring
+        );
+        // Empty set restores to Active.
+        roster.sync_retiring_projection(&BTreeSet::new());
+        assert_eq!(
+            roster.get(&MeerkatId::from("a")).unwrap().state,
+            MemberState::Active
+        );
+        // Unknown runtime ids in the set are silently ignored.
+        roster.sync_retiring_projection(&retiring_set_for(&["nope"]));
+        assert_eq!(
+            roster.get(&MeerkatId::from("a")).unwrap().state,
+            MemberState::Active
+        );
     }
 
     #[test]
@@ -1246,11 +1142,11 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
         let active: Vec<_> = roster.list().collect();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].meerkat_id, MeerkatId::from("b"));
+        assert_eq!(active[0].agent_identity, AgentIdentity::from("b"));
     }
 
     #[test]
@@ -1270,7 +1166,7 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
         let all: Vec<_> = roster.list_all().collect();
         assert_eq!(all.len(), 2);
@@ -1293,11 +1189,11 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
         let retiring: Vec<_> = roster.list_retiring().collect();
         assert_eq!(retiring.len(), 1);
-        assert_eq!(retiring[0].meerkat_id, MeerkatId::from("a"));
+        assert_eq!(retiring[0].agent_identity, AgentIdentity::from("a"));
     }
 
     #[test]
@@ -1316,7 +1212,7 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert!(!roster.is_empty());
 
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
         assert_eq!(roster.len(), 0);
         assert!(roster.is_empty());
     }
@@ -1338,11 +1234,11 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.mark_retiring(&MeerkatId::from("w1"));
+        roster.sync_retiring_projection(&retiring_set_for(&["w1"]));
 
         let workers: Vec<_> = roster.by_profile(&ProfileName::from("worker")).collect();
         assert_eq!(workers.len(), 1);
-        assert_eq!(workers[0].meerkat_id, MeerkatId::from("w2"));
+        assert_eq!(workers[0].agent_identity, AgentIdentity::from("w2"));
     }
 
     #[test]
@@ -1355,7 +1251,7 @@ mod tests {
             MobRuntimeMode::AutonomousHost,
             MemberRef::from_bridge_session_id(session_id()),
         );
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
 
         let entry = roster.get(&MeerkatId::from("a"));
         assert!(entry.is_some());
@@ -1369,7 +1265,6 @@ mod tests {
             generation: Generation::INITIAL,
             fence_token: FenceToken::new(0),
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
-            meerkat_id: MeerkatId::from("test"),
             role: ProfileName::from("worker"),
             member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
@@ -1379,7 +1274,6 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
-            voice_intent_present: false,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -1452,9 +1346,17 @@ mod tests {
     #[test]
     fn test_serde_roundtrip_missing_state_defaults_to_active() {
         // Simulate serialized data without the optional state field — state should default to Active.
-        let json = r#"{"agent_identity":"old","generation":0,"fence_token":0,"agent_runtime_id":{"identity":"old","generation":0},"meerkat_id":"old","role":"worker","member_ref":{"kind":"session","session_id":"00000000-0000-0000-0000-000000000001"},"runtime_mode":"autonomous_host","wired_to":[]}"#;
+        let json = r#"{"agent_identity":"old","generation":0,"fence_token":0,"agent_runtime_id":{"identity":"old","generation":0},"role":"worker","member_ref":{"kind":"session","session_id":"00000000-0000-0000-0000-000000000001"},"runtime_mode":"autonomous_host","wired_to":[]}"#;
         let parsed: RosterEntry = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.state, MemberState::Active);
+    }
+
+    #[test]
+    fn test_serde_accepts_legacy_meerkat_id_alias() {
+        // Legacy clients sending `meerkat_id` must still deserialize.
+        let json = r#"{"meerkat_id":"old","generation":0,"fence_token":0,"agent_runtime_id":{"identity":"old","generation":0},"role":"worker","member_ref":{"kind":"session","session_id":"00000000-0000-0000-0000-000000000001"},"runtime_mode":"autonomous_host","wired_to":[]}"#;
+        let parsed: RosterEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.agent_identity, AgentIdentity::from("old"));
     }
 
     #[test]
@@ -1523,7 +1425,7 @@ mod tests {
         ));
         let found = roster.find_by_label("faction", "north");
         assert!(found.is_some());
-        assert_eq!(found.unwrap().meerkat_id, MeerkatId::from("a"));
+        assert_eq!(found.unwrap().agent_identity, AgentIdentity::from("a"));
     }
 
     #[test]
@@ -1580,7 +1482,7 @@ mod tests {
                 m
             },
         ));
-        roster.mark_retiring(&MeerkatId::from("a"));
+        roster.sync_retiring_projection(&retiring_set_for(&["a"]));
         assert!(roster.find_by_label("faction", "north").is_none());
         assert_eq!(roster.find_all_by_label("faction", "north").count(), 0);
     }

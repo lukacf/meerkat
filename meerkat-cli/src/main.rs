@@ -7744,12 +7744,18 @@ async fn persist_mob_handle_snapshot(
     let _lock = acquire_mob_registry_lock(scope).await?;
     let mut registry = load_mob_registry(scope).await?;
     let mob_id = handle.mob_id().to_string();
+    let current_status = handle
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("read mob status: {e}"))?
+        .as_str()
+        .to_string();
     let entry = registry
         .mobs
         .entry(mob_id.clone())
         .or_insert_with(|| PersistedMob {
             definition: definition.clone(),
-            status: Some(handle.status().as_str().to_string()),
+            status: Some(current_status),
             events: Vec::new(),
             runs: std::collections::BTreeMap::new(),
         });
@@ -7929,7 +7935,10 @@ async fn hydrate_mob_state(
         }
 
         if let Some(target_status) = persisted.status.as_deref().and_then(parse_mob_state) {
-            let current = handle.status();
+            let current = handle
+                .status()
+                .await
+                .map_err(|e| anyhow::anyhow!("read mob status: {e}"))?;
             match (current, target_status) {
                 (meerkat_mob::MobState::Running, meerkat_mob::MobState::Stopped) => {
                     handle.stop().await.map_err(|e| anyhow::anyhow!("{e}"))?;

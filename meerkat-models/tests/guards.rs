@@ -64,6 +64,7 @@ const EXPECTED_MODEL_PROFILE_FIELDS: &[&str] = &[
     "inline_video",
     "vision",
     "image_tool_results",
+    "realtime",
     "params_schema",
     "call_timeout_secs",
 ];

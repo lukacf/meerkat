@@ -438,7 +438,7 @@ Execute a named DAG flow. Steps execute in dependency order with configured disp
   </Tab>
   <Tab title="Rust">
     ```rust
-    let status = handle.status();
+    let status = handle.status().await?;
     let flow_run = handle.flow_status(run_id).await?;
     ```
   </Tab>

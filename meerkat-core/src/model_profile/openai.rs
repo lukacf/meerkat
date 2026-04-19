@@ -97,6 +97,7 @@ pub fn fallback_caps(model: &str) -> Option<ModelCapabilities> {
         vision: true,
         image_tool_results: false,
         inline_video: false,
+        realtime: m.contains("realtime"),
         supports_temperature: !(gpt5 || codex),
         supports_top_p: false,
         supports_top_k: false,

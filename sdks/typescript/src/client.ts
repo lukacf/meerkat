@@ -1009,20 +1009,6 @@ export class MeerkatClient {
     });
   }
 
-  async attachMobMemberLive(mobId: string, agentIdentity: string): Promise<void> {
-    await this.request("mob/realtime_attach", {
-      mob_id: mobId,
-      agent_identity: agentIdentity,
-    });
-  }
-
-  async detachMobMemberLive(mobId: string, agentIdentity: string): Promise<void> {
-    await this.request("mob/realtime_detach", {
-      mob_id: mobId,
-      agent_identity: agentIdentity,
-    });
-  }
-
   async mobTurnStart(
     mobId: string,
     agentIdentity: string,
@@ -1776,6 +1762,48 @@ export class MeerkatClient {
       );
     }
     return result as unknown as RuntimeRealtimeAttachmentStatusResult;
+  }
+
+  /** Batch realtime attachment statuses for multiple session IDs. */
+  async runtimeRealtimeAttachmentStatuses(
+    sessionIds: string[],
+  ): Promise<Record<string, unknown>> {
+    return await this.request("runtime/realtime_attachment_statuses", {
+      session_ids: sessionIds,
+    });
+  }
+
+  /** Idempotent spawn: spawns or returns the existing member entry. */
+  async mobEnsureMember(
+    mobId: string,
+    spec: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return await this.request("mob/ensure_member", {
+      mob_id: mobId,
+      spec,
+    });
+  }
+
+  /** Declarative reconcile: converge roster to the desired spec list. */
+  async mobReconcile(
+    mobId: string,
+    desired: Record<string, unknown>[],
+    options?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { mob_id: mobId, desired };
+    if (options !== undefined) params.options = options;
+    return await this.request("mob/reconcile", params);
+  }
+
+  /** Label-filtered member listing. */
+  async mobListMembersMatching(
+    mobId: string,
+    filter: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return await this.request("mob/list_members_matching", {
+      mob_id: mobId,
+      filter,
+    });
   }
 
   async realtimeOpenInfo(

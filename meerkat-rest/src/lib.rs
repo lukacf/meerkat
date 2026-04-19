@@ -1458,127 +1458,9 @@ fn realtime_status_from_runtime(
     }
 }
 
-#[allow(clippy::result_large_err)]
-#[cfg(feature = "mob")]
-fn realtime_status_from_mob_serialized(status: &Value) -> Result<RealtimeChannelStatus, Response> {
-    let Some(status) = status.as_str() else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "mob live attachment status should serialize as a string"})),
-        )
-            .into_response());
-    };
-    let projected = match status {
-        "unattached" => realtime_channel_status(
-            RealtimeChannelState::Closed,
-            Some("no realtime channel is open for this target"),
-            0,
-        ),
-        "intent_present_unbound" | "binding_not_ready" => realtime_channel_status(
-            RealtimeChannelState::Opening,
-            Some("realtime attachment is pending"),
-            0,
-        ),
-        "binding_ready" => realtime_channel_status(RealtimeChannelState::Ready, None, 0),
-        "replacement_pending" => realtime_channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment replacement is pending"),
-            1,
-        ),
-        "reattach_required" => realtime_channel_status(
-            RealtimeChannelState::Reconnecting,
-            Some("realtime attachment requires reattach"),
-            1,
-        ),
-        other => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("unsupported mob live attachment status '{other}'")})),
-            )
-                .into_response());
-        }
-    };
-    Ok(projected)
-}
-
-#[cfg(feature = "mob")]
-async fn ensure_realtime_mob_member_target_available(
-    state: &AppState,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<(), Response> {
-    state
-        .mob_state
-        .mob_member_status(
-            &meerkat_mob::MobId::from(mob_id),
-            &meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": err.to_string()})),
-            )
-                .into_response()
-        })
-}
-
-#[cfg(not(feature = "mob"))]
-async fn ensure_realtime_mob_member_target_available(
-    _state: &AppState,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<(), Response> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "mob-target realtime control requires the REST mob feature"})),
-    )
-        .into_response())
-}
-
-#[cfg(feature = "mob")]
-async fn realtime_status_from_mob_target(
-    state: &AppState,
-    mob_id: &str,
-    agent_identity: &str,
-) -> Result<RealtimeChannelStatus, Response> {
-    let snapshot = state
-        .mob_state
-        .mob_member_status(
-            &meerkat_mob::MobId::from(mob_id),
-            &meerkat_mob::AgentIdentity::from(agent_identity),
-        )
-        .await
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": err.to_string()})),
-            )
-                .into_response()
-        })?;
-    let serialized = serde_json::to_value(snapshot.realtime_attachment_status).map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": err.to_string()})),
-        )
-            .into_response()
-    })?;
-    realtime_status_from_mob_serialized(&serialized)
-}
-
-#[cfg(not(feature = "mob"))]
-async fn realtime_status_from_mob_target(
-    _state: &AppState,
-    _mob_id: &str,
-    _agent_identity: &str,
-) -> Result<RealtimeChannelStatus, Response> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "mob-target realtime status requires the REST mob feature"})),
-    )
-        .into_response())
-}
+// `realtime_status_from_mob_serialized` and
+// `ensure_realtime_mob_member_target_available` were removed in Phase
+// 5G/T5i alongside the `RealtimeChannelTarget::MobMemberTarget` variant.
 
 async fn realtime_status(
     State(state): State<AppState>,
@@ -1607,27 +1489,6 @@ async fn realtime_status(
                 })?;
             realtime_status_from_runtime(live_status)
         }
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id,
-            agent_identity,
-        } => {
-            if mob_id.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "mob_id must not be empty"})),
-                )
-                    .into_response());
-            }
-            if agent_identity.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "agent_identity must not be empty"})),
-                )
-                    .into_response());
-            }
-            realtime_status_from_mob_target(&state, mob_id.as_str(), agent_identity.as_str())
-                .await?
-        }
     };
 
     Ok(Json(RealtimeStatusResult { status }))
@@ -1647,26 +1508,6 @@ async fn realtime_capabilities(
                     .into_response()
             })?;
             ensure_runtime_session_registered(&state, &sid).await?;
-        }
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id,
-            agent_identity,
-        } => {
-            if mob_id.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "mob_id must not be empty"})),
-                )
-                    .into_response());
-            }
-            if agent_identity.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "agent_identity must not be empty"})),
-                )
-                    .into_response());
-            }
-            ensure_realtime_mob_member_target_available(&state, mob_id, agent_identity).await?;
         }
     }
 
@@ -1689,26 +1530,6 @@ async fn realtime_open_info(
                     .into_response()
             })?;
             ensure_runtime_session_registered(&state, &sid).await?;
-        }
-        RealtimeChannelTarget::MobMemberTarget {
-            mob_id,
-            agent_identity,
-        } => {
-            if mob_id.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "mob_id must not be empty"})),
-                )
-                    .into_response());
-            }
-            if agent_identity.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": "agent_identity must not be empty"})),
-                )
-                    .into_response());
-            }
-            ensure_realtime_mob_member_target_available(&state, mob_id, agent_identity).await?;
         }
     }
 
@@ -2144,36 +1965,30 @@ async fn mob_member_status(
     Ok(Json(json!(snapshot)))
 }
 
-/// POST /mob/{id}/members/{agent_identity}/realtime/attach — stage live voice intent.
+/// POST /mob/{id}/members/{agent_identity}/realtime/attach — unavailable
+/// after Phase 5G/T5h: capability-driven realtime transport is
+/// session-scoped; resolve to `session_id` and drive realtime lifecycle
+/// through the session endpoints instead.
 #[cfg(feature = "mob")]
 async fn mob_realtime_attach(
-    State(state): State<AppState>,
-    Path((id, agent_identity)): Path<(String, String)>,
+    State(_state): State<AppState>,
+    Path((_id, _agent_identity)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-    let attached = state
-        .mob_state
-        .mob_realtime_attach(&mob_id, identity)
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!({"attached": attached})))
+    Err(ApiError::BadRequest(
+        "mob realtime attach is unavailable: capability-driven realtime transport is session-scoped".to_string(),
+    ))
 }
 
-/// POST /mob/{id}/members/{agent_identity}/realtime/detach — clear live voice intent.
+/// POST /mob/{id}/members/{agent_identity}/realtime/detach — unavailable
+/// after Phase 5G/T5h. See `mob_realtime_attach` above.
 #[cfg(feature = "mob")]
 async fn mob_realtime_detach(
-    State(state): State<AppState>,
-    Path((id, agent_identity)): Path<(String, String)>,
+    State(_state): State<AppState>,
+    Path((_id, _agent_identity)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    let mob_id = meerkat_mob::MobId::from(id.as_str());
-    let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-    let detached = state
-        .mob_state
-        .mob_realtime_detach(&mob_id, identity)
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!({"detached": detached})))
+    Err(ApiError::BadRequest(
+        "mob realtime detach is unavailable: capability-driven realtime transport is session-scoped".to_string(),
+    ))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -4743,6 +4558,7 @@ mod tests {
         (addr, captured_rx, task)
     }
 
+    #[allow(dead_code)]
     fn live_test_definition(mob_id: &str) -> meerkat_mob::MobDefinition {
         let mut profiles = std::collections::BTreeMap::new();
         profiles.insert(
@@ -4800,6 +4616,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn install_mock_mob_llm_client(
         state: &mut AppState,
         runtime_root: &std::path::Path,
@@ -5505,71 +5322,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_realtime_status_route_projects_member_realtime_attachment_state() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
-        state.llm_client_override = Some(mock_client.clone());
-        install_mock_mob_llm_client(&mut state, temp.path(), mock_client);
-        let mob_id = state
-            .mob_state
-            .mob_create_definition(live_test_definition("mob-realtime-rest"))
-            .await
-            .expect("create realtime test mob");
-        state
-            .mob_state
-            .mob_spawn(
-                &mob_id,
-                meerkat_mob::ProfileName::from("worker"),
-                meerkat_mob::AgentIdentity::from("worker-1"),
-                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-        state
-            .mob_state
-            .mob_realtime_attach(&mob_id, meerkat_mob::AgentIdentity::from("worker-1"))
-            .await
-            .expect("live attach should succeed");
-
-        let app = router(state);
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/status")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "target": {
-                        "type": "mob_member_target",
-                        "mob_id": mob_id.to_string(),
-                        "agent_identity": "worker-1",
-                    }
-                })
-                .to_string(),
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "realtime status route failed: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload["status"]["state"], "opening");
-    }
-
-    #[tokio::test]
     async fn test_realtime_capabilities_route_returns_conservative_metadata() {
         use axum::body::Body;
         use http_body_util::BodyExt;
@@ -5792,128 +5544,6 @@ mod tests {
             .expect("realtime proxy request should be captured");
         assert_eq!(forwarded, request_body);
         task.await.expect("realtime rpc stub should join");
-    }
-
-    #[tokio::test]
-    async fn test_mob_realtime_attach_and_detach_routes_drive_member_status() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
-        state.llm_client_override = Some(mock_client.clone());
-        install_mock_mob_llm_client(&mut state, temp.path(), mock_client);
-        let mob_id = state
-            .mob_state
-            .mob_create_definition(live_test_definition("mob-live-rest"))
-            .await
-            .expect("create voice test mob");
-        state
-            .mob_state
-            .mob_spawn(
-                &mob_id,
-                meerkat_mob::ProfileName::from("worker"),
-                meerkat_mob::AgentIdentity::from("worker-1"),
-                Some(meerkat_mob::MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-
-        let app = router(state);
-
-        let attach_request = axum::http::Request::builder()
-            .method("POST")
-            .uri(format!("/mob/{mob_id}/members/worker-1/realtime/attach"))
-            .body(Body::empty())
-            .unwrap();
-        let attach_response = app.clone().oneshot(attach_request).await.unwrap();
-        let attach_status = attach_response.status();
-        let attach_body = attach_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        assert_eq!(
-            attach_status,
-            StatusCode::OK,
-            "live attach route failed: {}",
-            String::from_utf8_lossy(&attach_body)
-        );
-
-        let status_request = axum::http::Request::builder()
-            .method("GET")
-            .uri(format!("/mob/{mob_id}/members/worker-1/status"))
-            .body(Body::empty())
-            .unwrap();
-        let attached_status_response = app.clone().oneshot(status_request).await.unwrap();
-        let attached_status = attached_status_response.status();
-        let attached_body = attached_status_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        assert_eq!(
-            attached_status,
-            StatusCode::OK,
-            "member status route failed after live attach: {}",
-            String::from_utf8_lossy(&attached_body)
-        );
-        let attached_payload: serde_json::Value =
-            serde_json::from_slice(&attached_body).expect("member status json");
-        assert_eq!(
-            attached_payload["realtime_attachment_status"],
-            "binding_not_ready"
-        );
-
-        let detach_request = axum::http::Request::builder()
-            .method("POST")
-            .uri(format!("/mob/{mob_id}/members/worker-1/realtime/detach"))
-            .body(Body::empty())
-            .unwrap();
-        let detach_response = app.clone().oneshot(detach_request).await.unwrap();
-        let detach_status = detach_response.status();
-        let detach_body = detach_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        assert_eq!(
-            detach_status,
-            StatusCode::OK,
-            "live detach route failed: {}",
-            String::from_utf8_lossy(&detach_body)
-        );
-
-        let status_request = axum::http::Request::builder()
-            .method("GET")
-            .uri(format!("/mob/{mob_id}/members/worker-1/status"))
-            .body(Body::empty())
-            .unwrap();
-        let detached_status_response = app.oneshot(status_request).await.unwrap();
-        let detached_status = detached_status_response.status();
-        let detached_body = detached_status_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes();
-        assert_eq!(
-            detached_status,
-            StatusCode::OK,
-            "member status route failed after live detach: {}",
-            String::from_utf8_lossy(&detached_body)
-        );
-        let detached_payload: serde_json::Value =
-            serde_json::from_slice(&detached_body).expect("member status json");
-        assert_eq!(detached_payload["realtime_attachment_status"], "unattached");
     }
 
     #[tokio::test]

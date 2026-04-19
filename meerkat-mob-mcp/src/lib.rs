@@ -466,17 +466,28 @@ impl MobMcpState {
         if !self.ensure_restored_best_effort("mob_list").await {
             return Vec::new();
         }
-        self.mobs
+        let snapshot: Vec<(MobId, meerkat_mob::MobHandle)> = self
+            .mobs
             .read()
             .await
             .iter()
-            .map(|(id, managed)| (id.clone(), managed.handle.status()))
-            .collect()
+            .map(|(id, managed)| (id.clone(), managed.handle.clone()))
+            .collect();
+        let mut out = Vec::with_capacity(snapshot.len());
+        for (id, handle) in snapshot {
+            match handle.status().await {
+                Ok(state) => out.push((id, state)),
+                Err(err) => {
+                    tracing::warn!(mob_id = %id, error = %err, "mob_list: skipping mob whose status read failed");
+                }
+            }
+        }
+        out
     }
 
     pub async fn mob_status(&self, mob_id: &MobId) -> Result<MobState, MobError> {
         let handle = self.handle_for(mob_id).await?;
-        Ok(handle.status())
+        handle.status().await
     }
 
     pub async fn mob_stop(&self, mob_id: &MobId) -> Result<(), MobError> {
@@ -953,28 +964,6 @@ impl MobMcpState {
             .realtime_attachment_status(session_id)
             .await
             .map_err(|err| SessionError::Unsupported(err.to_string()))
-    }
-
-    pub async fn mob_realtime_attach(
-        &self,
-        mob_id: &MobId,
-        identity: AgentIdentity,
-    ) -> Result<bool, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .realtime_attach(identity)
-            .await
-    }
-
-    pub async fn mob_realtime_detach(
-        &self,
-        mob_id: &MobId,
-        identity: AgentIdentity,
-    ) -> Result<bool, MobError> {
-        self.handle_for(mob_id)
-            .await?
-            .realtime_detach(identity)
-            .await
     }
 
     pub async fn mob_wait_kickoff(

@@ -266,12 +266,6 @@ class Mob:
     async def force_cancel(self, agent_identity: str) -> None:
         await self._client.force_cancel_mob_member(self.id, agent_identity)
 
-    async def realtime_attach(self, agent_identity: str) -> None:
-        await self._client.attach_mob_member_live(self.id, agent_identity)
-
-    async def realtime_detach(self, agent_identity: str) -> None:
-        await self._client.detach_mob_member_live(self.id, agent_identity)
-
     async def member_status(self, agent_identity: str) -> MobMemberSnapshot:
         return await self._client.mob_member_status(self.id, agent_identity)
 

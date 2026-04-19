@@ -1137,8 +1137,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert status["fence_token"] == 7
     assert status["realtime_attachment_status"] == "binding_ready"
 
-    await client.attach_mob_member_live("mob-1", "agent-a")
-    await client.detach_mob_member_live("mob-1", "agent-a")
     runtime_status = await client.runtime_realtime_attachment_status("session-1")
     assert runtime_status.status == "binding_ready"
 
@@ -1161,8 +1159,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert wait_members[0]["agent_runtime_id"] == "agent-a:1"
 
     mob_handle = client.mob("mob-1")
-    await mob_handle.realtime_attach("agent-b")
-    await mob_handle.realtime_detach("agent-b")
     scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
     assert scoped_wait_members[0]["agent_identity"] == "agent-a"
 
@@ -1185,16 +1181,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/spawn",
         "mob/retire",
         "mob/member_status",
-        "mob/realtime_attach",
-        "mob/realtime_detach",
         "runtime/realtime_attachment_status",
         "mob/respawn",
         "mob/wire",
         "mob/unwire",
         "mob/lifecycle",
         "mob/wait_kickoff",
-        "mob/realtime_attach",
-        "mob/realtime_detach",
         "mob/wait_kickoff",
         "mob/append_system_context",
         "mob/flows",
@@ -1202,8 +1194,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
-    assert calls[11][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
-    assert calls[12][1] == {
+    assert calls[9][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
+    assert calls[10][1] == {
         "mob_id": "mob-1",
         "member": "a",
         "peer": {
@@ -1214,15 +1206,15 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
-    assert calls[9][1] == {
+    assert calls[7][1] == {
         "session_id": "session-1",
     }
-    assert calls[14][1] == {
+    assert calls[12][1] == {
         "mob_id": "mob-1",
         "member_ids": ["agent-a"],
         "timeout_ms": 1234,
     }
-    assert calls[17][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[13][1] == {"mob_id": "mob-1", "timeout_ms": 99}
     assert calls[4][1]["agent_identity"] == "agent-a"
 
 

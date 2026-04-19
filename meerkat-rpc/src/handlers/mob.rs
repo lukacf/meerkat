@@ -985,50 +985,6 @@ pub async fn handle_force_cancel(
     }
 }
 
-pub async fn handle_realtime_attach(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobMemberParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_realtime_attach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
-        .await
-    {
-        Ok(attached) => RpcResponse::success(id, serde_json::json!({"attached": attached})),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
-pub async fn handle_realtime_detach(
-    id: Option<RpcId>,
-    params: Option<&RawValue>,
-    state: &Arc<MobMcpState>,
-) -> RpcResponse {
-    let params: MobMemberParams = match parse_params(params) {
-        Ok(p) => p,
-        Err(resp) => return resp.with_id(id),
-    };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    match state
-        .mob_realtime_detach(&mob_id, AgentIdentity::from(params.agent_identity.as_str()))
-        .await
-    {
-        Ok(detached) => RpcResponse::success(id, serde_json::json!({"detached": detached})),
-        Err(err) => invalid_params(id, err.to_string()),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // mob/destroy (Finding C3)
 // ---------------------------------------------------------------------------
@@ -1561,40 +1517,222 @@ pub async fn handle_mob_turn_start(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// Declarative roster API: mob/ensure_member, mob/reconcile,
+// mob/list_members_matching.
+// ---------------------------------------------------------------------------
+
+fn spawn_spec_from_wire(
+    spec_wire: &meerkat_contracts::MobMemberSpecWire,
+) -> Result<SpawnMemberSpec, String> {
+    let mut spec = SpawnMemberSpec::new(
+        spec_wire.profile.as_str(),
+        spec_wire.agent_identity.as_str(),
+    );
+    spec.initial_message = match spec_wire.initial_message.clone() {
+        Some(wire) => Some(
+            ContentInput::try_from(wire)
+                .map_err(|err| format!("invalid initial_message: {err}"))?,
+        ),
+        None => None,
+    };
+    spec.runtime_mode = spec_wire.runtime_mode.map(|mode| match mode {
+        meerkat_contracts::WireMobRuntimeMode::AutonomousHost => MobRuntimeMode::AutonomousHost,
+        meerkat_contracts::WireMobRuntimeMode::TurnDriven => MobRuntimeMode::TurnDriven,
+    });
+    spec.backend = spec_wire.backend.map(|b| match b {
+        meerkat_contracts::WireMobBackendKind::Session => MobBackendKind::Session,
+        meerkat_contracts::WireMobBackendKind::External => MobBackendKind::External,
+    });
+    spec.context = spec_wire.context.clone();
+    spec.labels = spec_wire.labels.clone();
+    spec.additional_instructions = spec_wire.additional_instructions.clone();
+    if let Some(binding) = spec_wire.binding.clone() {
+        spec.binding = Some(match binding {
+            meerkat_contracts::WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
+            meerkat_contracts::WireRuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            } => meerkat_mob::RuntimeBinding::External {
+                peer_id,
+                address,
+                bootstrap_token,
+            },
+        });
+    }
+    if let Some(auto_wire_parent) = spec_wire.auto_wire_parent {
+        spec.auto_wire_parent = auto_wire_parent;
+    }
+    Ok(spec)
+}
+
+fn spawn_receipt_wire(result: &meerkat_mob::SpawnResult) -> meerkat_contracts::MobSpawnReceiptWire {
+    meerkat_contracts::MobSpawnReceiptWire {
+        agent_identity: result.agent_identity.to_string(),
+        agent_runtime_id: meerkat_contracts::WireAgentRuntimeId {
+            identity: result.agent_runtime_id.identity.to_string(),
+            generation: result.agent_runtime_id.generation.get(),
+        },
+        fence_token: result.fence_token.get(),
+    }
+}
+
+pub async fn handle_ensure_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobEnsureMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let handle = match state.handle_for(&mob_id).await {
+        Ok(h) => h,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let spec = match spawn_spec_from_wire(&params.spec) {
+        Ok(s) => s,
+        Err(err) => return invalid_params(id, err),
+    };
+    match handle.ensure_member(spec).await {
+        Ok(meerkat_mob::runtime::EnsureMemberOutcome::Spawned(spawn)) => {
+            let outcome =
+                meerkat_contracts::MobEnsureMemberOutcomeWire::Spawned(spawn_receipt_wire(&spawn));
+            RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
+        }
+        Ok(meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry)) => {
+            let member = match serde_json::to_value(&entry) {
+                Ok(v) => v,
+                Err(err) => return invalid_params(id, format!("serialize member: {err}")),
+            };
+            let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(member);
+            RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_reconcile(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobReconcileParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let handle = match state.handle_for(&mob_id).await {
+        Ok(h) => h,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let desired: Vec<SpawnMemberSpec> = match params
+        .desired
+        .iter()
+        .map(spawn_spec_from_wire)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(v) => v,
+        Err(err) => return invalid_params(id, err),
+    };
+    let options = meerkat_mob::runtime::ReconcileOptions {
+        retire_stale: params.options.retire_stale,
+    };
+    match handle.reconcile(desired, options).await {
+        Ok(report) => {
+            let wire_report = meerkat_contracts::MobReconcileReportWire {
+                desired: report
+                    .desired
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                retained: report
+                    .retained
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                spawned: report.spawned.iter().map(spawn_receipt_wire).collect(),
+                retired: report
+                    .retired
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                failures: report
+                    .failures
+                    .iter()
+                    .map(|f| meerkat_contracts::MobReconcileFailureWire {
+                        agent_identity: f.agent_identity.to_string(),
+                        stage: match f.stage {
+                            meerkat_mob::runtime::ReconcileStage::Spawn => "spawn".to_string(),
+                            meerkat_mob::runtime::ReconcileStage::Retire => "retire".to_string(),
+                        },
+                        error: f.error.to_string(),
+                    })
+                    .collect(),
+            };
+            RpcResponse::success(
+                id,
+                meerkat_contracts::MobReconcileResult {
+                    report: wire_report,
+                },
+            )
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+pub async fn handle_list_members_matching(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobListMembersMatchingParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let handle = match state.handle_for(&mob_id).await {
+        Ok(h) => h,
+        Err(err) => return invalid_params(id, err.to_string()),
+    };
+    let filter = meerkat_mob::runtime::MemberFilter {
+        labels: params.filter.labels,
+        role: params
+            .filter
+            .role
+            .map(|r| meerkat_mob::ProfileName::from(r.as_str())),
+        state: params.filter.state.map(|s| match s {
+            meerkat_contracts::WireMemberState::Active => meerkat_mob::MemberState::Active,
+            meerkat_contracts::WireMemberState::Retiring => meerkat_mob::MemberState::Retiring,
+        }),
+    };
+    let entries = handle.list_members_matching(filter).await;
+    let members: Vec<Value> = entries
+        .iter()
+        .filter_map(|e| serde_json::to_value(e).ok())
+        .collect();
+    RpcResponse::success(
+        id,
+        meerkat_contracts::MobListMembersMatchingResult { members },
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_mob::{
-        AgentIdentity, AgentRuntimeId, FenceToken, MobDefinition, MobId, MobRuntimeMode,
-        ProfileName,
-    };
-    use std::collections::BTreeMap;
-
-    fn voice_test_definition(mob_id: &str) -> MobDefinition {
-        let mut profiles = BTreeMap::new();
-        profiles.insert(
-            ProfileName::from("worker"),
-            meerkat_mob::ProfileBinding::Inline(meerkat_mob::profile::Profile {
-                model: "claude-sonnet-4-5".to_string(),
-                skills: Vec::new(),
-                tools: meerkat_mob::profile::ToolConfig {
-                    comms: true,
-                    ..meerkat_mob::profile::ToolConfig::default()
-                },
-                peer_description: "worker".to_string(),
-                external_addressable: false,
-                backend: None,
-                runtime_mode: MobRuntimeMode::TurnDriven,
-                max_inline_peer_notifications: None,
-                output_schema: None,
-                provider_params: None,
-            }),
-        );
-        let mut definition = MobDefinition::explicit(MobId::from(mob_id));
-        definition.profiles = profiles;
-        definition
-    }
+    use meerkat_mob::{AgentIdentity, AgentRuntimeId, FenceToken};
 
     #[test]
     fn respawn_result_preserves_receipt_on_topology_restore_failure()
@@ -1838,83 +1976,5 @@ mod tests {
         assert_eq!(params.member_ids.unwrap_or_default(), vec!["a", "b"]);
         assert_eq!(params.timeout_ms, Some(2500));
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn realtime_attach_and_detach_handlers_drive_member_status() {
-        let state = meerkat_mob_mcp::MobMcpState::new_in_memory();
-        let mob_id = state
-            .mob_create_definition(voice_test_definition("mob-voice-rpc"))
-            .await
-            .expect("create voice mob");
-        state
-            .mob_spawn(
-                &mob_id,
-                ProfileName::from("worker"),
-                AgentIdentity::from("worker-1"),
-                Some(MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-
-        let attach_params = serde_json::value::to_raw_value(&serde_json::json!({
-            "mob_id": mob_id.to_string(),
-            "agent_identity": "worker-1",
-        }))
-        .expect("attach params");
-        let attach_response =
-            handle_realtime_attach(Some(RpcId::Num(1)), Some(attach_params.as_ref()), &state).await;
-        assert!(
-            attach_response.error.is_none(),
-            "voice attach should succeed"
-        );
-
-        let status_params = serde_json::value::to_raw_value(&serde_json::json!({
-            "mob_id": mob_id.to_string(),
-            "agent_identity": "worker-1",
-        }))
-        .expect("status params");
-        let attached_status =
-            handle_member_status(Some(RpcId::Num(2)), Some(status_params.as_ref()), &state).await;
-        let attached_value: serde_json::Value = serde_json::from_str(
-            attached_status
-                .result
-                .as_ref()
-                .expect("member status result")
-                .get(),
-        )
-        .expect("member status json");
-        assert_eq!(
-            attached_value["realtime_attachment_status"],
-            serde_json::Value::String("binding_not_ready".to_string())
-        );
-
-        let detach_params = serde_json::value::to_raw_value(&serde_json::json!({
-            "mob_id": mob_id.to_string(),
-            "agent_identity": "worker-1",
-        }))
-        .expect("detach params");
-        let detach_response =
-            handle_realtime_detach(Some(RpcId::Num(3)), Some(detach_params.as_ref()), &state).await;
-        assert!(
-            detach_response.error.is_none(),
-            "voice detach should succeed"
-        );
-
-        let detached_status =
-            handle_member_status(Some(RpcId::Num(4)), Some(status_params.as_ref()), &state).await;
-        let detached_value: serde_json::Value = serde_json::from_str(
-            detached_status
-                .result
-                .as_ref()
-                .expect("member status result")
-                .get(),
-        )
-        .expect("member status json");
-        assert_eq!(
-            detached_value["realtime_attachment_status"],
-            serde_json::Value::String("unattached".to_string())
-        );
     }
 }

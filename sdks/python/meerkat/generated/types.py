@@ -710,6 +710,10 @@ WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retir
 WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
 
 # Target for a public realtime channel.
+#
+# Identity-first: callers resolve any mob membership back to the session_id
+# explicitly (via `mob/member_status` then `realtime/open_info`) — the
+# channel protocol itself only knows about sessions.
 RealtimeChannelTarget = dict[str, Any]
 
 # Opening role for a realtime channel.

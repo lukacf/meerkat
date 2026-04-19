@@ -77,13 +77,15 @@ model. Public host MCP surfaces should not re-export that raw dispatcher.
 </Note>
 
 <Note>
-**Realtime attachment over MCP.** The public MCP tool set exposes only realtime
+**Realtime attachment over MCP.** Realtime transport is driven by
+`ModelCapabilities.realtime` on the session's model; it attaches
+automatically when the session runs a realtime-capable model (e.g.
+`gpt-realtime`). The public MCP tool set exposes only the product-layer
 bootstrap and status surfaces (`meerkat_realtime_open_info`,
-`meerkat_realtime_status`, `meerkat_realtime_capabilities`). Direct
-attach/detach of a realtime channel to a mob member is not exposed as a public
-MCP tool — use the JSON-RPC `mob/realtime_attach` / `mob/realtime_detach`
-surface for lifecycle control. See the [Realtime voice guide](/guides/realtime)
-for the full attachment state model and authority-epoch contract.
+`meerkat_realtime_status`, `meerkat_realtime_capabilities`) — there is
+no MCP attach/detach tool. See the [Realtime voice
+guide](/guides/realtime) for the capability-driven model and the full
+attachment state machine.
 </Note>
 
 ## Use MCP servers as tools (client)

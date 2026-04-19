@@ -409,6 +409,30 @@ impl MeerkatMachine {
         if should_wake {
             let _ = wake_tx.try_send(());
         }
+
+        // Capability-driven realtime transport: after the session is attached,
+        // consult the resolved model's ModelCapabilities.realtime and auto-
+        // attach (or detach) the realtime transport. Closes the P2 session-init
+        // seam — without this the capability is declared but no caller ever
+        // invokes it at init time (dogma #19).
+        //
+        // Errors from this are logged, not propagated: session attach already
+        // succeeded; a realtime-capability hiccup should not fail the attach.
+        // The session's first turn or explicit reconfigure will retry.
+        match self
+            .apply_capability_driven_realtime_transport(&session_id)
+            .await
+        {
+            Ok(_authority) => {}
+            Err(err) => {
+                tracing::debug!(
+                    %session_id,
+                    error = %err,
+                    "capability-driven realtime transport at session init yielded no attachment; \
+                     session will proceed without realtime binding"
+                );
+            }
+        }
     }
 
     /// Revert `Attaching → Queuing` if attachment failed. This unblocks
@@ -690,6 +714,8 @@ impl MeerkatMachine {
     ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
     {
         self.require_live_executor_for_realtime(session_id).await?;
+        self.require_realtime_capable_model(session_id, "attach_live")
+            .await?;
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::BeginRealtimeBinding,
@@ -708,6 +734,8 @@ impl MeerkatMachine {
     ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority, RuntimeDriverError>
     {
         self.require_live_executor_for_realtime(session_id).await?;
+        self.require_realtime_capable_model(session_id, "replace_realtime_attachment")
+            .await?;
         self.stage_session_dsl_input(
             session_id,
             dsl::MeerkatMachineInput::ReplaceRealtimeBinding,
@@ -735,6 +763,50 @@ impl MeerkatMachine {
             });
         }
         Ok(())
+    }
+
+    /// Reject realtime attach/replace for sessions whose current model does
+    /// not carry `ModelCapabilities.realtime = true`. Session and realtime
+    /// share one conversation; opening realtime on a non-realtime model
+    /// would require a silent model substitution (dogma #1/#5 violation).
+    ///
+    /// Callers must `session/reconfigure_llm` to a realtime-capable model
+    /// (e.g. `gpt-realtime`) before attach.
+    async fn require_realtime_capable_model(
+        &self,
+        session_id: &SessionId,
+        op: &'static str,
+    ) -> Result<(), RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })?;
+        match &entry.current_capability_surface {
+            Some(surface) if surface.realtime => Ok(()),
+            Some(_) => {
+                let model_name = entry
+                    .current_llm_identity
+                    .as_ref()
+                    .map(|id| id.model.as_str())
+                    .unwrap_or("<unknown>");
+                Err(RuntimeDriverError::ValidationFailed {
+                    reason: format!(
+                        "{op}: session model '{model_name}' does not support realtime; reconfigure to a realtime-capable model (e.g. gpt-realtime) before attach"
+                    ),
+                })
+            }
+            // Unresolved capability surface: defer to the hydrate path. In
+            // production, `apply_capability_driven_realtime_transport` (called
+            // from session attach) hydrates before any realtime decision, so a
+            // None here means the session has not yet reached the cap-resolve
+            // seam — either this is a low-level test or an unusual timing
+            // window. Both cases prefer a permissive attach over hard-failing;
+            // the downstream provider request will still fail loudly if the
+            // session model genuinely cannot open a realtime endpoint.
+            None => Ok(()),
+        }
     }
 
     /// Detach the runtime-owned binding. Preserves the durable intent bit so
@@ -805,11 +877,13 @@ impl MeerkatMachine {
     ) -> Result<(), RuntimeDriverError> {
         let next_binding_state = match status {
             crate::meerkat_machine_types::RealtimeAttachmentStatus::BindingNotReady => {
-                "BindingNotReady"
+                dsl::RealtimeBindingState::BindingNotReady
             }
-            crate::meerkat_machine_types::RealtimeAttachmentStatus::BindingReady => "BindingReady",
+            crate::meerkat_machine_types::RealtimeAttachmentStatus::BindingReady => {
+                dsl::RealtimeBindingState::BindingReady
+            }
             crate::meerkat_machine_types::RealtimeAttachmentStatus::ReplacementPending => {
-                "ReplacementPending"
+                dsl::RealtimeBindingState::ReplacementPending
             }
             other => {
                 return Err(RuntimeDriverError::ValidationFailed {
@@ -823,7 +897,7 @@ impl MeerkatMachine {
             &authority.session_id,
             dsl::MeerkatMachineInput::PublishRealtimeSignal {
                 authority_epoch: authority.authority_epoch,
-                next_binding_state: next_binding_state.to_string(),
+                next_binding_state,
             },
             "PublishRealtimeSignal",
         )

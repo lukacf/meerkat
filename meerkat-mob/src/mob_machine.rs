@@ -41,11 +41,27 @@ pub(crate) enum MobMachineCommand {
         spec: Box<crate::runtime::SpawnMemberSpec>,
         owner_context: Option<crate::runtime::CanonicalOpsOwnerContext>,
     },
+    /// Declarative spawn-if-absent. T4a seam; T5d wires the actor handler.
+    #[allow(dead_code)]
+    EnsureMember {
+        spec: Box<crate::runtime::SpawnMemberSpec>,
+    },
+    /// Declarative drive-toward-desired roster. T4a seam; T5d wires the actor handler.
+    #[allow(dead_code)]
+    Reconcile {
+        desired: Vec<crate::runtime::SpawnMemberSpec>,
+        options: crate::runtime::ReconcileOptions,
+    },
+    /// Filtered roster listing. T4a seam; T5d wires the actor handler.
+    #[allow(dead_code)]
+    ListMembersMatching {
+        filter: Box<crate::runtime::MemberFilter>,
+    },
     Retire {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     },
     Respawn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         initial_message: Option<meerkat_core::types::ContentInput>,
     },
     RetireAll,
@@ -58,13 +74,13 @@ pub(crate) enum MobMachineCommand {
         target: crate::PeerTarget,
     },
     ExternalTurn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: meerkat_core::types::ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
     },
     InternalTurn {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
         content: meerkat_core::types::ContentInput,
     },
     /// Submit a unit of work to a mob member, validated by fence token.
@@ -108,16 +124,10 @@ pub(crate) enum MobMachineCommand {
     ListMembersIncludingRetiring,
     ListAllMembers,
     MemberStatus {
-        meerkat_id: MeerkatId,
-    },
-    RealtimeAttach {
-        meerkat_id: MeerkatId,
-    },
-    RealtimeDetach {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     },
     SubscribeAgentEvents {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     },
     SubscribeAllAgentEvents,
     SubscribeMobEvents {
@@ -133,7 +143,7 @@ pub(crate) enum MobMachineCommand {
         authority_context: meerkat_core::service::MobToolAuthorityContext,
     },
     GetMember {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     },
     #[cfg(test)]
     FlowTrackerCounts,
@@ -141,12 +151,14 @@ pub(crate) enum MobMachineCommand {
     OrchestratorSnapshot,
     #[cfg(test)]
     LifecycleSnapshot,
+    #[cfg(test)]
+    DslT2Snapshot,
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
     },
     Shutdown,
     ForceCancel {
-        meerkat_id: MeerkatId,
+        agent_identity: MeerkatId,
     },
 }
 
@@ -158,6 +170,12 @@ pub(crate) enum MobMachineCommandResult {
     },
     FlowStatus(Option<MobRun>),
     SpawnReceipt(crate::runtime::MemberSpawnReceipt),
+    /// Result for `EnsureMember`. T4a seam.
+    #[allow(dead_code)]
+    EnsureMember(crate::runtime::EnsureMemberOutcome),
+    /// Result for `Reconcile`. Boxed to keep the enum compact. T4a seam.
+    #[allow(dead_code)]
+    Reconcile(Box<crate::runtime::ReconcileReport>),
     Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),
     DestroyReport(crate::runtime::MobDestroyReport),
     TaskId(crate::ids::TaskId),
@@ -169,6 +187,7 @@ pub(crate) enum MobMachineCommandResult {
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
     ListAllMembers(Vec<RosterEntry>),
     MemberStatus(crate::runtime::MobMemberSnapshot),
+    #[allow(dead_code)]
     Bool(bool),
     EventStream(meerkat_core::EventStream),
     AllAgentEventStreams(Vec<(MeerkatId, meerkat_core::EventStream)>),
@@ -181,6 +200,8 @@ pub(crate) enum MobMachineCommandResult {
     OrchestratorSnapshot(MobOrchestratorSnapshot),
     #[cfg(test)]
     LifecycleSnapshot(MobLifecycleSnapshot),
+    #[cfg(test)]
+    DslT2Snapshot(crate::runtime::MobDslT2Snapshot),
 }
 
 #[doc(hidden)]

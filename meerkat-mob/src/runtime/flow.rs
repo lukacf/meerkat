@@ -697,7 +697,7 @@ impl FlowEngine {
             .await
             .into_iter()
             .filter(|entry| entry.role == step.role)
-            .map(|entry| entry.meerkat_id)
+            .map(|entry| entry.agent_identity)
             .collect();
         targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 

@@ -35,9 +35,8 @@ This page is a quick-lookup index. For settled 0.5 session/runtime semantics, se
 | `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
 | `RealtimeAttachmentStatus` | `meerkat_runtime` | Runtime-owned realtime attachment state (`Unattached`, `IntentPresentUnbound`, `BindingNotReady`, `BindingReady`, `ReplacementPending`, `ReattachRequired`) |
 | `RealtimeAttachmentSignalAuthority` | `meerkat_runtime` | Authority-epoch token (`session_id` + `authority_epoch`) required on every provider callback |
-| `SessionLlmReconfigureRequest` | `meerkat_runtime` | Request to swap provider/model while realtime-attached (`model`, `provider`, `provider_params`) |
-| `MobRealtimeAttachParams` / `MobRealtimeAttachResult` | `meerkat_contracts::wire` | Wire types for `mob/realtime_attach` |
-| `MobRealtimeDetachParams` / `MobRealtimeDetachResult` | `meerkat_contracts::wire` | Wire types for `mob/realtime_detach` |
+| `SessionLlmReconfigureRequest` | `meerkat_runtime` | Request to swap provider/model on a session; capability-driven realtime transport branch attaches/detaches the binding based on the target model's `ModelCapabilities.realtime` (`model`, `provider`, `provider_params`) |
+| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` drives automatic realtime transport attach/detach |
 
 ## Traits
 

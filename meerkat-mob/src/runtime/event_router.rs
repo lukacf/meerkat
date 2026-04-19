@@ -91,16 +91,16 @@ async fn run_event_router(
     // Bootstrap: subscribe to all current roster members.
     {
         for entry in handle.list_members().await {
-            if tracked_ids.contains(&entry.meerkat_id) {
+            if tracked_ids.contains(&entry.agent_identity) {
                 continue;
             }
             // Only mark the member tracked once the subscription actually
             // succeeded. Otherwise a transient subscribe failure would
             // permanently exclude the member from the event stream.
             if let Some(stream) =
-                subscribe_member(&handle, entry.meerkat_id.clone(), entry.role.clone()).await
+                subscribe_member(&handle, entry.agent_identity.clone(), entry.role.clone()).await
             {
-                tracked_ids.insert(entry.meerkat_id.clone());
+                tracked_ids.insert(entry.agent_identity.clone());
                 merged.push(stream);
             }
         }
@@ -206,10 +206,10 @@ type TaggedStream = futures::stream::Map<
 
 async fn subscribe_member(
     handle: &MobHandle,
-    meerkat_id: MeerkatId,
+    agent_identity: MeerkatId,
     profile: ProfileName,
 ) -> Option<TaggedStream> {
-    let identity = AgentIdentity::from(meerkat_id.as_str());
+    let identity = AgentIdentity::from(agent_identity.as_str());
     let stream = match handle.subscribe_agent_events(&identity).await {
         Ok(stream) => stream,
         Err(error) => {
@@ -217,14 +217,14 @@ async fn subscribe_member(
             // the merged event stream. The caller is expected to leave
             // this member out of `tracked_ids` so a later tick can retry.
             tracing::warn!(
-                meerkat_id = %meerkat_id,
+                meerkat_id = %agent_identity,
                 error = %error,
                 "mob event router: failed to subscribe to member agent events",
             );
             return None;
         }
     };
-    let mid = meerkat_id;
+    let mid = agent_identity;
     let prof = profile;
     Some(stream.map(
         Box::new(move |envelope| (mid.clone(), prof.clone(), envelope))

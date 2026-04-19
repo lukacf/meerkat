@@ -22,7 +22,7 @@ use crate::model_profile::catalog::ModelTier;
 /// Fields group into:
 /// - identity (`id`, `provider`, `display_name`, `tier`, `model_family`)
 /// - context/output (`context_window`, `max_output_tokens`, plus `_beta` variants)
-/// - modalities (`vision`, `image_tool_results`, `inline_video`)
+/// - modalities (`vision`, `image_tool_results`, `inline_video`, `realtime`)
 /// - sampling (`supports_temperature`, `supports_top_p`, `supports_top_k`)
 /// - reasoning (`thinking`, `supports_reasoning`, `effort_levels`)
 /// - features (`supports_web_search`, `supports_inference_geo`,
@@ -60,6 +60,9 @@ pub struct ModelCapabilities {
     pub image_tool_results: bool,
     /// Whether the model accepts inline video content in user messages.
     pub inline_video: bool,
+    /// Whether the model supports a realtime bidirectional streaming transport
+    /// (e.g. OpenAI `*-realtime*` endpoints, Gemini `*-live*` endpoints).
+    pub realtime: bool,
 
     // ── Sampling ──────────────────────────────────────────────────────
     /// Whether the API accepts a non-default `temperature` on this model.

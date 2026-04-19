@@ -736,6 +736,9 @@ mod tests {
             peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
             session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
             auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
+            mcp_server_lifecycle: Arc::new(
+                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
+            ),
         };
 
         let req = CreateSessionRequest {
@@ -920,6 +923,9 @@ mod tests {
             peer_comms: Arc::new(meerkat_runtime::RuntimePeerCommsHandle::ephemeral()),
             session_admission: Arc::new(meerkat_runtime::RuntimeSessionAdmissionHandle::ephemeral()),
             auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral()),
+            mcp_server_lifecycle: Arc::new(
+                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
+            ),
         };
 
         let req = CreateSessionRequest {

@@ -525,38 +525,6 @@ pub struct MobMemberSendResult {
     pub handling_mode: WireHandlingMode,
 }
 
-/// Request payload for `mob/realtime_attach`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobRealtimeAttachParams {
-    pub mob_id: String,
-    pub agent_identity: String,
-}
-
-/// Response payload for `mob/realtime_attach`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobRealtimeAttachResult {
-    pub attached: bool,
-}
-
-/// Request payload for `mob/realtime_detach`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct MobRealtimeDetachParams {
-    pub mob_id: String,
-    pub agent_identity: String,
-}
-
-/// Response payload for `mob/realtime_detach`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct MobRealtimeDetachResult {
-    pub detached: bool,
-}
-
 /// Public handling mode for mob member delivery.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -697,6 +665,187 @@ impl From<RenderMetadata> for WireRenderMetadata {
             salience: Some(metadata.salience.into()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declarative roster API (`mob/ensure_member`, `mob/reconcile`,
+// `mob/list_members_matching`). These methods compose over spawn / retire /
+// list_members; they introduce no new lifecycle.
+// ---------------------------------------------------------------------------
+
+/// Per-member spec for `mob/ensure_member` and the `desired` entries of
+/// `mob/reconcile`.
+///
+/// Mirrors the essential, codegen-friendly fields of
+/// [`meerkat_mob::SpawnMemberSpec`]. Complex sub-types (tool access policy,
+/// budget split, inherited tool filter, override profile) are not on this
+/// wire surface — callers that need that parity should use the non-declarative
+/// `mob/spawn` method.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobMemberSpecWire {
+    /// Profile name (role) in the mob definition.
+    pub profile: String,
+    /// Stable member identity within the mob.
+    pub agent_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_message: Option<WireContentInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<WireMobRuntimeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<WireMobBackendKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<WireRuntimeBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_wire_parent: Option<bool>,
+}
+
+/// Request payload for `mob/ensure_member`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobEnsureMemberParams {
+    pub mob_id: String,
+    pub spec: MobMemberSpecWire,
+}
+
+/// Identity-native payload for `EnsureMemberOutcome::Spawned`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobSpawnReceiptWire {
+    pub agent_identity: String,
+    pub agent_runtime_id: WireAgentRuntimeId,
+    pub fence_token: u64,
+}
+
+/// Outcome of a `mob/ensure_member` call.
+///
+/// `Existed` returns the raw roster entry as untyped JSON — the Rust
+/// `MobMemberListEntry` type is the source of truth and carries its own
+/// `#[derive(Serialize)]` shape. Consumers that want a strongly-typed shape
+/// should parse it with the domain crate directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum MobEnsureMemberOutcomeWire {
+    #[serde(rename = "spawned")]
+    Spawned(MobSpawnReceiptWire),
+    #[serde(rename = "existed")]
+    Existed(Value),
+}
+
+/// Response payload for `mob/ensure_member`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobEnsureMemberResult {
+    pub outcome: MobEnsureMemberOutcomeWire,
+}
+
+/// Options controlling a `mob/reconcile` pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobReconcileOptionsWire {
+    /// When `true`, members on the roster whose identity is not in the
+    /// `desired` set are retired.
+    #[serde(default)]
+    pub retire_stale: bool,
+}
+
+/// Request payload for `mob/reconcile`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobReconcileParams {
+    pub mob_id: String,
+    #[serde(default)]
+    pub desired: Vec<MobMemberSpecWire>,
+    #[serde(default)]
+    pub options: MobReconcileOptionsWire,
+}
+
+/// Per-identity failure in a `mob/reconcile` pass.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobReconcileFailureWire {
+    pub agent_identity: String,
+    /// One of `"spawn"` or `"retire"`.
+    pub stage: String,
+    /// Stringified mob error.
+    pub error: String,
+}
+
+/// Summary produced by a `mob/reconcile` pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobReconcileReportWire {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desired: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned: Vec<MobSpawnReceiptWire>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<MobReconcileFailureWire>,
+}
+
+/// Response payload for `mob/reconcile`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobReconcileResult {
+    pub report: MobReconcileReportWire,
+}
+
+/// Roster member lifecycle state for `MobMemberFilterWire`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMemberState {
+    Active,
+    Retiring,
+}
+
+/// Filter for `mob/list_members_matching`. Non-empty / `Some` fields are
+/// combined conjunctively; an empty filter matches every member.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobMemberFilterWire {
+    /// Required exact matches on member labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    /// Required profile name (role).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Required roster state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<WireMemberState>,
+}
+
+/// Request payload for `mob/list_members_matching`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobListMembersMatchingParams {
+    pub mob_id: String,
+    #[serde(default)]
+    pub filter: MobMemberFilterWire,
+}
+
+/// Response payload for `mob/list_members_matching`. Each member is the raw
+/// roster entry JSON.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobListMembersMatchingResult {
+    #[serde(default)]
+    pub members: Vec<Value>,
 }
 
 #[cfg(test)]

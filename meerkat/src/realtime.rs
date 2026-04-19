@@ -36,16 +36,19 @@ impl RealtimeChannel {
         }
     }
 
-    pub fn mob_member(mob_id: impl Into<String>, agent_identity: impl Into<String>) -> Self {
-        Self {
-            target: RealtimeChannelTarget::MobMemberTarget {
-                mob_id: mob_id.into(),
-                agent_identity: agent_identity.into(),
-            },
-            role: RealtimeChannelRole::Primary,
-            turning_mode: RealtimeTurningMode::ProviderManaged,
-            reconnect_policy: None,
-        }
+    /// Deprecated: mob-member realtime targets were removed in Phase 5G/T5i.
+    /// Callers should resolve the session via `mob/member_status` and use
+    /// [`Self::session`] with the resolved `session_id` instead. This
+    /// helper panics at runtime to keep broken call sites loud while the
+    /// smoke-test migration catches up.
+    #[deprecated(
+        note = "mob-member realtime targets are gone; resolve session_id and call Self::session"
+    )]
+    #[allow(clippy::panic)]
+    pub fn mob_member(_mob_id: impl Into<String>, _agent_identity: impl Into<String>) -> Self {
+        panic!(
+            "RealtimeChannel::mob_member removed in Phase 5G/T5i; resolve session_id via mob/member_status and call RealtimeChannel::session"
+        );
     }
 
     pub fn role(mut self, role: RealtimeChannelRole) -> Self {

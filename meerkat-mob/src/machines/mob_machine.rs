@@ -107,6 +107,16 @@ impl WorkId {
     }
 }
 
+/// Bridging type for task identifier. Maps to a shell-side task reference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId(pub String);
+
+impl<T: Into<String>> From<T> for TaskId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
 /// Kickoff lifecycle phase for a member's initial autonomous turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KickoffPhase {
@@ -116,6 +126,62 @@ pub enum KickoffPhase {
     Started,
     Failed,
     Cancelled,
+}
+
+/// Task lifecycle status. DSL guards enumerate these directly
+/// (`TaskStatus::Pending`, `TaskStatus::InProgress`,
+/// `TaskStatus::Completed`, `TaskStatus::Cancelled`). `Completed` and
+/// `Cancelled` are the two terminal statuses; neither may be transitioned
+/// away from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TaskStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+/// Opaque task payload carried through the DSL. The full domain type is
+/// richer than what the DSL models; only `tasks.contains(id)` is observed in
+/// guards. Field projection lives in shell code consuming the DSL state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MobTask {
+    pub subject: String,
+    pub description: String,
+    pub status: TaskStatus,
+    pub owner: Option<AgentIdentity>,
+    pub blocked_by: Vec<TaskId>,
+}
+
+/// Per-runtime lifecycle marker tracking whether a member is actively serving
+/// work or draining toward retirement. Opaque to DSL guards — observed only
+/// at the shell layer for work-routing decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MobMemberState {
+    #[default]
+    Active,
+    Retiring,
+}
+
+/// Undirected wiring edge between two identities. Callers MUST normalize
+/// to `(smaller, larger)` before constructing so that edge equality is
+/// independent of insertion order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WiringEdge {
+    pub a: AgentIdentity,
+    pub b: AgentIdentity,
+}
+
+impl WiringEdge {
+    /// Constructs an edge, normalizing so `a <= b`.
+    pub fn new(lhs: AgentIdentity, rhs: AgentIdentity) -> Self {
+        if lhs <= rhs {
+            Self { a: lhs, b: rhs }
+        } else {
+            Self { a: rhs, b: lhs }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,12 +208,26 @@ machine! {
             member_kickoff_failed: Set<String>,
             member_kickoff_cancelled: Set<String>,
             member_kickoff_error: Map<String, String>,
-            // Durable per-member realtime voice intent. Keyed on
-            // AgentIdentity so the fact survives respawn (new
-            // AgentRuntimeId) for the same identity. The shell reconciles
-            // this into the runtime MeerkatMachine's realtime-attachment
-            // authority. Must stay in sync with catalog DSL.
-            member_voice_intent: Set<AgentIdentity>,
+            // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
+            // draining/retiring sub-state independently of the mob-level
+            // lifecycle phase so the shell can decide whether to route fresh
+            // work to a member while retire-drain is in flight.
+            member_state_markers: Map<AgentRuntimeId, MobMemberState>,
+            // Undirected wiring edges between agent identities. Stored as
+            // ordered pairs (smaller identity first) wrapped in WiringEdge
+            // so the DSL sees a single opaque key type.
+            wiring_edges: Set<WiringEdge>,
+            // Identity → current runtime binding. Survives within a
+            // generation; respawn replaces the runtime id for the same
+            // identity.
+            identity_to_runtime: Map<AgentIdentity, AgentRuntimeId>,
+            // Task board: the full MobTask payload is opaque at DSL level;
+            // lifecycle fields below provide the guard-visible projection.
+            tasks: Map<TaskId, MobTask>,
+            // Projected status index: guards use these to reject unknown-id
+            // updates and illegal status transitions (e.g. Completed→Pending).
+            in_progress_task_ids: Set<TaskId>,
+            completed_task_ids: Set<TaskId>,
         }
 
         init(Running) {
@@ -164,7 +244,12 @@ machine! {
             member_kickoff_failed = EmptySet,
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
-            member_voice_intent = EmptySet,
+            member_state_markers = EmptyMap,
+            wiring_edges = EmptySet,
+            identity_to_runtime = EmptyMap,
+            tasks = EmptyMap,
+            in_progress_task_ids = EmptySet,
+            completed_task_ids = EmptySet,
         }
 
         terminal [Destroyed]
@@ -196,8 +281,8 @@ machine! {
             Complete,
             Reset,
             Destroy,
-            TaskCreate,
-            TaskUpdate,
+            TaskCreate { task_id: TaskId, task_payload: MobTask },
+            TaskUpdate { task_id: TaskId, new_status: TaskStatus },
             TaskList,
             TaskGet,
             McpServerStates,
@@ -220,11 +305,6 @@ machine! {
             KickoffMarkStarting { member_id: String },
             KickoffResolveOutcome { member_id: String, outcome: String },
             KickoffCancelRequested { member_id: String },
-            // Per-member realtime attachment inputs matching the public
-            // mob/realtime_attach / mob/realtime_detach surface (and the
-            // MobMachineCommand::RealtimeAttach/RealtimeDetach manifest).
-            RealtimeAttach { agent_identity: AgentIdentity },
-            RealtimeDetach { agent_identity: AgentIdentity },
         }
 
         surface_only [
@@ -294,9 +374,6 @@ machine! {
             PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: String },
-            // Per-member realtime voice intent effects.
-            MemberVoiceIntentSet { agent_identity: AgentIdentity },
-            MemberVoiceIntentCleared { agent_identity: AgentIdentity },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -318,8 +395,6 @@ machine! {
         disposition PersistKickoffUpdate => local,
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
-        disposition MemberVoiceIntentSet => external,
-        disposition MemberVoiceIntentCleared => external,
 
         // =====================================================================
         // Direct transitions
@@ -330,6 +405,16 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
             update {
+                // Spawn is the "member joined live_runtime_ids" fact. The
+                // pending_spawn_count lifecycle is owned by StageSpawn (+1)
+                // and CompleteSpawn (-1) signals; Spawn itself leaves the
+                // counter untouched. Concurrent spawn batches rely on that
+                // separation — zeroing or double-decrementing here breaks
+                // alignment between DSL pending_spawn_count and the actor's
+                // pending_spawns map
+                // (test_concurrent_spawns_parallelize_provisioning).
+                // active_run_count is unrelated to spawn and stays untouched
+                // (previously zeroed here by mistake).
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -337,6 +422,7 @@ machine! {
                     self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -530,7 +616,9 @@ machine! {
             on signal RetireMember { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            update {}
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+            }
             to Running
             emit RequestRuntimeRetire
         }
@@ -543,6 +631,7 @@ machine! {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_state_markers.remove(agent_runtime_id);
                 self.active_run_count = 0;
             }
             to Stopped
@@ -556,6 +645,8 @@ machine! {
                 || self.lifecycle_phase == Phase::Stopped
             }
             update {
+                self.active_run_count = 0;
+                self.pending_spawn_count = 0;
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -563,6 +654,7 @@ machine! {
                     self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -573,6 +665,8 @@ machine! {
             on signal RespawnMember { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
             guard { self.lifecycle_phase == Phase::Running }
             update {
+                self.active_run_count = 0;
+                self.pending_spawn_count = 0;
                 self.live_runtime_ids.insert(agent_runtime_id);
                 if external_addressable {
                     self.externally_addressable_runtime_ids.insert(agent_runtime_id);
@@ -580,6 +674,7 @@ machine! {
                     self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -605,6 +700,7 @@ machine! {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_state_markers = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;
@@ -625,6 +721,7 @@ machine! {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_state_markers = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.coordinator_bound = false;
@@ -694,6 +791,7 @@ machine! {
         transition StopRunning {
             on input Stop
             guard { self.lifecycle_phase == Phase::Running }
+            guard "no_active_runs" { self.active_run_count == 0 }
             update {
                 self.coordinator_bound = false;
                 self.active_run_count = 0;
@@ -766,18 +864,76 @@ machine! {
             emit EmitProgressNote
         }
 
+        // TaskCreate: real mutator. Rejects duplicate task ids.
         transition TaskCreateRunning {
-            on input TaskCreate
+            on input TaskCreate { task_id, task_payload }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            guard "task_id_unused" { self.tasks.contains_key(task_id) == false }
+            update {
+                self.tasks.insert(task_id, task_payload);
+            }
             to Running
             emit EmitTaskNotice
         }
 
-        transition TaskUpdateRunning {
-            on input TaskUpdate
+        // TaskUpdate: status transition authority.
+        //
+        // Split into one transition per target status. Each enforces:
+        //   * task_id must refer to an existing task (unknown ids rejected)
+        //   * the source status is not a terminal one we disallow rolling
+        //     back from (Completed → Pending / InProgress is rejected).
+        //
+        // The status-projection sets (`in_progress_task_ids`,
+        // `completed_task_ids`) are the guard-visible truth; `tasks` carries
+        // the opaque payload for shell-side projection.
+        transition TaskUpdateRunningPending {
+            on input TaskUpdate { task_id, new_status }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            guard "target_pending" { new_status == TaskStatus::Pending }
+            guard "task_known" { self.tasks.contains_key(task_id) == true }
+            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
+            update {
+                self.in_progress_task_ids.remove(task_id);
+            }
+            to Running
+            emit EmitTaskNotice
+        }
+
+        transition TaskUpdateRunningInProgress {
+            on input TaskUpdate { task_id, new_status }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "target_in_progress" { new_status == TaskStatus::InProgress }
+            guard "task_known" { self.tasks.contains_key(task_id) == true }
+            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
+            update {
+                self.in_progress_task_ids.insert(task_id);
+            }
+            to Running
+            emit EmitTaskNotice
+        }
+
+        transition TaskUpdateRunningCompleted {
+            on input TaskUpdate { task_id, new_status }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "target_completed" { new_status == TaskStatus::Completed }
+            guard "task_known" { self.tasks.contains_key(task_id) == true }
+            update {
+                self.in_progress_task_ids.remove(task_id);
+                self.completed_task_ids.insert(task_id);
+            }
+            to Running
+            emit EmitTaskNotice
+        }
+
+        transition TaskUpdateRunningCancelled {
+            on input TaskUpdate { task_id, new_status }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "target_cancelled" { new_status == TaskStatus::Cancelled }
+            guard "task_known" { self.tasks.contains_key(task_id) == true }
+            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
+            update {
+                self.in_progress_task_ids.remove(task_id);
+            }
             to Running
             emit EmitTaskNotice
         }
@@ -1126,6 +1282,7 @@ machine! {
         transition StartFlowRunning {
             on signal StartFlow
             guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
             update {
                 self.active_run_count += 1;
             }
@@ -1201,8 +1358,7 @@ machine! {
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
-                self.live_runtime_ids.remove(agent_runtime_id);
-                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Running
             emit RequestRuntimeRetire
@@ -1214,8 +1370,7 @@ machine! {
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
             update {
-                self.live_runtime_ids.remove(agent_runtime_id);
-                self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
             to Stopped
             emit RequestRuntimeRetire
@@ -1309,28 +1464,5 @@ machine! {
             emit FlowTerminalized
         }
 
-        // =====================================================================
-        // Per-member realtime voice intent
-        // =====================================================================
-
-        transition RealtimeAttach {
-            on input RealtimeAttach { agent_identity }
-            guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.member_voice_intent.insert(agent_identity);
-            }
-            to Running
-            emit MemberVoiceIntentSet { agent_identity: agent_identity }
-        }
-
-        transition RealtimeDetach {
-            on input RealtimeDetach { agent_identity }
-            guard { self.lifecycle_phase == Phase::Running }
-            update {
-                self.member_voice_intent.remove(agent_identity);
-            }
-            to Running
-            emit MemberVoiceIntentCleared { agent_identity: agent_identity }
-        }
     }
 }

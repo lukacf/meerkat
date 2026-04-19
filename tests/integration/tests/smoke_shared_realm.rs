@@ -4,7 +4,10 @@
     clippy::panic,
     dead_code,
     unused_assignments,
-    unused_variables
+    unused_variables,
+    // T5i removed RealtimeChannel::mob_member; these smoke scenarios still
+    // reference it as a panic stub pending session-target migration.
+    deprecated
 )]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -1365,9 +1368,8 @@ async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_m
             "realtime/open_info",
             json!({
                 "target": {
-                    "type": "mob_member_target",
-                    "mob_id": mob_id,
-                    "agent_identity": agent_identity,
+                    "type": "session_target",
+                    "session_id": current_session_id,
                 },
                 "role": "primary",
                 "turning_mode": "provider_managed",
@@ -1377,7 +1379,7 @@ async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_m
         .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::mob_member(mob_id, agent_identity);
+        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
         eprintln!("[member audio helper] connect channel");
         let connection = channel.connect(&open_info).await?;
         let (mut sender, mut receiver) = connection.split();
@@ -5163,6 +5165,23 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
     )
     .await?;
 
+    // Resolve worker-1's session_id before opening realtime (T5i: mob_member_target removed).
+    let worker_status = tcp_rpc_call(
+        &rpc_addr,
+        3,
+        "mob/member_status",
+        json!({
+            "mob_id": mob_id,
+            "agent_identity": "worker-1",
+        }),
+        30,
+    )
+    .await?;
+    let worker_session_id = worker_status["current_session_id"]
+        .as_str()
+        .ok_or("mob/member_status missing current_session_id")?
+        .to_string();
+
     let open_info_payload = parse_mcp_tool_payload(
         &mcp_call_tool(
             &mut mcp,
@@ -5170,9 +5189,8 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
             "meerkat_realtime_open_info",
             json!({
                 "target": {
-                    "type": "mob_member_target",
-                    "mob_id": mob_id,
-                    "agent_identity": "worker-1",
+                    "type": "session_target",
+                    "session_id": worker_session_id,
                 },
                 "role": "primary",
                 "turning_mode": "provider_managed",
@@ -5184,7 +5202,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
     let open_info: meerkat::contracts::RealtimeOpenInfo =
         serde_json::from_value(open_info_payload)?;
 
-    let channel = meerkat::RealtimeChannel::mob_member(mob_id.clone(), "worker-1");
+    let channel = meerkat::RealtimeChannel::session(worker_session_id.clone());
     let mut connection = channel.connect(&open_info).await?;
 
     let attached_status = tcp_rpc_call(
@@ -5339,7 +5357,10 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                     },
                     "profiles": {
                         "operator": {
-                            "model": openai_smoke_model(),
+                            // T5i/D5: the operator is the realtime surface — session
+                            // model must be realtime-capable. gpt-realtime is the
+                            // only entry in the catalog with realtime=true.
+                            "model": "gpt-realtime",
                             "runtime_mode": "turn_driven",
                             "external_addressable": true,
                             "tools": { "comms": true },
@@ -5516,9 +5537,8 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "mob_member_target",
-                        "mob_id": mob_id,
-                        "agent_identity": operator,
+                        "type": "session_target",
+                        "session_id": current_session_id,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -5528,7 +5548,7 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::mob_member(mob_id, operator);
+        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
         let connection = match channel.connect(&open_info).await {
             Ok(connection) => connection,
             Err(error) => {
@@ -5843,9 +5863,8 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "mob_member_target",
-                        "mob_id": mob_id,
-                        "agent_identity": operator,
+                        "type": "session_target",
+                        "session_id": current_session_id,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -6740,7 +6759,9 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
                         "id": mob_id,
                         "profiles": {
                             "lead": {
-                                "model": openai_smoke_model(),
+                                // T5i/D5: scenario 72 exercises realtime audio on the
+                                // lead member's session; model must be realtime-capable.
+                                "model": "gpt-realtime",
                                 "tools": { "comms": true },
                                 "peer_description": "Lead realtime worker",
                                 "external_addressable": true
@@ -6780,7 +6801,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
                 180,
             )
             .await?;
-        let _current_session_id = seeded["session_id"]
+        let current_session_id = seeded["session_id"]
             .as_str()
             .ok_or("mob/turn_start missing session_id for scenario 72")?
             .to_string();
@@ -6791,9 +6812,8 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "mob_member_target",
-                        "mob_id": mob_id,
-                        "agent_identity": agent_identity,
+                        "type": "session_target",
+                        "session_id": current_session_id,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -6803,7 +6823,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::mob_member(mob_id, agent_identity);
+        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
         eprintln!("[scenario 72] connect realtime channel");
         let connection = channel.connect(&open_info).await?;
         let (mut sender, mut receiver) = connection.split();

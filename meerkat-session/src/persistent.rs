@@ -931,6 +931,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             auth_lease: Arc::new(
                                 meerkat_runtime::RuntimeAuthLeaseHandle::ephemeral(),
                             ),
+                            mcp_server_lifecycle: Arc::new(
+                                meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
+                            ),
                         },
                     )
                 })

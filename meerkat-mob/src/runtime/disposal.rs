@@ -36,17 +36,15 @@ pub(super) enum DisposalStep {
     StopHostLoop,
     NotifyPeers,
     RemoveTrustEdges,
-    RealtimeDetach,
     ArchiveSession,
 }
 
 impl DisposalStep {
     /// The ordered sequence of policy-driven steps.
-    pub(super) const ORDERED: [DisposalStep; 5] = [
+    pub(super) const ORDERED: [DisposalStep; 4] = [
         DisposalStep::StopHostLoop,
         DisposalStep::NotifyPeers,
         DisposalStep::RemoveTrustEdges,
-        DisposalStep::RealtimeDetach,
         DisposalStep::ArchiveSession,
     ];
 
@@ -63,7 +61,6 @@ impl std::fmt::Display for DisposalStep {
             Self::StopHostLoop => f.write_str("StopHostLoop"),
             Self::NotifyPeers => f.write_str("NotifyPeers"),
             Self::RemoveTrustEdges => f.write_str("RemoveTrustEdges"),
-            Self::RealtimeDetach => f.write_str("RealtimeDetach"),
             Self::ArchiveSession => f.write_str("ArchiveSession"),
         }
     }
@@ -77,10 +74,9 @@ impl std::fmt::Display for DisposalStep {
 ///
 /// Steps never re-read the roster — prevents TOCTOU races.
 pub(super) struct DisposalContext {
-    pub(crate) meerkat_id: MeerkatId,
+    pub(crate) agent_identity: MeerkatId,
     pub entry: RosterEntry,
     pub retiring_key: Option<String>,
-    pub clear_voice_intent: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +143,7 @@ impl ErrorPolicy for WarnAndContinue {
         ctx: &DisposalContext,
     ) -> bool {
         tracing::warn!(
-            meerkat_id = %ctx.meerkat_id,
+            meerkat_id = %ctx.agent_identity,
             step = %step,
             error = %error,
             "retire: step failed (continuing)"
@@ -169,14 +165,14 @@ impl ErrorPolicy for BulkBestEffort {
     ) -> bool {
         if step.is_peer_step() {
             tracing::debug!(
-                meerkat_id = %ctx.meerkat_id,
+                meerkat_id = %ctx.agent_identity,
                 step = %step,
                 error = %error,
                 "retire(bulk): step failed (expected during concurrent teardown)"
             );
         } else {
             tracing::warn!(
-                meerkat_id = %ctx.meerkat_id,
+                meerkat_id = %ctx.agent_identity,
                 step = %step,
                 error = %error,
                 "retire(bulk): step failed (continuing)"
@@ -217,19 +213,17 @@ mod tests {
 
     fn test_ctx() -> DisposalContext {
         DisposalContext {
-            meerkat_id: MeerkatId::from("test-member"),
+            agent_identity: MeerkatId::from("test-member"),
             entry: RosterEntry {
                 agent_identity: AgentIdentity::from("test-member"),
                 generation: Generation::INITIAL,
                 fence_token: FenceToken::new(0),
                 agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test-member")),
-                meerkat_id: MeerkatId::from("test-member"),
                 role: ProfileName::from("worker"),
                 member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,
                 state: MemberState::Retiring,
-                voice_intent_present: false,
                 wired_to: BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),
                 labels: std::collections::BTreeMap::new(),
@@ -237,24 +231,7 @@ mod tests {
                 effective_profile_override: None,
             },
             retiring_key: None,
-            clear_voice_intent: false,
         }
-    }
-
-    #[test]
-    fn realtime_detach_step_runs_before_archive_session() {
-        let realtime_detach_index = DisposalStep::ORDERED
-            .iter()
-            .position(|step| *step == DisposalStep::RealtimeDetach)
-            .expect("live detach step");
-        let archive_index = DisposalStep::ORDERED
-            .iter()
-            .position(|step| *step == DisposalStep::ArchiveSession)
-            .expect("archive step");
-        assert!(
-            realtime_detach_index < archive_index,
-            "live detach must run before archive session"
-        );
     }
 
     fn test_error() -> MobError {

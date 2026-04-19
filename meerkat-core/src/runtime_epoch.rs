@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
-    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, PeerCommsHandle,
-    SessionAdmissionHandle, TurnStateHandle,
+    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
+    PeerCommsHandle, SessionAdmissionHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -170,6 +170,12 @@ pub struct SessionRuntimeBindings {
     pub session_admission: Arc<dyn SessionAdmissionHandle>,
     /// Auth lease lifecycle DSL handle (Phase 1.5-rev addition).
     pub auth_lease: Arc<dyn AuthLeaseHandle>,
+    /// MCP server lifecycle DSL handle (Phase 5G / T5g addition).
+    ///
+    /// Routes per-server MCP handshake events into the session's MeerkatMachine
+    /// DSL (`mcp_server_states` substate) and exposes the `PendingConnect` set
+    /// to the agent loop for the `[MCP_PENDING]` system-notice toggle.
+    pub mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -186,6 +192,7 @@ impl Clone for SessionRuntimeBindings {
             peer_comms: Arc::clone(&self.peer_comms),
             session_admission: Arc::clone(&self.session_admission),
             auth_lease: Arc::clone(&self.auth_lease),
+            mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
         }
     }
 }
@@ -204,6 +211,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("peer_comms", &"<dyn PeerCommsHandle>")
             .field("session_admission", &"<dyn SessionAdmissionHandle>")
             .field("auth_lease", &"<dyn AuthLeaseHandle>")
+            .field("mcp_server_lifecycle", &"<dyn McpServerLifecycleHandle>")
             .finish()
     }
 }

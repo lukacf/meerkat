@@ -41,17 +41,21 @@ Short version:
 
 ### Realtime attachment vocabulary (public noun)
 
-Public API surfaces describe `realtime`, not `voice`. The converged
-terms across RPC, REST, MCP, and SDKs are:
+Public API surfaces describe `realtime`, not `voice`. Realtime
+transport is capability-driven: `ModelCapabilities.realtime: bool` on
+the session's resolved model decides attach/detach. There is no
+caller-initiated attach/detach RPC. Converged terms:
 
-- `runtime/realtime_attachment_status` — runtime-owned status projection
-- `mob/realtime_attach` / `mob/realtime_detach` — per-member attach/detach
+- `ModelCapabilities.realtime` — the capability bit that drives transport
+- `runtime/realtime_attachment_status` — single-session status projection
+- `runtime/realtime_attachment_statuses` — batch status projection
 - `mob/member_status.realtime_attachment_status` — per-member projection
+- `realtime/open_info` / `realtime/status` / `realtime/capabilities` — product-layer bootstrap
 
 The `realtime_attachment_status` enum is the typed form surfaces
 present; audio-only backend behavior is one provider specialization,
-not the public capability name. Prior `live_*` surfaces have been
-renamed to the `realtime_*` vocabulary across RPC/REST/MCP/SDK catalogs.
+not the public capability name. Prior `mob/realtime_attach(detach)` and
+`attachMobMemberLive`/`detachMobMemberLive` surfaces have been deleted.
 
 Load `references/realtime-attachment.md` when touching realtime
 attachment state, the live-topology reconfigure flow, or the DSL
@@ -62,7 +66,7 @@ authority epoch model.
 Exactly four canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
 - **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification, **realtime attachment authority, live-topology reconfigure phase**.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution, **per-member realtime intent**.
+- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member voice intent was removed — realtime is driven by each member's session-level `ModelCapabilities.realtime`.)
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 
@@ -76,7 +80,7 @@ Detailed architecture, DSL ↔ schema ↔ kernel ↔ TLA+ flow, the field-driven
 
 Stable per-member identity is separate from per-runtime binding:
 
-- **`AgentIdentity`** — assigned at spawn, persists across respawns and runtime-binding changes. Keys all public mob APIs (`mob/realtime_attach { agent_identity }`, `mob/member_status`, delegate targets, voice intent, etc.).
+- **`AgentIdentity`** — assigned at spawn, persists across respawns and runtime-binding changes. Keys all public mob APIs (`mob/member_status`, delegate targets, wiring, etc.).
 - **`AgentRuntimeId`** — per-runtime binding detail. Rotates on respawn. DSL guards keyed on `{agent_runtime_id, fence_token}` use this for binding-level rotation safety.
 - **`FenceToken`** — monotonic epoch counter for runtime bindings. DSL guards enforce `fence_token` ordering.
 - **`Generation`** — mob-member generation counter; increments on respawn.
@@ -123,7 +127,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 - **`references/machine-system.md`** — load when touching DSL sources, catalog schemas, generated kernels, TLC verification, authority cutover, handle trait design, or any "where does this semantic state live" question. Covers the DSL → MachineSchema → kernel → TLA+ → runtime flow, the field-driven design principle, signals vs inputs, and the `HandleDslAuthority` cross-crate pattern.
 - **`references/runtime-control-plane.md`** — load when working on `MeerkatMachine`, runtime drivers, session registration, policy resolution, `RuntimeBuildMode` / `SessionRuntimeBindings`, `OpsLifecycleRegistry`, session service lifecycle, persistence pairing, detached-op wake, or test harness ownership.
-- **`references/realtime-attachment.md`** — load when working on realtime attachment state, the live-topology reconfigure flow, provider callback authority epochs, or the peer-response-terminal context append path. Covers the DSL state fields, the `RealtimeAttachmentSignalAuthority` token, and the five CoreExecutor entry points that route context-only staged primitives.
+- **`references/realtime-attachment.md`** — load when working on realtime attachment state, the capability-driven transport policy (`ModelCapabilities.realtime`), the live-topology reconfigure flow, provider callback authority epochs, or the peer-response-terminal context append path. Covers the DSL state fields, the `RealtimeAttachmentSignalAuthority` token, and the five CoreExecutor entry points that route context-only staged primitives.
 - **`references/agent-construction.md`** — load when touching `AgentFactory::build_agent()`, agent builder, multimodal content types, or runtime tool scoping.
 - **`references/mob-orchestration.md`** — load when working on mobs: creation, launch modes, spawn policies, delegation tools, lifecycle control, provisioning, wiring, flow/frame execution, mob persistence, or `MobActor` decomposition.
 - **`references/comms-model.md`** — load when working on peer trust, inter-agent messaging, comms drain lifecycle, envelope classification, or session identity claims.

@@ -194,17 +194,14 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
 }
 
 fn openai_realtime_connect_model(identity: &meerkat_core::SessionLlmIdentity) -> String {
-    let model = identity.model.trim();
-    let lowered = model.to_ascii_lowercase();
-    if lowered.contains("realtime") || lowered.starts_with("gpt-audio") {
-        return model.to_string();
-    }
-
-    std::env::var("RKAT_OPENAI_REALTIME_MODEL")
-        .ok()
-        .or_else(|| std::env::var("OPENAI_REALTIME_MODEL").ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "gpt-realtime".to_string())
+    // Session model IS the realtime model. No substitution.
+    //
+    // If the session's model doesn't support realtime, opening a realtime
+    // channel must fail upstream at the capability-guard seam — not be
+    // silently swapped for a different model. Session and realtime share
+    // one conversation, one history, one capability profile. See dogma #1
+    // ("one semantic fact, one owner") and #5 ("typed truth, never folklore").
+    identity.model.clone()
 }
 
 fn openai_realtime_history_context(seed_messages: &[Message]) -> Option<String> {
@@ -3827,19 +3824,10 @@ mod tests {
     }
 
     #[test]
-    fn openai_realtime_connect_model_defaults_non_realtime_models_to_audio_realtime() {
-        let semantic_identity = SessionLlmIdentity {
-            model: "gpt-5.4".to_string(),
-            provider: Provider::OpenAI,
-            self_hosted_server_id: None,
-            provider_params: None,
-            connection_ref: None,
-        };
-        assert_eq!(
-            openai_realtime_connect_model(&semantic_identity),
-            "gpt-realtime".to_string()
-        );
-
+    fn openai_realtime_connect_model_returns_session_model_verbatim() {
+        // Post-0.6: session model IS the realtime model. No substitution.
+        // Non-realtime session models must be rejected upstream (capability
+        // guard at attach seam), not silently swapped.
         let realtime_identity = SessionLlmIdentity {
             model: "gpt-realtime".to_string(),
             provider: Provider::OpenAI,
@@ -3850,6 +3838,23 @@ mod tests {
         assert_eq!(
             openai_realtime_connect_model(&realtime_identity),
             "gpt-realtime".to_string()
+        );
+
+        // Even for a non-realtime model, we return it verbatim. The capability
+        // guard upstream decides whether to open a realtime channel at all.
+        // If we got here with a non-realtime model, opening the channel will
+        // fail at the provider boundary with a clear model-not-found error,
+        // instead of silently masquerading behind a different model.
+        let semantic_identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        assert_eq!(
+            openai_realtime_connect_model(&semantic_identity),
+            "gpt-5.4".to_string()
         );
     }
 

@@ -533,8 +533,13 @@ impl MeerkatMachine {
         )
         .await;
 
-        // 7. Complete topology reconfigure and re-attach to mint a new
-        // authority epoch for the caller.
+        // 7. Complete topology reconfigure. Whether we re-attach or leave
+        // detached is capability-driven: the resolved target's
+        // `ModelCapabilities.realtime` decides. Realtime-capable targets
+        // reattach to mint a new authority token for the caller; non-realtime
+        // targets surface `ValidationFailed` so the caller observes that the
+        // swap moved the session off a realtime model (the binding is gone
+        // and no new authority can be minted).
         self.stage_session_dsl_input(
             &session_id,
             crate::meerkat_machine::dsl::MeerkatMachineInput::CompleteLiveTopology,
@@ -547,7 +552,16 @@ impl MeerkatMachine {
             ))
         })?;
 
-        self.attach_live(&session_id).await
+        if target_capability_surface.realtime {
+            self.attach_live(&session_id).await
+        } else {
+            Err(RuntimeDriverError::ValidationFailed {
+                reason: format!(
+                    "target model '{}' has no realtime capability; live topology reconfigure completed detached",
+                    target_identity.model
+                ),
+            })
+        }
     }
 
     /// Post-detach failure recovery: discard live session on the host, reset
@@ -583,5 +597,82 @@ impl MeerkatMachine {
         Err(RuntimeDriverError::Internal(format!(
             "live topology reconfigure failed after detach: {original_error}"
         )))
+    }
+
+    /// Drive the realtime transport to match the session's resolved model
+    /// capability. This is the session-init seam for capability-driven
+    /// realtime: the caller never decides whether to `attach_live`; instead
+    /// the resolved `ModelCapabilities.realtime` on the session's current
+    /// model drives transport lifecycle.
+    ///
+    /// Policy:
+    /// - capability `realtime = true` and binding not ready → `attach_live`
+    ///   (mints a new `RealtimeAttachmentSignalAuthority`).
+    /// - capability `realtime = true` and binding already ready → no-op, returns
+    ///   `Ok(None)` (caller already holds an authority; session init should not
+    ///   rotate it).
+    /// - capability `realtime = false` and binding present → `detach_live`.
+    /// - capability `realtime = false` and no binding → no-op.
+    ///
+    /// Hydrates the session's current llm capability surface via the
+    /// reconfigure host if not already cached, so session init can call this
+    /// immediately after the llm identity becomes known. Unresolved
+    /// capability surface (no profile) is a no-op.
+    pub async fn apply_capability_driven_realtime_transport(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<crate::meerkat_machine_types::RealtimeAttachmentSignalAuthority>,
+        RuntimeDriverError,
+    > {
+        let (cached_surface, cached_status) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (
+                entry.current_capability_surface.clone(),
+                entry.capability_surface_status,
+            )
+        };
+
+        // If the capability surface hasn't been hydrated yet (session just
+        // came up after init), hydrate it now via the reconfigure host so the
+        // capability-driven decision uses the resolved model's real flags.
+        let surface = match (cached_surface, cached_status) {
+            (Some(surface), SessionLlmCapabilitySurfaceStatus::Resolved) => surface,
+            _ => {
+                let host = self.llm_reconfigure_host()?;
+                let hydrated = host.hydrate_session_llm_state(session_id).await?;
+                self.cache_hydrated_session_llm_state(session_id, &hydrated)
+                    .await?;
+                match hydrated.current_capability_surface {
+                    Some(surface) => surface,
+                    None => return Ok(None),
+                }
+            }
+        };
+
+        let status =
+            <Self as SessionServiceRuntimeExt>::realtime_attachment_status(self, session_id)
+                .await
+                .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
+
+        use crate::meerkat_machine_types::RealtimeAttachmentStatus;
+        let is_bound = matches!(
+            status,
+            RealtimeAttachmentStatus::BindingNotReady
+                | RealtimeAttachmentStatus::BindingReady
+                | RealtimeAttachmentStatus::ReplacementPending
+        );
+
+        match (surface.realtime, is_bound) {
+            (true, false) => self.attach_live(session_id).await.map(Some),
+            (true, true) => Ok(None),
+            (false, true) => self.detach_live(session_id).await.map(|()| None),
+            (false, false) => Ok(None),
+        }
     }
 }

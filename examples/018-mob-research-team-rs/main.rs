@@ -228,7 +228,7 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     println!(
         "Mob '{}' created (status: {:?})",
         handle.mob_id(),
-        handle.status()
+        handle.status().await?
     );
 
     // Spawn the lead analyst and two researchers.
@@ -343,7 +343,7 @@ content = "Evaluate technical feasibility, architecture options, scalability con
     }
 
     // Final status.
-    println!("\nFinal mob status: {:?}", handle.status());
+    println!("\nFinal mob status: {:?}", handle.status().await?);
 
     // Clean up.
     handle.retire_all().await?;

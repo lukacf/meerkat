@@ -25,7 +25,8 @@ use meerkat_core::ToolCatalogEntry;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
 use meerkat_core::handles::{
-    DslTransitionError, ExternalToolSurfaceHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
+    DslTransitionError, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
+    SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
 use meerkat_core::tool_catalog::stable_owner_key_for_tool;
 use meerkat_core::types::ToolDef;
@@ -38,7 +39,7 @@ use meerkat_core::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
@@ -938,6 +939,17 @@ pub struct McpRouter {
     pending_snapshot_alignment: Option<SurfaceSnapshotAlignmentObligation>,
     /// Queued canonical lifecycle deltas for async completions.
     completed_updates: VecDeque<CompletedLifecycleUpdate>,
+    /// Optional session-scoped MCP server lifecycle handle
+    /// (Phase 5G / T5g). When bound, every handshake event mirrors into
+    /// the session's MeerkatMachine DSL `mcp_server_states`. Standalone
+    /// callers (tests, fixtures) leave this `None` and the DSL mirror is
+    /// skipped — shell-level behavior stays identical.
+    ///
+    /// Stored behind `Arc<StdRwLock<...>>` so the adapter (which wraps the
+    /// router in a `tokio` async lock) can bind the handle late — after
+    /// construction, via a sync trait method — without needing to block on
+    /// the async router lock.
+    mcp_lifecycle_handle: Arc<StdRwLock<Option<Arc<dyn McpServerLifecycleHandle>>>>,
 }
 
 impl McpRouter {
@@ -953,7 +965,62 @@ impl McpRouter {
             pending_obligations: HashMap::new(),
             pending_snapshot_alignment: None,
             completed_updates: VecDeque::new(),
+            mcp_lifecycle_handle: Arc::new(StdRwLock::new(None)),
         }
+    }
+
+    /// Return the shared handle slot for late-binding a session's MCP server
+    /// lifecycle DSL handle (Phase 5G / T5g). The adapter (which wraps the
+    /// router in a tokio async lock) calls this once at router construction
+    /// to obtain a clone it can write into from the sync
+    /// `AgentToolDispatcher::bind_mcp_server_lifecycle_handle` method.
+    pub fn mcp_lifecycle_handle_slot(
+        &self,
+    ) -> Arc<StdRwLock<Option<Arc<dyn McpServerLifecycleHandle>>>> {
+        Arc::clone(&self.mcp_lifecycle_handle)
+    }
+
+    fn with_lifecycle_handle<F>(&self, f: F)
+    where
+        F: FnOnce(&dyn McpServerLifecycleHandle) -> Result<(), DslTransitionError>,
+    {
+        let guard = match self.mcp_lifecycle_handle.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "mcp_lifecycle_handle RwLock poisoned; recovering — DSL mirror may drift"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if let Some(handle) = guard.as_deref()
+            && let Err(error) = f(handle)
+        {
+            tracing::debug!(
+                error = %error,
+                "McpServerLifecycleHandle DSL apply rejected"
+            );
+        }
+    }
+
+    fn notify_lifecycle_connect_pending(&self, server_name: &str) {
+        self.with_lifecycle_handle(|handle| handle.apply_connect_pending(server_name));
+    }
+
+    fn notify_lifecycle_connected(&self, server_name: &str) {
+        self.with_lifecycle_handle(|handle| handle.apply_connected(server_name));
+    }
+
+    fn notify_lifecycle_failed(&self, server_name: &str, failure: &str) {
+        self.with_lifecycle_handle(|handle| handle.apply_failed(server_name, failure));
+    }
+
+    fn notify_lifecycle_disconnected(&self, server_name: &str) {
+        self.with_lifecycle_handle(|handle| handle.apply_disconnected(server_name));
+    }
+
+    fn notify_lifecycle_reload(&self, server_name: &str) {
+        self.with_lifecycle_handle(|handle| handle.apply_reload(server_name));
     }
 
     /// Create a new empty router
@@ -1048,6 +1115,7 @@ impl McpRouter {
             .apply(ExternalToolSurfaceInput::StageAdd { surface_id: sid })
         {
             Ok(_) => {
+                self.notify_lifecycle_connect_pending(&server_name);
                 self.staged_payloads.insert(server_name, config);
             }
             Err(error) => {
@@ -1092,6 +1160,7 @@ impl McpRouter {
             .apply(ExternalToolSurfaceInput::StageReload { surface_id: sid })
         {
             Ok(_) => {
+                self.notify_lifecycle_reload(&server_name);
                 // Lifecycle legality is owner-owned. Shell payload lookup is
                 // execution context only and does not decide whether StageReload
                 // is legal.
@@ -1273,6 +1342,7 @@ impl McpRouter {
                         });
                         entry.tools.clear();
                     }
+                    self.notify_lifecycle_disconnected(&surface_id.0);
                     delta.removed_servers.push(surface_id.0.clone());
                 }
                 ExternalToolSurfaceEffect::RejectSurfaceCall { .. } => {
@@ -1399,6 +1469,7 @@ impl McpRouter {
         match result {
             Ok((conn, tools)) => {
                 let tool_count = tools.len();
+                self.notify_lifecycle_connected(&server_name);
 
                 match self
                     .surface_owner
@@ -1485,6 +1556,7 @@ impl McpRouter {
                     SurfaceDeltaOperation::Reload => ToolConfigChangeOperation::Reload,
                     SurfaceDeltaOperation::Remove | SurfaceDeltaOperation::None => unreachable!(),
                 };
+                self.notify_lifecycle_failed(&server_name, &err.to_string());
 
                 let snapshot_alignment =
                     match self

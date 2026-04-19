@@ -5,6 +5,9 @@ pub mod catalog;
 pub mod compat;
 mod composition;
 mod machine;
+pub mod types;
+
+pub use types::McpServerId;
 
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,

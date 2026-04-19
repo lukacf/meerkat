@@ -302,7 +302,7 @@ Wildcard `"*"` matches any role.
 
 ## Realtime attachment
 
-Any mob member can be attached to a live OpenAI Realtime audio channel by its `AgentIdentity`. Attach/detach keys on stable identity (`mob/realtime_attach`, `mob/realtime_detach`) so intent survives respawn; the underlying binding and its authority epoch are session-scoped and rotate per-runtime. See the [Realtime voice guide](/guides/realtime) for the attachment state machine, authority token model, and live-topology reconfigure flow.
+Each mob member runs in its own session, so realtime is enabled per-member by pointing a profile at a realtime-capable model (for example `gpt-realtime`). The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no per-member attach/detach RPC. Use `runtime/realtime_attachment_statuses` to observe all members' attachment state in one round trip. See the [Realtime voice guide](/guides/realtime) for the capability-driven model, state machine, and live-topology reconfigure flow.
 
 ## See also
 

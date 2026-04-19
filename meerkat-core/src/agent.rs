@@ -329,6 +329,18 @@ pub trait AgentToolDispatcher: Send + Sync {
     ) -> Option<Arc<dyn crate::completion_feed::CompletionEnrichmentProvider>> {
         None
     }
+
+    /// Bind a session-scoped MCP server lifecycle handle (Phase 5G / T5g).
+    ///
+    /// Dispatchers that manage per-server MCP handshake lifecycle (like
+    /// `McpRouterAdapter`) use the handle to mirror connection state into
+    /// the session's MeerkatMachine DSL. The default implementation is a
+    /// no-op for dispatchers that have no MCP handshake to route.
+    fn bind_mcp_server_lifecycle_handle(
+        &self,
+        _handle: Arc<dyn crate::handles::McpServerLifecycleHandle>,
+    ) {
+    }
 }
 
 /// Compute whether the current exact catalog should stay inline or switch to deferred mode.
@@ -846,6 +858,11 @@ where
     /// occurs. `connection_ref_binding_key` identifies which binding the
     /// session's LLM calls route through.
     pub(crate) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
+    /// Runtime-backed MCP server lifecycle handle (Phase 5G / T5g). When set,
+    /// the agent loop reads `pending_server_ids()` at each CallingLlm boundary
+    /// to decide whether to emit the `[MCP_PENDING]` system notice.
+    pub(crate) mcp_server_lifecycle_handle:
+        Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
     /// Binding key for the connection_ref this session resolves through,
     /// in `"realm_id:binding_id"` form. Populated when the agent was built
     /// via a connection_ref path; `None` for env-var / legacy flat path.

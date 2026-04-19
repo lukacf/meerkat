@@ -92,6 +92,11 @@ pub struct SessionLlmCapabilitySurface {
     pub vision: bool,
     pub image_tool_results: bool,
     pub supports_web_search: bool,
+    /// Whether the resolved model exposes a realtime bidirectional streaming
+    /// transport. Drives capability-based auto attach/detach in
+    /// `reconfigure_live_topology` and `apply_capability_driven_realtime_transport`.
+    #[serde(default)]
+    pub realtime: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_secs: Option<u64>,
 }

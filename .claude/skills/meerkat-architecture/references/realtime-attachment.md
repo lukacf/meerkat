@@ -5,45 +5,57 @@ live-topology reconfigure flow, provider callback authority epochs, or
 the peer-response-terminal context append path.
 
 User-facing companion: `docs/guides/realtime.mdx`. That guide is the
-source of truth for the public attach/detach surface, the state enum
-table, and the authority-epoch contract. This reference covers the
+source of truth for the capability-driven public model (choose a
+realtime-capable model; transport attaches automatically), the state
+enum table, and the authority-epoch contract. This reference covers the
 internal DSL fields, invariants, and shell↔DSL routing used when
 modifying the implementation.
 
-## Public vocabulary
+## Capability-driven public surface
 
-Public API surfaces describe `realtime`, not `voice`. Converged terms:
+Realtime is a delivery mode of the session's LLM, not a separate
+subsystem. `ModelCapabilities.realtime: bool` (defined in
+`meerkat-models/src/capabilities/mod.rs`, projected onto
+`ModelProfile.realtime` in `meerkat-models/src/profile/mod.rs`) drives
+all transport attach/detach decisions. There is no caller-initiated
+attach/detach RPC.
 
-- `runtime/realtime_attachment_status` — runtime-owned status projection
-- `mob/realtime_attach` / `mob/realtime_detach` — per-member attach/detach
-- `mob/member_status.realtime_attachment_status` — per-member projection
+Public vocabulary:
+
+- `runtime/realtime_attachment_status` — runtime-owned status projection (single session)
+- `runtime/realtime_attachment_statuses` — batch projection
+- `realtime/open_info` / `realtime/status` / `realtime/capabilities` — product-layer bootstrap
+
+Previously public methods, now deleted:
+
+- `mob/realtime_attach` / `mob/realtime_detach` — removed (T6b)
+- `MobHandle::realtime_attach` / `realtime_detach` — removed (T5h)
+- `RealtimeChannelTarget::MobMemberTarget` — removed (T5i); callers pass `SessionTarget` directly
+- `MemberVoiceIntentSet` / `MemberVoiceIntentCleared` events — deprecated, replay as no-ops (T6c)
+
+Runtime-internal methods still named `attach_live` / `detach_live` /
+`reconfigure_live_topology` on `MeerkatMachine` — these are called by
+the capability-driven policy (below), not by remote callers.
 
 `RealtimeAttachmentStatus` enum variants (runtime-owned):
 
-- `Unattached` — session not registered or no intent present
-- `IntentPresentUnbound` — operator requested live; binding not live yet
+- `Unattached` — session's resolved model is not realtime-capable
+- `IntentPresentUnbound` — runtime has begun bringing up a binding
 - `BindingNotReady` — binding exists; provider hasn't confirmed readiness
 - `BindingReady` — provider reports realtime transport ready
-- `ReplacementPending` — new authority minted; old binding draining
-- `ReattachRequired` — prior binding invalidated; caller must reattach
+- `ReplacementPending` — new authority minted (e.g. during reconfigure); old binding draining
+- `ReattachRequired` — prior binding invalidated by a post-detach failure; reconfigure required
 
 ## DSL state (catalog + runtime, both in sync)
 
 `MeerkatMachineState`:
 
 ```
-realtime_intent_present: bool,              // projected from mob voice intent
 realtime_binding_state: String,             // "Unbound" | "BindingNotReady" | ...
 realtime_binding_authority_epoch: Option<u64>,
 realtime_reattach_required: bool,
 realtime_next_authority_epoch: u64,         // monotonic; rotates on bind/detach
 live_topology_phase: String,                // "Idle" | "Reconfiguring" | "Detached" | ...
-```
-
-`MobMachineState`:
-
-```
-member_voice_intent: Set<AgentIdentity>,    // survives respawn
 ```
 
 ### Invariants
@@ -62,10 +74,9 @@ member_voice_intent: Set<AgentIdentity>,    // survives respawn
 ## DSL inputs (MeerkatMachine)
 
 Realtime binding:
-- `ProjectRealtimeIntent { present }` — shell reconciler from mob
 - `BeginRealtimeBinding` — mint new authority epoch
-- `ReplaceRealtimeBinding` — swap while preserving intent
-- `DetachRealtimeBinding` — drop binding, keep intent
+- `ReplaceRealtimeBinding` — swap while preserving session identity
+- `DetachRealtimeBinding` — drop binding
 - `RequireRealtimeReattach` — invalidate, require fresh attach
 - `PublishRealtimeSignal { authority_epoch, next_binding_state }` — provider callback
 
@@ -93,23 +104,47 @@ realtime_binding_authority_epoch`. Stale tokens are rejected.
 
 No `apply()` method, no transitions — it's a token.
 
-## Public methods (meerkat-runtime)
+## Capability-driven transport policy
 
-On `MeerkatMachine`:
+Implementation: `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs`
+(`apply_capability_driven_realtime_transport`).
 
-- `project_realtime_attachment_intent(&self, &SessionId, bool)` — shell
-  reconciler from mob `MemberVoiceIntentSet`/`MemberVoiceIntentCleared`
+At session-init time and at the final step of `reconfigure_live_topology`,
+the runtime hydrates `SessionLlmCapabilitySurface.realtime` (populated in
+`meerkat-rpc/src/session_runtime.rs::profile_to_capability_surface` from
+the resolved `ModelProfile`) and branches:
+
+- Target is realtime-capable and current binding is absent → call
+  `attach_live` internally (mints authority epoch via
+  `BeginRealtimeBinding`).
+- Target is not realtime-capable and a binding exists → call
+  `detach_live` internally (via `DetachRealtimeBinding`).
+- Target is realtime-capable and a binding exists on a different identity
+  → during reconfigure, the `Detached` step already dropped the binding;
+  the capability branch calls `attach_live` to mint a fresh authority.
+
+There is no caller-initiated attach path.
+
+## Public methods (meerkat-runtime, internal to host composition)
+
+On `MeerkatMachine` (called by host/facade code, not exposed as RPC):
+
 - `attach_live(&self, &SessionId) -> Result<RealtimeAttachmentSignalAuthority, ...>` —
-  gated on live executor; mints authority
-- `replace_realtime_attachment(&self, &SessionId) -> ...` — same gate
+  gated on live executor; mints authority. Called by the capability policy.
+- `replace_realtime_attachment(&self, &SessionId) -> ...` — same gate.
 - `detach_live(&self, &SessionId) -> ...`
 - `require_realtime_attachment_reattach(&self, &SessionId) -> ...`
 - `require_realtime_attachment_reattach_for_authority(&self, authority) -> ...` —
-  only if caller still presents current authority
+  only if caller still presents current authority.
 - `publish_realtime_attachment_signal(&self, authority, status) -> ...` —
-  routes through DSL `PublishRealtimeSignal` with epoch validation
-- `reconfigure_live_topology(&self, authority, SessionLlmReconfigureRequest) -> Result<new_authority, ...>` —
-  orchestrates the full 6-step DSL flow (see below)
+  routes through DSL `PublishRealtimeSignal` with epoch validation.
+- `reconfigure_live_topology(&self, authority, SessionLlmReconfigureRequest) -> Result<Option<new_authority>, ...>` —
+  orchestrates the full 6-step DSL flow; final step branches on
+  target capability's `realtime` bit.
+- `apply_capability_driven_realtime_transport(&self, &SessionId) -> ...` —
+  session-init seam for the capability-driven policy.
+- `realtime_attachment_status(&self, &SessionId)` — read the
+  runtime-owned projection.
 
 ## Live-topology reconfigure orchestration
 
@@ -134,7 +169,9 @@ Phases:
    reattach required).
 6. Host `apply_live_session_tool_visibility_state` + persist +
    `ApplyLiveTopologyVisibility`; then `CompleteLiveTopology`; then
-   `attach_live` to mint a fresh authority for the caller.
+   final capability branch — if target is realtime-capable, call
+   `attach_live` to mint a fresh authority; else return None and leave
+   status `Unattached`.
 
 ## Context-only staged primitive routing (peer_response_terminal)
 
@@ -162,35 +199,33 @@ channels) see the token/intent durably.
 
 ## Shell ↔ DSL routing
 
-All realtime public methods in `meerkat-runtime` stage DSL inputs via
+All realtime methods in `meerkat-runtime` stage DSL inputs via
 `stage_session_dsl_input(&session_id, dsl::MeerkatMachineInput::...,
 "context")`. None mutate shell state directly. Provider callback
 validation happens inside the DSL guard, not in shell pre-checks.
 
 ## Known limitations (out of realtime port scope)
 
-- **Inert `MobMachineState.member_voice_intent`**: `MobActor`'s
-  `dsl_authority` isn't behind an interior-mutability primitive, so
-  `handle_realtime_attach`/`detach` (which take `&self`) can't stage
-  `RealtimeAttach`/`RealtimeDetach` DSL inputs. The shell roster's
-  `voice_intent_present` is the current source of truth; DSL field
-  tracks empty. Parity evaluator projects roster truth into the
-  `member_voice_intent` key for coverage. Full fix requires wrapping
-  `MobActor.dsl_authority` in `Arc<Mutex<_>>` (mirror MeerkatMachine).
 - **Catalog-runtime DSL divergence on `MarkLiveTopologyDetached`**:
   catalog guards on `current_run_id == None`; runtime guards on
   `turn_phase ∈ {Ready, DrainingBoundary, ...}`. Catalog doesn't model
   `turn_phase` and is a strict over-approximation; TLC-proven
   invariants still hold in production.
+- **OpenAI Realtime only**: `gpt-realtime` is the only production
+  realtime-capable model today. Gemini `*-live*` models are reserved
+  in the capability derivation but have no production entries.
 
 ## Key files
 
+- `meerkat-models/src/capabilities/mod.rs` — `ModelCapabilities.realtime`
+- `meerkat-models/src/profile/mod.rs` — `ModelProfile.realtime` (projection)
+- `meerkat-models/src/profile/openai.rs` — `realtime: m.contains("realtime")`
 - `meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs` — catalog DSL
 - `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs` — catalog DSL
 - `meerkat-runtime/src/meerkat_machine/dsl.rs` — runtime DSL (production)
 - `meerkat-runtime/src/meerkat_machine/session_management.rs` — public methods
-- `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs` — reconfigure_live_topology
+- `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs` — reconfigure_live_topology + capability-driven transport
 - `meerkat-runtime/src/meerkat_machine/dispatch_control.rs` — RuntimeRealtimeAttachmentStatus projection
-- `meerkat-runtime/src/meerkat_machine_types.rs` — `RealtimeAttachmentSignalAuthority`, `RealtimeAttachmentStatus`
+- `meerkat-runtime/src/meerkat_machine_types.rs` — `RealtimeAttachmentSignalAuthority`, `RealtimeAttachmentStatus`, `SessionLlmCapabilitySurface.realtime`
 - `meerkat-runtime/src/meerkat_machine_types.rs::SessionLlmReconfigureHost` — shell host trait
 - `docs/architecture/identity-first-live-voice-proposal.md` — design notes

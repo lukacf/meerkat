@@ -271,7 +271,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     println!(
         "Pipeline '{}' created (status: {:?})",
         handle.mob_id(),
-        handle.status()
+        handle.status().await?
     );
 
     // Spawn the coordinator.
@@ -396,7 +396,7 @@ content = "Execute deployment: build release, run smoke tests. Report pass/fail.
     }
 
     // Final status.
-    println!("\nPipeline status: {:?}", handle.status());
+    println!("\nPipeline status: {:?}", handle.status().await?);
     println!("Members: {}", handle.list_members().await.len());
 
     // Clean up.

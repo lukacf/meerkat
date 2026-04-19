@@ -51,10 +51,10 @@ impl PendingSpawnLineage {
             .collect()
     }
 
-    pub(super) fn contains_member(&self, meerkat_id: &MeerkatId) -> bool {
+    pub(super) fn contains_member(&self, agent_identity: &MeerkatId) -> bool {
         self.metadata
             .values()
-            .any(|pending| &pending.meerkat_id == meerkat_id)
+            .any(|pending| &pending.agent_identity == agent_identity)
     }
 
     pub(super) fn insert(
@@ -115,11 +115,11 @@ impl PendingSpawnLineage {
         Some(slot)
     }
 
-    pub(super) fn take_for_member(&mut self, meerkat_id: &MeerkatId) -> Vec<PendingSpawnSlot> {
+    pub(super) fn take_for_member(&mut self, agent_identity: &MeerkatId) -> Vec<PendingSpawnSlot> {
         let tickets: Vec<_> = self
             .metadata
             .iter()
-            .filter(|(_, pending)| &pending.meerkat_id == meerkat_id)
+            .filter(|(_, pending)| &pending.agent_identity == agent_identity)
             .map(|(&ticket, _)| ticket)
             .collect();
         let mut canceled = Vec::new();

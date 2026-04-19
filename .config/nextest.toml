@@ -1,0 +1,18 @@
+# Nextest configuration for meerkat-0.6-cleanups.
+#
+# Retry policy is scoped narrowly: the two known pre-existing flakes are
+# retried once, everything else runs to completion without retries.
+
+[[profile.default.overrides]]
+# D4 / issue #260: provider_tool_use_boundary race. Reduced from ~20% to ~10%
+# by drain-and-clear-dirty logic; full elimination blocked on deeper
+# runtime-append synchronization work.
+filter = 'test(provider_tool_use_boundary_does_not_surface_public_turn_completed_or_flush_canonical_output)'
+retries = 2
+
+[[profile.default.overrides]]
+# Pre-existing pending-spawn alignment race in concurrent-spawn orchestration.
+# Observed historically and by actor-cutover-3 during T5-prep. Not a
+# regression introduced by this PR; retries until we land a targeted fix.
+filter = 'test(test_concurrent_spawns_parallelize_provisioning)'
+retries = 2

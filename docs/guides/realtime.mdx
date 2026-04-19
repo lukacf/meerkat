@@ -1,87 +1,183 @@
 ---
 title: "Realtime voice"
-description: "Attach an OpenAI Realtime audio channel to a session or mob member while keeping the session as the source of conversational truth."
+description: "Enable low-latency audio on a session by choosing a realtime-capable model — transport attach/detach is automatic."
 icon: "microphone"
 ---
 
-Realtime in Meerkat is a **live audio overlay on top of an ordinary session** — not a parallel conversation model. The session owns history, tools, and context; the realtime attachment is a separately-managed binding to an OpenAI Realtime transport whose lifecycle and authority are enforced by the `MeerkatMachine` DSL.
+Realtime in Meerkat is **a delivery mode of the session's LLM, not a separate subsystem**. To use realtime audio on a session, pick a realtime-capable model (for example `gpt-realtime`). The runtime attaches an OpenAI Realtime transport automatically when the resolved model advertises `ModelCapabilities.realtime == true`, and detaches automatically when a reconfigure swaps the session onto a non-realtime model. There is no caller-initiated attach RPC.
 
-This guide covers the public attach/detach surface, the runtime-owned attachment state enum, the authority-epoch token that provider callbacks must present, and the live-topology reconfigure flow that swaps provider/model on a realtime-attached session.
+This guide covers the capability-driven model, how to enable realtime on a session, how to observe the attachment status, and the live-topology reconfigure flow for swapping the session's model while a realtime binding is active.
 
 <Note>
-Public API surfaces are named `realtime`, not `voice`. The converged wire vocabulary is `runtime/realtime_attachment_status`, `mob/realtime_attach`, `mob/realtime_detach`, and `mob/member_status.realtime_attachment_status`. Internal Rust symbols still use `live_` in some places (for example `attach_live`, `detach_live`) — the external contract is always `realtime_*`.
+Public API surfaces describe `realtime`, not `voice`. The converged vocabulary is `ModelCapabilities.realtime`, `runtime/realtime_attachment_status`, and the `realtime/*` bootstrap methods (`realtime/open_info`, `realtime/status`, `realtime/capabilities`). Internal Rust symbols still use `live_` in some places (for example `attach_live`, `detach_live`, `reconfigure_live_topology`) — those are runtime-internal implementation details, not a caller-invoked surface.
 </Note>
 
 ## Mental model
 
-A session is the trunk of the conversation: messages, tool calls, committed history, compaction. A realtime attachment is a side channel that rides on top of that trunk:
+A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.2`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
 
 ```text
         +--------------------------+
-        |    Session (trunk)       |   history, tools, context
-        |  MeerkatMachine kernel   |
+        |   Session (history,      |
+        |   tools, context)        |
         +--------------------------+
                      |
-                     | RealtimeAttachmentSignalAuthority { session_id, authority_epoch }
+                     | session.model = "gpt-realtime"
                      v
         +--------------------------+
-        |  OpenAI Realtime binding |   audio ingress / egress
-        |  (provider transport)    |
-        +--------------------------+
+        | OpenAI Realtime binding  |  audio ingress/egress,
+        | (runtime-managed)        |  committed into session
+        +--------------------------+                     at turn boundaries
 ```
 
 Key invariants:
 
-- The session is the source of conversational truth. Committing text, tool calls, and turn boundaries all route through the same agent loop as non-realtime sessions.
-- The attachment has its own state (`RealtimeAttachmentStatus`) and its own authority epoch. Both are session-scoped.
-- Provider callbacks must present the current authority token. Stale tokens are rejected by the DSL guard before any mutation lands.
-- In a mob, each member is attached independently by `AgentIdentity`. Mob-level intent is durable and survives respawn; the binding under it is per-runtime.
+- **One canonical history.** The session is the source of conversational truth. Realtime audio chunks commit into the same history as non-realtime turns, at turn boundaries.
+- **Capability drives transport.** `ModelCapabilities.realtime` is the only signal that determines whether a realtime binding exists. No caller toggles it on or off directly.
+- **Attach/detach is automatic.** When a session is initialized or reconfigured, the runtime inspects the resolved model's realtime capability and brings a binding up or tears it down to match.
+- **Authority epochs guard provider callbacks.** Every binding has an authority-epoch token; the provider transport presents it on every callback. Stale tokens are rejected by the DSL guard before any mutation lands.
 
-## Identity-first attachment
+## Realtime-capable models
 
-Meerkat separates the **durable per-member intent** ("this member should be live") from the **per-binding authority epoch** ("this is the current transport under that intent"):
+`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`). Capability is derived from the model family:
 
-| Concept | Key | Survives respawn? | Rotates on... |
-|---------|-----|-------------------|---------------|
-| Voice intent (mob-owned) | `AgentIdentity` | Yes | Never (only explicit attach/detach) |
-| Binding authority epoch (runtime-owned) | `SessionId` | No | Every bind, replace, detach, reconfigure |
+- **OpenAI**: any model whose name contains `realtime` (currently **only `gpt-realtime`**; the legacy `gpt-4o-realtime-preview` was the predecessor and is now superseded).
+- **Gemini**: reserved for future `*-live*` endpoints — no production models today.
+- **Anthropic**: no realtime-capable models today.
+- **Self-hosted**: `realtime = false` by default.
 
-Mob-level attach/detach keys on `AgentIdentity`. Runtime-level binding mutations (which provider callbacks trigger) key on `SessionId` + `authority_epoch`. When a member is respawned, the voice intent persists, the old session disappears, and the runtime mints a fresh authority for the new session's binding.
+Use `GET /models/catalog` (REST) or `models/catalog` (RPC) to inspect which models advertise `realtime == true` in the running runtime.
 
-## Attachment states
+## Enabling realtime on a session
 
-The runtime-owned `RealtimeAttachmentStatus` enum is the single projection every surface surfaces through `runtime/realtime_attachment_status` and `mob/member_status.realtime_attachment_status`:
+Realtime is enabled by pointing the session at a realtime-capable model. Two paths:
+
+### At session creation
+
+Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
+
+<CodeGroup>
+```json JSON-RPC
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/create",
+  "params": {
+    "prompt": "Let's talk.",
+    "model": "gpt-realtime",
+    "provider": "openai"
+  }
+}
+```
+
+```bash REST
+curl -X POST http://127.0.0.1:8080/sessions \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Let'"'"'s talk.","model":"gpt-realtime","provider":"openai"}'
+```
+
+```python Python SDK
+from meerkat import MeerkatClient
+
+async with MeerkatClient() as client:
+    await client.connect(realm_id="team-alpha")
+    session = await client.create_session(
+        prompt="Let's talk.",
+        model="gpt-realtime",
+        provider="openai",
+    )
+```
+</CodeGroup>
+
+The runtime resolves the model, sees `ModelCapabilities.realtime == true`, and brings up the realtime transport automatically. Poll `runtime/realtime_attachment_status` (below) to confirm the binding has reached `BindingReady`.
+
+### Configuration defaults
+
+The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime"` makes realtime the default for the whole install. See the [Configuration guide](/guides/configuration).
+
+### Mid-session: swap to a realtime-capable model
+
+If a session was started on a non-realtime model and later needs realtime, a reconfigure swap is required. The runtime owns the orchestration via `MeerkatMachine::reconfigure_live_topology` (see [Live-topology reconfigure](#live-topology-reconfigure) below). Host surfaces expose this through the `SessionLlmReconfigureHost` trait; no public RPC exists to trigger the swap from a remote caller today — it is invoked internally by host code (for example during a mob member profile change or a model-routing policy decision).
+
+When the swap targets a realtime-capable model, the runtime mints a fresh authority epoch and brings the binding up. When it targets a non-realtime model, the existing binding is torn down and the response surfaces `ValidationFailed` so the caller knows the binding is gone.
+
+## Observing attachment status
+
+The runtime-owned `RealtimeAttachmentStatus` is surfaced by `runtime/realtime_attachment_status`:
+
+<CodeGroup>
+```json JSON-RPC (single session)
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "runtime/realtime_attachment_status",
+  "params": {"session_id": "01936f8a-7b2c-7000-8000-000000000001"}
+}
+// => { "session_id": "...", "status": "binding_ready" }
+```
+
+```json JSON-RPC (batch)
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "runtime/realtime_attachment_statuses",
+  "params": {"session_ids": ["01936f8a-...", "01936f8b-..."]}
+}
+// => { "statuses": [{ "session_id": "...", "status": "binding_ready" }, ...] }
+```
+
+```bash REST
+curl http://127.0.0.1:8080/runtime/01936f8a-.../realtime_attachment_status
+# => {"session_id": "...", "status": "binding_ready"}
+```
+</CodeGroup>
+
+### Attachment states
 
 | State | Meaning | Terminal? |
 |-------|---------|-----------|
-| `Unattached` | No intent registered, no binding | stable |
-| `IntentPresentUnbound` | Operator requested realtime; runtime has not bound yet | transient |
-| `BindingNotReady` | Runtime opened a binding; provider has not confirmed readiness | transient |
-| `BindingReady` | Provider reports the realtime transport is live; audio flowing | stable |
-| `ReplacementPending` | New authority minted; old binding draining | transient |
-| `ReattachRequired` | Prior binding invalidated; caller must reattach explicitly | stable (requires action) |
+| `Unattached` | Session's model is not realtime-capable | stable |
+| `IntentPresentUnbound` | Runtime has begun bringing up a binding | transient |
+| `BindingNotReady` | Binding opened; provider has not confirmed readiness | transient |
+| `BindingReady` | Provider reports transport is live; audio flowing | stable |
+| `ReplacementPending` | New authority minted (e.g. during reconfigure); old binding draining | transient |
+| `ReattachRequired` | Prior binding invalidated by a post-detach failure; a fresh reconfigure is needed | stable (requires action) |
 
-`Unattached + Some(epoch)` and `BindingReady + None` are TLC-unreachable by invariant (`realtime_binding_epoch_consistency`). `realtime_next_authority_epoch` is monotonic — every transition that mints an epoch produces a strictly greater value than any prior epoch.
+Invariants (TLC-verified): `Unattached` always has `authority_epoch == None`; `BindingReady` always has `authority_epoch == Some(_)`. The `realtime_next_authority_epoch` counter is monotonic — every new binding mints a strictly greater epoch than any prior binding on the same session.
 
 ### State transitions
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unattached
-    Unattached --> IntentPresentUnbound: attach_live
+    Unattached --> IntentPresentUnbound: session init on realtime-capable model
     IntentPresentUnbound --> BindingNotReady: runtime opens binding
-    BindingNotReady --> BindingReady: publish_realtime_signal(BindingReady)
-    BindingReady --> ReplacementPending: replace_realtime_attachment
-    ReplacementPending --> BindingReady: publish_realtime_signal(BindingReady)
-    BindingReady --> Unattached: detach_live
-    BindingReady --> ReattachRequired: require_realtime_attachment_reattach
-    ReplacementPending --> ReattachRequired: require_realtime_attachment_reattach
-    ReattachRequired --> IntentPresentUnbound: attach_live (fresh authority)
-    BindingNotReady --> Unattached: detach_live
-    IntentPresentUnbound --> Unattached: detach_live
+    BindingNotReady --> BindingReady: provider confirms ready
+    BindingReady --> ReplacementPending: reconfigure to another realtime-capable model
+    ReplacementPending --> BindingReady: new binding ready
+    BindingReady --> Unattached: reconfigure to non-realtime model
+    BindingReady --> ReattachRequired: post-detach failure during reconfigure
+    ReattachRequired --> IntentPresentUnbound: successful reconfigure onto realtime-capable model
 ```
 
-Intent (mob-owned) and binding state (runtime-owned) are orthogonal. Detach drops the binding but the mob may still hold the per-member intent depending on which surface detached — `mob/realtime_detach` clears both, provider-level `require_realtime_attachment_reattach` clears only the binding and flips status to `ReattachRequired`.
+All transitions are initiated by the runtime's capability-driven transport policy, not by callers.
+
+## Realtime bootstrap methods
+
+Three product-layer RPC methods help callers open and inspect the actual audio transport on top of the attachment:
+
+| Method | Purpose |
+|--------|---------|
+| `realtime/open_info` | Issue a single-use bootstrap token for opening a realtime WebSocket |
+| `realtime/status` | Read product-layer realtime channel status for a session |
+| `realtime/capabilities` | Read product-layer realtime capabilities (supported input/output kinds, interrupt/transcript support) |
+
+These are emitted by `rkat-rpc`'s realtime WebSocket listener. Callers typically:
+
+1. Create or resume a session on a realtime-capable model.
+2. Poll `runtime/realtime_attachment_status` until it reports `binding_ready`.
+3. Call `realtime/open_info` to obtain a bootstrap token.
+4. Open a WebSocket to the bootstrap URL to exchange audio chunks.
 
 ## Authority token
 
@@ -94,165 +190,15 @@ pub struct RealtimeAttachmentSignalAuthority {
 }
 ```
 
-- `attach_live` and `replace_realtime_attachment` mint a new authority by incrementing `realtime_next_authority_epoch` and returning the token.
+- The runtime mints a fresh authority when it brings a binding up.
 - The provider transport carries the token on every callback (`publish_realtime_attachment_signal`, etc.).
-- The DSL `PublishRealtimeSignal` guard compares the incoming `authority_epoch` against `realtime_binding_authority_epoch`. Stale tokens are rejected **before** any state mutation — no partial updates, no races against in-progress topology reconfigure.
+- The DSL `PublishRealtimeSignal` guard compares the incoming `authority_epoch` against `realtime_binding_authority_epoch`. Stale tokens are rejected **before** any state mutation — no partial updates, no races against in-progress reconfigure.
 
 This is a **token, not a state machine**: it has no `apply()` method. Its only job is to let the runtime prove, at every provider callback, that the caller is still the current authority under the current binding.
 
-## Public API surface
-
-<Tabs>
-  <Tab title="JSON-RPC">
-    ```json
-    // Attach realtime to a mob member (durable intent)
-    {"jsonrpc":"2.0","id":1,"method":"mob/realtime_attach","params":{
-      "mob_id": "release-triage",
-      "agent_identity": "lead-1"
-    }}
-    // => { "attached": true }
-
-    // Inspect the runtime-owned attachment status for a session
-    {"jsonrpc":"2.0","id":2,"method":"runtime/realtime_attachment_status","params":{
-      "session_id": "01936f8a-7b2c-7000-8000-000000000001"
-    }}
-    // => { "session_id": "...", "status": "binding_ready" }
-
-    // Detach
-    {"jsonrpc":"2.0","id":3,"method":"mob/realtime_detach","params":{
-      "mob_id": "release-triage",
-      "agent_identity": "lead-1"
-    }}
-    // => { "detached": true }
-
-    // Per-member status includes the projection
-    {"jsonrpc":"2.0","id":4,"method":"mob/member_status","params":{
-      "mob_id": "release-triage",
-      "agent_identity": "lead-1"
-    }}
-    // => { "status": "running", "realtime_attachment_status": "binding_ready", ... }
-    ```
-
-    Typed request/response types on the wire are `MobRealtimeAttachParams` / `MobRealtimeAttachResult`, `MobRealtimeDetachParams` / `MobRealtimeDetachResult`.
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    # Attach realtime to a mob member
-    curl -X POST \
-      http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/attach
-    # => {"attached": true}
-
-    # Read runtime-owned realtime attachment status
-    curl http://127.0.0.1:8080/runtime/01936f8a-.../realtime_attachment_status
-    # => {"session_id": "...", "status": "binding_ready"}
-
-    # Detach realtime from a mob member
-    curl -X POST \
-      http://127.0.0.1:8080/mob/release-triage/members/lead-1/realtime/detach
-    # => {"detached": true}
-    ```
-
-    Routes: `POST /mob/{id}/members/{agent_identity}/realtime/attach`, `POST /mob/{id}/members/{agent_identity}/realtime/detach`, `GET /runtime/{id}/realtime_attachment_status`.
-  </Tab>
-  <Tab title="MCP bootstrap">
-    Public MCP tools (exposed by `meerkat-mcp-server` + `meerkat-mob-mcp`):
-
-    | Tool | Purpose |
-    |------|---------|
-    | `meerkat_realtime_open_info` | Issue a single-use bootstrap token for opening a realtime WebSocket |
-    | `meerkat_realtime_status` | Read product-layer realtime channel status for a session or mob member |
-    | `meerkat_realtime_capabilities` | Read product-layer realtime capabilities for a target |
-
-    Direct attach/detach is not exposed as a public MCP tool. MCP clients that orchestrate mobs should use the JSON-RPC `mob/realtime_attach` / `mob/realtime_detach` surface via the `meerkat_mob_*` bridge. The `MobMcpState` service layer (internal) exposes `mob_realtime_attach`, `mob_realtime_detach`, and `realtime_session_realtime_attachment_status` for host integrations.
-  </Tab>
-  <Tab title="Python SDK">
-    ```python
-    from meerkat import MeerkatClient
-
-    async with MeerkatClient() as client:
-        await client.connect(realm_id="team-alpha")
-        mob = await client.create_mob(definition={"id": "release-triage", "profiles": {...}})
-        await mob.spawn(profile="lead", agent_identity="lead-1")
-
-        # Attach realtime
-        await mob.realtime_attach("lead-1")
-
-        # Inspect status
-        status = await mob.member_status("lead-1")
-        print(status.realtime_attachment_status)  # "binding_ready"
-
-        # Detach
-        await mob.realtime_detach("lead-1")
-    ```
-
-    Public method names on the `Mob` wrapper are `realtime_attach(agent_identity)` and `realtime_detach(agent_identity)`. The field on `member_status()` is `realtime_attachment_status`. The public `meerkat_attachmob_member_live` and `detach_mob_member_live` helpers on the lower-level client are internal aliases that send the same wire methods.
-  </Tab>
-  <Tab title="TypeScript SDK">
-    ```typescript
-    import { MeerkatClient } from "@rkat/sdk";
-
-    const client = new MeerkatClient();
-    await client.connect({ realmId: "team-alpha" });
-
-    const mob = await client.createMob({ definition: { id: "release-triage", profiles: {...} } });
-    await mob.spawn({ profile: "lead", agentIdentity: "lead-1" });
-
-    // Attach realtime
-    await client.attachMobMemberLive("release-triage", "lead-1");
-
-    // Inspect status
-    const status = await client.mobMemberStatus("release-triage", "lead-1");
-    console.log(status.liveAttachmentStatus); // "binding_ready"
-
-    // Detach
-    await client.detachMobMemberLive("release-triage", "lead-1");
-    ```
-
-    The TypeScript SDK retains `attachMobMemberLive`, `detachMobMemberLive`, and the `liveAttachmentStatus` field name for backwards compatibility, but the wire method names and values it sends/receives use the converged `realtime_*` vocabulary.
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    use meerkat_runtime::{MeerkatMachine, RealtimeAttachmentSignalAuthority};
-    use meerkat_core::SessionId;
-
-    // Mint a fresh authority epoch; returns the token to hand to the provider.
-    let authority: RealtimeAttachmentSignalAuthority =
-        machine.attach_live(&session_id).await?;
-
-    // Provider callbacks present the token on every signal publish.
-    machine
-        .publish_realtime_attachment_signal(
-            authority.clone(),
-            meerkat_runtime::RealtimeAttachmentStatus::BindingReady,
-        )
-        .await?;
-
-    // Project the runtime-owned status (same value RPC/REST expose).
-    let status = machine.realtime_attachment_status(&session_id).await?;
-
-    // Detach — drops the binding, preserves mob-level intent if any.
-    machine.detach_live(&session_id).await?;
-    ```
-
-    Public methods on `MeerkatMachine`:
-
-    | Method | Purpose |
-    |--------|---------|
-    | `attach_live(&SessionId)` | Mint a fresh authority epoch; gated on live executor binding |
-    | `replace_realtime_attachment(&SessionId)` | Rotate authority while preserving intent |
-    | `detach_live(&SessionId)` | Drop the binding |
-    | `require_realtime_attachment_reattach(&SessionId)` | Invalidate binding; flip to `ReattachRequired` |
-    | `require_realtime_attachment_reattach_for_authority(authority)` | Same, but only if caller still presents current authority |
-    | `publish_realtime_attachment_signal(authority, status)` | Provider callback (epoch-validated) |
-    | `project_realtime_attachment_intent(&SessionId, bool)` | Shell reconciler from mob `MemberVoiceIntent*` events |
-    | `realtime_attachment_status(&SessionId)` | Read the runtime-owned projection |
-    | `reconfigure_live_topology(authority, SessionLlmReconfigureRequest)` | Swap provider/model while realtime-attached |
-  </Tab>
-</Tabs>
-
 ## Live-topology reconfigure
 
-Swapping provider or model on a session that currently has a realtime attachment requires a coordinated detach/rebind — you cannot hot-swap the LLM client underneath an open Realtime socket. `reconfigure_live_topology` orchestrates the full 6-phase DSL-guarded flow:
+Swapping provider or model on a session that currently has a realtime attachment requires a coordinated detach/rebind — you cannot hot-swap the LLM client underneath an open Realtime socket. `MeerkatMachine::reconfigure_live_topology` orchestrates the full 6-phase DSL-guarded flow:
 
 ```text
 Idle --(BeginLiveTopologyReconfigure)--> Reconfiguring
@@ -277,25 +223,20 @@ Idle --(BeginLiveTopologyReconfigure)--> Reconfiguring
                                               v
                                              Idle
                                               |
-                                              | attach_live (mint fresh authority)
+                                              | if target model is realtime-capable:
+                                              |     mint fresh authority, rebind
+                                              | else:
+                                              |     remain Unattached
                                               v
-                                        IntentPresentUnbound → BindingReady
+                                   BindingReady or Unattached
 ```
 
-Call site:
+### Final-step branch (capability-driven)
 
-```rust
-let new_authority = machine
-    .reconfigure_live_topology(
-        current_authority,
-        SessionLlmReconfigureRequest {
-            model: Some("gpt-5.2".into()),
-            provider: Some("openai".into()),
-            provider_params: None,
-        },
-    )
-    .await?;
-```
+The last step of the flow inspects `SessionLlmCapabilitySurface.realtime` for the resolved target model:
+
+- **Target is realtime-capable** → runtime calls `attach_live` internally, minting a new authority epoch and bringing the new binding up.
+- **Target is not realtime-capable** → runtime returns `ValidationFailed` to the caller. The previous binding is already gone (torn down in the `Detached` step); the caller learns the session has swapped off a realtime model.
 
 ### Guard and failure model
 
@@ -310,7 +251,7 @@ Two failure modes, chosen by *when* the failure happens:
 | Failure path | When | Effect |
 |--------------|------|--------|
 | `AbortLiveTopologyBeforeDetach` | Host failed during hydrate/resolve, **before** `MarkLiveTopologyDetached` succeeded | Binding preserved, caller may retry |
-| `FailLiveTopologyAfterDetach` | Host failed **after** the binding was already dropped | Binding gone, status flips to `ReattachRequired`, caller must reattach explicitly |
+| `FailLiveTopologyAfterDetach` | Host failed **after** the binding was already dropped | Binding gone, status flips to `ReattachRequired`, caller must retry the reconfigure |
 
 The distinction is deliberate: once the binding is gone, deterministic recovery requires rebuilding from the new LLM identity, not rolling back to a provider transport that no longer matches the configured model.
 
@@ -318,91 +259,64 @@ The distinction is deliberate: once the binding is gone, deterministic recovery 
 
 Step 2 of the flow drives any in-flight turn through `cancel_after_boundary_inner`, which delivers `RunControlCommand::Cancel` to the agent loop. This is idempotent and gated on control-channel presence — calling it on an idle session is a no-op. It ensures the turn reaches a safe boundary before the guard on `MarkLiveTopologyDetached` allows the binding to drop.
 
-## End-to-end Rust example
+## End-to-end example
 
-```rust
-use std::sync::Arc;
-use meerkat::{AgentFactory, build_persistent_service, open_realm_persistence_in};
-use meerkat_core::service::InitialTurnPolicy;
-use meerkat_mob::{AgentIdentity, MobBuilder, MobDefinition, MobStorage};
-use meerkat_runtime::{MeerkatMachine, SessionLlmReconfigureRequest};
-use meerkat_store::RealmBackend;
+```python
+from meerkat import MeerkatClient
 
-async fn realtime_voice_flow() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Standard Meerkat setup: realm persistence + factory + service.
-    let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
-    let (_manifest, persistence) = open_realm_persistence_in(
-        &realms_root,
-        "voice-demo",
-        Some(RealmBackend::Sqlite),
-        None,
-    ).await?;
-    let factory = AgentFactory::new(realms_root.clone())
-        .runtime_root(realms_root.clone())
-        .builtins(true);
-    let service = build_persistent_service(factory, Default::default(), 64, persistence);
+async with MeerkatClient() as client:
+    await client.connect(realm_id="team-alpha")
 
-    // 2. Create a one-member mob with a realtime-capable profile.
-    let definition = MobDefinition::from_toml(r#"
-        id = "voice-demo"
-        [profiles.host]
-        model = "gpt-5.2"
-        provider = "openai"
-        peer_description = "Realtime host"
-    "#)?;
-    let handle = MobBuilder::new(definition, MobStorage::in_memory())
-        .with_session_service(service.clone().as_mob_session_service())
-        .create()
-        .await?;
-    handle.spawn_spec(
-        meerkat_mob::SpawnMemberSpec::new("host", AgentIdentity::from("host-1"))
-    ).await?;
+    # 1. Create a session on a realtime-capable model — transport attaches automatically.
+    session = await client.create_session(
+        prompt="Ready for voice.",
+        model="gpt-realtime",
+        provider="openai",
+    )
 
-    // 3. Stage durable realtime intent at the mob level.
-    handle.realtime_attach(AgentIdentity::from("host-1")).await?;
+    # 2. Wait for the binding to reach BindingReady.
+    while True:
+        status = await client.runtime_realtime_attachment_status(session.id)
+        if status.status == "binding_ready":
+            break
+        await asyncio.sleep(0.1)
 
-    // 4. Mint a runtime authority and hand it to the provider transport.
-    //    (Provider integration code lives in meerkat-client; it calls
-    //     publish_realtime_attachment_signal as the socket progresses.)
-    let machine: Arc<MeerkatMachine> = /* obtained from runtime bindings */ unimplemented!();
-    let session_id = handle.member_session_id(&AgentIdentity::from("host-1")).await?;
-    let authority = machine.attach_live(&session_id).await?;
+    # 3. Obtain a bootstrap token and open the audio WebSocket.
+    bootstrap = await client.realtime_open_info(session.id)
+    # ... open ws to bootstrap.url, exchange audio chunks ...
 
-    // 5. Hot-swap the LLM identity mid-call (e.g., Opus → GPT-5.2).
-    let new_authority = machine
-        .reconfigure_live_topology(
-            authority,
-            SessionLlmReconfigureRequest {
-                model: Some("gpt-5.2".into()),
-                provider: Some("openai".into()),
-                provider_params: None,
-            },
-        )
-        .await?;
-
-    // 6. Interrupt barge-in: from another task, force the current turn to cancel.
-    handle.force_cancel_member(AgentIdentity::from("host-1")).await?;
-
-    // 7. Detach realtime and clear mob intent.
-    handle.realtime_detach(AgentIdentity::from("host-1")).await?;
-    machine.detach_live(&session_id).await?;
-
-    Ok(())
-}
+    # 4. The session's history accumulates committed turns as audio commits
+    #    at turn boundaries — same as a text session.
+    history = await client.session_history(session.id)
 ```
+
+## Realtime and mobs
+
+Each mob member has its own session, so realtime attachment is per-member by construction. To make a member realtime-capable, set its profile's `model` to a realtime-capable model (for example in the `MobDefinition` TOML):
+
+```toml
+id = "voice-demo"
+
+[profiles.host]
+model = "gpt-realtime"
+provider = "openai"
+peer_description = "Realtime host"
+```
+
+Every member spawned under that profile is initialized on `gpt-realtime` and its session gets a realtime binding automatically. Use `runtime/realtime_attachment_statuses` with the member session IDs to observe attachment state across the whole mob in one round trip.
 
 ## Limitations and known gaps
 
-- **OpenAI Realtime only.** The shipped provider integration is OpenAI Realtime; other providers are not yet wired into the realtime transport layer.
+- **OpenAI Realtime only.** The shipped provider integration is OpenAI Realtime (`gpt-realtime`). Other providers are not yet wired into the realtime transport layer.
 - **Single realtime binding per session.** A session has at most one realtime attachment at a time. To attach multiple members, spawn them as separate mob members — each has its own session.
-- **Inert `MobMachine.member_voice_intent` DSL field.** `MobActor.dsl_authority` is not yet behind interior-mutability, so `&self` handlers cannot stage `RealtimeAttach` / `RealtimeDetach` DSL inputs. The shell roster's `voice_intent_present` remains the source of truth for mob-level intent; the DSL field is projected from the roster for parity coverage. See `.claude/skills/meerkat-architecture/references/realtime-attachment.md` for the architecture note and the full fix (wrap `dsl_authority` in `Arc<Mutex<_>>` — mirrors `MeerkatMachine`).
-- **Idle sessions reject attach.** `attach_live` / `replace_realtime_attachment` are gated on the presence of a live executor binding. Sessions that have never run a turn return `RuntimeDriverError::NotReady`; start a turn first (even a no-op prompt) or spawn via a mob.
-- **Catalog-runtime divergence on `MarkLiveTopologyDetached`.** The catalog guards on `current_run_id == None`; the runtime guards on `turn_phase ∈ {Ready, DrainingBoundary, Completed, Failed, Cancelled}`. The catalog is a strict over-approximation and the TLC-proven invariants still hold.
+- **Idle sessions cannot host a new binding.** The realtime transport is brought up as part of the executor binding; sessions that have never run a turn have no binding to attach to. Start a turn first (even a trivial prompt) or spawn via a mob to bring the executor online.
+- **No remote-callable reconfigure RPC.** Host code can call `reconfigure_live_topology` via `SessionLlmReconfigureHost`; there is no JSON-RPC or REST method that triggers a model swap from a remote caller today. Applications that need mid-session swaps should integrate at the host trait level.
 
 ## See also
 
-- [Mobs guide](/guides/mobs) — spawning members, wiring, flows, runtime modes
-- [JSON-RPC API](/api/rpc) — full method catalog including `mob/realtime_attach`, `mob/realtime_detach`, `runtime/realtime_attachment_status`
-- [REST API](/api/rest) — REST routes for realtime attachment
+- [Mobs guide](/guides/mobs) — spawning members, profiles, realtime-capable per-member models
+- [Configuration guide](/guides/configuration) — setting `default_model`
+- [JSON-RPC API](/api/rpc) — `session/create`, `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, `realtime/*` bootstrap
+- [REST API](/api/rest) — REST routes for session creation and realtime attachment status
 - Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`
 - Product design record: `docs/architecture/identity-first-live-voice-proposal.md`

@@ -22,6 +22,10 @@ const GPT5_4_EFFORT: &[&str] = &["none", "low", "medium", "high", "xhigh"];
 /// (Codex is a reasoning-only model — no `none`/`minimal`).
 const GPT5_3_CODEX_EFFORT: &[&str] = &["low", "medium", "high", "xhigh"];
 
+/// Realtime models accept no reasoning effort levels — they are audio-first
+/// streaming models without thinking semantics.
+const REALTIME_NO_EFFORT: &[&str] = &[];
+
 /// Capability rows for OpenAI catalog models.
 pub const CAPABILITIES: &[ModelCapabilities] = &[
     // GPT-5.4
@@ -45,6 +49,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: false,
         inline_video: false,
+        realtime: false,
         // Primary docs on the model page do not definitively state
         // temperature acceptance when reasoning is `none`. Stay with the
         // conservative pre-refactor stance (reject) until confirmed.
@@ -85,6 +90,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         vision: true,
         image_tool_results: false,
         inline_video: false,
+        realtime: false,
         supports_temperature: false,
         supports_top_p: false,
         supports_top_k: false,
@@ -98,6 +104,52 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_legacy_penalties: true,
         supports_thinking_budget_legacy: false,
         beta_headers: &[],
+        call_timeout_secs: Some(600),
+    },
+    // gpt-realtime
+    //
+    // OpenAI's canonical realtime model (supersedes gpt-4o-realtime-preview).
+    // Audio-first streaming model used via the realtime WebSocket API.
+    // Tool-calling supported via realtime session function declarations.
+    //
+    // Sources:
+    //   - https://platform.openai.com/docs/models/gpt-realtime
+    //   - https://platform.openai.com/docs/guides/realtime
+    //
+    // Session capability meaning: realtime=true unlocks the realtime transport
+    // substrate on a session whose current LLM is gpt-realtime. Sessions on
+    // non-realtime models (gpt-5.4, etc.) must `session/reconfigure_llm` to
+    // gpt-realtime before opening a realtime channel.
+    ModelCapabilities {
+        id: "gpt-realtime",
+        provider: "openai",
+        display_name: "GPT Realtime",
+        tier: ModelTier::Recommended,
+        model_family: "gpt-realtime",
+        context_window: 128_000,
+        max_output_tokens: 4_096,
+        context_window_beta: None,
+        max_output_tokens_beta: None,
+        vision: false,
+        image_tool_results: false,
+        inline_video: false,
+        realtime: true,
+        supports_temperature: true,
+        supports_top_p: true,
+        supports_top_k: false,
+        thinking: ThinkingSupport::None,
+        supports_reasoning: false,
+        effort_levels: REALTIME_NO_EFFORT,
+        supports_web_search: false,
+        supports_inference_geo: false,
+        supports_compaction: false,
+        supports_structured_output: true,
+        supports_legacy_penalties: false,
+        supports_thinking_budget_legacy: false,
+        beta_headers: &[],
+        // Realtime is streaming (WebSocket) — per-call timeout here is a
+        // loose ceiling on synchronous fallback paths. Realtime transport
+        // owns its own reconnect/heartbeat policy.
         call_timeout_secs: Some(600),
     },
 ];

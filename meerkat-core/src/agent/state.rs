@@ -792,12 +792,20 @@ where
                     self.session.messages_mut().retain(|message| {
                         !is_synthetic_notice(message, SystemNoticeKind::McpPending)
                     });
-                    if !ext.pending.is_empty() {
+                    // Prefer the DSL-authoritative handshake state (Phase 5G /
+                    // T5g); fall back to the shell's `ext.pending` projection
+                    // when no runtime handle is wired (standalone, tests).
+                    let pending_servers: Vec<String> =
+                        match self.mcp_server_lifecycle_handle.as_deref() {
+                            Some(handle) => handle.pending_server_ids().into_iter().collect(),
+                            None => ext.pending.clone(),
+                        };
+                    if !pending_servers.is_empty() {
                         self.session.push(synthetic_notice_message(
                             SystemNoticeKind::McpPending,
                             format!(
                                 "Servers connecting: {}. Tools will appear when ready.",
-                                ext.pending.join(", ")
+                                pending_servers.join(", ")
                             ),
                         ));
                     }

@@ -861,9 +861,8 @@ fn realtime_open_info_required_fields() {
 #[test]
 fn realtime_open_request_roundtrip() {
     let request = RealtimeOpenRequest {
-        target: RealtimeChannelTarget::MobMemberTarget {
-            mob_id: "mob-1".to_string(),
-            agent_identity: "researcher".to_string(),
+        target: RealtimeChannelTarget::SessionTarget {
+            session_id: "01983ef8-0000-7000-8000-000000000001".to_string(),
         },
         role: RealtimeChannelRole::Primary,
         turning_mode: RealtimeTurningMode::ExplicitCommit,
@@ -888,10 +887,8 @@ fn realtime_open_request_roundtrip() {
     assert!(
         matches!(
             roundtrip.target,
-            RealtimeChannelTarget::MobMemberTarget {
-                ref mob_id,
-                ref agent_identity,
-            } if mob_id == "mob-1" && agent_identity == "researcher"
+            RealtimeChannelTarget::SessionTarget { ref session_id }
+                if session_id == "01983ef8-0000-7000-8000-000000000001"
         ),
         "unexpected realtime target roundtrip: {:?}",
         roundtrip.target

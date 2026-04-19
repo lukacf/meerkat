@@ -173,14 +173,6 @@ export class Mob {
     await this.client.forceCancelMobMember(this.mobId, agentIdentity);
   }
 
-  async liveAttach(agentIdentity: string): Promise<void> {
-    await this.client.attachMobMemberLive(this.mobId, agentIdentity);
-  }
-
-  async liveDetach(agentIdentity: string): Promise<void> {
-    await this.client.detachMobMemberLive(this.mobId, agentIdentity);
-  }
-
   async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {
     return this.client.mobMemberStatus(this.mobId, agentIdentity);
   }

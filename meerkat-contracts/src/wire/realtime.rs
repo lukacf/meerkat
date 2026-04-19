@@ -198,17 +198,15 @@ pub struct ToolCallTimeoutContext {
 }
 
 /// Target for a public realtime channel.
+///
+/// Identity-first: callers resolve any mob membership back to the session_id
+/// explicitly (via `mob/member_status` then `realtime/open_info`) — the
+/// channel protocol itself only knows about sessions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeChannelTarget {
-    SessionTarget {
-        session_id: String,
-    },
-    MobMemberTarget {
-        mob_id: String,
-        agent_identity: String,
-    },
+    SessionTarget { session_id: String },
 }
 
 /// Opening role for a realtime channel.

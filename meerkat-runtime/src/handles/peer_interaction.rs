@@ -78,7 +78,14 @@ impl RuntimePeerInteractionHandle {
         if let Some(observer) = observer_opt {
             for effect in effects {
                 if let mm_dsl::MeerkatMachineEffect::PeerInteractionCleanup { corr_id } = effect {
-                    observer.on_peer_interaction_cleanup(dsl_corr_id_to_core(corr_id));
+                    match dsl_corr_id_to_core(corr_id.clone()) {
+                        Some(core_id) => observer.on_peer_interaction_cleanup(core_id),
+                        None => tracing::error!(
+                            raw = %corr_id.0,
+                            context = context,
+                            "PeerInteractionCleanup: DSL emitted a corr_id that is not a valid UUID — broken invariant; skipping observer dispatch"
+                        ),
+                    }
                 }
             }
         }
@@ -86,20 +93,16 @@ impl RuntimePeerInteractionHandle {
     }
 }
 
-fn dsl_corr_id_to_core(dsl_id: mm_dsl::PeerCorrelationId) -> PeerCorrelationId {
-    // Round-trip through the string wire form. The DSL key is the
-    // stringified UUID produced by `From<PeerCorrelationId>` at fire time,
-    // so parse must succeed on the canonical path.
-    match uuid::Uuid::parse_str(&dsl_id.0) {
-        Ok(uuid) => PeerCorrelationId::from_uuid(uuid),
-        Err(_) => {
-            tracing::warn!(
-                raw = %dsl_id.0,
-                "PeerInteractionCleanup: corr_id not a valid UUID; using nil"
-            );
-            PeerCorrelationId::from_uuid(uuid::Uuid::nil())
-        }
-    }
+fn dsl_corr_id_to_core(dsl_id: mm_dsl::PeerCorrelationId) -> Option<PeerCorrelationId> {
+    // The DSL key is always produced by `From<PeerCorrelationId> for
+    // mm_dsl::PeerCorrelationId`, which stringifies a UUID. Parse must
+    // succeed on every canonical path; a parse failure here is a broken
+    // invariant, not a recoverable condition. Return `None` so the caller
+    // skips observer dispatch and logs — silently substituting nil would
+    // cross-contaminate any real `corr_id 0` event.
+    uuid::Uuid::parse_str(&dsl_id.0)
+        .ok()
+        .map(PeerCorrelationId::from_uuid)
 }
 
 impl PeerInteractionHandle for RuntimePeerInteractionHandle {

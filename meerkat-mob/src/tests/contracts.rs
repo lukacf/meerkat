@@ -308,7 +308,6 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
 async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     use meerkat_core::comms::InputStreamMode;
     use meerkat_core::handles::PeerInteractionHandle;
-    use meerkat_core::service::SessionError;
 
     let suffix = Uuid::new_v4().simple().to_string();
     let sender_name = format!("c002c-sender-{suffix}");
@@ -388,11 +387,6 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     .await
     .expect("fresh send with unique corr_id should succeed");
     assert!(matches!(ok_receipt, SendReceipt::PeerRequestSent { .. }));
-
-    // Silence unused import warning from `SessionError` in this test
-    // module — the type is useful context for the error shape docs but
-    // not directly matched on.
-    let _ = std::mem::size_of::<SessionError>();
 
     let _ = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
 }

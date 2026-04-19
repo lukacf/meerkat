@@ -6,6 +6,40 @@ Dogma reference: `meerkat-runtime-dogma.md` #13 — *derived projections are reb
 Roadmap reference: issue #264 (0.7 peer/comms authority drift), W1-D
 Baseline commit: `97981e314` (post-prerequisite-patchwork merge)
 
+### Audit extension notes
+
+The first pass of this audit (fields 1–12) missed three projection-shaped
+fields that the lead review caught: `McpRouter.projection`, the four
+`*_cache` fallback copies on `McpRouterAdapter`, and
+`SessionLlmIdentity.connection_ref` (which carries an explicit dogma §1/§13
+comment in its own docstring). Fields 13–15 below are the corrective
+extension. The framing of the audit as repo-wide-exhaustive is preserved;
+the extension is the honest acknowledgement that the first sweep was not.
+
+Heuristics used for the second-pass sweep (so a future auditor can extend
+it further):
+
+- `grep -rn "projection" --include="*.rs"` across the crates the first
+  pass skipped (meerkat-mcp, meerkat-memory, meerkat-hooks,
+  meerkat-schedule, meerkat-skills, meerkat-rest, meerkat-session,
+  meerkat-store, meerkat-providers, meerkat-cli, meerkat,
+  meerkat-rpc).
+- `grep -rn "dogma" --include="*.rs"` — any field whose own comments
+  flag dogma §1/§13 responsibility. Only `connection_ref` surfaced this
+  way on the second pass; future fields with similar callouts should be
+  added here rather than in a follow-up audit.
+- Field-name patterns `_cache`, `_snapshot`, `_shadow`, `_mirror`,
+  `_projection`. The surviving hits beyond fields 1–12 are covered in
+  fields 13–15; other hits (`trusted_snapshot` on queue entries,
+  `session_snapshot` in run-ledger records, `config_snapshot` on
+  `FactoryAgentBuilder`) were examined and are frozen-point-in-time
+  captures or fallback defaults, not live projections — noted here so
+  they are not re-opened.
+- `Arc<RwLock<...>>` / `Arc<Mutex<...>>` wrapping "canonical owner lives
+  elsewhere" state. `meerkat-skills`, `meerkat-memory`, and
+  `meerkat-hooks` were spot-checked and own their state primarily;
+  nothing in those crates surfaced as projection-shaped.
+
 ## What this audit is
 
 Dogma #13 says a projection must be rebuildable from canonical truth and must
@@ -440,6 +474,173 @@ enum with explicit guards. No action in this PR.
 
 ---
 
+### 13. `McpRouter.projection` (tool-routing snapshot)
+
+Location: `meerkat-mcp/src/router.rs:931` (field);
+`meerkat-mcp/src/router.rs:869–886` (`RouterProjectionSnapshot` shape);
+publish site `publish_projection_snapshot` at `router.rs:1855`; drain
+callers at `router.rs:1105`, `1259`, `1398`, `1736`, `1984`, `2093`;
+read sites `projection_tools` (`router.rs:1919`), `projection_catalog`
+(`router.rs:1923`), `list_tools` (`router.rs:1973`), and `call_tool`'s
+`tool_to_server` lookup at `router.rs:1994–1999`.
+
+- **Canonical source.** The canonical tool universe is
+  `surface_owner.visible_surfaces()` (DSL-owned visible server set)
+  crossed with `ServerEntry.tools` on each live `ServerEntry` in
+  `self.servers`. The projection materializes that join plus a
+  `tool_to_server` reverse index at `epoch = surface_owner.snapshot_epoch()`.
+- **Rebuild trigger sites.** Explicit: every mutator that can change
+  either the visible-surface set or a server's `tools` vector calls
+  `publish_projection_snapshot(&mut self)`. The six call sites listed
+  above cover: initial `apply_staged`, reload completions, async
+  pending-result drains, removal progress, and the explicit
+  `progress_removals` path. The publish routine re-reads both inputs
+  under `&mut self` (no concurrent mutator can race) and replaces
+  `self.projection` with a fresh `Arc<RouterProjectionSnapshot>`.
+- **Staleness policy.** Push-on-every-mutator. The `epoch` field is
+  stored on the snapshot but not currently compared anywhere — it is
+  written (`router.rs:1911`) but `#[allow(dead_code)]` (`router.rs:870`),
+  so staleness detection is by-construction (publish-after-mutate), not
+  by epoch comparison.
+- **Semantic impact of staleness.** Potentially yes: `call_tool` looks
+  up `tool_to_server` in the snapshot, so a stale snapshot could route
+  a tool call to a retired server or `ToolNotFound` a newly-visible
+  one. In practice all mutators publish synchronously under `&mut self`
+  and readers hold `Arc<RouterProjectionSnapshot>` snapshots, so the
+  published value is never torn mid-read. No known bug.
+
+**Verdict: Compliant projection, with soft policy.**
+
+The correctness contract is informal: "every mutator that changes
+visible surfaces or any `ServerEntry.tools` must call
+`publish_projection_snapshot`." It is not enforced by types. The stored-
+but-unread `epoch` field suggests an earlier design intended
+epoch-based validation that never landed. Candidate for tightening in
+an ITEM-6 follow-up: either (a) wire the `epoch` into reader paths as a
+staleness check, or (b) move the publish into a `Drop`-style guard or
+an explicit typed `PublishProjection` effect so it cannot be forgotten.
+Not action-required today.
+
+See seed B below.
+
+---
+
+### 14. `McpRouterAdapter` fallback caches (`tools_cache`, `catalog_cache`, `pending_sources_cache`, `surface_snapshot_cache`)
+
+Location: `meerkat-mcp/src/adapter.rs:28–31` (fields with
+`/// Tool visibility and routing come from the router's atomically
+published projection snapshot. The adapter keeps a best-effort fallback
+copy so `tools()` can stay non-blocking under lock contention.`
+docstring on the struct at `adapter.rs:20–24`); sync on
+`sync_router_projection` (`adapter.rs:127`); consumed on the `try_read`
+fallback path of `tools` (`adapter.rs:308`), `tool_catalog`
+(`adapter.rs:380`), `external_tool_surface_snapshot` (`adapter.rs:323`),
+and always on `pending_catalog_sources` (`adapter.rs:394`) plus the
+bind-time seeding loop at `adapter.rs:407`.
+
+- **Canonical source.** The inner `McpRouter`'s `projection` (field 13).
+  The adapter's caches are a second-layer projection of a first-layer
+  projection.
+- **Rebuild trigger sites.** Every adapter write path calls
+  `sync_router_projection` after acquiring the router write lock
+  (`adapter.rs:140, 170, 181, 201, 215, 226, 237, 287, 301, 369`); the
+  sync copies all four router snapshots into the caches. The `tools()`
+  and `tool_catalog()` read paths also opportunistically refresh on
+  `try_read` success (`adapter.rs:313–314, 385`), so the fallback is
+  kept warm by successful reads, not only writes.
+- **Staleness policy.** Push-on-write + opportunistic-refresh-on-read.
+  The fallback is consulted only when `try_read` returns `WouldBlock`
+  (contention) or when the router has been taken out (`None`, i.e.
+  post-shutdown). Under contention, stale values are bounded to "one
+  concurrent write lock's worth of time." Post-shutdown, caches are
+  explicitly cleared in `shutdown` (`adapter.rs:155–161`).
+- **Semantic impact of staleness.** The cached values feed `tools()`
+  and `tool_catalog()`, both of which are *advertisement* surfaces —
+  they drive which tools the LLM sees as available. Stale values can
+  cause the LLM to see a phantom (recently-removed) tool or miss a
+  newly-advertised one for the brief contention window. A phantom call
+  routes through `dispatch()` which holds the async read lock, at
+  which point the router's live `projection` decides and will return
+  `ToolNotFound` for the phantom. No incorrect routing; only an
+  observable lag in advertisement.
+  - `pending_catalog_sources` always reads the cache (no try_read
+    fast-path), which is the widest staleness window among the four.
+    It drives the `[MCP_PENDING]` notice; stale here means the notice
+    fires or clears one sync-cycle late. Not decision-changing.
+
+**Verdict: Compliant projection (soft policy).**
+
+The design is explicit and the docstring calls out "best-effort
+fallback… to stay non-blocking under lock contention." It is a
+legitimate dual-cache pattern. Soft-policy caveats:
+
+- The on-read refresh in `tools()` / `tool_catalog()` assumes the
+  caller is fine getting whatever `try_read` produces; if every caller
+  coincidentally hits contention on the same tick, the caches coast on
+  their last-known-good value. In practice contention on the router
+  read lock is short-lived; this is acceptable.
+- `pending_catalog_sources` has no read-through attempt — the cache is
+  the only source. Tightening would have it attempt `try_read` first,
+  matching `tools()` / `tool_catalog()`.
+
+Not action-required today; noted as a tightening opportunity. See seed
+B for a combined McpRouter/adapter hygiene pass if it is done at all.
+
+---
+
+### 15. `SessionLlmIdentity.connection_ref` (dogma-flagged write-through projection)
+
+Location: `meerkat-core/src/session.rs:921`; projection construction
+in `SessionMetadata::llm_identity()` (`session.rs:926–934`); write-back
+in `SessionMetadata::apply_llm_identity()` (`session.rs:937–943`);
+canonical owner `SessionMetadata.connection_ref` at `session.rs:891`;
+resume re-install in
+`meerkat-core/src/session_recovery.rs:278–281`; downstream consumers
+in `meerkat-core/src/agent/builder.rs:577–582`
+(`with_connection_ref_binding_key`) and
+`meerkat-core/src/agent.rs:866–869` (runner binding key).
+
+- **Canonical source.** `SessionMetadata.connection_ref` — persisted,
+  dogma-§1 canonical owner. The field docstring at `session.rs:917–919`
+  is explicit: *"Projection (dogma §1/§13): canonical owner is
+  `SessionMetadata.connection_ref`; this field is the read/write
+  projection used by hot-swap."*
+- **Rebuild trigger sites.**
+  - Construction: `llm_identity()` builds the projection from
+    canonical metadata every time it is called. Pure read-through.
+  - Write-back: `apply_llm_identity()` writes the projection's
+    `connection_ref` back onto canonical metadata, so the projection is
+    also the sole mutation path on hot-swap
+    (`apply_live_session_llm_identity`).
+  - Resume: `session_recovery.rs:278–281` clones canonical metadata
+    into `AgentBuildConfig.connection_ref` on session restore so the
+    rebuilt agent re-resolves against the same realm binding. This is
+    a projection *into* `AgentBuildConfig`, not on the identity
+    struct — parallel plumbing, not a second shadow.
+- **Staleness policy.** Cannot go stale during a single hot-swap: the
+  projection is built, mutated, and applied-back inside
+  `apply_llm_identity` with `&mut SessionMetadata` — no reader sees an
+  intermediate state. Cross-call staleness is not meaningful: callers
+  that keep an old `SessionLlmIdentity` around are keeping a snapshot
+  by design.
+- **Semantic impact of staleness.** NO. The projection is the
+  *intended* vehicle for hot-swap; its whole reason to exist is that
+  the projection and the canonical field have identical shape for this
+  subfield. Every mutation path goes through
+  `apply_llm_identity` (dogma §12: dynamic policy follows dynamic
+  identity), which overwrites canonical metadata from the projection
+  atomically.
+
+**Verdict: Compliant projection.**
+
+Well-formed dogma §1/§13 write-through projection. The field's own
+docstring states the invariant and the invariant holds. Referenced
+here so the audit is exhaustive for fields carrying explicit dogma
+callouts — a future field added with the same pattern should land
+here, not be rediscovered by grep.
+
+---
+
 ## Summary table
 
 | # | Field | Verdict | Seeded into |
@@ -456,9 +657,14 @@ enum with explicit guards. No action in this PR.
 | 10 | MobActor runtime maps (bundle) | Not a projection | — |
 | 11 | Realtime-WS turn-in-flight locals | Shadow truth | W3-H |
 | 12 | `session_runtime` comms-drain ownership | Shadow truth | W2-G |
+| 13 | `McpRouter.projection` (tool-routing snapshot) | Compliant projection (soft policy) | ITEM-6 seed B (optional tightening) |
+| 14 | `McpRouterAdapter` fallback caches (`tools_cache`, `catalog_cache`, `pending_sources_cache`, `surface_snapshot_cache`) | Compliant projection (soft policy) | ITEM-6 seed B (optional tightening) |
+| 15 | `SessionLlmIdentity.connection_ref` | Compliant projection | — |
 
 Five entries are shadow truth. Four of them are already scoped to named
-Wave 2/3 PRs. One is a net-new finding.
+Wave 2/3 PRs. One is a net-new finding. The extension pass (fields
+13–15) added no new shadow-truth entries — two soft-policy compliant
+projections (seed B, optional) and one cleanly-compliant projection.
 
 ---
 
@@ -485,9 +691,38 @@ PR land here.
   read-through. Test: add/remove trust after queue creation and verify
   `admit_peer_receive` picks up the change without re-initialization.
 
+### Seed B — `McpRouter` / `McpRouterAdapter` projection hygiene (optional tightening)
+
+- **Crate / file:** `meerkat-mcp/src/router.rs`,
+  `meerkat-mcp/src/adapter.rs`
+- **Shape:** neither field is shadow-truth; this seed is an optional
+  hygiene pass, only to take on if someone is already touching MCP
+  plumbing.
+  - Router: either delete the stored-but-unread `epoch` field on
+    `RouterProjectionSnapshot` (`router.rs:870`), or actually wire it
+    into reader paths so "did I see a published snapshot newer than
+    epoch N?" is answerable from caller code.
+  - Router: consider folding `publish_projection_snapshot` into a typed
+    effect emitted by the mutation paths rather than an ad-hoc call
+    every mutator has to remember — today the contract is informal.
+  - Adapter: give `pending_catalog_sources` (`adapter.rs:394`) the
+    same `try_read` / `cached_*` fallback shape as `tools()` and
+    `tool_catalog()` so pending-source advertisement does not lag a
+    full sync cycle behind live router state.
+- **DSL owner:** none required — the router's `publish_projection_snapshot`
+  already joins DSL-owned `surface_owner.visible_surfaces()` with
+  shell-owned `ServerEntry.tools`. This seed is about formalizing the
+  refresh contract, not relocating authority.
+- **Why:** the projections are correct today; they are fragile to future
+  edits that forget to call the publish helper. Typing the refresh
+  contract would close that gap.
+- **Acceptance note:** no behavioral change expected; correctness
+  regression coverage already exists via MCP integration tests.
+
 No other net-new seeds surfaced in this audit. All other shadow-truth
 findings are covered by W1-A, W2-E, W2-G, or W3-H per the Wave 1–3
-roadmap.
+roadmap. The second-pass extension surfaced seed B as an optional
+hygiene item and no additional shadow-truth hits.
 
 ---
 
@@ -507,3 +742,7 @@ roadmap.
   auditors do not re-open the question for fields whose shape (`BTreeMap`
   on a runtime struct) superficially matches the audit brief but whose
   contents are shell-mechanical by design.
+- Entries 13–15 are the extension pass and are flagged at the top of the
+  doc. Future extensions should land alongside, not in a separate audit
+  document — the stated scope is repo-wide and this file is the
+  authoritative index.

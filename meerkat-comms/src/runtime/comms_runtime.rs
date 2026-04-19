@@ -1638,6 +1638,24 @@ impl CommsRuntime {
                 }
                 Err(SendError::PeerOffline)
             }
+            Err(crate::router::SendError::AdmissionDropped { reason }) => {
+                // Transport worked; the receiver's ingress admission policy
+                // rejected us. Surface the typed reason all the way to the
+                // public API error payload so clients see e.g.
+                // `untrusted_sender` rather than the old `PeerOffline` lie.
+                // Reachability stays distinct too: the peer is still live
+                // at the transport layer, so we record `AdmissionDropped`
+                // rather than `OfflineOrNoAck`.
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &peer.reachability_key(),
+                        PeerReachabilityReason::AdmissionDropped,
+                    );
+                }
+                Err(SendError::AdmissionDropped {
+                    reason: reason.into(),
+                })
+            }
             Err(
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
             ) => {
@@ -3864,6 +3882,68 @@ mod tests {
         assert_eq!(
             entry.last_unreachable_reason,
             Some(PeerReachabilityReason::TransportError)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_to_untrusted_peer_surfaces_admission_dropped_not_offline() {
+        // Regression: before typed `AdmissionOutcome`, the router collapsed a
+        // receiver-side ingress rejection into `PeerOffline`. That made a
+        // policy failure indistinguishable from a transport failure in
+        // REST/RPC/MCP payloads. Now it must come through as
+        // `SendError::AdmissionDropped { UntrustedSender }` with reachability
+        // recorded as `AdmissionDropped` (transport was live).
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("admit-sender-{suffix}");
+        let receiver_name = format!("admit-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        // Sender trusts receiver; receiver does NOT trust sender. Receiver
+        // has `require_peer_auth: true` by default, so our envelope lands
+        // at its ingress gate and gets rejected with `UntrustedSender`.
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &receiver_name,
+                receiver.public_key().to_peer_id(),
+                format!("inproc://{receiver_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("sender must trust receiver");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+                body: "policy-rejected".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(SendError::AdmissionDropped {
+                    reason: meerkat_core::comms::AdmissionDropReason::UntrustedSender
+                })
+            ),
+            "untrusted-sender ingress drop must surface as typed AdmissionDropped, \
+             got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let entry = peers
+            .iter()
+            .find(|listed| listed.name.as_str() == receiver_name)
+            .expect("trusted peer should remain listed after admission drop");
+        assert_eq!(
+            entry.last_unreachable_reason,
+            Some(PeerReachabilityReason::AdmissionDropped),
+            "policy rejection must record AdmissionDropped, not OfflineOrNoAck"
         );
     }
 

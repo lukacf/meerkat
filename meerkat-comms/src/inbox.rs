@@ -73,6 +73,21 @@ impl AdmissionOutcome {
     }
 }
 
+impl From<DropReason> for meerkat_core::comms::AdmissionDropReason {
+    fn from(reason: DropReason) -> Self {
+        match reason {
+            DropReason::UntrustedSender => {
+                meerkat_core::comms::AdmissionDropReason::UntrustedSender
+            }
+            DropReason::ClassificationRejected => {
+                meerkat_core::comms::AdmissionDropReason::ClassificationRejected
+            }
+            DropReason::SessionClosed => meerkat_core::comms::AdmissionDropReason::SessionClosed,
+            DropReason::InboxFull => meerkat_core::comms::AdmissionDropReason::InboxFull,
+        }
+    }
+}
+
 /// A classified inbox entry, pairing an item with its ingress classification.
 #[derive(Debug)]
 pub(crate) struct ClassifiedInboxEntry {

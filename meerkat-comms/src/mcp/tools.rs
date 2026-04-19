@@ -370,6 +370,17 @@ fn format_router_send_error(peer_name: &str, error: crate::router::SendError) ->
         crate::router::SendError::PeerOffline => {
             format!("peer_unreachable: peer '{peer_name}' is unreachable: offline_or_no_ack")
         }
+        crate::router::SendError::AdmissionDropped { reason } => {
+            // Distinct from `peer_unreachable`: the peer's transport was
+            // live, ingress policy refused us. Surface the typed reason
+            // (untrusted_sender / inbox_full / …) so clients can tell
+            // policy failures from connectivity failures.
+            let code: meerkat_core::comms::AdmissionDropReason = reason.into();
+            format!(
+                "peer_admission_dropped: peer '{peer_name}' rejected envelope at ingress: {}",
+                code.as_code()
+            )
+        }
         crate::router::SendError::Transport(inner) => {
             format!(
                 "peer_unreachable: peer '{peer_name}' is unreachable: transport_error ({inner})"

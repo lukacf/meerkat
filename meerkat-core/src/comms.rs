@@ -509,9 +509,14 @@ pub enum PeerReachability {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PeerReachabilityReason {
     OfflineOrNoAck,
     TransportError,
+    /// The peer admitted the transport but rejected our envelope at its
+    /// ingress policy gate (untrusted sender, full inbox, etc.). The peer
+    /// is still reachable at the transport level; policy denied us.
+    AdmissionDropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,7 +585,44 @@ pub enum StreamError {
     Internal(String),
 }
 
+/// Typed reason a peer rejected our envelope at its ingress admission gate.
+///
+/// This mirrors `meerkat_comms::DropReason` across the core boundary so
+/// `SendError::AdmissionDropped` can carry the typed cause all the way to
+/// REST/RPC/MCP error payloads. Callers distinguish transport-level failure
+/// (`PeerOffline`) from policy-level rejection (`AdmissionDropped { reason }`)
+/// without collapsing both into "peer unreachable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AdmissionDropReason {
+    /// `require_peer_auth` is on, the sender is not in the trusted set, and
+    /// the envelope is not auth-exempt (e.g. supervisor-bridge bootstrap).
+    UntrustedSender,
+    /// Classification rejected the item before the admission gate ran.
+    ClassificationRejected,
+    /// The receiver's classified inbox is closed (receiver dropped).
+    SessionClosed,
+    /// The receiver's classified inbox is at capacity.
+    InboxFull,
+}
+
+impl AdmissionDropReason {
+    /// Stable wire code for this drop reason, suitable for REST/RPC/MCP
+    /// error payloads. Callers-facing discriminant — must stay stable.
+    pub fn as_code(&self) -> &'static str {
+        match self {
+            AdmissionDropReason::UntrustedSender => "untrusted_sender",
+            AdmissionDropReason::ClassificationRejected => "classification_rejected",
+            AdmissionDropReason::SessionClosed => "session_closed",
+            AdmissionDropReason::InboxFull => "inbox_full",
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum SendError {
     #[error("peer not found: {0}")]
     PeerNotFound(String),
@@ -596,6 +638,12 @@ pub enum SendError {
     Validation(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// Receiver admitted the envelope-transport but rejected it at ingress
+    /// for a typed policy reason (untrusted sender, full inbox, etc.). This
+    /// is semantically distinct from `PeerOffline` — transport worked,
+    /// policy refused.
+    #[error("peer dropped at admission: {reason:?}")]
+    AdmissionDropped { reason: AdmissionDropReason },
 }
 
 #[derive(Debug, Clone, thiserror::Error)]

@@ -47,6 +47,7 @@ impl Default for CommsConfig {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SendError {
     #[error("Peer not found: {0}")]
     PeerNotFound(String),
@@ -56,6 +57,13 @@ pub enum SendError {
     Transport(#[from] TransportError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// The peer admitted the transport layer but rejected our envelope at
+    /// its ingress admission gate. Semantically distinct from `PeerOffline`
+    /// — transport worked, policy refused. Carries the typed `DropReason`
+    /// so callers can render e.g. `untrusted_sender` rather than masquerade
+    /// as "peer unreachable".
+    #[error("Peer dropped envelope at admission: {reason:?}")]
+    AdmissionDropped { reason: crate::inbox::DropReason },
 }
 
 #[inline]
@@ -63,10 +71,10 @@ fn map_inproc_send_error(err: InprocSendError) -> SendError {
     match err {
         InprocSendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
         InprocSendError::InboxClosed | InprocSendError::InboxFull => SendError::PeerOffline,
-        // A peer rejecting our envelope at its ingress gate looks externally
-        // identical to the peer being offline — the envelope did not land,
-        // and we have no typed cause to echo back on this crate's `SendError`.
-        InprocSendError::IngressDropped(_) => SendError::PeerOffline,
+        // Preserve the typed ingress-drop reason all the way through to
+        // REST/RPC/MCP payloads. Do NOT collapse into `PeerOffline` — the
+        // transport worked, the receiver's admission policy rejected us.
+        InprocSendError::IngressDropped(reason) => SendError::AdmissionDropped { reason },
     }
 }
 

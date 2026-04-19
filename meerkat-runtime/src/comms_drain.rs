@@ -146,18 +146,21 @@ pub fn spawn_comms_drain(
                         }
                     }
                     PeerInputClass::Response => {
-                        // Distinguish progress responses from terminal responses.
-                        let is_terminal = matches!(
-                            &candidate.interaction.content,
+                        // Distinguish progress responses from terminal responses
+                        // via the canonical classifier in meerkat-core. Raw
+                        // `ResponseStatus` matching here is forbidden — all
+                        // consumers must read `TerminalityClass` so "terminal"
+                        // stays lock-stepped across the codebase.
+                        let is_terminal = match &candidate.interaction.content {
                             meerkat_core::interaction::InteractionContent::Response {
                                 status,
                                 ..
-                            } if matches!(
-                                status,
-                                meerkat_core::interaction::ResponseStatus::Completed
-                                    | meerkat_core::interaction::ResponseStatus::Failed
-                            )
-                        );
+                            } => matches!(
+                                meerkat_core::interaction::classify_response_terminality(*status),
+                                meerkat_core::interaction::TerminalityClass::Terminal { .. }
+                            ),
+                            _ => false,
+                        };
 
                         if is_terminal {
                             // Terminal response — single admission with

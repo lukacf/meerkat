@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
 
 use crate::identity::{Keypair, Signature};
-use crate::inbox::{InboxError, InboxSender};
+use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::transport::TransportError;
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::trust::TrustedPeers;
@@ -99,15 +99,20 @@ where
         framed.send(frame).await?;
     }
 
-    // Enqueue to inbox (with classification if context is available)
-    inbox_sender
-        .send_classified(InboxItem::External { envelope })
-        .map_err(|err| match err {
-            InboxError::Closed => IoTaskError::InboxClosed,
-            InboxError::Full => IoTaskError::InboxFull,
-        })?;
-
-    Ok(())
+    // Enqueue to inbox (with classification if context is available).
+    // Typed admission outcome: explicit drops are surfaced as `IoTaskError`
+    // so the IO task can react (close connection, log, etc.) rather than
+    // silently returning `Ok(())`.
+    match inbox_sender.send_classified(InboxItem::External { envelope }) {
+        AdmissionOutcome::Admitted => Ok(()),
+        AdmissionOutcome::Dropped { reason } => Err(match reason {
+            DropReason::SessionClosed => IoTaskError::InboxClosed,
+            DropReason::InboxFull => IoTaskError::InboxFull,
+            DropReason::UntrustedSender | DropReason::ClassificationRejected => {
+                IoTaskError::IngressDropped(reason)
+            }
+        }),
+    }
 }
 
 /// Determine if we should send an ack for this message kind.
@@ -152,6 +157,8 @@ pub enum IoTaskError {
     InboxClosed,
     #[error("Inbox full")]
     InboxFull,
+    #[error("Ingress dropped: {0:?}")]
+    IngressDropped(DropReason),
 }
 
 #[cfg(test)]

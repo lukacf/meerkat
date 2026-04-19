@@ -250,6 +250,7 @@ mod tests {
         manager
             .inbox_sender()
             .send(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         // Give tokio a moment to process

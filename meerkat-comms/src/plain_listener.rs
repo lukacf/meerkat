@@ -3,7 +3,7 @@
 //! Accepts newline-delimited JSON or plain text over TCP/UDS connections.
 //! Messages are pushed to the inbox as `InboxItem::PlainEvent`.
 
-use crate::inbox::{InboxError, InboxSender};
+use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::transport::plain_codec::parse_plain_line;
 use crate::types::InboxItem;
 use futures::StreamExt;
@@ -47,13 +47,23 @@ pub async fn handle_plain_connection<S>(
                     blocks: None,
                     render_metadata: None,
                 }) {
-                    Ok(()) => {}
-                    Err(InboxError::Full) => {
+                    AdmissionOutcome::Admitted => {}
+                    AdmissionOutcome::Dropped {
+                        reason: DropReason::InboxFull,
+                    } => {
                         tracing::warn!("Plain listener: inbox full, dropping event");
                     }
-                    Err(InboxError::Closed) => {
+                    AdmissionOutcome::Dropped {
+                        reason: DropReason::SessionClosed,
+                    } => {
                         tracing::debug!("Plain listener: inbox closed, exiting");
                         return;
+                    }
+                    AdmissionOutcome::Dropped { reason } => {
+                        tracing::warn!(
+                            reason = ?reason,
+                            "Plain listener: inbox dropped plain event at ingress"
+                        );
                     }
                 }
             }

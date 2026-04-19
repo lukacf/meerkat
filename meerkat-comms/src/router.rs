@@ -63,6 +63,10 @@ fn map_inproc_send_error(err: InprocSendError) -> SendError {
     match err {
         InprocSendError::PeerNotFound(peer) => SendError::PeerNotFound(peer),
         InprocSendError::InboxClosed | InprocSendError::InboxFull => SendError::PeerOffline,
+        // A peer rejecting our envelope at its ingress gate looks externally
+        // identical to the peer being offline — the envelope did not land,
+        // and we have no typed cause to echo back on this crate's `SendError`.
+        InprocSendError::IngressDropped(_) => SendError::PeerOffline,
     }
 }
 

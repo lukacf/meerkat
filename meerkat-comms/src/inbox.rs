@@ -10,6 +10,7 @@ use crate::tokio;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, mpsc};
 
 use crate::classify::IngressClassificationContext;
@@ -23,6 +24,52 @@ use meerkat_core::{
 use std::collections::BTreeSet;
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
+
+/// Reason an ingress item was dropped before it reached the classified queue.
+///
+/// Every variant is a semantic failure mode — the envelope or event did not
+/// reach the agent. Silent `Ok(())` used to mask these; now they are typed,
+/// logged, and counted so tests can pin down "zero drops on the happy path".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DropReason {
+    /// `require_peer_auth` is on, the sender is not in the trusted set, and
+    /// the envelope is not auth-exempt (e.g. supervisor-bridge bootstrap).
+    UntrustedSender,
+    /// Classification rejected the item (e.g. pre-trust policy drop in the
+    /// classification context before it ever reached the admission gate).
+    ClassificationRejected,
+    /// The classified queue is closed (receiver dropped).
+    SessionClosed,
+    /// The classified queue is at capacity.
+    InboxFull,
+}
+
+/// Outcome of an admission attempt against the classified inbox.
+///
+/// Marked `#[must_use]` so that silently discarding a `Dropped` branch at a
+/// call site is a compile error — a drop is never "just success".
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionOutcome {
+    Admitted,
+    Dropped { reason: DropReason },
+}
+
+impl AdmissionOutcome {
+    /// True iff the item was admitted onto the queue.
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, AdmissionOutcome::Admitted)
+    }
+
+    /// Convert this outcome into a `Result` with the drop reason as the error.
+    /// Useful at seams that already flow errors through `?`.
+    pub fn into_result(self) -> Result<(), DropReason> {
+        match self {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::Dropped { reason } => Err(reason),
+        }
+    }
+}
 
 /// A classified inbox entry, pairing an item with its ingress classification.
 #[derive(Debug)]
@@ -39,6 +86,15 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) text_projection: String,
 }
 
+/// Internal admission decision paired with the peer-trust snapshot that the
+/// enqueue site still needs to stamp on the entry. `AdmissionOutcome` is the
+/// public face; `trusted_snapshot` stays crate-internal.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdmissionDecision {
+    pub(crate) outcome: AdmissionOutcome,
+    pub(crate) trusted_snapshot: Option<bool>,
+}
+
 #[derive(Debug)]
 struct ClassifiedInboxQueue {
     capacity: usize,
@@ -47,6 +103,7 @@ struct ClassifiedInboxQueue {
     auth_required: bool,
     trusted_peers: BTreeSet<PeerId>,
     phase: PeerIngressState,
+    dropped_count: Arc<AtomicU64>,
 }
 
 impl ClassifiedInboxQueue {
@@ -58,7 +115,12 @@ impl ClassifiedInboxQueue {
             auth_required,
             trusted_peers: BTreeSet::new(),
             phase: PeerIngressState::Absent,
+            dropped_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn dropped_counter(&self) -> Arc<AtomicU64> {
+        self.dropped_count.clone()
     }
 
     fn sync_trusted_peer_added(&mut self, peer_id: &str) {
@@ -71,19 +133,23 @@ impl ClassifiedInboxQueue {
 
     /// Admit a prepared item into the peer-ingress lifecycle.
     ///
-    /// Returns `(should_enqueue, trusted_snapshot)`:
-    /// - For plain events: always enqueue, no trust snapshot.
-    /// - For external envelopes: consult the trust set + auth-required policy.
-    ///   Untrusted senders with auth required are dropped (no enqueue); the
-    ///   trust snapshot still records the decision for queue visibility.
+    /// Returns a typed `AdmissionDecision`:
+    /// - Plain events are always admitted, with no trust snapshot.
+    /// - External envelopes consult the trust set + auth-required policy.
+    ///   Untrusted senders with auth required are `Dropped { reason:
+    ///   UntrustedSender }`; the trust snapshot still records the decision
+    ///   for queue visibility.
     ///
     /// Updates `phase` to track the observable lifecycle:
     /// `Absent → Received` (admitted), `Received → Received` (more work),
     /// `Absent → Dropped` (untrusted with empty queue), untrusted with queued
     /// work keeps `Received`.
-    fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> (bool, Option<bool>) {
+    fn admit_peer_receive(&mut self, prepared: &PreparedIngressItem) -> AdmissionDecision {
         let InboxItem::External { envelope } = &prepared.item else {
-            return (true, None);
+            return AdmissionDecision {
+                outcome: AdmissionOutcome::Admitted,
+                trusted_snapshot: None,
+            };
         };
         let peer_id = PeerId(envelope.from.to_peer_id());
         let trusted = self.trusted_peers.contains(&peer_id);
@@ -92,13 +158,22 @@ impl ClassifiedInboxQueue {
 
         if admitted {
             self.phase = PeerIngressState::Received;
-            (true, Some(trusted))
-        } else if had_queued_work {
-            self.phase = PeerIngressState::Received;
-            (false, Some(false))
+            AdmissionDecision {
+                outcome: AdmissionOutcome::Admitted,
+                trusted_snapshot: Some(trusted),
+            }
         } else {
-            self.phase = PeerIngressState::Dropped;
-            (false, Some(false))
+            if had_queued_work {
+                self.phase = PeerIngressState::Received;
+            } else {
+                self.phase = PeerIngressState::Dropped;
+            }
+            AdmissionDecision {
+                outcome: AdmissionOutcome::Dropped {
+                    reason: DropReason::UntrustedSender,
+                },
+                trusted_snapshot: Some(false),
+            }
         }
     }
 
@@ -212,6 +287,8 @@ pub struct Inbox {
     classified_queue: Option<Arc<Mutex<ClassifiedInboxQueue>>>,
     /// Notifier that fires only for actionable inputs.
     actionable_notify: Option<Arc<Notify>>,
+    /// Shared drop counter (cloned into `InboxSender`). Classified path only.
+    dropped_count: Option<Arc<AtomicU64>>,
 }
 
 /// The sending end of the inbox, cloned to IO tasks.
@@ -226,6 +303,8 @@ pub struct InboxSender {
     classified_queue: Option<Arc<Mutex<ClassifiedInboxQueue>>>,
     /// Notifier that fires only for actionable inputs.
     actionable_notify: Option<Arc<Notify>>,
+    /// Shared drop counter. Classified path only.
+    dropped_count: Option<Arc<AtomicU64>>,
 }
 
 impl Inbox {
@@ -244,6 +323,7 @@ impl Inbox {
                 notify: notify.clone(),
                 classified_queue: None,
                 actionable_notify: None,
+                dropped_count: None,
             },
             InboxSender {
                 tx,
@@ -251,6 +331,7 @@ impl Inbox {
                 classification_context: None,
                 classified_queue: None,
                 actionable_notify: None,
+                dropped_count: None,
             },
         )
     }
@@ -273,6 +354,7 @@ impl Inbox {
         for trusted_peer in &context.trusted_peers.read().peers {
             queue.sync_trusted_peer_added(&trusted_peer.pubkey.to_peer_id());
         }
+        let dropped_count = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         (
             Inbox {
@@ -280,6 +362,7 @@ impl Inbox {
                 notify: notify.clone(),
                 classified_queue: Some(classified_queue.clone()),
                 actionable_notify: Some(actionable_notify.clone()),
+                dropped_count: Some(dropped_count.clone()),
             },
             InboxSender {
                 tx,
@@ -287,6 +370,7 @@ impl Inbox {
                 classification_context: Some(context),
                 classified_queue: Some(classified_queue),
                 actionable_notify: Some(actionable_notify),
+                dropped_count: Some(dropped_count),
             },
         )
     }
@@ -346,6 +430,20 @@ impl Inbox {
             .map(|queue| queue.lock().runtime_snapshot())
     }
 
+    /// Read the classified-inbox drop counter.
+    ///
+    /// Every `Dropped` outcome from `admit_peer_receive` (plus any failure
+    /// before enqueue — full queue, closed queue, classification rejection)
+    /// increments this counter. Tests assert this is zero on clean delivery
+    /// scenarios to pin down the "no silent drops" invariant.
+    ///
+    /// Returns `None` on non-classified inboxes (there is no admission step).
+    pub fn dropped_count(&self) -> Option<u64> {
+        self.dropped_count
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn note_trusted_peer_added(&mut self, peer_id: &str) {
         if let Some(queue) = &self.classified_queue {
             queue.lock().sync_trusted_peer_added(peer_id);
@@ -384,54 +482,107 @@ impl InboxSender {
     /// goes through the classified queue (the sole consumer). On non-classified
     /// runtimes, enqueues on the raw channel directly.
     ///
-    /// Returns an error if the inbox has been closed.
-    pub fn send(&self, item: InboxItem) -> Result<(), InboxError> {
-        // If classification context is available, route through classified path
+    /// Returns a typed `AdmissionOutcome`. Drops are never surfaced as `Ok(())`.
+    pub fn send(&self, item: InboxItem) -> AdmissionOutcome {
+        // If classification context is available, route through classified path.
         if self.classification_context.is_some() {
             return self.send_classified(item);
         }
-        self.tx.try_send(item).map_err(|err| match err {
-            mpsc::error::TrySendError::Closed(_) => InboxError::Closed,
-            mpsc::error::TrySendError::Full(_) => InboxError::Full,
-        })?;
-        // Notify any waiting tasks
-        self.notify.notify_waiters();
-        Ok(())
+        match self.tx.try_send(item) {
+            Ok(()) => {
+                self.notify.notify_waiters();
+                AdmissionOutcome::Admitted
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    reason = ?DropReason::SessionClosed,
+                    "raw inbox dropped item: queue closed"
+                );
+                self.record_drop(DropReason::SessionClosed)
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    reason = ?DropReason::InboxFull,
+                    "raw inbox dropped item: queue full"
+                );
+                self.record_drop(DropReason::InboxFull)
+            }
+        }
     }
 
     /// Send an item with classification through the classified queue.
     ///
-    /// Classifies the item using the ingress context. Items that classify
-    /// as `None` (e.g., untrusted senders with `require_peer_auth`) are
-    /// silently dropped — snapshot semantics, no resurrection.
+    /// Returns a typed `AdmissionOutcome` so that silent discards become a
+    /// compile error. `Dropped` outcomes carry a `DropReason`, are emitted as
+    /// `tracing::warn!`, and increment the queue's drop counter. Tests assert
+    /// on the counter to prove the happy path doesn't leak drops.
+    ///
+    /// Transport/queue-level errors (closed queue, full queue) are surfaced as
+    /// `Dropped` outcomes rather than bubbled `Err`s — they're semantic drops
+    /// from the caller's perspective, not programmer errors.
     ///
     /// Classified items are enqueued only on the classified queue, then the
     /// appropriate notify is fired.
-    pub(crate) fn send_classified(&self, item: InboxItem) -> Result<(), InboxError> {
-        if let (Some(ctx), Some(classified_queue)) =
+    pub fn send_classified(&self, item: InboxItem) -> AdmissionOutcome {
+        let (Some(ctx), Some(classified_queue)) =
             (&self.classification_context, &self.classified_queue)
-        {
-            let result = match ctx.prepare(item) {
-                Some(r) => r,
-                None => {
-                    // Dropped at ingress — untrusted or otherwise rejected.
-                    // Do not enqueue, do not notify.
-                    return Ok(());
+        else {
+            // Non-classified fallback: enqueue on raw and report back as typed
+            // outcome. Use try_send directly to avoid infinite recursion with
+            // `send()` (which delegates to us when a classification context is
+            // present).
+            return match self.tx.try_send(item) {
+                Ok(()) => {
+                    self.notify.notify_waiters();
+                    AdmissionOutcome::Admitted
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::warn!(
+                        reason = ?DropReason::SessionClosed,
+                        "classified inbox send_classified fell back to raw and found queue closed"
+                    );
+                    self.record_drop(DropReason::SessionClosed)
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        reason = ?DropReason::InboxFull,
+                        "classified inbox send_classified fell back to raw and found queue full"
+                    );
+                    self.record_drop(DropReason::InboxFull)
                 }
             };
-            let kind = result.ingress_kind();
-            let (should_enqueue, trusted_snapshot) = {
-                let mut queue = classified_queue.lock();
-                if result.auth_exempt && ctx.require_peer_auth && !result.trusted_sender {
-                    // Auth-exempt bridge traffic (bootstrap / idempotency-ack)
-                    // bypasses the peer-trust gate so bootstrapping can
-                    // complete before trust edges exist.
-                    (true, Some(false))
-                } else {
-                    queue.admit_peer_receive(&result)
+        };
+
+        let result = match ctx.prepare(item) {
+            Some(r) => r,
+            None => {
+                // Classification rejected the item before admission (e.g.
+                // pre-trust policy drop). No envelope context to log.
+                tracing::warn!(
+                    reason = ?DropReason::ClassificationRejected,
+                    "classified inbox dropped item at classification stage"
+                );
+                return self.record_drop(DropReason::ClassificationRejected);
+            }
+        };
+        let kind = result.ingress_kind();
+        let decision = {
+            let mut queue = classified_queue.lock();
+            if result.auth_exempt && ctx.require_peer_auth && !result.trusted_sender {
+                // Auth-exempt bridge traffic (bootstrap / idempotency-ack)
+                // bypasses the peer-trust gate so bootstrapping can
+                // complete before trust edges exist.
+                AdmissionDecision {
+                    outcome: AdmissionOutcome::Admitted,
+                    trusted_snapshot: Some(false),
                 }
-            };
-            if !should_enqueue {
+            } else {
+                queue.admit_peer_receive(&result)
+            }
+        };
+        match decision.outcome {
+            AdmissionOutcome::Admitted => {}
+            AdmissionOutcome::Dropped { reason } => {
                 if let InboxItem::External { envelope } = &result.item {
                     tracing::warn!(
                         peer_id = %envelope.from.to_peer_id(),
@@ -441,38 +592,63 @@ impl InboxSender {
                         request_id = result.request_id.as_deref().unwrap_or("<none>"),
                         auth_required = ctx.require_peer_auth,
                         trusted_sender = result.trusted_sender,
+                        reason = ?reason,
                         "classified inbox dropped external peer ingress at admission"
                     );
                 }
-                return Ok(());
+                return self.record_drop(reason);
             }
-            let entry = ClassifiedInboxEntry {
-                raw_item_id: result.raw_item_id,
-                item: result.item,
-                class: result.class,
-                auth_exempt: result.auth_exempt,
-                kind,
-                from_peer: result.from_peer,
-                lifecycle_peer: result.lifecycle_peer,
-                request_id: result.request_id,
-                trusted_snapshot,
-                text_projection: result.text_projection,
-            };
-            // Enqueue only on classified queue (no raw double-enqueue).
-            // drain_classified_inbox_interactions() is the sole consumer.
-            let is_actionable = entry.class.is_actionable();
-            classified_queue.lock().try_push(entry)?;
-            // Fire actionable notify only for actionable classes
-            if is_actionable && let Some(ref actionable) = self.actionable_notify {
-                actionable.notify_waiters();
-            }
-            // Always fire broad notify
-            self.notify.notify_waiters();
-            Ok(())
-        } else {
-            // Fallback: no classification context, just send raw
-            self.send(item)
         }
+        let entry = ClassifiedInboxEntry {
+            raw_item_id: result.raw_item_id,
+            item: result.item,
+            class: result.class,
+            auth_exempt: result.auth_exempt,
+            kind,
+            from_peer: result.from_peer,
+            lifecycle_peer: result.lifecycle_peer,
+            request_id: result.request_id,
+            trusted_snapshot: decision.trusted_snapshot,
+            text_projection: result.text_projection,
+        };
+        // Enqueue only on classified queue (no raw double-enqueue).
+        // drain_classified_inbox_interactions() is the sole consumer.
+        let is_actionable = entry.class.is_actionable();
+        let push_result = classified_queue.lock().try_push(entry);
+        match push_result {
+            Ok(()) => {
+                // Fire actionable notify only for actionable classes.
+                if is_actionable && let Some(ref actionable) = self.actionable_notify {
+                    actionable.notify_waiters();
+                }
+                // Always fire broad notify.
+                self.notify.notify_waiters();
+                AdmissionOutcome::Admitted
+            }
+            Err(InboxError::Closed) => {
+                tracing::warn!(
+                    kind = ?kind,
+                    reason = ?DropReason::SessionClosed,
+                    "classified inbox dropped item: queue closed"
+                );
+                self.record_drop(DropReason::SessionClosed)
+            }
+            Err(InboxError::Full) => {
+                tracing::warn!(
+                    kind = ?kind,
+                    reason = ?DropReason::InboxFull,
+                    "classified inbox dropped item: queue full"
+                );
+                self.record_drop(DropReason::InboxFull)
+            }
+        }
+    }
+
+    fn record_drop(&self, reason: DropReason) -> AdmissionOutcome {
+        if let Some(counter) = &self.dropped_count {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        AdmissionOutcome::Dropped { reason }
     }
 }
 
@@ -574,7 +750,7 @@ mod tests {
             envelope: make_test_envelope(),
         };
         let result = sender.send(item);
-        assert!(result.is_ok());
+        assert!(result.is_admitted());
     }
 
     #[tokio::test]
@@ -583,7 +759,10 @@ mod tests {
         let envelope = make_test_envelope();
         let envelope_id = envelope.id;
 
-        sender.send(InboxItem::External { envelope }).unwrap();
+        sender
+            .send(InboxItem::External { envelope })
+            .into_result()
+            .unwrap();
 
         let received = inbox.recv().await;
         assert!(received.is_some());
@@ -603,7 +782,10 @@ mod tests {
         for i in 0..3 {
             let mut envelope = make_test_envelope();
             envelope.id = Uuid::from_u128(i as u128);
-            sender.send(InboxItem::External { envelope }).unwrap();
+            sender
+                .send(InboxItem::External { envelope })
+                .into_result()
+                .unwrap();
         }
 
         // Give a moment for items to be queued
@@ -636,7 +818,12 @@ mod tests {
         let result = sender.send(InboxItem::External {
             envelope: make_test_envelope(),
         });
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed
+            }
+        ));
     }
 
     #[test]
@@ -644,12 +831,21 @@ mod tests {
         let sender_pubkey = PubKey::new([1u8; 32]);
         let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
         let (inbox, sender) = Inbox::new_classified(ctx);
+        let counter = sender.dropped_count.clone();
         drop(inbox);
 
         let result = sender.send_classified(InboxItem::External {
             envelope: make_test_envelope(),
         });
-        assert!(matches!(result, Err(InboxError::Closed)));
+        assert!(matches!(
+            result,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed
+            }
+        ));
+        // And the drop counter must have ticked — the silent `Ok(())` bug is gone.
+        let c = counter.expect("classified path must expose a counter");
+        assert_eq!(c.load(Ordering::Relaxed), 1);
     }
 
     // Phase 3: Wait interruption tests
@@ -676,6 +872,7 @@ mod tests {
             .send(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
 
         // The notification should complete immediately (message was sent before we awaited)
@@ -704,6 +901,7 @@ mod tests {
             .send(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
 
         // The task should complete
@@ -752,6 +950,7 @@ mod tests {
             .send_classified(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
@@ -775,6 +974,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), notified).await;
@@ -798,6 +998,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let notified = actionable.notified();
@@ -822,6 +1023,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let notified = actionable.notified();
@@ -847,6 +1049,7 @@ mod tests {
                 blocks: None,
                 render_metadata: None,
             })
+            .into_result()
             .unwrap();
 
         let notified = actionable.notified();
@@ -873,6 +1076,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let notified = actionable.notified();
@@ -893,6 +1097,7 @@ mod tests {
             .send_classified(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
 
         let entries = inbox.try_drain_classified();
@@ -916,6 +1121,7 @@ mod tests {
             .send_classified(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
 
         // Raw channel should be empty
@@ -940,6 +1146,7 @@ mod tests {
             .send_classified(InboxItem::External {
                 envelope: make_test_envelope(),
             })
+            .into_result()
             .unwrap();
         sender
             .send_classified(InboxItem::PlainEvent {
@@ -950,6 +1157,7 @@ mod tests {
                 blocks: None,
                 render_metadata: None,
             })
+            .into_result()
             .unwrap();
 
         let snapshot = inbox
@@ -994,6 +1202,7 @@ mod tests {
 
         sender
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let snapshot = inbox
@@ -1004,5 +1213,93 @@ mod tests {
         assert_eq!(snapshot.queued_entries[0].kind, PeerIngressKind::Request);
         assert_eq!(snapshot.queued_entries[0].request_id, Some(request_id));
         assert_eq!(snapshot.queued_entries[0].trusted_snapshot, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_classified_happy_path_reports_zero_drops() {
+        // Acceptance criterion: on a clean delivery scenario the drop counter
+        // stays at zero. This pins down the "no silent drops" invariant —
+        // regressions that reintroduce `Ok(())`-on-drop would bump it.
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
+        let (inbox, sender) = Inbox::new_classified(ctx);
+
+        let outcome = sender.send_classified(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+        assert_eq!(outcome, AdmissionOutcome::Admitted);
+        assert_eq!(
+            inbox.dropped_count(),
+            Some(0),
+            "happy-path delivery must not touch the drop counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classified_untrusted_sender_returns_typed_drop_reason() {
+        // Untrusted sender + require_peer_auth: drop is typed, logged, and
+        // counted. No more `Ok(())` masquerading as delivery.
+        let untrusted_pubkey = PubKey::new([9u8; 32]);
+        let ctx = make_classification_context(TrustedPeers::new(), true);
+        let (inbox, sender) = Inbox::new_classified(ctx);
+
+        let mut envelope = make_test_envelope();
+        envelope.from = untrusted_pubkey;
+
+        let outcome = sender.send_classified(InboxItem::External { envelope });
+        assert_eq!(
+            outcome,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::UntrustedSender
+            }
+        );
+        assert_eq!(inbox.dropped_count(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_classified_full_queue_returns_typed_drop_reason() {
+        // InboxFull drops surface as typed `Dropped { InboxFull }` with the
+        // counter bumped. We build a classified queue at capacity 1 by using
+        // `new_with_capacity` plus then falling through to the classified
+        // path with trusted sender: admit the first, reject the second.
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
+        // `new_classified` uses DEFAULT_INBOX_CAPACITY; to exercise full we
+        // need a direct construction path. Fall back to building the queue
+        // directly and then driving it.
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let mut queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth);
+        for trusted_peer in &ctx.trusted_peers.read().peers {
+            queue.sync_trusted_peer_added(&trusted_peer.pubkey.to_peer_id());
+        }
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx),
+            classified_queue: Some(classified_queue),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        let first = sender.send_classified(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+        assert_eq!(first, AdmissionOutcome::Admitted);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        let second = sender.send_classified(InboxItem::External {
+            envelope: make_test_envelope(),
+        });
+        assert_eq!(
+            second,
+            AdmissionOutcome::Dropped {
+                reason: DropReason::InboxFull
+            }
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 }

@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
     AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
-    PeerCommsHandle, SessionAdmissionHandle, TurnStateHandle,
+    PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -176,6 +176,14 @@ pub struct SessionRuntimeBindings {
     /// DSL (`mcp_server_states` substate) and exposes the `PendingConnect` set
     /// to the agent loop for the `[MCP_PENDING]` system-notice toggle.
     pub mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
+    /// Peer interaction lifecycle DSL handle (W1-A / issue #264).
+    ///
+    /// Optional: surfaces without a runtime-owned session DSL (WASM,
+    /// standalone ephemeral tests) leave this `None` and the comms runtime
+    /// falls back to inline channel bookkeeping. Surfaces with a real session
+    /// runtime populate this with [`RuntimePeerInteractionHandle`] sharing the
+    /// same `HandleDslAuthority` as the other five handles.
+    pub peer_interaction: Option<Arc<dyn PeerInteractionHandle>>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -193,6 +201,7 @@ impl Clone for SessionRuntimeBindings {
             session_admission: Arc::clone(&self.session_admission),
             auth_lease: Arc::clone(&self.auth_lease),
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
+            peer_interaction: self.peer_interaction.as_ref().map(Arc::clone),
         }
     }
 }
@@ -212,6 +221,13 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("session_admission", &"<dyn SessionAdmissionHandle>")
             .field("auth_lease", &"<dyn AuthLeaseHandle>")
             .field("mcp_server_lifecycle", &"<dyn McpServerLifecycleHandle>")
+            .field(
+                "peer_interaction",
+                &self
+                    .peer_interaction
+                    .as_ref()
+                    .map(|_| "<dyn PeerInteractionHandle>"),
+            )
             .finish()
     }
 }

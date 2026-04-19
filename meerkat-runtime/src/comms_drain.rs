@@ -151,16 +151,35 @@ pub fn spawn_comms_drain(
                         // `ResponseStatus` matching here is forbidden — all
                         // consumers must read `TerminalityClass` so "terminal"
                         // stays lock-stepped across the codebase.
-                        let is_terminal = match &candidate.interaction.content {
+                        //
+                        // W1-A also needs to route terminal status → the DSL
+                        // peer-interaction handle's `PeerTerminalDisposition`.
+                        // Compute both from the single classifier call so the
+                        // "terminal" and "disposition" facts never drift.
+                        let terminal_status = match &candidate.interaction.content {
                             meerkat_core::interaction::InteractionContent::Response {
                                 status,
                                 ..
-                            } => matches!(
-                                meerkat_core::interaction::classify_response_terminality(*status),
-                                meerkat_core::interaction::TerminalityClass::Terminal { .. }
-                            ),
-                            _ => false,
+                            } => match meerkat_core::interaction::classify_response_terminality(
+                                *status,
+                            ) {
+                                meerkat_core::interaction::TerminalityClass::Terminal {
+                                    disposition,
+                                } => match disposition {
+                                    meerkat_core::interaction::TerminalDisposition::Completed => {
+                                        Some(meerkat_core::handles::PeerTerminalDisposition::Completed)
+                                    }
+                                    meerkat_core::interaction::TerminalDisposition::Failed => {
+                                        Some(meerkat_core::handles::PeerTerminalDisposition::Failed)
+                                    }
+                                    _ => None,
+                                },
+                                meerkat_core::interaction::TerminalityClass::Progress => None,
+                                _ => None,
+                            },
+                            _ => None,
                         };
+                        let is_terminal = terminal_status.is_some();
 
                         if is_terminal {
                             // Terminal response — single admission with
@@ -181,6 +200,28 @@ pub fn spawn_comms_drain(
                                     continue;
                                 }
                             };
+
+                            // W1-A: advance the DSL peer-interaction lifecycle
+                            // into its terminal state BEFORE admitting the
+                            // input into the runtime. The `PeerInteractionCleanup`
+                            // effect fires once the terminal transition lands,
+                            // draining subscriber / stream channels keyed on
+                            // the same correlation id. Skip if no handle is
+                            // installed (standalone tests / WASM).
+                            if let (Some(handle), Some(disposition)) =
+                                (comms_runtime.peer_interaction_handle(), terminal_status)
+                            {
+                                let corr_id =
+                                    meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+                                if let Err(err) = handle.response_terminal(corr_id, disposition) {
+                                    tracing::debug!(
+                                        error = %err,
+                                        corr_id = %corr_id,
+                                        "PeerInteractionHandle::response_terminal rejected"
+                                    );
+                                }
+                            }
+
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let content_input =
                                 classified_interaction_to_runtime_input(&candidate, &runtime_id);
@@ -210,6 +251,26 @@ pub fn spawn_comms_drain(
                             }
                         } else {
                             // Progress response — route as peer input for checkpoint-style handling.
+                            // W1-A: also record the progress signal in the
+                            // DSL so downstream reads see state transition
+                            // `Sent → AcceptedProgress`.
+                            if let Some(handle) = comms_runtime.peer_interaction_handle()
+                                && let meerkat_core::interaction::InteractionContent::Response {
+                                    in_reply_to,
+                                    ..
+                                } = &candidate.interaction.content
+                            {
+                                let corr_id =
+                                    meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
+                                if let Err(err) = handle.response_progress(corr_id) {
+                                    tracing::debug!(
+                                        error = %err,
+                                        corr_id = %corr_id,
+                                        "PeerInteractionHandle::response_progress rejected"
+                                    );
+                                }
+                            }
+
                             let input =
                                 classified_interaction_to_runtime_input(&candidate, &runtime_id);
                             if let Err(err) = adapter.accept_input(&session_id, input).await {

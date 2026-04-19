@@ -2227,6 +2227,16 @@ impl AgentFactory {
         // are no-ops.
         if let RuntimeBuildMode::SessionOwned(bindings) = resolved_mode {
             tools.bind_mcp_server_lifecycle_handle(Arc::clone(&bindings.mcp_server_lifecycle));
+            // W1-A: install the peer-interaction DSL handle on the session's
+            // comms runtime so outbound PeerRequest sends record into
+            // `pending_peer_requests` and `comms_drain` fires response
+            // progress / terminal transitions.
+            #[cfg(feature = "comms")]
+            if let (Some(runtime), Some(handle)) =
+                (&comms_runtime, bindings.peer_interaction.as_ref())
+            {
+                runtime.install_peer_interaction_handle(Arc::clone(handle));
+            }
         }
 
         // 7. Create session store adapter (override > factory > feature-flag default)

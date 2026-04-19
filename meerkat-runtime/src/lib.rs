@@ -67,7 +67,7 @@ pub use durability::{DurabilityError, validate_durability};
 pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeMcpServerLifecycleHandle, RuntimePeerCommsHandle,
-    RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
+    RuntimePeerInteractionHandle, RuntimeSessionAdmissionHandle, RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,

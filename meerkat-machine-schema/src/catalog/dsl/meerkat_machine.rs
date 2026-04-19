@@ -30,6 +30,17 @@ machine! {
             // deterministic [MCP_PENDING] system-notice toggle and to gate
             // tool availability as servers complete their handshakes.
             mcp_server_states: Map<McpServerId, Enum<McpServerState>>,
+
+            // --- Peer interaction lifecycle (W1-A / issue #264) ---
+            //
+            // Outbound request lifecycle: the shell inserts on send, advances
+            // on progress/terminal arrival, and removes on terminal so
+            // projection consumers (subscriber / stream registries) drop
+            // associated channels deterministically via the
+            // `PeerInteractionCleanup` effect.
+            pending_peer_requests: Map<PeerCorrelationId, Enum<OutboundPeerRequestState>>,
+            // Inbound mirror for requests we owe a reply to.
+            inbound_peer_requests: Map<PeerCorrelationId, Enum<InboundPeerRequestState>>,
         }
 
         init(Initializing) {
@@ -46,6 +57,8 @@ machine! {
             realtime_next_authority_epoch = 1,
             live_topology_phase = "Idle",
             mcp_server_states = EmptyMap,
+            pending_peer_requests = EmptyMap,
+            inbound_peer_requests = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -135,6 +148,15 @@ machine! {
             McpServerFailed { server_id: McpServerId, error: String },
             McpServerDisconnected { server_id: McpServerId },
             McpServerReload { server_id: McpServerId },
+            // Peer interaction lifecycle inputs (W1-A). Fire on outbound send,
+            // response arrival (progress or terminal), timeout, inbound
+            // request arrival, and inbound reply completion.
+            PeerRequestSent { corr_id: PeerCorrelationId, to: String },
+            PeerResponseProgressArrived { corr_id: PeerCorrelationId },
+            PeerResponseTerminalArrived { corr_id: PeerCorrelationId, disposition: Enum<PeerTerminalDisposition> },
+            PeerRequestTimedOut { corr_id: PeerCorrelationId },
+            PeerRequestReceived { corr_id: PeerCorrelationId },
+            PeerResponseReplied { corr_id: PeerCorrelationId },
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -231,6 +253,14 @@ machine! {
             // notice and refresh tool availability deterministically.
             McpServerStateChanged { server_id: McpServerId, new_state: Enum<McpServerState> },
             McpServerReloadRequested { server_id: McpServerId },
+            // Peer interaction lifecycle effects (W1-A). Emitted on every
+            // lifecycle-advancing transition so the shell can drop channels
+            // (`subscriber_registry`, `interaction_stream_registry`) keyed on
+            // `corr_id` — the map handles become a pure projection of these
+            // effects.
+            PeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: Enum<OutboundPeerRequestState> },
+            PeerInteractionCleanup { corr_id: PeerCorrelationId },
+            InboundPeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: Enum<InboundPeerRequestState> },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -283,6 +313,9 @@ machine! {
         disposition RealtimeBindingRotated => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
+        disposition PeerInteractionStateChanged => external,
+        disposition PeerInteractionCleanup => external,
+        disposition InboundPeerInteractionStateChanged => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -1600,6 +1633,92 @@ machine! {
         }
 
         // =====================================================================
+        // Peer interaction lifecycle transitions (W1-A / issue #264)
+        // =====================================================================
+
+        transition PeerRequestSent {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerRequestSent { corr_id, to }
+            guard "not_already_pending" { !self.pending_peer_requests.contains_key(corr_id) }
+            update {
+                self.pending_peer_requests.insert(corr_id, OutboundPeerRequestState::Sent);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Sent }
+        }
+
+        transition PeerResponseProgressArrived {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseProgressArrived { corr_id }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            update {
+                self.pending_peer_requests.insert(corr_id, OutboundPeerRequestState::AcceptedProgress);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::AcceptedProgress }
+        }
+
+        transition PeerResponseTerminalArrivedCompleted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseTerminalArrived { corr_id, disposition }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            guard "completed" { disposition == PeerTerminalDisposition::Completed }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Completed }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
+        transition PeerResponseTerminalArrivedFailed {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseTerminalArrived { corr_id, disposition }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            guard "failed" { disposition == PeerTerminalDisposition::Failed }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::Failed }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
+        transition PeerRequestTimedOut {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerRequestTimedOut { corr_id }
+            guard "pending_exists" { self.pending_peer_requests.contains_key(corr_id) }
+            update {
+                self.pending_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit PeerInteractionStateChanged { corr_id: corr_id, new_state: OutboundPeerRequestState::TimedOut }
+            emit PeerInteractionCleanup { corr_id: corr_id }
+        }
+
+        transition PeerRequestReceived {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerRequestReceived { corr_id }
+            guard "not_already_inbound" { !self.inbound_peer_requests.contains_key(corr_id) }
+            update {
+                self.inbound_peer_requests.insert(corr_id, InboundPeerRequestState::Received);
+            }
+            to Idle
+            emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Received }
+        }
+
+        transition PeerResponseReplied {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input PeerResponseReplied { corr_id }
+            guard "inbound_exists" { self.inbound_peer_requests.contains_key(corr_id) }
+            update {
+                self.inbound_peer_requests.remove(corr_id);
+            }
+            to Idle
+            emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }
+        }
+
+        // =====================================================================
         // Live-topology reconfigure transitions
         // =====================================================================
 
@@ -1749,7 +1868,37 @@ stub_newtype!(ToolFilter);
 stub_newtype!(ToolVisibilityWitness);
 stub_newtype!(Generation);
 
-pub use crate::types::McpServerId;
+pub use crate::types::{McpServerId, PeerCorrelationId};
+
+/// Typed outbound peer-request state (catalog DSL twin).
+///
+/// Unit variants only: failure reason and terminal disposition travel on the
+/// companion fields of the DSL input / effect, not in the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OutboundPeerRequestState {
+    #[default]
+    Sent,
+    AcceptedProgress,
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+/// Typed inbound peer-request state (catalog DSL twin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InboundPeerRequestState {
+    #[default]
+    Received,
+    Replied,
+}
+
+/// Typed terminal disposition for an outbound peer response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerTerminalDisposition {
+    #[default]
+    Completed,
+    Failed,
+}
 
 /// Per-server MCP connection lifecycle state.
 ///

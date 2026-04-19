@@ -152,6 +152,8 @@ pub(crate) fn project_state(
         realtime_next_authority_epoch: 1,
         live_topology_phase: "Idle".to_string(),
         mcp_server_states: std::collections::BTreeMap::new(),
+        pending_peer_requests: std::collections::BTreeMap::new(),
+        inbound_peer_requests: std::collections::BTreeMap::new(),
     }
 }
 

@@ -726,6 +726,17 @@ pub trait CommsRuntime: Send + Sync {
     /// terminal events to the tap.
     fn mark_interaction_complete(&self, _id: &crate::interaction::InteractionId) {}
 
+    /// Access the session's peer-interaction DSL handle (W1-A).
+    ///
+    /// Returns `None` for standalone / ephemeral comms runtimes that have no
+    /// attached session DSL. Returns `Some` once the surface has installed
+    /// the handle via [`meerkat_comms::CommsRuntime::install_peer_interaction_handle`].
+    fn peer_interaction_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::handles::PeerInteractionHandle>> {
+        None
+    }
+
     /// Drain classified inbox interactions.
     ///
     /// Returns interactions with pre-computed classification from ingress.

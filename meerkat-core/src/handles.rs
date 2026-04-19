@@ -22,6 +22,9 @@
 use std::collections::BTreeSet;
 
 use crate::lifecycle::{InputId, RunId};
+use crate::peer_correlation::{
+    InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId,
+};
 
 /// Error surfaced when a DSL transition is rejected.
 ///
@@ -479,4 +482,84 @@ pub trait McpServerLifecycleHandle: Send + Sync {
     /// Used by the agent loop to drive the `[MCP_PENDING]` system-notice
     /// lifecycle: non-empty → emit notice; empty → strip notice.
     fn pending_server_ids(&self) -> BTreeSet<String>;
+}
+
+// ---------------------------------------------------------------------------
+// PeerInteractionHandle (W1-A / issue #264)
+// ---------------------------------------------------------------------------
+
+/// Terminal disposition companion for [`PeerInteractionHandle::response_terminal`].
+///
+/// Carried as a typed wire value so the DSL can route `Completed` / `Failed`
+/// terminal transitions without the shell re-interpreting `ResponseStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerTerminalDisposition {
+    /// Terminal response with `Completed` status.
+    Completed,
+    /// Terminal response with `Failed` status.
+    Failed,
+}
+
+/// Peer request / response lifecycle DSL handle (W1-A).
+///
+/// Routes the full peer-interaction lifecycle — outbound `Sent`,
+/// progress / terminal response arrival, timeouts, and inbound
+/// `Received` / `Replied` — into the MeerkatMachine DSL's
+/// `pending_peer_requests` / `inbound_peer_requests` substate maps.
+///
+/// Terminal transitions emit a DSL-owned cleanup effect that the shell
+/// observes to drop any subscriber / stream channel associated with the
+/// correlation id. The channels themselves live in shell-owned maps (they
+/// hold `mpsc::Sender` values that cannot live in DSL state); those maps
+/// are strict projections of DSL state, with the invariant "channel live
+/// iff `corr_id ∈ pending ∧ state ≠ terminal`" enforced by the effect.
+pub trait PeerInteractionHandle: Send + Sync {
+    /// Fire `PeerRequestSent { corr_id, to }`.
+    ///
+    /// Guard: `corr_id` is not already in `pending_peer_requests`.
+    fn request_sent(
+        &self,
+        corr_id: PeerCorrelationId,
+        to: String,
+    ) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerResponseProgressArrived { corr_id }`.
+    ///
+    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
+    /// `Sent` (a progress after a progress is allowed as a self-loop).
+    fn response_progress(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerResponseTerminalArrived { corr_id, disposition }`.
+    ///
+    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
+    /// not already terminal. Emits the DSL `PeerInteractionCleanup` effect.
+    fn response_terminal(
+        &self,
+        corr_id: PeerCorrelationId,
+        disposition: PeerTerminalDisposition,
+    ) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerRequestTimedOut { corr_id }`.
+    ///
+    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
+    /// not already terminal. Emits `PeerInteractionCleanup`.
+    fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerRequestReceived { corr_id }` (inbound).
+    ///
+    /// Guard: `corr_id` is not already in `inbound_peer_requests`.
+    fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `PeerResponseReplied { corr_id }` (inbound reply sent).
+    ///
+    /// Guard: `corr_id` is in `inbound_peer_requests` with state `Received`.
+    fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Observe the DSL-owned state of an outbound peer request.
+    ///
+    /// Returns `None` if the correlation id is not in `pending_peer_requests`.
+    fn outbound_state(&self, corr_id: PeerCorrelationId) -> Option<OutboundPeerRequestState>;
+
+    /// Observe the DSL-owned state of an inbound peer request.
+    fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState>;
 }

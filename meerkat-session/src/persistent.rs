@@ -952,6 +952,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             mcp_server_lifecycle: Arc::new(
                                 meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
                             ),
+                            peer_interaction: Some(Arc::new(
+                                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
+                            )),
                         },
                     )
                 })

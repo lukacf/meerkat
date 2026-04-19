@@ -459,6 +459,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 stream,
             } => {
                 let interaction_id = Uuid::new_v4();
+                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
 
                 if stream_reserved {
@@ -499,6 +500,21 @@ impl CoreCommsRuntime for CommsRuntime {
                         return Err(e);
                     }
                 };
+
+                // Record the outbound request in the DSL (W1-A). The
+                // `pending_peer_requests` map is now the authoritative
+                // source for the subscriber / stream registry cleanup
+                // invariant; the handle is optional to keep standalone
+                // and WASM paths working unchanged.
+                if let Some(handle) = self.peer_interaction_handle()
+                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                {
+                    tracing::debug!(
+                        error = %err,
+                        corr_id = %corr_id,
+                        "PeerInteractionHandle::request_sent rejected — DSL guard fired"
+                    );
+                }
 
                 Ok(SendReceipt::PeerRequestSent {
                     envelope_id,
@@ -589,6 +605,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 // Reserve under the canonical request envelope id so the same
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
+                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
                 self.subscriber_registry
                     .lock()
@@ -620,6 +637,16 @@ impl CoreCommsRuntime for CommsRuntime {
                         return Err(SendAndStreamError::Send(e));
                     }
                 };
+
+                if let Some(handle) = self.peer_interaction_handle()
+                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                {
+                    tracing::debug!(
+                        error = %err,
+                        corr_id = %corr_id,
+                        "PeerInteractionHandle::request_sent rejected — DSL guard fired"
+                    );
+                }
 
                 let receipt = SendReceipt::PeerRequestSent {
                     envelope_id,
@@ -687,6 +714,12 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn mark_interaction_complete(&self, id: &meerkat_core::InteractionId) {
         self.mark_interaction_complete(id.0);
+    }
+
+    fn peer_interaction_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+        self.peer_interaction_handle()
     }
 
     async fn drain_classified_inbox_interactions(
@@ -976,6 +1009,17 @@ pub struct CommsRuntime {
     /// Set during construction when classified inbox is used.
     actionable_notify: Option<Arc<tokio::sync::Notify>>,
     blob_store: Option<Arc<dyn BlobStore>>,
+    /// Session-scoped peer-interaction DSL handle (W1-A). Populated by the
+    /// surface after `CommsRuntime` is constructed — comms runtime itself
+    /// does not know the session's DSL authority at new-time. When `Some`,
+    /// outbound `PeerRequestSent` events are recorded into the DSL and the
+    /// subscriber / stream registries become projection consumers of the
+    /// `PeerInteractionCleanup` effect. When `None` (standalone tests,
+    /// WASM) the legacy inline bookkeeping remains authoritative — this is
+    /// the documented projection fallback, not shadow truth, because the
+    /// DSL substate is simply absent for standalone runtimes.
+    peer_interaction_handle:
+        parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>>,
 }
 
 impl CommsRuntime {
@@ -1053,6 +1097,7 @@ impl CommsRuntime {
             silent_intents,
             actionable_notify,
             blob_store: None,
+            peer_interaction_handle: parking_lot::RwLock::new(None),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             config.inproc_namespace.as_deref().unwrap_or(""),
@@ -1158,6 +1203,7 @@ impl CommsRuntime {
             silent_intents,
             actionable_notify,
             blob_store: None,
+            peer_interaction_handle: parking_lot::RwLock::new(None),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1280,6 +1326,7 @@ impl CommsRuntime {
             silent_intents,
             actionable_notify,
             blob_store: None,
+            peer_interaction_handle: parking_lot::RwLock::new(None),
         };
         InprocRegistry::global().register_with_meta_in_namespace(
             namespace.as_deref().unwrap_or(""),
@@ -1307,6 +1354,27 @@ impl CommsRuntime {
     /// boundary.
     pub fn set_blob_store(&mut self, blob_store: Arc<dyn BlobStore>) {
         self.blob_store = Some(blob_store);
+    }
+
+    /// Install the session's peer-interaction DSL handle (W1-A).
+    ///
+    /// Called by the surface after the session's `SessionRuntimeBindings`
+    /// land. Once set, outbound `PeerRequest` sends fire
+    /// `PeerInteractionHandle::request_sent`, making `pending_peer_requests`
+    /// the authoritative source for the subscriber / stream registry's
+    /// cleanup-on-terminal invariant.
+    pub fn install_peer_interaction_handle(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle>,
+    ) {
+        *self.peer_interaction_handle.write() = Some(handle);
+    }
+
+    /// Read-side accessor for the installed peer-interaction handle.
+    pub fn peer_interaction_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+        self.peer_interaction_handle.read().clone()
     }
 
     async fn hydrate_message_kind_for_transport(

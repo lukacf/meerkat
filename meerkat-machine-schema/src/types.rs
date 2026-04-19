@@ -20,3 +20,18 @@ impl<T: Into<String>> From<T> for McpServerId {
         Self(value.into())
     }
 }
+
+/// Opaque correlation identifier for the peer request / response lifecycle.
+///
+/// Catalog-DSL twin of [`meerkat_core::PeerCorrelationId`]. Carried on all
+/// W1-A peer-interaction inputs and effects; used as the key of the DSL's
+/// `pending_peer_requests` and `inbound_peer_requests` substate maps so the
+/// subscriber / stream registries can project deterministically off DSL state.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct PeerCorrelationId(pub String);
+
+impl<T: Into<String>> From<T> for PeerCorrelationId {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}

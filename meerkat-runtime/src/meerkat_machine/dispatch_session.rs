@@ -312,6 +312,11 @@ impl MeerkatMachine {
                                 &shared_handle_authority,
                             )),
                         ),
+                        peer_interaction: Some(Arc::new(
+                            crate::handles::RuntimePeerInteractionHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
+                        )),
                     },
                 ))
             }

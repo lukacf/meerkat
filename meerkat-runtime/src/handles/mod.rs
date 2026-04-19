@@ -29,6 +29,7 @@ mod comms_drain;
 mod external_tool_surface;
 mod mcp_server_lifecycle;
 mod peer_comms;
+mod peer_interaction;
 mod session_admission;
 mod turn_state;
 
@@ -37,6 +38,7 @@ pub use comms_drain::RuntimeCommsDrainHandle;
 pub use external_tool_surface::RuntimeExternalToolSurfaceHandle;
 pub use mcp_server_lifecycle::RuntimeMcpServerLifecycleHandle;
 pub use peer_comms::RuntimePeerCommsHandle;
+pub use peer_interaction::RuntimePeerInteractionHandle;
 pub use session_admission::RuntimeSessionAdmissionHandle;
 pub use turn_state::RuntimeTurnStateHandle;
 
@@ -80,7 +82,7 @@ impl HandleDslAuthority {
     }
 
     /// Apply a DSL input under the shared authority's mutex.
-    pub(crate) fn apply_input(
+    pub fn apply_input(
         &self,
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
@@ -95,7 +97,7 @@ impl HandleDslAuthority {
     }
 
     /// Apply a DSL signal under the shared authority's mutex.
-    pub(crate) fn apply_signal(
+    pub fn apply_signal(
         &self,
         signal: mm_dsl::MeerkatMachineSignal,
         context: &'static str,
@@ -111,7 +113,7 @@ impl HandleDslAuthority {
     }
 
     /// Clone the current DSL state under the shared authority's mutex.
-    pub(crate) fn snapshot_state(&self) -> mm_dsl::MeerkatMachineState {
+    pub fn snapshot_state(&self) -> mm_dsl::MeerkatMachineState {
         let guard = self
             .inner
             .lock()

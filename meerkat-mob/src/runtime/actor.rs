@@ -3811,10 +3811,41 @@ impl MobActor {
         // From this point, rollback_failed_spawn handles cleanup via the
         // disposal pipeline.
         let member_ref = provision.commit()?;
-        let peer_id = self
-            .provisioner_comms(&member_ref)
-            .await
-            .and_then(|comms| comms.public_key());
+        let member_comms = self.provisioner_comms(&member_ref).await;
+        let peer_id = member_comms.as_ref().and_then(|comms| comms.public_key());
+
+        // Bootstrap supervisor trust on the member's comms runtime.
+        //
+        // The supervisor sends protocol-level lifecycle notifications
+        // (`mob.peer_added`, `mob.peer_retired`, …) to every member. These are
+        // not auth-exempt, so the receiving member must already trust the
+        // supervisor's peer id or the classified inbox will drop the
+        // envelope at admission. Before typed `AdmissionOutcome` landed, the
+        // drop was silent — now it surfaces as `PeerOffline`, which is what
+        // this bootstrap closes. External peers get the same edge via the
+        // supervisor-bridge BindMember bootstrap; session-backed members did
+        // not have an equivalent seam.
+        if let Some(member_comms) = member_comms.as_ref() {
+            match self.supervisor_bridge.supervisor_spec().await {
+                Ok(sup_spec) => {
+                    if let Err(err) = member_comms.add_trusted_peer(sup_spec).await {
+                        tracing::warn!(
+                            agent_identity = %agent_identity,
+                            error = %err,
+                            "could not register supervisor trust on session-backed member comms; \
+                             lifecycle notifications may be dropped at admission"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        agent_identity = %agent_identity,
+                        error = %err,
+                        "supervisor_spec unavailable; cannot bootstrap member→supervisor trust"
+                    );
+                }
+            }
+        }
 
         // Resolve `external_addressable` from the effective profile so we
         // can inform both the shell roster and the DSL (see the

@@ -118,7 +118,14 @@ struct ClassifiedInboxQueue {
     closed: bool,
     entries: VecDeque<ClassifiedInboxEntry>,
     auth_required: bool,
+    /// Public trust set — mirrors the router's user-facing `TrustedPeers`
+    /// and feeds `resolve_peer_directory()`.
     trusted_peers: BTreeSet<PeerId>,
+    /// Private trust set — admission-only, never feeds the peer directory.
+    /// Used for control-plane edges (e.g. supervisor→member lifecycle
+    /// notifications) that must bypass the user-facing `comms.peers` surface
+    /// so clients can't target internal channels as ordinary peers.
+    private_trusted_peers: BTreeSet<PeerId>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
 }
@@ -131,6 +138,7 @@ impl ClassifiedInboxQueue {
             entries: VecDeque::new(),
             auth_required,
             trusted_peers: BTreeSet::new(),
+            private_trusted_peers: BTreeSet::new(),
             phase: PeerIngressState::Absent,
             dropped_count: Arc::new(AtomicU64::new(0)),
         }
@@ -146,6 +154,16 @@ impl ClassifiedInboxQueue {
 
     fn sync_trusted_peer_removed(&mut self, peer_id: &str) {
         self.trusted_peers.remove(&PeerId(peer_id.to_string()));
+    }
+
+    fn sync_private_trust_added(&mut self, peer_id: &str) -> bool {
+        self.private_trusted_peers
+            .insert(PeerId(peer_id.to_string()))
+    }
+
+    fn sync_private_trust_removed(&mut self, peer_id: &str) -> bool {
+        self.private_trusted_peers
+            .remove(&PeerId(peer_id.to_string()))
     }
 
     /// Admit a prepared item into the peer-ingress lifecycle.
@@ -169,7 +187,13 @@ impl ClassifiedInboxQueue {
             };
         };
         let peer_id = PeerId(envelope.from.to_peer_id());
-        let trusted = self.trusted_peers.contains(&peer_id);
+        // Either the public (directory-visible) trust set or the
+        // admission-only private trust set may admit. Private trust exists
+        // specifically for control-plane edges (e.g. supervisor→member
+        // lifecycle notifications) that must not leak into `comms.peers`.
+        let trusted_public = self.trusted_peers.contains(&peer_id);
+        let trusted_private = self.private_trusted_peers.contains(&peer_id);
+        let trusted = trusted_public || trusted_private;
         let admitted = trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
 
@@ -471,6 +495,25 @@ impl Inbox {
         if let Some(queue) = &self.classified_queue {
             queue.lock().sync_trusted_peer_removed(peer_id);
         }
+    }
+
+    /// Sync a private-trust edge into the admission gate. Unlike
+    /// `note_trusted_peer_added`, this never touches the router's
+    /// directory-visible `TrustedPeers`. Returns `true` if the edge was
+    /// newly added (not already present).
+    pub(crate) fn note_private_trust_added(&mut self, peer_id: &str) -> bool {
+        self.classified_queue
+            .as_ref()
+            .map(|queue| queue.lock().sync_private_trust_added(peer_id))
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if the edge was present and removed.
+    pub(crate) fn note_private_trust_removed(&mut self, peer_id: &str) -> bool {
+        self.classified_queue
+            .as_ref()
+            .map(|queue| queue.lock().sync_private_trust_removed(peer_id))
+            .unwrap_or(false)
     }
 
     #[cfg(test)]

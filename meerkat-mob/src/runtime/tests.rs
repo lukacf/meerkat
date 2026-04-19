@@ -17992,6 +17992,47 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
 }
 
 #[tokio::test]
+async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
+    // Fix 2 regression: `finalize_spawn_from_pending` bootstraps supervisor
+    // trust on every session-backed member so lifecycle notifications land
+    // at the classified inbox. That bootstrap must NOT register the
+    // supervisor as a public trusted peer — it's a control-plane edge and
+    // would otherwise surface as an ordinary sendable peer in the
+    // member's `comms.peers` output (and downstream REST/RPC/MCP). The
+    // admission-only private trust seam keeps the edge invisible to the
+    // directory.
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(sample_definition(), "no-supervisor-leak");
+    let (handle, service) = create_test_mob_with_real_comms(definition).await;
+    let receipt = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-private"),
+            None,
+        )
+        .await
+        .expect("spawn session-backed member");
+    let session_id = receipt
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+
+    let member_comms = service
+        .real_comms(&session_id)
+        .await
+        .expect("member comms runtime");
+    let directory = member_comms.peers().await;
+    let supervisor_entry = directory
+        .iter()
+        .find(|entry| entry.name.as_str().contains("__mob_supervisor__"));
+    assert!(
+        supervisor_entry.is_none(),
+        "supervisor must NOT appear in the session-backed member's public \
+         peer directory; the private-trust seam is the whole point. Got: {directory:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_external_tools_provider_called_per_spawn() {
     let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let counter_clone = counter.clone();

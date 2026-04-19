@@ -3817,23 +3817,27 @@ impl MobActor {
         // Bootstrap supervisor trust on the member's comms runtime.
         //
         // The supervisor sends protocol-level lifecycle notifications
-        // (`mob.peer_added`, `mob.peer_retired`, …) to every member. These are
-        // not auth-exempt, so the receiving member must already trust the
-        // supervisor's peer id or the classified inbox will drop the
-        // envelope at admission. Before typed `AdmissionOutcome` landed, the
-        // drop was silent — now it surfaces as `PeerOffline`, which is what
-        // this bootstrap closes. External peers get the same edge via the
-        // supervisor-bridge BindMember bootstrap; session-backed members did
-        // not have an equivalent seam.
+        // (`mob.peer_added`, `mob.peer_retired`, …) to every member. These
+        // are not auth-exempt, so the receiving member must already trust
+        // the supervisor's peer id or the classified inbox will drop the
+        // envelope at admission. External peers get this edge via the
+        // supervisor-bridge `BindMember` bootstrap; session-backed members
+        // had no equivalent seam before W1-B.
+        //
+        // Use the *private* trust seam: the supervisor is a control-plane
+        // peer and must NOT leak into the member's `comms.peers` directory,
+        // REST, RPC, or MCP surface — clients would otherwise be able to
+        // target the supervisor bridge as an ordinary sendable peer.
+        // `add_private_trusted_peer` wires only the admission gate.
         if let Some(member_comms) = member_comms.as_ref() {
             match self.supervisor_bridge.supervisor_spec().await {
                 Ok(sup_spec) => {
-                    if let Err(err) = member_comms.add_trusted_peer(sup_spec).await {
+                    if let Err(err) = member_comms.add_private_trusted_peer(sup_spec).await {
                         tracing::warn!(
                             agent_identity = %agent_identity,
                             error = %err,
-                            "could not register supervisor trust on session-backed member comms; \
-                             lifecycle notifications may be dropped at admission"
+                            "could not register supervisor private-trust on session-backed \
+                             member comms; lifecycle notifications may be dropped at admission"
                         );
                     }
                 }

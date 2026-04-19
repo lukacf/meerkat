@@ -117,10 +117,10 @@ pub struct WasmExternalAuthResolver;
 
 #[cfg(target_arch = "wasm32")]
 #[async_trait::async_trait(?Send)]
-impl meerkat_client::ExternalAuthResolverHandle for WasmExternalAuthResolver {
+impl meerkat_providers::ExternalAuthResolverHandle for WasmExternalAuthResolver {
     async fn resolve(
         &self,
-        binding: &meerkat_client::runtime::binding::ValidatedBinding,
+        binding: &meerkat_providers::ValidatedBinding,
     ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
         let binding_key = format!("{}:{}", binding.auth_profile.id, binding.backend_profile.id,);
         let promise = invoke_external_auth_resolver(&binding_key).map_err(|e| {

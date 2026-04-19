@@ -57,7 +57,7 @@ export ANTHROPIC_API_KEY=sk-...
 
 ```bash
 rkat run "What is the capital of France?"
-rkat run --model gpt-5.2 "Explain async/await"
+rkat run --model gpt-5.4 "Explain async/await"
 ```
 
 **Give it tools and let it work.** Enable shell access and mob orchestration with the `full` tool preset, then let the agent coordinate delegated work through mob members and flows:
@@ -293,7 +293,7 @@ system_prompt = "You analyze code for error handling gaps, security issues, and 
 tools = { shell = true, builtins = true }
 
 [profiles.writer]
-model = "gpt-5.2"
+model = "gpt-5.4"
 system_prompt = "You produce clear, actionable remediation plans from analysis findings."
 
 [wiring]

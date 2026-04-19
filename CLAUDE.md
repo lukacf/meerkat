@@ -105,7 +105,11 @@ meerkat-models    → Curated model catalog and provider profile rules (leaf cra
                      and parameter schemas. Consumed by core, client, tools, and facade.
 meerkat-core      → Agent loop, types, budget, retry, state machine (no I/O deps)
                      Also: SessionService trait, Compactor trait, MemoryStore trait, SessionError
-meerkat-client    → LLM providers (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
+meerkat-client    → LLM provider clients (Anthropic, OpenAI, Gemini) implementing AgentLlmClient
+meerkat-providers → Provider runtime registry + OAuth + TokenStore + cloud authorizers (AWS/GCP/Azure)
+                     Owns `ProviderRuntimeRegistry`, `ResolverEnvironment`, and the typed
+                     `{backend_kind, auth_method}` matrix per provider. Consumed by the facade
+                     and surface crates for realm-scoped credential resolution.
 meerkat-store     → Session persistence (SqliteSessionStore, JsonlStore, MemoryStore) implementing SessionStore
 meerkat-tools     → Tool registry and validation implementing AgentToolDispatcher
 meerkat-session   → Session service orchestration (EphemeralSessionService, DefaultCompactor)
@@ -426,7 +430,7 @@ Required GitHub Actions secrets for full release:
 ### Crate Publish Order
 
 The crates are published in dependency order:
-`meerkat-models` → `meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
+`meerkat-models` → `meerkat-core` → `meerkat-contracts` → `meerkat-client` → `meerkat-providers` → `meerkat-store` → `meerkat-tools` → `meerkat-session` → `meerkat-memory` → `meerkat-mcp` → `meerkat-mcp-server` → `meerkat-hooks` → `meerkat-skills` → `meerkat-comms` → `meerkat-rpc` → `meerkat-rest` → `meerkat` → `meerkat-mob` → `meerkat-mob-mcp` → `meerkat-mob-pack` → `rkat`
 
 ### Key Rules for AI Agents
 
@@ -442,7 +446,7 @@ When running tests or demos that involve multiple LLM providers/models, use thes
 
 | Provider | Model Name |
 |----------|------------|
-| OpenAI | `gpt-5.4` or `gpt-5.3-codex` or `gpt-5.2` |
+| OpenAI | `gpt-5.4` or `gpt-5.4-mini` or `gpt-5.4-pro` or `gpt-5.3-codex` |
 | Gemini | `gemini-3.1-pro-preview` or `gemini-3.1-flash-lite` or `gemini-3.1-flash-lite-preview` or `gemini-3-flash-preview` |
 | Anthropic | `claude-opus-4-7` or `claude-opus-4-6` or `claude-sonnet-4-6` or `claude-sonnet-4-5` |
 

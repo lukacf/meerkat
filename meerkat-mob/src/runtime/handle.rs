@@ -614,6 +614,14 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
+    /// Per-member auth binding (deferral §1). When set, this member's
+    /// agent builds with `AgentBuildConfig.connection_ref = Some(this)`
+    /// — scoping credential resolution to the named realm + binding.
+    /// `None` means the member uses env-default / config-realm fallback
+    /// (mob members do NOT currently auto-inherit the spawner's
+    /// binding; that's a separate plumbing concern per dogma §19 —
+    /// we don't add a tri-state until Inherit has real semantics).
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 impl SpawnMemberSpec {
@@ -635,7 +643,14 @@ impl SpawnMemberSpec {
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
+            connection_ref: None,
         }
+    }
+
+    /// Set the per-member auth binding (deferral §1).
+    pub fn with_connection_ref(mut self, conn_ref: meerkat_core::ConnectionRef) -> Self {
+        self.connection_ref = Some(conn_ref);
+        self
     }
 
     pub fn with_shell_env(mut self, env: std::collections::HashMap<String, String>) -> Self {

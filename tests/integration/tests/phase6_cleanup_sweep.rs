@@ -113,13 +113,6 @@ fn count_substring_hits(
 /// an inline comment explaining why it's out-of-scope for Phase 6.
 fn phase6_deletions() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
     const NO_SKIP: &[&str] = &[];
-    // `OpenAiLiveClient::from_env` in openai_live.rs (#250 realtime SDK)
-    // reuses the exact signature the `from_env` needle catches. The
-    // realtime path is not yet wired through the ProviderRuntimeRegistry
-    // — a follow-up PR (plan-deferral §7) will either delete it or route
-    // it through the registry. Until then it's out-of-scope for the
-    // Phase 6 sweep.
-    const FROM_ENV_SKIP: &[&str] = &["meerkat-client/src/openai_live.rs"];
     vec![
         (
             "resolve_provider_credentials",
@@ -222,8 +215,8 @@ fn phase6_deletions() -> Vec<(&'static str, &'static str, &'static [&'static str
         // to the resolver env_lookup seam, not bypass constructors.
         (
             "pub fn from_env() -> Result<Self, LlmError>",
-            "provider client from_env constructors (plan §6.5)",
-            FROM_ENV_SKIP,
+            "provider client from_env constructors (plan §6.5 + deferral §7)",
+            NO_SKIP,
         ),
         // Plan §6 dogma §5: no bare `api_key` / `base_url` catch-all
         // fields on browser-facing init structs — the "anthropic by

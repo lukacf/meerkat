@@ -1,23 +1,19 @@
-//! Curated model catalog and provider profile rules for the Meerkat agent platform.
+//! meerkat-models — shim re-exports.
 //!
-//! This crate is the single source of truth for:
-//! - Which models are supported and recommended (`catalog` module)
-//! - Per-model capability detection and parameter schemas (`profile` module)
-//!
-//! It is a pure leaf crate with no I/O, no HTTP, and no meerkat crate dependencies.
-//! Consumers include `meerkat-core` (config defaults), `meerkat-client` (adapter rules),
-//! `meerkat-tools` (sub-agent validation), and the facade layer (surface endpoints).
+//! All model catalog / capability / profile data moved to
+//! `meerkat_core::model_profile` in the B2 split (2026-04-18). This crate
+//! is retained as a thin shim so that downstream `meerkat_models::*`
+//! imports continue to work without an import sweep.
 
-pub mod capabilities;
-pub mod catalog;
-pub mod profile;
+pub use meerkat_core::model_profile as profile;
+pub use meerkat_core::model_profile::capabilities;
+pub use meerkat_core::model_profile::catalog;
 
-// Re-exports for convenience
-pub use capabilities::{
+pub use meerkat_core::model_profile::capabilities::{
     BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport, all_capabilities, capabilities_for,
 };
-pub use catalog::{CatalogEntry, ModelTier, ProviderDefaults};
-pub use catalog::{
-    allowed_models, catalog, default_model, entry_for, provider_defaults, provider_names,
+pub use meerkat_core::model_profile::catalog::{
+    CatalogEntry, ModelTier, ProviderDefaults, allowed_models, catalog, default_model, entry_for,
+    provider_defaults, provider_names,
 };
-pub use profile::{ModelProfile, profile_for};
+pub use meerkat_core::model_profile::{ModelProfile, profile_for};

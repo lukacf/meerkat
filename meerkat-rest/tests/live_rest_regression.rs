@@ -120,7 +120,7 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         mob_state,
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        token_store: Arc::new(meerkat_client::auth_store::EphemeralTokenStore::new()),
+        token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
     };
 
     let app = router(state.clone());

@@ -697,6 +697,35 @@ fn synthesize_realm_from_config(
     meerkat_core::RealmConnectionSet::synthesize_env_default(provider)
 }
 
+/// Resolve the API key for `provider` through the canonical
+/// `ProviderRuntimeRegistry` path. Honors the same config→env precedence
+/// as [`synthesize_realm_from_config`]: a realm in `config.realm` that
+/// binds the provider wins, otherwise falls back to
+/// `RealmConnectionSet::synthesize_env_default(provider)` which reads
+/// via `CredentialSourceSpec::Env` through the resolver's env_lookup
+/// seam (respecting `RKAT_*` precedence).
+///
+/// Returns `None` if the realm has no credential material or the
+/// resolver returned a non-inline-secret lease (dynamic authorizer,
+/// OAuth-backed, etc). Dogma §1/§7/§14: single canonical owner for
+/// provider credential acquisition, never a helper-local env read.
+///
+/// Intended for boot-time credential acquisition in sideband surfaces
+/// (e.g. the realtime WS host) that do not yet route through a
+/// per-session `connection_ref`. Session-scoped paths build through
+/// `build_agent`/`AgentFactory` instead.
+pub async fn resolve_provider_api_key(config: &Config, provider: Provider) -> Option<String> {
+    let realm = synthesize_realm_from_config(config, provider);
+    let binding_id = realm.default_binding.clone()?;
+    let env = meerkat_providers::ResolverEnvironment::with_process_env();
+    let registry = crate::default_provider_registry();
+    registry
+        .resolve(&realm, &binding_id, &env)
+        .await
+        .ok()?
+        .resolved_secret()
+}
+
 /// Deferred snapshot provider that captures visible tools from a composed tool dispatcher.
 ///
 /// Created before mob tool composition (so it can be passed into `MobToolsBuildArgs`),
@@ -785,13 +814,13 @@ pub struct AgentFactory {
     /// set this to an `AutoTokenStore` during construction so the whole
     /// stack reads the same persisted credentials.
     #[cfg(not(target_arch = "wasm32"))]
-    pub token_store: Option<Arc<dyn meerkat_client::auth_store::TokenStore>>,
+    pub token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>>,
     /// Refresh coordinator for OAuth token lifecycle. When `None`, a
     /// fresh `InMemoryCoordinator` is created per build; callers that
     /// need cross-process refresh dedup (e.g. concurrent CLI runs) set
     /// a `FileLockCoordinator` here.
     #[cfg(not(target_arch = "wasm32"))]
-    pub refresh_coord: Option<Arc<dyn meerkat_client::auth_store::RefreshCoordinator>>,
+    pub refresh_coord: Option<Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>>,
     /// External auth resolvers keyed by handle. Merged into
     /// `ResolverEnvironment.external_resolvers` during `build_agent`.
     /// The WASM runtime registers a `WasmExternalAuthResolver` under
@@ -799,7 +828,7 @@ pub struct AgentFactory {
     /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
     /// delegate credential resolution to the JS host's OAuth flow.
     pub external_auth_resolvers:
-        BTreeMap<String, Arc<dyn meerkat_client::ExternalAuthResolverHandle>>,
+        BTreeMap<String, Arc<dyn meerkat_providers::ExternalAuthResolverHandle>>,
 }
 
 impl std::fmt::Debug for AgentFactory {
@@ -871,8 +900,8 @@ impl AgentFactory {
     /// bindings surface `InteractiveLoginRequired`.
     pub fn new(store_path: impl Into<PathBuf>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let token_store = meerkat_client::auth_store::TokenStoreBackend::default_auto()
-            .and_then(meerkat_client::auth_store::TokenStoreBackend::open)
+        let token_store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+            .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
             .ok();
         Self {
             store_path: store_path.into(),
@@ -907,7 +936,7 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_token_store(
         mut self,
-        store: Arc<dyn meerkat_client::auth_store::TokenStore>,
+        store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
     ) -> Self {
         self.token_store = Some(store);
         self
@@ -921,7 +950,7 @@ impl AgentFactory {
     pub fn with_external_auth_resolver(
         mut self,
         handle: impl Into<String>,
-        resolver: Arc<dyn meerkat_client::ExternalAuthResolverHandle>,
+        resolver: Arc<dyn meerkat_providers::ExternalAuthResolverHandle>,
     ) -> Self {
         self.external_auth_resolvers.insert(handle.into(), resolver);
         self
@@ -931,7 +960,7 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_refresh_coordinator(
         mut self,
-        coord: Arc<dyn meerkat_client::auth_store::RefreshCoordinator>,
+        coord: Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>,
     ) -> Self {
         self.refresh_coord = Some(coord);
         self
@@ -943,8 +972,8 @@ impl AgentFactory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_default_token_store(
         mut self,
-    ) -> Result<Self, meerkat_client::auth_store::TokenStoreError> {
-        let store = meerkat_client::auth_store::TokenStoreBackend::default_auto()?.open()?;
+    ) -> Result<Self, meerkat_providers::auth_store::TokenStoreError> {
+        let store = meerkat_providers::auth_store::TokenStoreBackend::default_auto()?.open()?;
         self.token_store = Some(store);
         Ok(self)
     }
@@ -1236,17 +1265,46 @@ impl AgentFactory {
             return self.build_self_hosted_client_for_identity(&registry, identity);
         }
 
-        // Phase 6 hot-swap routing: compose a synthetic RealmConnection-
-        // Set from the Config + env via synthesize_realm_from_config (same
-        // precedence as build_agent's env-fallback path). Test-mode shim
-        // honored identically so hot-swap never needs real credentials
-        // under RKAT_TEST_CLIENT=1.
+        // Test-mode shim: hot-swap never needs real credentials under
+        // RKAT_TEST_CLIENT=1.
         if std::env::var("RKAT_TEST_CLIENT").ok().as_deref() == Some("1") {
             return Ok(Arc::new(meerkat_client::TestClient::default()));
         }
-        let realm = synthesize_realm_from_config(config, identity.provider);
+
+        // Dogma §12 dynamic-policy-follows-dynamic-identity (deferral §2):
+        // if the session carries a `connection_ref`, hot-swap must
+        // re-enter `ProviderRuntimeRegistry::resolve` against that
+        // specific realm + binding — not via
+        // `synthesize_realm_from_config`, which would pick "any realm
+        // that binds this provider" and bleed credentials across
+        // tenants. Env-default is the fallback only when no binding was
+        // persisted on the session.
+        let (realm, binding_id): (meerkat_core::RealmConnectionSet, String) =
+            match identity.connection_ref.as_ref() {
+                Some(conn_ref) => {
+                    let section = config.realm.get(&conn_ref.realm_id).ok_or_else(|| {
+                        FactoryError::ClientCreationFailed(format!(
+                            "realm '{}' not found in config.realm (hot-swap)",
+                            conn_ref.realm_id
+                        ))
+                    })?;
+                    let realm =
+                        meerkat_core::RealmConnectionSet::from_config(&conn_ref.realm_id, section)
+                            .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+                    (realm, conn_ref.binding_id.clone())
+                }
+                None => {
+                    let realm = synthesize_realm_from_config(config, identity.provider);
+                    let binding_id = realm
+                        .default_binding
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    (realm, binding_id)
+                }
+            };
+
         #[allow(unused_mut)]
-        let mut env = meerkat_client::ResolverEnvironment::with_process_env();
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
         #[cfg(not(target_arch = "wasm32"))]
         {
             if let Some(store) = self.token_store.clone() {
@@ -1259,9 +1317,9 @@ impl AgentFactory {
         for (handle, resolver) in &self.external_auth_resolvers {
             env = env.with_external_resolver(handle.clone(), resolver.clone());
         }
-        let provider_registry = meerkat_client::ProviderRuntimeRegistry::default();
+        let provider_registry = crate::default_provider_registry();
         let connection = provider_registry
-            .resolve(&realm, "default", &env)
+            .resolve(&realm, &binding_id, &env)
             .await
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
         provider_registry
@@ -1737,6 +1795,7 @@ impl AgentFactory {
                             provider,
                             self_hosted_server_id: self_hosted_server_id.clone(),
                             provider_params: build_config.provider_params.clone(),
+                            connection_ref: None,
                         },
                     )
                     .map_err(BuildAgentError::LlmClient)?
@@ -1784,7 +1843,7 @@ impl AgentFactory {
                     // `rkat auth login`, server-side OAuth completion, etc.)
                     // are read during resolve_binding.
                     #[allow(unused_mut)]
-                    let mut env = meerkat_client::ResolverEnvironment::with_process_env();
+                    let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         if let Some(store) = self.token_store.clone() {
@@ -1797,7 +1856,7 @@ impl AgentFactory {
                     for (handle, resolver) in &self.external_auth_resolvers {
                         env = env.with_external_resolver(handle.clone(), resolver.clone());
                     }
-                    let provider_registry = meerkat_client::ProviderRuntimeRegistry::default();
+                    let provider_registry = crate::default_provider_registry();
                     let is_env_default = build_config.connection_ref.is_none();
                     let connection = provider_registry
                         .resolve(&realm, &binding_id, &env)

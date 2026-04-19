@@ -1,0 +1,277 @@
+---
+title: "Auth"
+description: "Realm-scoped credential resolution: from the env-var happy path to OAuth, cloud IAM, and per-member overrides"
+icon: "key"
+---
+
+Meerkat's auth story has two layers. The **fast path** is an env var
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — set it and
+`rkat run` works. The **powerful path** is realm-scoped bindings:
+declare a realm in your config, register credentials via `rkat auth
+login` or the REST/RPC surfaces, and pass `--connection-ref
+<realm>:<binding>` to scope a session or mob member to that specific
+binding.
+
+Both paths route through the same `ProviderRuntimeRegistry`. There's no
+hidden magic path: the env fallback is a synthesized realm with
+`CredentialSourceSpec::Env`, resolved by the same code that handles
+your configured realms.
+
+## The fast path: env vars
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+rkat run "What's the weather like in 2026?"
+```
+
+That's it. If the env var is set, Meerkat synthesizes a default realm
+(`env_default`) with a binding that reads the key via
+`CredentialSourceSpec::Env`, then resolves normally. `RKAT_*`-prefixed
+env vars (e.g., `RKAT_ANTHROPIC_API_KEY`) take precedence over the
+provider-native names.
+
+| Provider  | Primary env var       | Fallback         |
+|-----------|-----------------------|------------------|
+| Anthropic | `ANTHROPIC_API_KEY`   | —                |
+| OpenAI    | `OPENAI_API_KEY`      | —                |
+| Gemini    | `GEMINI_API_KEY`      | `GOOGLE_API_KEY` |
+
+## The powerful path: realms + bindings
+
+A **realm** is a named collection of backend profiles, auth profiles,
+and provider bindings. It lets you:
+
+- Run multiple sessions against different accounts or tenants
+- Mix OAuth (Claude.ai Pro/Max), api_key (keyed by CI), and cloud IAM
+  (Bedrock/Vertex/Foundry) in one process
+- Hot-swap a session's active binding mid-conversation
+- Give different mob members different credentials
+
+### Realm shape
+
+```toml
+# ~/.rkat/config.toml (or project-local .rkat/config.toml)
+
+[realm.prod.backend.anthropic_primary]
+provider = "anthropic"
+backend_kind = "anthropic_api"
+
+[realm.prod.backend.openai_primary]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.prod.auth.anthropic_oauth]
+provider = "anthropic"
+auth_method = "claude_ai_oauth"
+source = { kind = "managed_store", profile = "anthropic_oauth" }
+
+[realm.prod.auth.openai_apikey]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "managed_store", profile = "openai_apikey" }
+
+[realm.prod.binding.default]
+backend_profile = "anthropic_primary"
+auth_profile    = "anthropic_oauth"
+
+[realm.prod.binding.openai]
+backend_profile = "openai_primary"
+auth_profile    = "openai_apikey"
+```
+
+### Log in
+
+```bash
+# Interactive OAuth (opens a browser; stores refresh token in the
+# TokenStore — OS keychain when available, otherwise 0600 file).
+rkat auth login anthropic
+
+# Scripted (api_key):
+rkat auth login openai --non-interactive --secret "$OPENAI_KEY"
+```
+
+### Use the binding
+
+```bash
+rkat run --connection-ref prod:default "hello"
+rkat run --connection-ref prod:openai   "hello"
+```
+
+## Subcommands
+
+<Steps>
+  <Step title="Login and profile management">
+    ```bash
+    rkat auth realms                       # list realms defined in config
+    rkat auth profiles --realm prod        # list profiles/backends/bindings
+    rkat auth profile --realm prod <id>    # inspect one profile
+    rkat auth login <provider>             # start OAuth or api_key flow
+    rkat auth logout <profile_id>          # clear persisted credentials
+    ```
+  </Step>
+  <Step title="Status and refresh">
+    ```bash
+    rkat auth status --realm prod <profile_id>    # TokenStore state + expiry
+    rkat auth test --realm prod <binding_id>      # dry-run the binding
+    rkat auth refresh --realm prod <profile_id>   # force-refresh OAuth tokens
+    ```
+
+    `rkat auth refresh` is a no-op for `api_key` / `static_bearer`
+    auth methods (nothing to refresh). For OAuth-backed methods it
+    exchanges the persisted refresh token for a fresh access token and
+    writes the new bundle back to the TokenStore.
+  </Step>
+  <Step title="Delete">
+    ```bash
+    rkat auth profile-delete --realm prod <profile_id> -y
+    ```
+  </Step>
+</Steps>
+
+## Auth methods
+
+Each provider's runtime accepts a matrix of `(backend_kind,
+auth_method)` pairs. The table below summarizes what's wired today.
+
+| Provider  | backend_kind        | auth_method             | Notes |
+|-----------|---------------------|-------------------------|-------|
+| Anthropic | `anthropic_api`     | `api_key`, `static_bearer` | Direct to api.anthropic.com |
+| Anthropic | `anthropic_api`     | `claude_ai_oauth`       | Claude Pro/Max OAuth (PKCE, S256) |
+| Anthropic | `anthropic_api`     | `oauth_to_api_key`      | Console OAuth → provisions api_key |
+| Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws` | AWS SigV4 / env-bearer |
+| Anthropic | `vertex`            | `vertex_google_auth`    | GoogleAuth / Vertex AI |
+| Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad` | Azure AI Foundry |
+| OpenAI    | `openai_api`        | `api_key`, `static_bearer` | Direct to api.openai.com |
+| OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
+| OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
+| Google    | `google_genai`      | `api_key`, `bearer_api_key` | Direct to Google GenAI |
+| Google    | `vertex_ai`         | `api_key_express`       | Vertex API Express key |
+| Google    | `vertex_ai`         | `adc`, `compute_adc`    | ADC / compute metadata |
+| Google    | `code_assist`       | `google_oauth`          | Gemini Code Assist OAuth |
+
+External commands (`CredentialSourceSpec::Command`) and file
+descriptors (`CredentialSourceSpec::FileDescriptor`) let host
+applications inject tokens without going through OAuth.
+
+## Credential sources
+
+The `source` field on an auth profile declares *where* credentials
+come from. Five shapes are supported:
+
+| Kind | Description |
+|------|-------------|
+| `InlineSecret { secret }` | Secret stored inline in the TOML (use only for dev/local) |
+| `Env { env, fallback }` | Read env var at resolve time via `ResolverEnvironment::env_lookup` |
+| `ManagedStore { profile }` | Resolve via the `TokenStore` (set by `rkat auth login`) |
+| `ExternalResolver { handle }` | Host-registered JS callback (WASM) or Rust resolver (embedded) |
+| `Command { program, args, ... }` | Run an external binary; cache stdout for `refresh_interval_ms` |
+
+<Warning>
+Storing api keys inline in config files works but shouldn't be
+checked into git. Prefer `ManagedStore` (which writes to the OS
+keychain or a 0o600 file) or `Env`.
+</Warning>
+
+## Hot-swap mid-session
+
+When a session is created with `--connection-ref prod:default`, its
+persisted `SessionMetadata.connection_ref` carries that binding through
+resume and hot-swap. Changing the model/provider mid-turn via the RPC
+`turn/start` override keeps the binding by default; pass an explicit
+`connection_ref` on the turn request to scope the swap to a different
+realm or binding.
+
+```json
+// RPC turn/start — hot-swap to openai binding in the same realm
+{
+  "method": "turn/start",
+  "params": {
+    "session_id": "...",
+    "prompt": "...",
+    "model": "gpt-5.4",
+    "connection_ref": {"realm_id": "prod", "binding_id": "openai"}
+  }
+}
+```
+
+The factory re-enters `ProviderRuntimeRegistry::resolve` with the new
+binding — no env-default fallback, no cross-realm credential bleed.
+
+## Per-mob-member override
+
+Mob members default to env-default / config-realm fallback credentials.
+Pass `connection_ref` on `mob_spawn_member` to scope a member to a
+specific binding:
+
+```json
+{
+  "tool": "mob_spawn_member",
+  "args": {
+    "mob_id": "research",
+    "profile": "analyst",
+    "member_id": "a1",
+    "connection_ref": "prod:openai"
+  }
+}
+```
+
+Members in the same mob can use different providers or tenants
+without cross-contamination. The `connection_ref` string form
+(`realm:binding`) and struct form (`{"realm_id": ..., "binding_id":
+...}`) are both accepted.
+
+## Refresh coordination
+
+Refresh semantics are owned by the `AuthMachine` DSL (one instance
+per `<realm>:<binding>`). On resolve, the runtime:
+
+1. Checks `expires_at`. If present and within 80% of TTL, marks the
+   lease `Expiring` via the DSL.
+2. Under `Expiring`, the next resolve triggers `BeginRefresh`.
+   In-process dedup ensures only one refresh HTTP call per binding
+   even under concurrent resolves; cross-process dedup via filesystem
+   lockfile when `refresh-file-lock` is enabled.
+3. On successful refresh, fires `CompleteRefresh` and updates
+   `expires_at`. On failure, `RefreshFailedTransient` (retry)
+   or `RefreshFailedPermanent` (routes to `ReauthRequired` +
+   emits an `[AUTH_REAUTH_REQUIRED]` system notice on the session).
+
+The lifecycle is TLC-verified in `specs/machines/auth/`.
+
+## Audit logging
+
+Every accepted lifecycle transition emits a structured tracing event:
+
+- `target = "meerkat::auth::audit"`
+- Fields: `binding_key`, `action`, `from_phase`, `to_phase`
+
+REST and RPC surfaces also emit audit events for user-initiated
+actions: `create_profile`, `delete_profile`, `login_oauth_complete`,
+`login_device_complete`, `logout`. Filter any `tracing::Subscriber`
+on the `meerkat::auth::audit` target to build a persistent audit log.
+
+## Feature flags
+
+The `meerkat-providers` crate gates optional auth methods behind
+features so you only pay for what you use:
+
+| Feature          | Enables |
+|------------------|---------|
+| `oauth`          | OAuth flows (Claude.ai, ChatGPT, Code Assist) |
+| `native-keyring` | OS keychain storage for tokens |
+| `refresh-file-lock` | Cross-process refresh dedup |
+| `aws-auth`       | Bedrock backend + SigV4 signing |
+| `google-oauth`   | Vertex + Code Assist + ADC |
+| `azure-auth`     | Foundry backend + Azure AD |
+
+The `rkat` CLI enables `anthropic`, `openai`, `gemini`, and `oauth`
+by default; add cloud-specific features at compile time for
+Bedrock/Vertex/Foundry.
+
+## See also
+
+- [Hooks](/docs/guides/hooks) — observe auth events or gate turns on
+  credential state
+- [Mobs](/docs/guides/mobs) — per-member `connection_ref` overrides
+- Design doc `/docs/architecture/meerkat-runtime-dogma.md` for the
+  dogma §1/§10/§12 rationale behind the realm/binding model

@@ -114,6 +114,11 @@ pub struct RuntimeTurnMetadata {
     /// Override provider-specific parameters for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Override realm-scoped connection binding for this turn (deferral
+    /// §2). On materialized sessions, scopes the hot-swap credential
+    /// fetch to this realm + binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<crate::ConnectionRef>,
     /// Optional normalized rendering metadata for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
@@ -154,6 +159,11 @@ pub struct StagedRunInput {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "primitive_type", rename_all = "snake_case")]
+// StagedInput is intentionally large — it carries the full
+// RuntimeTurnMetadata (model/provider/connection_ref overrides,
+// rendering metadata, skill refs, etc.). Boxing would force an
+// allocation on every input construction, which is in the hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum RunPrimitive {
     /// Apply conversation mutations at a boundary.
     StagedInput(StagedRunInput),

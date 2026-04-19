@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 meerkat.workspace = true
 meerkat-client.workspace = true
+meerkat-providers.workspace = true
 meerkat-core.workspace = true
 meerkat-machine-kernels.workspace = true
 meerkat-models.workspace = true

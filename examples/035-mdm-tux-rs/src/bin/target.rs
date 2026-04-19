@@ -334,6 +334,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             provider_params: None,
             render_metadata: dispatch.render_metadata.clone(),
             execution_kind: None,
+            connection_ref: None,
         });
         let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = InputOrigin::System;

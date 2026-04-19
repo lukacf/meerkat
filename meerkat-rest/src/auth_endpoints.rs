@@ -17,18 +17,18 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use meerkat_client::auth_oauth::{
-    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
-    poll_device_code, request_device_code,
-};
-use meerkat_client::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
-use meerkat_client::providers::anthropic::oauth as a_oauth;
-use meerkat_client::providers::google::oauth as g_oauth;
-use meerkat_client::providers::openai::oauth as o_oauth;
+use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::RealmConnectionSet;
+use meerkat_gemini::runtime::oauth as g_oauth;
+use meerkat_openai::runtime::oauth as o_oauth;
+use meerkat_providers::auth_oauth::{
+    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
+    poll_device_code, request_device_code,
+};
+use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
 
 use crate::AppState;
 
@@ -197,17 +197,29 @@ pub async fn create_auth_profile(
     };
     let key = TokenKey::new(body.realm_id.clone(), body.profile_id.clone());
     match state.token_store.save(&key, &tokens).await {
-        Ok(()) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "realm_id": body.realm_id,
-                "profile_id": body.profile_id,
-                "provider": body.provider,
-                "auth_method": body.auth_method,
-                "stored": true,
-            })),
-        )
-            .into_response(),
+        Ok(()) => {
+            // Deferral §5: structured audit event. Filters:
+            // target=meerkat::auth::audit action=create_profile.
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", body.realm_id, body.profile_id),
+                action = "create_profile",
+                provider = %body.provider,
+                auth_method = %body.auth_method,
+                "auth profile created via REST"
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "realm_id": body.realm_id,
+                    "profile_id": body.profile_id,
+                    "provider": body.provider,
+                    "auth_method": body.auth_method,
+                    "stored": true,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("TokenStore save failed: {e}") })),
@@ -250,15 +262,23 @@ pub async fn delete_auth_profile(
 ) -> impl IntoResponse {
     let key = TokenKey::new(query.realm_id.clone(), profile_id.clone());
     match state.token_store.clear(&key).await {
-        Ok(()) => (
-            StatusCode::NO_CONTENT,
-            Json(serde_json::json!({
-                "realm_id": query.realm_id,
-                "profile_id": profile_id,
-                "cleared": true,
-            })),
-        )
-            .into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", query.realm_id, profile_id),
+                action = "delete_profile",
+                "auth profile deleted via REST"
+            );
+            (
+                StatusCode::NO_CONTENT,
+                Json(serde_json::json!({
+                    "realm_id": query.realm_id,
+                    "profile_id": profile_id,
+                    "cleared": true,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("TokenStore clear failed: {e}") })),
@@ -280,8 +300,8 @@ pub async fn test_auth_profile(
 ) -> impl IntoResponse {
     match resolve_realm(&state, &body.realm_id).await {
         Ok(realm) => {
-            let registry = meerkat_client::ProviderRuntimeRegistry::default();
-            let env = meerkat_client::ResolverEnvironment::with_process_env()
+            let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+            let env = meerkat_providers::ResolverEnvironment::with_process_env()
                 .with_token_store(Arc::clone(&state.token_store));
             match registry.resolve(&realm, &body.binding_id, &env).await {
                 Ok(conn) => (
@@ -475,6 +495,15 @@ pub async fn complete_login(
             .into_response();
     }
 
+    tracing::info!(
+        target: "meerkat::auth::audit",
+        binding_key = %format!("{}:{}", body.realm_id, profile_id),
+        action = "login_oauth_complete",
+        provider = %body.provider,
+        has_refresh_token = %tokens.refresh_token.is_some(),
+        "OAuth login completed via REST"
+    );
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -655,6 +684,14 @@ pub async fn complete_device_login(
                 )
                     .into_response();
             }
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", body.realm_id, profile_id),
+                action = "login_device_complete",
+                provider = %body.provider,
+                has_refresh_token = %tokens.refresh_token.is_some(),
+                "OAuth device-flow login completed via REST"
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -740,15 +777,23 @@ pub async fn logout(
 ) -> impl IntoResponse {
     let key = TokenKey::new(query.realm_id.clone(), profile_id.clone());
     match state.token_store.clear(&key).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "realm_id": query.realm_id,
-                "profile_id": profile_id,
-                "cleared": true,
-            })),
-        )
-            .into_response(),
+        Ok(()) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", query.realm_id, profile_id),
+                action = "logout",
+                "auth profile logged out via REST"
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "realm_id": query.realm_id,
+                    "profile_id": profile_id,
+                    "cleared": true,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": format!("TokenStore clear failed: {e}") })),

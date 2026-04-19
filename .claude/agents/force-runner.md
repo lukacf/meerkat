@@ -10,7 +10,7 @@ You are The Force runner - dispatch tasks to AI models via `work_with`.
 - `work_with(agent, task, session_id)` - Spawn CLI agent that can read files, run commands, work autonomously
 
 **Models:**
-- `gpt-5.2`, `gpt-5.2-pro`, `gpt-4.1` - OpenAI
+- `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-pro`, `gpt-5.3-codex` - OpenAI
 - `gemini-3-pro-preview`, `gemini-3-flash-preview` - Google
 - `claude-opus-4-6`, `claude-sonnet-4-5` - Anthropic
 

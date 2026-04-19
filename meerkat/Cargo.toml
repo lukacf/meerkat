@@ -14,7 +14,12 @@ categories.workspace = true
 
 [dependencies]
 meerkat-core = { workspace = true, features = ["jsonschema"] }
-meerkat-client = { workspace = true }
+meerkat-llm-core = { workspace = true }
+meerkat-client = { workspace = true, default-features = false }
+meerkat-providers = { workspace = true, default-features = false }
+meerkat-anthropic = { workspace = true, optional = true, default-features = false }
+meerkat-openai = { workspace = true, optional = true, default-features = false }
+meerkat-gemini = { workspace = true, optional = true, default-features = false }
 meerkat-schedule = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
@@ -65,9 +70,10 @@ default = ["anthropic", "openai", "gemini"]
 integration-real-tests = []
 
 # LLM providers
-anthropic = ["meerkat-client/anthropic"]
-openai = ["meerkat-client/openai"]
-gemini = ["meerkat-client/gemini"]
+anthropic = ["meerkat-client/anthropic", "dep:meerkat-anthropic", "meerkat-providers/anthropic"]
+openai = ["meerkat-client/openai", "dep:meerkat-openai", "meerkat-providers/openai"]
+openai-realtime = ["openai", "meerkat-client/openai-realtime", "meerkat-openai/realtime"]
+gemini = ["meerkat-client/gemini", "dep:meerkat-gemini", "meerkat-providers/gemini"]
 all-providers = ["anthropic", "openai", "gemini"]
 
 # Storage backends

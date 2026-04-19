@@ -78,7 +78,7 @@ async fn e2e_auth_refresh_coordinator_inproc_dedup() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use meerkat_client::auth_store::{
+    use meerkat_providers::auth_store::{
         InMemoryCoordinator, PersistedAuthMode, PersistedTokens, RefreshCoordinator, TokenKey,
     };
 
@@ -94,7 +94,7 @@ async fn e2e_auth_refresh_coordinator_inproc_dedup() {
         let call_count = Arc::clone(&call_count);
         let key = key.clone();
         handles.push(tokio::spawn(async move {
-            let refresh_fn: meerkat_client::auth_store::RefreshFn = Box::new(move || {
+            let refresh_fn: meerkat_providers::auth_store::RefreshFn = Box::new(move || {
                 let call_count = Arc::clone(&call_count);
                 Box::pin(async move {
                     call_count.fetch_add(1, Ordering::SeqCst);

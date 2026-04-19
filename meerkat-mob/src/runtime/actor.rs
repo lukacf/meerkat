@@ -2890,6 +2890,7 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
+            connection_ref,
         } = spec;
         let meerkat_id = MeerkatId::from(identity.as_str());
         // Normalize launch-mode resume/fork details for the provisioning path.
@@ -3182,6 +3183,10 @@ impl MobActor {
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
+            }
+            // Deferral §1: per-member auth binding.
+            if let Some(ref cref) = connection_ref {
+                config.connection_ref = Some(cref.clone());
             }
 
             let base_prompt = initial_message.clone().unwrap_or_else(|| {

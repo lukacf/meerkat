@@ -475,6 +475,47 @@ Config APIs return a realm-scoped envelope:
 
 `config/set` and `config/patch` support `expected_generation` for CAS.
 
+## Auth (realm/binding model)
+
+Every session resolves credentials through `ProviderRuntimeRegistry`.
+Two paths:
+
+- **Env fallback**: set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+  `GEMINI_API_KEY` (or `RKAT_*` variants) and Meerkat synthesizes a
+  default realm + binding for you. No config changes needed.
+- **Realm bindings**: declare `[realm.<id>.{backend,auth,binding}]` in
+  config, run `rkat auth login <provider>`, then pass
+  `--connection-ref <realm>:<binding>` on `rkat run` / session-create /
+  `mob_spawn_member` to scope a specific session or mob member.
+
+Key facts:
+
+- The canonical owner of credential acquisition is
+  `meerkat_providers::ProviderRuntimeRegistry`. No other code reads
+  `std::env::var` for provider keys (dogma §5/§7/§14).
+- `SessionLlmIdentity.connection_ref` is persisted; hot-swap
+  (`apply_live_session_llm_identity`) re-enters `resolve` against
+  the same binding — no cross-realm credential bleed.
+- `AuthMachine` (per-binding) owns refresh semantics: Valid →
+  Expiring → Refreshing → (Valid | ReauthRequired). Refresh dedup is
+  DSL-owned (in-process) + filesystem-lockfile (cross-process, feature
+  `refresh-file-lock`).
+- OAuth methods: `claude_ai_oauth` (Anthropic), `managed_chatgpt_oauth`
+  (OpenAI), `google_oauth` (Code Assist). All PKCE S256.
+- Cloud IAM: Bedrock (SigV4), Vertex (GoogleAuth), Foundry (Azure AD).
+- Every accepted transition emits a `target = "meerkat::auth::audit"`
+  tracing event (deferral §5). REST/RPC login/logout emit matching
+  events for user-initiated actions.
+
+The provider-runtime + OAuth + auth-store + authorizer modules live
+in the separately-published `meerkat-providers` crate. The `meerkat`
+facade and `meerkat-client` crate re-export the necessary types;
+surfaces import `meerkat_providers::*` directly.
+
+See `docs/guides/auth.mdx` for the full walkthrough and
+`docs/architecture/meerkat-runtime-dogma.md` for the §1/§10/§12
+rationale.
+
 ## Feature composition
 
 The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini). Everything else is opt-in via Cargo features:

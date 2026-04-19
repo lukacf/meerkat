@@ -32,7 +32,7 @@ meerkat-core = { workspace = true, features = ["jsonschema"] }
 # can implement the trait the provider runtime registry looks up. §6.14
 # deleted the direct Anthropic/OpenAI/Gemini *client* constructors, but the
 # resolver seam is a new, legitimate use.
-meerkat-client = { workspace = true, default-features = false, features = ["anthropic", "openai", "gemini"] }
+meerkat-providers = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth"] }
 meerkat-store = { workspace = true, features = ["memory"] }
 meerkat-tools = { workspace = true, default-features = false }
 meerkat-session = { workspace = true }

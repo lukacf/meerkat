@@ -1,0 +1,42 @@
+[package]
+name = "meerkat-providers"
+description = "Shim re-export crate — delegates to meerkat-auth-core and meerkat-llm-core provider_runtime (B2 split). Provider-specific verticals live in meerkat-anthropic, meerkat-openai, meerkat-gemini."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-llm-core = { workspace = true }
+meerkat-auth-core = { workspace = true, default-features = false }
+
+[dev-dependencies]
+
+[features]
+default = ["oauth"]
+
+# Legacy feature aliases forwarded to meerkat-auth-core. Per-provider
+# features (bedrock/vertex/foundry/adc/code-assist) live on the
+# corresponding per-provider crate.
+native-keyring = ["meerkat-auth-core/keyring"]
+refresh-file-lock = ["meerkat-auth-core/file-lock"]
+oauth = ["meerkat-auth-core/oauth"]
+aws-auth = ["meerkat-auth-core/aws-sigv4"]
+google-oauth = ["meerkat-auth-core/gcp-auth"]
+azure-auth = ["meerkat-auth-core/azure-ad"]
+
+# Legacy feature aliases that used to select provider clients.
+# Retained as no-ops for backwards compat — downstream callers should
+# feature-gate on the per-provider crate's features directly.
+anthropic = []
+openai = []
+gemini = []
+
+[lints]
+workspace = true

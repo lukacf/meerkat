@@ -449,6 +449,7 @@ async fn build_llm_client_for_identity_rejects_self_hosted_server_mismatch() {
                 provider: Provider::SelfHosted,
                 self_hosted_server_id: Some("other".to_string()),
                 provider_params: None,
+                connection_ref: None,
             },
         )
         .await
@@ -2132,4 +2133,98 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
         params.get("web_search").is_some(),
         "explicit provider search override should still be honored under explicit tool policy: {params}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Deferral §2: connection_ref hot-swap mid-session
+// ---------------------------------------------------------------------------
+//
+// Dogma §12 (dynamic policy follows dynamic identity) requires that when a
+// session persists a `connection_ref`, `build_llm_client_for_identity`
+// pins the credential resolve to that specific realm + binding — not a
+// synthesized env-default realm. The tests below cover the three failure
+// modes we most care about preventing: silent realm substitution,
+// swallowing of unknown realms, and ignoring a per-hot-swap override.
+
+#[tokio::test]
+async fn hot_swap_scopes_resolve_to_session_connection_ref() {
+    // identity.connection_ref = Some(ref) but config.realm has no matching
+    // realm → typed error. Confirms the factory no longer falls through to
+    // synthesize_realm_from_config + env-default, which would have silently
+    // resolved credentials belonging to a different realm in multi-tenant
+    // setups.
+    //
+    // Assumes RKAT_TEST_CLIENT is not set in the test process env — if it
+    // were, the factory would short-circuit to TestClient before even
+    // reaching the connection_ref branch. Nothing else in this test file
+    // sets that variable, so this assumption holds.
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config = Config::default();
+    let identity = SessionLlmIdentity {
+        model: "claude-opus-4-7".to_string(),
+        provider: Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        connection_ref: Some(meerkat_core::ConnectionRef {
+            realm_id: "tenant_a".to_string(),
+            binding_id: "default".to_string(),
+        }),
+    };
+    let err = match factory
+        .build_llm_client_for_identity(&config, &identity)
+        .await
+    {
+        Ok(_) => panic!("hot-swap against unknown realm must error, not fall through"),
+        Err(e) => e,
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("realm 'tenant_a' not found"),
+        "expected 'realm tenant_a not found' in error, got: {message}"
+    );
+}
+
+#[test]
+fn session_metadata_projects_connection_ref_into_llm_identity() {
+    // Dogma §1/§13: SessionMetadata is the canonical owner;
+    // SessionLlmIdentity is a read/write projection. Verify round-trip.
+    let conn_ref = meerkat_core::ConnectionRef {
+        realm_id: "prod".to_string(),
+        binding_id: "openai_default".to_string(),
+    };
+    let mut metadata = SessionMetadata {
+        model: "gpt-5.4".to_string(),
+        max_tokens: 1024,
+        structured_output_retries: 2,
+        provider: Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        tooling: SessionTooling::default(),
+        keep_alive: false,
+        comms_name: None,
+        peer_meta: None,
+        realm_id: None,
+        instance_id: None,
+        backend: None,
+        config_generation: None,
+        connection_ref: Some(conn_ref.clone()),
+    };
+    let identity = metadata.llm_identity();
+    assert_eq!(identity.connection_ref, Some(conn_ref));
+
+    // Overwrite via apply_llm_identity — connection_ref should change.
+    let swapped_ref = meerkat_core::ConnectionRef {
+        realm_id: "tenant_b".to_string(),
+        binding_id: "default".to_string(),
+    };
+    let new_identity = SessionLlmIdentity {
+        model: "gpt-5.4".to_string(),
+        provider: Provider::OpenAI,
+        self_hosted_server_id: None,
+        provider_params: None,
+        connection_ref: Some(swapped_ref.clone()),
+    };
+    metadata.apply_llm_identity(&new_identity);
+    assert_eq!(metadata.connection_ref, Some(swapped_ref));
 }

@@ -179,6 +179,7 @@ mod factory;
 pub use factory::{
     AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent,
     decode_llm_client_override_from_service, encode_llm_client_override_for_service, provider_key,
+    resolve_provider_api_key,
 };
 
 mod persistence;
@@ -364,6 +365,41 @@ pub fn compose_tools_with_comms(
     }
     instructions.push_str(CommsToolSurface::usage_instructions());
     Ok((Arc::new(composite), instructions))
+}
+
+// Re-export provider-runtime types for downstream consumers that used to
+// reach them via meerkat_providers::* or meerkat_client::*.
+pub use meerkat_llm_core::provider_runtime::{
+    ExternalAuthResolverHandle, ProviderAuthError, ProviderBindingError, ProviderClientError,
+    ProviderRuntime, ProviderRuntimeRegistry, ResolverEnvironment,
+};
+
+/// Construct a [`meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry`] populated with the
+/// feature-gated provider runtimes from the per-provider crates.
+///
+/// Replaces `meerkat_llm_core::ProviderRuntimeRegistry::default_registry()`,
+/// which is empty post-B2-split because `meerkat-llm-core` cannot reach the
+/// per-provider crates (cycle).
+pub fn default_provider_registry() -> meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry {
+    #[allow(unused_mut)]
+    let mut r = meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty();
+    // Per-provider runtimes are non-wasm by construction (they depend on
+    // meerkat-auth-core for OAuth/IAM which requires filesystem/keyring).
+    #[cfg(all(feature = "anthropic", not(target_arch = "wasm32")))]
+    {
+        r = r.with_runtime(std::sync::Arc::new(
+            meerkat_anthropic::AnthropicProviderRuntime,
+        ));
+    }
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    {
+        r = r.with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    }
+    #[cfg(all(feature = "gemini", not(target_arch = "wasm32")))]
+    {
+        r = r.with_runtime(std::sync::Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    }
+    r
 }
 
 /// Prelude module for convenient imports

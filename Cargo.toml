@@ -4,7 +4,13 @@ members = [
     "meerkat-machine-derive",
     "meerkat-models",
     "meerkat-core",
+    "meerkat-llm-core",
+    "meerkat-auth-core",
     "meerkat-client",
+    "meerkat-providers",
+    "meerkat-anthropic",
+    "meerkat-openai",
+    "meerkat-gemini",
     "meerkat-schedule",
     "meerkat-store",
     "meerkat-tools",
@@ -122,7 +128,13 @@ tempfile = "3.14"
 # Internal crates
 meerkat-models = { version = "0.6.0", path = "meerkat-models" }
 meerkat-core = { version = "0.6.0", path = "meerkat-core" }
+meerkat-llm-core = { version = "0.6.0", path = "meerkat-llm-core" }
+meerkat-auth-core = { version = "0.6.0", path = "meerkat-auth-core", default-features = false }
 meerkat-client = { version = "0.6.0", path = "meerkat-client", default-features = false }
+meerkat-providers = { version = "0.6.0", path = "meerkat-providers", default-features = false }
+meerkat-anthropic = { version = "0.6.0", path = "meerkat-anthropic", default-features = false }
+meerkat-openai = { version = "0.6.0", path = "meerkat-openai", default-features = false }
+meerkat-gemini = { version = "0.6.0", path = "meerkat-gemini", default-features = false }
 meerkat-schedule = { version = "0.6.0", path = "meerkat-schedule" }
 meerkat-tools = { version = "0.6.0", path = "meerkat-tools", default-features = false }
 meerkat-mcp = { version = "0.6.0", path = "meerkat-mcp" }

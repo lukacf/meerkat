@@ -65,6 +65,13 @@ pub struct SessionLlmReconfigureRequest {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Optional realm-scoped connection override. When present, the
+    /// hot-swap uses this binding to resolve credentials; when absent,
+    /// the session's existing `SessionLlmIdentity.connection_ref` is
+    /// preserved. Dogma §10 inherit/set — `None` inherits the current
+    /// binding, `Some(ref)` sets a new one explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

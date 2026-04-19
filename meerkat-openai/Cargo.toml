@@ -1,0 +1,57 @@
+[package]
+name = "meerkat-openai"
+description = "OpenAI vertical for Meerkat: LLM client, compatible client, live/realtime, provider runtime, catalog, capabilities, profile, and ChatGPT OAuth backend."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+meerkat-core = { workspace = true }
+meerkat-llm-core = { workspace = true }
+meerkat-contracts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+indexmap = "2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-auth-core = { workspace = true }
+meerkat-runtime = { workspace = true, optional = true, default-features = false }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+base64 = { workspace = true }
+oai-rt-rs = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio_with_wasm = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }
+meerkat-auth-core = { workspace = true, features = ["oauth"] }
+axum = { workspace = true }
+
+[features]
+default = ["oauth"]
+oauth = ["meerkat-auth-core/oauth"]
+realtime = ["dep:oai-rt-rs", "dep:meerkat-runtime"]
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom", "base64", "indexmap", "tempfile"]
+
+[lints]
+workspace = true

@@ -1280,7 +1280,7 @@ enum Commands {
     },
 
     #[command(
-        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch '{\"agent\":{\"model\":\"gpt-5.2\"}}'"
+        after_help = "Examples:\n  rkat config get --format toml\n  rkat config set ./.rkat/config.toml\n  rkat config patch '{\"agent\":{\"model\":\"gpt-5.4\"}}'"
     )]
     /// Config management
     Config {
@@ -1414,6 +1414,25 @@ enum AuthCommands {
     Logout {
         /// Auth profile id (either `realm:binding` or bare `binding` — the
         /// latter assumes realm `dev`).
+        profile_id: String,
+    },
+
+    /// Force a refresh of the persisted credential for an auth profile.
+    ///
+    /// For OAuth-backed methods this exchanges the persisted refresh
+    /// token for a fresh access token and writes the result back into
+    /// the TokenStore. For api_key / static-bearer methods this is a
+    /// no-op (nothing to refresh); a descriptive message is printed.
+    ///
+    /// Parallel to `rkat auth test <binding>` which also triggers a
+    /// refresh as a side effect of resolving the binding — this
+    /// subcommand is the explicit refresh-only entrypoint.
+    Refresh {
+        /// Realm id.
+        #[arg(long, default_value = "dev")]
+        realm: String,
+
+        /// Auth profile id.
         profile_id: String,
     },
 }
@@ -2832,8 +2851,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
-            let registry = meerkat_client::ProviderRuntimeRegistry::default();
-            let env = meerkat_client::ResolverEnvironment::with_process_env();
+            let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+            let env = meerkat_providers::ResolverEnvironment::with_process_env();
             match registry.resolve(&realm_set, &binding_id, &env).await {
                 Ok(conn) => {
                     println!("state: valid");
@@ -2868,7 +2887,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             // TokenStore lookup: `<realm>:<profile_id>` is the canonical key.
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
-                use meerkat_client::auth_store::{TokenKey, TokenStoreBackend};
+                use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
                 let store = TokenStoreBackend::default_auto()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                     .open()
@@ -2961,7 +2980,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             }
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
-                use meerkat_client::auth_store::{TokenKey, TokenStoreBackend};
+                use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
                 let store = TokenStoreBackend::default_auto()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
                     .open()
@@ -3076,6 +3095,157 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                 );
             }
         }
+        AuthCommands::Refresh { realm, profile_id } => {
+            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+            {
+                refresh_auth_profile(&realm, &profile_id, &config).await?;
+            }
+            #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
+            {
+                let _ = (realm, profile_id, &config);
+                anyhow::bail!(
+                    "`rkat auth refresh` requires the `anthropic`, `openai`, and `gemini` \
+                     features to be enabled at build time."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `rkat auth refresh <realm> <profile_id>` handler (deferral §6).
+///
+/// Forces a refresh of the persisted credential for the given auth
+/// profile. For OAuth-backed methods this exchanges the persisted
+/// refresh token for a fresh access token and writes the new bundle
+/// back to the TokenStore. For `api_key` / `static_bearer` auth
+/// methods this is a no-op with a descriptive message.
+///
+/// Implementation: locates a binding that references the auth profile,
+/// runs the canonical `ProviderRuntimeRegistry::resolve` path (which
+/// attaches the TokenStore + RefreshCoordinator so refresh side-effects
+/// persist), then explicitly calls `lease.refresh(Manual)` to trigger
+/// the refresh regardless of proactive-refresh heuristics. Dogma §1:
+/// the registry is the canonical resolver — no helper-local refresh.
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+async fn refresh_auth_profile(
+    realm: &str,
+    profile_id: &str,
+    config: &meerkat_core::Config,
+) -> anyhow::Result<()> {
+    use meerkat_core::auth::AuthRefreshReason;
+    use meerkat_providers::ResolverEnvironment;
+    use meerkat_providers::auth_store::{
+        InMemoryCoordinator, RefreshCoordinator, TokenKey, TokenStore, TokenStoreBackend,
+    };
+    use std::sync::Arc as StdArc;
+
+    let section = config
+        .realm
+        .get(realm)
+        .ok_or_else(|| anyhow::anyhow!("Unknown realm '{realm}'"))?;
+    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm, section)
+        .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
+    let profile = realm_set
+        .auth_profiles
+        .get(profile_id)
+        .ok_or_else(|| anyhow::anyhow!("Auth profile '{realm}:{profile_id}' not found"))?;
+
+    // No-op fast paths: refresh is meaningless for non-OAuth methods.
+    // Dogma §5: typed truth — we branch on auth_method, not folklore.
+    let is_refreshable = matches!(
+        profile.auth_method.as_str(),
+        "managed_chatgpt_oauth"
+            | "claude_ai_oauth"
+            | "oauth_to_api_key"
+            | "google_oauth"
+            | "code_assist_oauth"
+    );
+    if !is_refreshable {
+        println!(
+            "profile:       {realm}:{profile_id}\n\
+             auth_method:   {}\n\
+             refresh:       no-op\n\
+             reason:        auth_method is not OAuth-backed; credentials don't expire",
+            profile.auth_method,
+        );
+        return Ok(());
+    }
+
+    // Find a binding that references this auth profile.
+    let binding_id = realm_set
+        .bindings
+        .iter()
+        .find(|(_, b)| b.auth_profile == profile_id)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No binding in realm '{realm}' references auth profile '{profile_id}'; \
+                 refresh requires a binding to drive the resolver."
+            )
+        })?;
+
+    // Wire the TokenStore + RefreshCoordinator into the environment so
+    // the refresh write-back reaches persistent storage.
+    let store: StdArc<dyn TokenStore> = TokenStoreBackend::default_auto()
+        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
+        .open()
+        .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
+    let coord: StdArc<dyn RefreshCoordinator> = StdArc::new(InMemoryCoordinator::default());
+
+    // Pre-state for the reported diff.
+    let key = TokenKey::new(realm, profile_id);
+    let before = store
+        .load(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
+    if before.is_none() {
+        println!(
+            "profile:       {realm}:{profile_id}\n\
+             refresh:       skipped\n\
+             reason:        no persisted credential; run `rkat auth login {}` first",
+            profile.provider.as_str(),
+        );
+        return Ok(());
+    }
+
+    let env = ResolverEnvironment::with_process_env()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(coord);
+    let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+    let connection = registry
+        .resolve(&realm_set, &binding_id, &env)
+        .await
+        .map_err(|e| anyhow::anyhow!("Binding resolution failed: {e}"))?;
+
+    connection
+        .auth_lease
+        .refresh(AuthRefreshReason::Manual)
+        .await
+        .map_err(|e| anyhow::anyhow!("Refresh failed: {e}"))?;
+
+    // Post-state after refresh is observable via the TokenStore (the
+    // refresh path writes back there).
+    let after = store
+        .load(&key)
+        .await
+        .map_err(|e| anyhow::anyhow!("TokenStore reload failed: {e}"))?;
+
+    println!("profile:       {realm}:{profile_id}");
+    println!("auth_method:   {}", profile.auth_method);
+    println!("refresh:       ok");
+    if let Some(before) = before.as_ref()
+        && let Some(expires_at) = before.expires_at
+    {
+        println!("expires_at(before): {}", expires_at.to_rfc3339());
+    }
+    if let Some(after) = after.as_ref() {
+        if let Some(expires_at) = after.expires_at {
+            println!("expires_at(after):  {}", expires_at.to_rfc3339());
+        }
+        if let Some(last_refresh) = after.last_refresh {
+            println!("last_refresh:        {}", last_refresh.to_rfc3339());
+        }
     }
     Ok(())
 }
@@ -3158,7 +3328,7 @@ impl LoginProvider {
     fn sample_model(self) -> &'static str {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
-            Self::OpenAi => "gpt-5.2",
+            Self::OpenAi => "gpt-5.4",
             Self::Google => "gemini-3.1-flash-lite",
         }
     }
@@ -3306,7 +3476,7 @@ async fn noninteractive_login(
     secret: Option<&str>,
     _scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
-    use meerkat_client::auth_store::{
+    use meerkat_providers::auth_store::{
         PersistedAuthMode, PersistedTokens, TokenKey, TokenStoreBackend,
     };
 
@@ -3389,13 +3559,13 @@ async fn interactive_login(
     use std::sync::Arc as StdArc;
     use std::time::Duration;
 
-    use meerkat_client::auth_oauth::{OAuthError, PkcePair, run_loopback_callback};
-    use meerkat_client::auth_store::{
+    use meerkat_anthropic::runtime::oauth as a_oauth;
+    use meerkat_gemini::runtime::oauth as g_oauth;
+    use meerkat_openai::runtime::oauth as o_oauth;
+    use meerkat_providers::auth_oauth::{OAuthError, PkcePair, run_loopback_callback};
+    use meerkat_providers::auth_store::{
         PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreBackend,
     };
-    use meerkat_client::providers::anthropic::oauth as a_oauth;
-    use meerkat_client::providers::google::oauth as g_oauth;
-    use meerkat_client::providers::openai::oauth as o_oauth;
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;
@@ -3530,7 +3700,7 @@ async fn interactive_login(
     // --- Step 4: exchange + persist ------------------------------
     print_step(4, 4, "Exchanging the code for access + refresh tokens");
     let http = reqwest::Client::new();
-    let result = meerkat_client::auth_oauth::exchange_authorization_code(
+    let result = meerkat_providers::auth_oauth::exchange_authorization_code(
         &http,
         &endpoints,
         &outcome.code,
@@ -3647,7 +3817,7 @@ async fn interactive_login(
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::Result<()> {
-    use meerkat_client::auth_store::{TokenKey, TokenStoreBackend};
+    use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
     let store = TokenStoreBackend::default_auto()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
@@ -6271,6 +6441,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     provider_params: None,
                     render_metadata: dispatch.render_metadata.clone(),
                     execution_kind: None,
+                    connection_ref: None,
                 },
             ),
         );

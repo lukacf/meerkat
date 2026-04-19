@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use meerkat_client::{ProviderRuntimeRegistry, ResolverEnvironment};
+use meerkat::ResolverEnvironment;
 use meerkat_core::auth::ResolvedAuthKind;
 use meerkat_core::{RealmConfigSection, RealmConnectionSet};
 
@@ -46,7 +46,7 @@ async fn two_member_bindings_resolve_to_distinct_leases() {
     let realm_a = realm_with_anthropic_key("mob_member_a", "sk-a-0000000000000000000000000000");
     let realm_b = realm_with_anthropic_key("mob_member_b", "sk-b-1111111111111111111111111111");
 
-    let registry = ProviderRuntimeRegistry::default();
+    let registry = meerkat::default_provider_registry();
     let env = ResolverEnvironment::with_process_env();
 
     let (a, b) = tokio::join!(
@@ -82,7 +82,7 @@ async fn two_member_bindings_resolve_to_distinct_leases() {
 async fn same_realm_two_resolves_are_independent_invocations() {
     let realm = realm_with_anthropic_key("mob_shared_realm", "sk-shared-abcdef0123456789abcdef01");
 
-    let registry = ProviderRuntimeRegistry::default();
+    let registry = meerkat::default_provider_registry();
     let env = ResolverEnvironment::with_process_env();
 
     let first = registry
@@ -124,7 +124,7 @@ async fn cross_provider_members_resolve_orthogonally() {
     )]);
     let realm_b = RealmConnectionSet::from_config("mob_oai", &section_b).unwrap();
 
-    let registry = ProviderRuntimeRegistry::default();
+    let registry = meerkat::default_provider_registry();
     let env = ResolverEnvironment::with_process_env();
 
     let (a, b) = tokio::join!(

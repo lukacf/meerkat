@@ -905,6 +905,20 @@ pub struct SessionLlmIdentity {
     pub self_hosted_server_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<serde_json::Value>,
+    /// Realm-scoped auth binding this session resolves credentials
+    /// through. Carried on the identity so mid-session hot-swaps
+    /// (`apply_live_session_llm_identity`) re-resolve against the
+    /// same realm the session was created with — preventing
+    /// cross-realm credential bleed in multi-tenant setups. Dogma
+    /// §12 (dynamic policy follows dynamic identity): on swap the
+    /// factory re-enters `ProviderRuntimeRegistry::resolve` against
+    /// this binding, not a new synthesized env-default realm.
+    ///
+    /// Projection (dogma §1/§13): canonical owner is
+    /// `SessionMetadata.connection_ref`; this field is the
+    /// read/write projection used by hot-swap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_ref: Option<crate::ConnectionRef>,
 }
 
 impl SessionMetadata {
@@ -915,6 +929,7 @@ impl SessionMetadata {
             provider: self.provider,
             self_hosted_server_id: self.self_hosted_server_id.clone(),
             provider_params: self.provider_params.clone(),
+            connection_ref: self.connection_ref.clone(),
         }
     }
 
@@ -924,6 +939,7 @@ impl SessionMetadata {
         self.provider = identity.provider;
         self.self_hosted_server_id = identity.self_hosted_server_id.clone();
         self.provider_params = identity.provider_params.clone();
+        self.connection_ref = identity.connection_ref.clone();
     }
 }
 

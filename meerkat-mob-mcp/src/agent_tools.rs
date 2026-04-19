@@ -767,6 +767,15 @@ impl AgentMobToolSurface {
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
+        if let Some(arg) = args.connection_ref {
+            let cref = arg.into_connection_ref().ok_or_else(|| {
+                ToolError::invalid_arguments(
+                    call.name,
+                    "connection_ref must be either \"<realm>:<binding>\" or {realm_id, binding_id}",
+                )
+            })?;
+            spec.connection_ref = Some(cref);
+        }
 
         let spawn_result = self
             .state
@@ -1689,6 +1698,30 @@ struct SpawnMemberArgs {
     auto_wire_parent: Option<bool>,
     #[serde(default)]
     tooling: Option<meerkat_mob::SpawnTooling>,
+    /// Per-member auth binding (deferral §1). Accepts either the
+    /// string form `"<realm>:<binding>"` or the struct
+    /// `{"realm_id": "...", "binding_id": "..."}` (wire-contract
+    /// shape). When set, this member resolves credentials via the
+    /// named realm + binding; otherwise the member uses env-default
+    /// / config-realm fallback.
+    #[serde(default)]
+    connection_ref: Option<ConnectionRefArg>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConnectionRefArg {
+    Str(String),
+    Struct(meerkat_core::ConnectionRef),
+}
+
+impl ConnectionRefArg {
+    fn into_connection_ref(self) -> Option<meerkat_core::ConnectionRef> {
+        match self {
+            Self::Str(raw) => meerkat_core::ConnectionRef::parse(&raw),
+            Self::Struct(r) => Some(r),
+        }
+    }
 }
 
 #[derive(Deserialize)]

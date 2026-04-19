@@ -246,13 +246,18 @@ mod tests {
     #[cfg(feature = "openai")]
     use async_trait::async_trait;
     use meerkat_client::TestClient;
-    #[cfg(feature = "openai")]
-    use meerkat_client::{
-        LlmError, OpenAiLiveCallTarget, OpenAiLiveClientEvent, OpenAiLiveServerEvent,
-        OpenAiLiveSession, OpenAiLiveSessionFactory, OpenAiRealtimeAttachmentOrchestrator,
-        RealtimeAttachmentToolDispatchHost,
-    };
     use meerkat_core::SessionBuildOptions;
+    #[cfg(feature = "openai")]
+    use meerkat_llm_core::LlmError;
+    #[cfg(feature = "openai")]
+    use meerkat_openai::live::{
+        OpenAiLiveCallTarget, OpenAiLiveClientEvent, OpenAiLiveServerEvent, OpenAiLiveSession,
+        OpenAiLiveSessionFactory,
+    };
+    #[cfg(feature = "openai")]
+    use meerkat_openai::realtime_attachment::{
+        OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
+    };
     use meerkat_runtime::completion::CompletionOutcome;
     use meerkat_runtime::{Input, PromptInput, RuntimeState};
     use tempfile::TempDir;

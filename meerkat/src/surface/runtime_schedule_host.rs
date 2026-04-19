@@ -233,6 +233,7 @@ impl RuntimeBackedScheduleSessionHost {
                 provider_params: None,
                 render_metadata,
                 execution_kind: None,
+                connection_ref: None,
             },
         );
         let mut prompt_input = PromptInput::from_content_input(prompt, turn_metadata);

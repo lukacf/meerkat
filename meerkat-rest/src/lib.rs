@@ -151,7 +151,7 @@ pub struct AppState {
     /// Persistent TokenStore for OAuth-backed bindings. Shared with the
     /// AgentFactory so both read and write paths (login, resolve,
     /// logout) see the same credentials.
-    pub token_store: Arc<dyn meerkat_client::auth_store::TokenStore>,
+    pub token_store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,12 +282,12 @@ impl AppState {
         // OAuth write-path handlers (auth/login/complete, auth/profile/
         // create, auth/logout) can read/write the same persisted
         // credentials as the factory's resolve_binding path.
-        let token_store: Arc<dyn meerkat_client::auth_store::TokenStore> =
-            match meerkat_client::auth_store::TokenStoreBackend::default_auto()
-                .and_then(meerkat_client::auth_store::TokenStoreBackend::open)
+        let token_store: Arc<dyn meerkat_providers::auth_store::TokenStore> =
+            match meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+                .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
             {
                 Ok(store) => store,
-                Err(_) => Arc::new(meerkat_client::auth_store::EphemeralTokenStore::new()),
+                Err(_) => Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
             };
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
@@ -456,6 +456,7 @@ async fn resolve_validation_identity(
         provider,
         self_hosted_server_id,
         provider_params: None,
+        connection_ref: None,
     }
 }
 

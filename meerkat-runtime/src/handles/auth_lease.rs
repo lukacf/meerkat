@@ -22,6 +22,33 @@ use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionErr
 
 use crate::auth_machine::dsl as auth_dsl;
 
+/// Emit a structured audit record for every accepted auth-lease DSL
+/// transition. REST/RPC surfaces (and any other `tracing::Subscriber`
+/// consumer) can filter on `target = "meerkat::auth::audit"` to build
+/// a persistent audit log without the shell inventing the fact set
+/// (dogma §17 — surfaces observe, they do not own lifecycle truth).
+///
+/// Deferral §5: structured observability for auth events. We emit at
+/// the single choke point where DSL transitions succeed, not from each
+/// caller — that keeps the audit trail aligned with the machine's
+/// actual acceptance of the transition and avoids duplication /
+/// drift (dogma §1).
+fn emit_audit(
+    binding_key: &str,
+    action: &'static str,
+    from_phase: Option<&str>,
+    to_phase: Option<&str>,
+) {
+    tracing::info!(
+        target: "meerkat::auth::audit",
+        binding_key = %binding_key,
+        action = %action,
+        from_phase = ?from_phase,
+        to_phase = ?to_phase,
+        "auth lease transition"
+    );
+}
+
 /// Runtime-backed [`AuthLeaseHandle`] impl.
 ///
 /// Holds a mutex-guarded registry of per-binding [`auth_dsl::AuthMachineAuthority`]
@@ -66,6 +93,7 @@ impl RuntimeAuthLeaseHandle {
         context: &'static str,
         create_if_missing: bool,
     ) -> Result<(), DslTransitionError> {
+        let action = Self::audit_action_for(&input);
         let mut guard = self
             .machines
             .lock()
@@ -85,9 +113,35 @@ impl RuntimeAuthLeaseHandle {
                 }
             }
         };
+        let from_phase = Self::phase_str(&entry.state.lifecycle_phase);
         auth_dsl::AuthMachineMutator::apply(entry, input)
-            .map(|_| ())
-            .map_err(|err| DslTransitionError::new(context, format!("{err}")))
+            .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+        let to_phase = Self::phase_str(&entry.state.lifecycle_phase);
+        emit_audit(binding_key, action, Some(from_phase), Some(to_phase));
+        Ok(())
+    }
+
+    fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
+        match input {
+            auth_dsl::AuthMachineInput::Acquire { .. } => "acquire_lease",
+            auth_dsl::AuthMachineInput::MarkExpiring => "mark_expiring",
+            auth_dsl::AuthMachineInput::BeginRefresh => "begin_refresh",
+            auth_dsl::AuthMachineInput::CompleteRefresh { .. } => "complete_refresh",
+            auth_dsl::AuthMachineInput::RefreshFailedTransient => "refresh_failed_transient",
+            auth_dsl::AuthMachineInput::RefreshFailedPermanent => "refresh_failed_permanent",
+            auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
+            auth_dsl::AuthMachineInput::Release => "release_lease",
+        }
+    }
+
+    fn phase_str(phase: &auth_dsl::AuthLifecyclePhase) -> &'static str {
+        match phase {
+            auth_dsl::AuthLifecyclePhase::Valid => "valid",
+            auth_dsl::AuthLifecyclePhase::Expiring => "expiring",
+            auth_dsl::AuthLifecyclePhase::Refreshing => "refreshing",
+            auth_dsl::AuthLifecyclePhase::ReauthRequired => "reauth_required",
+            auth_dsl::AuthLifecyclePhase::Released => "released",
+        }
     }
 }
 

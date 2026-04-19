@@ -10,18 +10,18 @@ use std::sync::Arc;
 
 use serde_json::value::RawValue;
 
-use meerkat_client::auth_oauth::{
-    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
-    poll_device_code, request_device_code,
-};
-use meerkat_client::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
-use meerkat_client::providers::anthropic::oauth as a_oauth;
-use meerkat_client::providers::google::oauth as g_oauth;
-use meerkat_client::providers::openai::oauth as o_oauth;
+use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::RealmConnectionSet;
+use meerkat_gemini::runtime::oauth as g_oauth;
+use meerkat_openai::runtime::oauth as o_oauth;
+use meerkat_providers::auth_oauth::{
+    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
+    poll_device_code, request_device_code,
+};
+use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -82,7 +82,7 @@ async fn resolve_realm(
 fn require_token_store(
     runtime: &SessionRuntime,
     id: Option<RpcId>,
-) -> Result<Arc<dyn meerkat_client::auth_store::TokenStore>, RpcResponse> {
+) -> Result<Arc<dyn meerkat_providers::auth_store::TokenStore>, RpcResponse> {
     runtime.token_store().ok_or_else(|| {
         RpcResponse::error(
             id.clone(),
@@ -282,15 +282,24 @@ pub async fn handle_auth_profile_create(
     };
     let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
     match store.save(&key, &tokens).await {
-        Ok(()) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "realm_id": parsed.realm_id,
-                "profile_id": parsed.profile_id,
-                "auth_method": parsed.auth_method,
-                "stored": true,
-            }),
-        ),
+        Ok(()) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                action = "create_profile",
+                auth_method = %parsed.auth_method,
+                "auth profile created via RPC"
+            );
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "realm_id": parsed.realm_id,
+                    "profile_id": parsed.profile_id,
+                    "auth_method": parsed.auth_method,
+                    "stored": true,
+                }),
+            )
+        }
         Err(e) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,
@@ -314,14 +323,22 @@ pub async fn handle_auth_profile_delete(
     };
     let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
     match store.clear(&key).await {
-        Ok(()) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "realm_id": parsed.realm_id,
-                "profile_id": parsed.profile_id,
-                "cleared": true,
-            }),
-        ),
+        Ok(()) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                action = "delete_profile",
+                "auth profile deleted via RPC"
+            );
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "realm_id": parsed.realm_id,
+                    "profile_id": parsed.profile_id,
+                    "cleared": true,
+                }),
+            )
+        }
         Err(e) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,
@@ -349,8 +366,8 @@ pub async fn handle_auth_profile_test(
         Ok(r) => r,
         Err(r) => return r.with_id(id),
     };
-    let registry = meerkat_client::ProviderRuntimeRegistry::default();
-    let mut env = meerkat_client::ResolverEnvironment::with_process_env();
+    let registry = meerkat_providers::ProviderRuntimeRegistry::default();
+    let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
     if let Some(store) = runtime.token_store() {
         env = env.with_token_store(store);
     }
@@ -513,6 +530,14 @@ pub async fn handle_auth_login_complete(
             format!("TokenStore save failed: {e}"),
         );
     }
+    tracing::info!(
+        target: "meerkat::auth::audit",
+        binding_key = %format!("{}:{}", parsed.realm_id, profile_id),
+        action = "login_oauth_complete",
+        provider = %parsed.provider,
+        has_refresh_token = %tokens.refresh_token.is_some(),
+        "OAuth login completed via RPC"
+    );
     RpcResponse::success(
         id,
         serde_json::json!({
@@ -685,6 +710,14 @@ pub async fn handle_auth_login_device_complete(
                     format!("TokenStore save failed: {e}"),
                 );
             }
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", parsed.realm_id, profile_id),
+                action = "login_device_complete",
+                provider = %parsed.provider,
+                has_refresh_token = %tokens.refresh_token.is_some(),
+                "OAuth device-flow login completed via RPC"
+            );
             RpcResponse::success(
                 id,
                 serde_json::json!({
@@ -727,7 +760,7 @@ pub async fn handle_auth_login_provision_api_key(
     params: Option<&RawValue>,
     runtime: &SessionRuntime,
 ) -> RpcResponse {
-    use meerkat_client::providers::anthropic::oauth as a_oauth;
+    use meerkat_anthropic::runtime::oauth as a_oauth;
     let parsed: ProvisionApiKeyParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
@@ -834,14 +867,22 @@ pub async fn handle_auth_logout(
     };
     let key = TokenKey::new(parsed.realm_id.clone(), parsed.profile_id.clone());
     match store.clear(&key).await {
-        Ok(()) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "realm_id": parsed.realm_id,
-                "profile_id": parsed.profile_id,
-                "cleared": true,
-            }),
-        ),
+        Ok(()) => {
+            tracing::info!(
+                target: "meerkat::auth::audit",
+                binding_key = %format!("{}:{}", parsed.realm_id, parsed.profile_id),
+                action = "logout",
+                "auth profile logged out via RPC"
+            );
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "realm_id": parsed.realm_id,
+                    "profile_id": parsed.profile_id,
+                    "cleared": true,
+                }),
+            )
+        }
         Err(e) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,

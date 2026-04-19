@@ -42,6 +42,7 @@ pub mod lifecycle;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
+pub mod model_profile;
 pub mod model_registry;
 pub mod ops;
 pub mod ops_lifecycle;
@@ -49,6 +50,7 @@ pub mod peer_meta;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
 pub mod provider;
+pub mod provider_matrix;
 pub mod retry;
 pub mod runtime_bootstrap;
 pub mod runtime_epoch;

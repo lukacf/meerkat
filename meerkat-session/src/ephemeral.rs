@@ -623,6 +623,10 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             provider,
             self_hosted_server_id: None,
             provider_params,
+            connection_ref: req
+                .build
+                .as_ref()
+                .and_then(|build| build.connection_ref.clone()),
         }
     }
 

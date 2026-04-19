@@ -185,6 +185,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     system_prompt: None,
                     output_schema: None,
                     structured_output_retries: None,
+                    connection_ref: primitive
+                        .turn_metadata()
+                        .and_then(|meta| meta.connection_ref.clone()),
                 }),
             )
             .await;

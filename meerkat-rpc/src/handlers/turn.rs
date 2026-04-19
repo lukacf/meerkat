@@ -69,6 +69,15 @@ pub struct StartTurnParams {
     /// Override provider-specific parameters. Applied alongside model/provider override.
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
+    /// Override realm-scoped connection binding for this turn (deferral
+    /// §2). On materialized sessions this scopes the hot-swap credential
+    /// fetch to a specific realm + binding — preventing cross-realm
+    /// credential bleed in multi-tenant setups. On pending sessions it
+    /// flows into `SessionBuildOptions.connection_ref`. Dogma §10
+    /// inherit/set: `None` keeps the session's current binding;
+    /// `Some(...)` sets a new one explicitly.
+    #[serde(default)]
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 /// Parameters for `turn/interrupt`.
@@ -112,6 +121,7 @@ pub struct TurnOverrides {
     pub output_schema: Option<serde_json::Value>,
     pub structured_output_retries: Option<u32>,
     pub provider_params: Option<serde_json::Value>,
+    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 impl TurnOverrides {
@@ -198,6 +208,7 @@ pub async fn handle_start(
         output_schema: params.output_schema,
         structured_output_retries: params.structured_output_retries,
         provider_params: params.provider_params,
+        connection_ref: params.connection_ref,
     };
 
     // Lazy-register executor if not already registered.

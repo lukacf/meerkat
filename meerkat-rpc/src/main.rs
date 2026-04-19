@@ -164,6 +164,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await;
 
+    // Boot-time OpenAI credential acquisition for the realtime WS
+    // sideband. Routes through the canonical ProviderRuntimeRegistry
+    // (dogma §1/§7/§14) — no helper-local env read. When config binds
+    // openai via `[realm.*]`, that binding wins; otherwise the
+    // env-default realm synthesis reads OPENAI_API_KEY (with RKAT_*
+    // precedence) via the resolver's env_lookup seam. Resolved here
+    // before `config` is moved into SessionRuntime.
+    let realtime_openai_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> =
+        meerkat::resolve_provider_api_key(&config, meerkat_core::Provider::OpenAI)
+            .await
+            .map(|api_key| {
+                Arc::new(meerkat_client::OpenAiRealtimeSessionFactory::new(Arc::new(
+                    meerkat_client::OpenAiLiveClient::new(api_key),
+                ))) as Arc<dyn meerkat_client::RealtimeSessionFactory>
+            });
+
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         realm_paths.root.join("config_state.json"),
@@ -200,10 +216,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             meerkat_rpc::REALTIME_WS_PATH
         );
         let mut host = meerkat_rpc::RealtimeWsHost::new(actual_ws_url.clone());
-        if let Ok(client) = meerkat_client::OpenAiLiveClient::from_env() {
-            host = host.with_session_factory(Arc::new(
-                meerkat_client::OpenAiRealtimeSessionFactory::new(Arc::new(client)),
-            ));
+        if let Some(session_factory) = realtime_openai_factory.clone() {
+            host = host.with_session_factory(session_factory);
         }
         let host = Arc::new(host);
         eprintln!("rkat-rpc listening on {actual_ws_url}");

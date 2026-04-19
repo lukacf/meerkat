@@ -367,11 +367,21 @@ impl SessionRuntimeLlmReconfigureHost {
             None
         };
 
+        // Dogma §10 inherit/set: `None` on the request preserves the
+        // session's existing binding, `Some(...)` sets a new one
+        // explicitly for this hot-swap. Prevents cross-realm credential
+        // bleed in multi-tenant swaps.
+        let connection_ref = request
+            .connection_ref
+            .clone()
+            .or_else(|| current.connection_ref.clone());
+
         Ok(SessionLlmIdentity {
             model,
             provider,
             self_hosted_server_id,
             provider_params,
+            connection_ref,
         })
     }
 }
@@ -850,7 +860,7 @@ impl SessionRuntime {
     /// Persistent TokenStore used by OAuth-backed bindings (shared with
     /// the AgentFactory so login writes + resolve reads see the same
     /// credentials).
-    pub fn token_store(&self) -> Option<Arc<dyn meerkat_client::auth_store::TokenStore>> {
+    pub fn token_store(&self) -> Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> {
         self.factory.token_store.clone()
     }
 
@@ -1067,6 +1077,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id,
             provider_params: build_config.provider_params.clone(),
+            connection_ref: None,
         })
     }
 
@@ -1174,6 +1185,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id,
             provider_params,
+            connection_ref: None,
         })
     }
 
@@ -1387,6 +1399,7 @@ impl SessionRuntime {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
             provider_params: ov.provider_params.clone(),
+            connection_ref: None,
         };
 
         if !self.runtime_adapter.contains_session(session_id).await
@@ -1764,6 +1777,7 @@ impl SessionRuntime {
                 provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
                 render_metadata: None,
                 execution_kind: None,
+                connection_ref: None,
             },
         );
 
@@ -4882,6 +4896,7 @@ mod tests {
             provider: meerkat_core::Provider::SelfHosted,
             self_hosted_server_id: Some("local".to_string()),
             provider_params: None,
+            connection_ref: None,
         };
         let overrides = crate::handlers::turn::TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.2 })),

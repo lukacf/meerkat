@@ -146,7 +146,8 @@ pub use image_content::{
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
     PeerIngressAuthorityPhase, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
-    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
+    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus, TerminalDisposition,
+    TerminalityClass, classify_response_terminality,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,

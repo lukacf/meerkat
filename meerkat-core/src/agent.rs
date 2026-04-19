@@ -586,6 +586,32 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Register a peer for admission-only trust without listing it in the
+    /// directory.
+    ///
+    /// Used for control-plane edges — the canonical case is the supervisor
+    /// bridge for session-backed mob members: lifecycle notifications
+    /// (`mob.peer_added`, `mob.peer_retired`, …) must land at the member's
+    /// inbox, but the supervisor must not appear as an ordinary sendable
+    /// peer in `comms.peers` / REST / RPC / MCP. The admission gate consults
+    /// both the public and private trust sets; `resolve_peer_directory()`
+    /// consults only the public set.
+    async fn add_private_trusted_peer(&self, _peer: TrustedPeerSpec) -> Result<(), SendError> {
+        Err(SendError::Unsupported(
+            "add_private_trusted_peer not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
+    /// Remove a previously registered private-trust edge by peer ID.
+    ///
+    /// Returns `true` if the edge was present and removed, `false` if it
+    /// was not.
+    async fn remove_private_trusted_peer(&self, _peer_id: &str) -> Result<bool, SendError> {
+        Err(SendError::Unsupported(
+            "remove_private_trusted_peer not supported for this CommsRuntime".to_string(),
+        ))
+    }
+
     /// Dispatch a canonical comms command.
     async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         Err(SendError::Unsupported(

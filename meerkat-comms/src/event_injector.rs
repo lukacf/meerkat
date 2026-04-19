@@ -1,6 +1,6 @@
 //! Concrete `EventInjector` implementation wrapping `InboxSender`.
 
-use crate::inbox::{InboxError, InboxSender};
+use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::types::InboxItem;
@@ -57,19 +57,31 @@ impl EventInjector for CommsEventInjector {
             ContentInput::Text(_) => None,
             ContentInput::Blocks(blocks) => Some(blocks),
         };
-        self.sender
-            .send_classified(InboxItem::PlainEvent {
-                body,
-                source,
-                handling_mode,
-                interaction_id: None,
-                blocks,
-                render_metadata,
-            })
-            .map_err(|e| match e {
-                InboxError::Full => EventInjectorError::Full,
-                InboxError::Closed => EventInjectorError::Closed,
-            })
+        match self.sender.send_classified(InboxItem::PlainEvent {
+            body,
+            source,
+            handling_mode,
+            interaction_id: None,
+            blocks,
+            render_metadata,
+        }) {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::Dropped { reason } => Err(drop_reason_to_injector_error(reason)),
+        }
+    }
+}
+
+fn drop_reason_to_injector_error(reason: DropReason) -> EventInjectorError {
+    match reason {
+        DropReason::InboxFull => EventInjectorError::Full,
+        DropReason::SessionClosed => EventInjectorError::Closed,
+        // Plain events never hit the peer-auth gate (auth classification is
+        // external-envelope-only), but an ingress-stage rejection still maps
+        // to Closed from the caller's perspective — the event did not reach
+        // the agent.
+        DropReason::UntrustedSender | DropReason::ClassificationRejected => {
+            EventInjectorError::Closed
+        }
     }
 }
 
@@ -93,20 +105,19 @@ impl meerkat_core::event_injector::SubscribableInjector for CommsEventInjector {
         self.subscriber_registry.lock().insert(id, tx);
 
         // Send to inbox with interaction_id
-        if let Err(e) = self.sender.send_classified(InboxItem::PlainEvent {
-            body,
-            source,
-            handling_mode,
-            interaction_id: Some(id),
-            blocks,
-            render_metadata,
-        }) {
+        if let AdmissionOutcome::Dropped { reason } =
+            self.sender.send_classified(InboxItem::PlainEvent {
+                body,
+                source,
+                handling_mode,
+                interaction_id: Some(id),
+                blocks,
+                render_metadata,
+            })
+        {
             // Clean up subscriber on send failure
             self.subscriber_registry.lock().remove(&id);
-            return Err(match e {
-                InboxError::Full => EventInjectorError::Full,
-                InboxError::Closed => EventInjectorError::Closed,
-            });
+            return Err(drop_reason_to_injector_error(reason));
         }
 
         Ok(meerkat_core::event_injector::InteractionSubscription {

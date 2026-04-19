@@ -34,7 +34,7 @@ pub mod runtime;
 pub use agent::types::{DrainedMessage, PlainMessage, drain_inbox_item};
 pub use event_injector::CommsEventInjector;
 pub use identity::{IdentityError, Keypair, PubKey, Signature};
-pub use inbox::{Inbox, InboxError, InboxSender};
+pub use inbox::{AdmissionOutcome, DropReason, Inbox, InboxError, InboxSender};
 pub use inproc::{InprocPeerInfo, InprocRegistry, InprocSendError};
 #[cfg(not(target_arch = "wasm32"))]
 pub use io_task::{IoTaskError, handle_connection};

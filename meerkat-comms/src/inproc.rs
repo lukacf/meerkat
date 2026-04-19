@@ -32,7 +32,7 @@ use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
-use crate::inbox::{InboxError, InboxSender};
+use crate::inbox::{AdmissionOutcome, DropReason, InboxSender};
 use crate::peer_meta::PeerMeta;
 use crate::types::{Envelope, InboxItem, MessageKind};
 
@@ -405,12 +405,18 @@ impl InprocRegistry {
         }
 
         let envelope_id = envelope.id;
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .map_err(|err| match err {
-                InboxError::Closed => InprocSendError::InboxClosed,
-                InboxError::Full => InprocSendError::InboxFull,
-            })?;
+        match sender.send_classified(InboxItem::External { envelope }) {
+            AdmissionOutcome::Admitted => {}
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed,
+            } => return Err(InprocSendError::InboxClosed),
+            AdmissionOutcome::Dropped {
+                reason: DropReason::InboxFull,
+            } => return Err(InprocSendError::InboxFull),
+            AdmissionOutcome::Dropped { reason } => {
+                return Err(InprocSendError::IngressDropped(reason));
+            }
+        }
 
         Ok(envelope_id)
     }
@@ -463,12 +469,18 @@ impl InprocRegistry {
 
         // Deliver directly to inbox
         let envelope_id = envelope.id;
-        sender
-            .send_classified(InboxItem::External { envelope })
-            .map_err(|err| match err {
-                InboxError::Closed => InprocSendError::InboxClosed,
-                InboxError::Full => InprocSendError::InboxFull,
-            })?;
+        match sender.send_classified(InboxItem::External { envelope }) {
+            AdmissionOutcome::Admitted => {}
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed,
+            } => return Err(InprocSendError::InboxClosed),
+            AdmissionOutcome::Dropped {
+                reason: DropReason::InboxFull,
+            } => return Err(InprocSendError::InboxFull),
+            AdmissionOutcome::Dropped { reason } => {
+                return Err(InprocSendError::IngressDropped(reason));
+            }
+        }
 
         Ok(envelope_id)
     }
@@ -524,6 +536,8 @@ pub enum InprocSendError {
     InboxClosed,
     #[error("Peer inbox is full")]
     InboxFull,
+    #[error("Peer inbox dropped ingress: {0:?}")]
+    IngressDropped(crate::inbox::DropReason),
 }
 
 #[cfg(test)]

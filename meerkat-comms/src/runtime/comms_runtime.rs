@@ -301,6 +301,24 @@ impl CoreCommsRuntime for CommsRuntime {
         self.unregister_trusted_peer(peer_id).await
     }
 
+    async fn add_private_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
+        let public_key = PubKey::from_peer_id(&peer.peer_id)
+            .map_err(|err| SendError::Validation(err.to_string()))?;
+        let trusted_peer = TrustedPeer {
+            name: peer.name,
+            pubkey: public_key,
+            addr: peer.address,
+            meta: crate::PeerMeta::default(),
+        };
+        self.register_private_trusted_peer(trusted_peer).await
+    }
+
+    async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
+        let public_key =
+            PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
+        self.unregister_private_trusted_peer(&public_key).await
+    }
+
     fn dismiss_received(&self) -> bool {
         self.dismiss_flag.swap(false, Ordering::SeqCst)
     }
@@ -1423,6 +1441,41 @@ impl CommsRuntime {
         Ok(removed)
     }
 
+    /// Register a trust edge whose peer entry is marked private.
+    ///
+    /// The peer goes through the same router + classified-inbox sync as
+    /// [`register_trusted_peer`](Self::register_trusted_peer) — admission
+    /// and send-resolution behave identically — but its pubkey is added
+    /// to the router's private-pubkey directory filter so
+    /// `resolve_peer_directory()` (and downstream `comms.peers`
+    /// REST/RPC/MCP handlers) filter it out. Intended for control-plane
+    /// edges such as the supervisor→member lifecycle channel for
+    /// session-backed mob members, where delivery AND reply-routing must
+    /// work but the recipient must not appear as an ordinary sendable
+    /// peer on user-facing surfaces.
+    pub async fn register_private_trusted_peer(&self, peer: TrustedPeer) -> Result<(), SendError> {
+        let peer_id = peer.pubkey.to_peer_id();
+        let pubkey = peer.pubkey;
+        self.router.add_trusted_peer(peer);
+        self.router.mark_private(pubkey);
+        self.inbox.lock().await.note_trusted_peer_added(&peer_id);
+        Ok(())
+    }
+
+    /// Remove a previously registered private-trust edge.
+    pub async fn unregister_private_trusted_peer(
+        &self,
+        public_key: &PubKey,
+    ) -> Result<bool, SendError> {
+        let peer_id = public_key.to_peer_id();
+        let removed = self.router.remove_trusted_peer(public_key);
+        self.router.unmark_private(public_key);
+        if removed {
+            self.inbox.lock().await.note_trusted_peer_removed(&peer_id);
+        }
+        Ok(removed)
+    }
+
     /// Canonical runtime trust-removal seam using a public key.
     pub async fn unregister_trusted_pubkey(&self, public_key: &PubKey) -> Result<bool, SendError> {
         self.unregister_trusted_peer(&public_key.to_peer_id()).await
@@ -1516,6 +1569,18 @@ impl CommsRuntime {
             let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
+                    continue;
+                }
+                // Private peers are admission-visible and send-resolvable
+                // but never appear in the directory — that's the point of
+                // the private-trust seam (e.g. supervisor bridge for
+                // session-backed mob members). Still mark the name and
+                // pubkey as "known" so an unrelated inproc entry with the
+                // same identity doesn't fall through to the `Inproc`
+                // source below.
+                if self.router.is_private(&peer.pubkey) {
+                    trusted_names.insert(peer.name.clone());
+                    trusted_pubkeys.insert(peer.pubkey);
                     continue;
                 }
                 trusted_names.insert(peer.name.clone());
@@ -1638,6 +1703,24 @@ impl CommsRuntime {
                 }
                 Err(SendError::PeerOffline)
             }
+            Err(crate::router::SendError::AdmissionDropped { reason }) => {
+                // Transport worked; the receiver's ingress admission policy
+                // rejected us. Surface the typed reason all the way to the
+                // public API error payload so clients see e.g.
+                // `untrusted_sender` rather than the old `PeerOffline` lie.
+                // Reachability stays distinct too: the peer is still live
+                // at the transport layer, so we record `AdmissionDropped`
+                // rather than `OfflineOrNoAck`.
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().record_send_failed(
+                        &peer.reachability_key(),
+                        PeerReachabilityReason::AdmissionDropped,
+                    );
+                }
+                Err(SendError::AdmissionDropped {
+                    reason: reason.into(),
+                })
+            }
             Err(
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
             ) => {
@@ -1748,25 +1831,31 @@ impl CommsRuntime {
             StreamRegistryEntry::reserved(sender, receiver),
         );
 
-        if let Err(error) =
-            self.router
-                .inbox_sender()
-                .send_classified(crate::types::InboxItem::PlainEvent {
-                    body,
-                    source: PlainEventSource::from(source),
-                    handling_mode,
-                    interaction_id: Some(interaction_id),
-                    blocks,
-                    render_metadata: None,
-                })
+        if let crate::inbox::AdmissionOutcome::Dropped { reason } = self
+            .router
+            .inbox_sender()
+            .send_classified(crate::types::InboxItem::PlainEvent {
+                body,
+                source: PlainEventSource::from(source),
+                handling_mode,
+                interaction_id: Some(interaction_id),
+                blocks,
+                render_metadata: None,
+            })
         {
             self.interaction_stream_registry
                 .lock()
                 .remove(&interaction_id);
             self.subscriber_registry.lock().remove(&interaction_id);
-            return Err(match error {
-                crate::inbox::InboxError::Full => SendError::Validation("input queue full".into()),
-                crate::inbox::InboxError::Closed => SendError::InputClosed,
+            return Err(match reason {
+                crate::inbox::DropReason::InboxFull => {
+                    SendError::Validation("input queue full".into())
+                }
+                crate::inbox::DropReason::SessionClosed => SendError::InputClosed,
+                crate::inbox::DropReason::UntrustedSender
+                | crate::inbox::DropReason::ClassificationRejected => {
+                    SendError::Validation(format!("input rejected at ingress: {reason:?}"))
+                }
             });
         }
 
@@ -2242,16 +2331,19 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope: msg })
+            .into_result()
             .unwrap();
         runtime
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope: req })
+            .into_result()
             .unwrap();
         runtime
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope: resp })
+            .into_result()
             .unwrap();
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
@@ -2323,6 +2415,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope: msg })
+            .into_result()
             .unwrap();
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
@@ -2391,6 +2484,22 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             });
         }
+        // Peer must also trust the runtime: the receive-side admission gate
+        // now drops untrusted envelopes with `UntrustedSender` instead of
+        // silently reporting success, and reachability upstream reflects that.
+        // Use `add_trusted_peer` so the classified inbox's canonical
+        // `trusted_peers` BTreeSet is synced too, not just the RwLock.
+        CoreCommsRuntime::add_trusted_peer(
+            &peer,
+            TrustedPeerSpec::new(
+                &runtime_name,
+                runtime.public_key().to_peer_id(),
+                format!("inproc://{runtime_name}"),
+            )
+            .expect("valid trusted peer spec"),
+        )
+        .await
+        .expect("peer should accept trust entry for runtime");
 
         let receipt = CoreCommsRuntime::send(
             &runtime,
@@ -2564,6 +2673,7 @@ mod tests {
                 interaction_id: Some(interaction_id),
                 render_metadata: None,
             })
+            .into_result()
             .unwrap();
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
@@ -2592,6 +2702,7 @@ mod tests {
                 interaction_id: None,
                 render_metadata: Some(render_metadata.clone()),
             })
+            .into_result()
             .unwrap();
 
         let interactions = runtime.drain_classified_inbox_interactions().await.unwrap();
@@ -2621,6 +2732,7 @@ mod tests {
                 interaction_id: None,
                 render_metadata: None,
             })
+            .into_result()
             .unwrap();
 
         let snapshot = CoreCommsRuntime::peer_ingress_queue_snapshot(&runtime)
@@ -2665,6 +2777,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
         runtime
             .router
@@ -2677,6 +2790,7 @@ mod tests {
                 interaction_id: None,
                 render_metadata: None,
             })
+            .into_result()
             .unwrap();
 
         let snapshot = CoreCommsRuntime::peer_ingress_queue_snapshot(&runtime)
@@ -2776,11 +2890,19 @@ mod tests {
             },
         );
 
-        runtime
+        // Untrusted sender, require_peer_auth on: the admission gate drops
+        // the envelope with `UntrustedSender`. We assert the typed outcome
+        // directly so the silent-Ok path can't creep back.
+        let outcome = runtime
             .router
             .inbox_sender()
-            .send_classified(InboxItem::External { envelope })
-            .unwrap();
+            .send_classified(InboxItem::External { envelope });
+        assert_eq!(
+            outcome,
+            crate::inbox::AdmissionOutcome::Dropped {
+                reason: crate::inbox::DropReason::UntrustedSender
+            }
+        );
 
         let snapshot = CoreCommsRuntime::peer_ingress_runtime_snapshot(&runtime)
             .await
@@ -2814,13 +2936,20 @@ mod tests {
             },
         );
 
-        runtime
+        // Untrusted sender under require_peer_auth: must be explicitly
+        // dropped at admission with a typed reason — no more silent Ok(()).
+        let outcome = runtime
             .router
             .inbox_sender()
             .send_classified(InboxItem::External {
                 envelope: envelope.clone(),
-            })
-            .unwrap();
+            });
+        assert_eq!(
+            outcome,
+            crate::inbox::AdmissionOutcome::Dropped {
+                reason: crate::inbox::DropReason::UntrustedSender
+            }
+        );
 
         {
             let inbox = runtime.inbox.lock().await;
@@ -2839,6 +2968,8 @@ mod tests {
                 inbox.peer_authority_trusts_peer_for_test(&peer_id),
                 Some(false)
             );
+            // Drop counter ticked exactly once — the bug repair is visible.
+            assert_eq!(inbox.dropped_count(), Some(1));
         }
 
         let trusted_peer = TrustedPeerSpec::new("sender", peer_id.clone(), "inproc://sender")
@@ -2863,6 +2994,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         let snapshot = CoreCommsRuntime::peer_ingress_runtime_snapshot(&runtime)
@@ -2947,6 +3079,7 @@ mod tests {
             .router
             .inbox_sender()
             .send_classified(InboxItem::External { envelope })
+            .into_result()
             .unwrap();
 
         {
@@ -3730,6 +3863,22 @@ mod tests {
         )
         .await
         .expect("add trusted peer");
+        // Receiver must trust the sender too: `require_peer_auth` is on by
+        // default, and with typed drop-reasons the receiver no longer silently
+        // accepts untrusted envelopes as `Ok(())` — the admission gate now
+        // reports `Dropped { UntrustedSender }`, which surfaces to this caller
+        // as `PeerOffline`. Mutual trust mirrors real deployments.
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            TrustedPeerSpec::new(
+                &sender_name,
+                sender.public_key().to_peer_id(),
+                format!("inproc://{sender_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("add trusted peer");
 
         let peers_before = CoreCommsRuntime::peers(&sender).await;
         let before = peers_before
@@ -3798,6 +3947,68 @@ mod tests {
         assert_eq!(
             entry.last_unreachable_reason,
             Some(PeerReachabilityReason::TransportError)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_to_untrusted_peer_surfaces_admission_dropped_not_offline() {
+        // Regression: before typed `AdmissionOutcome`, the router collapsed a
+        // receiver-side ingress rejection into `PeerOffline`. That made a
+        // policy failure indistinguishable from a transport failure in
+        // REST/RPC/MCP payloads. Now it must come through as
+        // `SendError::AdmissionDropped { UntrustedSender }` with reachability
+        // recorded as `AdmissionDropped` (transport was live).
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("admit-sender-{suffix}");
+        let receiver_name = format!("admit-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        // Sender trusts receiver; receiver does NOT trust sender. Receiver
+        // has `require_peer_auth: true` by default, so our envelope lands
+        // at its ingress gate and gets rejected with `UntrustedSender`.
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &receiver_name,
+                receiver.public_key().to_peer_id(),
+                format!("inproc://{receiver_name}"),
+            )
+            .expect("valid trusted peer"),
+        )
+        .await
+        .expect("sender must trust receiver");
+
+        let result = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerMessage {
+                blocks: None,
+                to: PeerName::new(receiver_name.clone()).expect("valid peer name"),
+                body: "policy-rejected".to_string(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(SendError::AdmissionDropped {
+                    reason: meerkat_core::comms::AdmissionDropReason::UntrustedSender
+                })
+            ),
+            "untrusted-sender ingress drop must surface as typed AdmissionDropped, \
+             got: {result:?}"
+        );
+
+        let peers = CoreCommsRuntime::peers(&sender).await;
+        let entry = peers
+            .iter()
+            .find(|listed| listed.name.as_str() == receiver_name)
+            .expect("trusted peer should remain listed after admission drop");
+        assert_eq!(
+            entry.last_unreachable_reason,
+            Some(PeerReachabilityReason::AdmissionDropped),
+            "policy rejection must record AdmissionDropped, not OfflineOrNoAck"
         );
     }
 
@@ -4059,6 +4270,19 @@ mod tests {
                 meta: crate::PeerMeta::default(),
             });
         }
+        // Receive side must also trust the sender after the silent-drop fix.
+        // Use `add_trusted_peer` so the classified queue's trust set syncs.
+        CoreCommsRuntime::add_trusted_peer(
+            &_peer,
+            TrustedPeerSpec::new(
+                &runtime_name,
+                runtime.public_key().to_peer_id(),
+                format!("inproc://{runtime_name}"),
+            )
+            .expect("valid trusted peer spec"),
+        )
+        .await
+        .expect("peer should accept trust entry for runtime");
 
         let cmd = CommsCommand::PeerMessage {
             blocks: None,

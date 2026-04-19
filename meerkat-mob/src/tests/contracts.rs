@@ -282,6 +282,20 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     CoreCommsRuntime::add_trusted_peer(&sender, spec)
         .await
         .expect("add trusted peer");
+    // Receiver must trust the sender too: after typed `AdmissionOutcome`
+    // landed, the receiver's classified inbox rejects envelopes from
+    // untrusted senders with `Dropped { UntrustedSender }` (surfaced
+    // upstream as `PeerOffline`) instead of silently returning `Ok(())`.
+    // Mutual trust matches what real deployments set up.
+    let reverse_spec = TrustedPeerSpec::new(
+        &sender_name,
+        sender.public_key().to_peer_id(),
+        format!("inproc://{sender_name}"),
+    )
+    .expect("valid spec");
+    CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
+        .await
+        .expect("add reverse trusted peer");
 
     // Verify send works before removal
     let cmd = CommsCommand::PeerMessage {

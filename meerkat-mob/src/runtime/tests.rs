@@ -17993,14 +17993,18 @@ async fn test_trusted_peer_spec_uses_real_external_identity_for_peer_only_member
 
 #[tokio::test]
 async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
-    // Fix 2 regression: `finalize_spawn_from_pending` bootstraps supervisor
-    // trust on every session-backed member so lifecycle notifications land
-    // at the classified inbox. That bootstrap must NOT register the
-    // supervisor as a public trusted peer — it's a control-plane edge and
-    // would otherwise surface as an ordinary sendable peer in the
-    // member's `comms.peers` output (and downstream REST/RPC/MCP). The
-    // admission-only private trust seam keeps the edge invisible to the
-    // directory.
+    // Fix 2 regression (negative invariant): `finalize_spawn_from_pending`
+    // bootstraps supervisor trust on every session-backed member so
+    // lifecycle notifications land at the classified inbox. That bootstrap
+    // must NOT register the supervisor as a publicly-listed trusted peer —
+    // it's a control-plane edge and would otherwise surface as an ordinary
+    // sendable peer in the member's `comms.peers` output (and downstream
+    // REST/RPC/MCP). The private-trust seam uses the router's
+    // `private_pubkeys` directory-filter to keep the entry invisible.
+    //
+    // The *positive* complement — "the supervisor is still trusted enough
+    // for the member to send back to it" — is enforced by
+    // `test_supervisor_private_trust_preserves_send_resolution` below.
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let definition = with_unique_mob_id(sample_definition(), "no-supervisor-leak");
     let (handle, service) = create_test_mob_with_real_comms(definition).await;
@@ -18029,6 +18033,72 @@ async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
         supervisor_entry.is_none(),
         "supervisor must NOT appear in the session-backed member's public \
          peer directory; the private-trust seam is the whole point. Got: {directory:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_supervisor_private_trust_preserves_send_resolution() {
+    // Fix 2 positive invariant: the private-trust seam must still keep
+    // the supervisor fully send-resolvable from the member. When splitting
+    // `add_trusted_peer` into "admission + directory + send-resolution" vs
+    // "admission + send-resolution (no directory)", the positive side was
+    // the one that broke first — e2e-smoke caught pictionary kickoff
+    // timing out because the admission-only path left the member's
+    // router unable to resolve the supervisor's `PeerName` to a `PeerAddr`,
+    // so reply-sends silently failed. This test pins the required
+    // invariants: the supervisor entry is in the router's `TrustedPeers`
+    // (so `send_peer_command` can resolve), is marked private (so the
+    // directory hides it), and the member's classified inbox knows the
+    // supervisor pubkey (so admission accepts lifecycle notifications).
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(sample_definition(), "supervisor-send-resolution");
+    let (handle, service) = create_test_mob_with_real_comms(definition).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-send"), None)
+        .await
+        .expect("spawn session-backed member");
+    let session_id = receipt
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+    let member_comms = service
+        .real_comms(&session_id)
+        .await
+        .expect("member comms runtime");
+
+    // Look up the supervisor pubkey via the member's trust list — this is
+    // the same list the router uses to resolve `PeerName → PeerAddr`.
+    let supervisor_pubkey = {
+        let trusted = member_comms.trusted_peers_shared();
+        let guard = trusted.read();
+        let entry = guard
+            .peers
+            .iter()
+            .find(|p| p.name.contains("__mob_supervisor__"))
+            .expect(
+                "send-resolution invariant: supervisor must still appear in the \
+                 member's internal TrustedPeers — that's what the router consults \
+                 to resolve the supervisor's PeerName to a PeerAddr on reply-sends",
+            );
+        entry.pubkey
+    };
+
+    // The directory-filter side-channel must mark this pubkey private.
+    assert!(
+        member_comms.router().is_private(&supervisor_pubkey),
+        "directory-filter invariant: supervisor pubkey must be marked \
+         private so `resolve_peer_directory()` hides it"
+    );
+
+    // And the directory must in fact hide it. This is the same fact the
+    // negative-invariant test asserts at the `peers()` API, pinned here
+    // as the end-to-end consequence of the two internal invariants above.
+    let directory = member_comms.peers().await;
+    assert!(
+        directory
+            .iter()
+            .all(|entry| !entry.name.as_str().contains("__mob_supervisor__")),
+        "directory output must not list the supervisor; got: {directory:?}"
     );
 }
 

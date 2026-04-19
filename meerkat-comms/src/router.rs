@@ -86,6 +86,12 @@ pub struct Router {
     /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
+    /// Directory-filter side-channel for private (control-plane) trust
+    /// edges. Membership here is additive to `trusted_peers`: the peer
+    /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
+    /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
+    /// for the supervisor bridge in session-backed mob members.
+    private_pubkeys: Arc<RwLock<std::collections::HashSet<crate::identity::PubKey>>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -103,6 +109,7 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
+            private_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -120,11 +127,28 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
+            private_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
             inbox_sender,
             inproc_namespace: None,
         }
+    }
+
+    /// Mark a peer as private (hidden from `resolve_peer_directory`).
+    pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
+        self.private_pubkeys.write().insert(pubkey);
+    }
+
+    /// Remove the private marker for a peer. Returns `true` if the marker
+    /// was present and removed.
+    pub fn unmark_private(&self, pubkey: &crate::identity::PubKey) -> bool {
+        self.private_pubkeys.write().remove(pubkey)
+    }
+
+    /// Returns `true` if the peer is currently marked private.
+    pub fn is_private(&self, pubkey: &crate::identity::PubKey) -> bool {
+        self.private_pubkeys.read().contains(pubkey)
     }
 
     /// Scope in-process routing to a namespace.

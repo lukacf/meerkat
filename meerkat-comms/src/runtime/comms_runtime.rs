@@ -304,13 +304,19 @@ impl CoreCommsRuntime for CommsRuntime {
     async fn add_private_trusted_peer(&self, peer: TrustedPeerSpec) -> Result<(), SendError> {
         let public_key = PubKey::from_peer_id(&peer.peer_id)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.register_private_trust_edge(&public_key).await
+        let trusted_peer = TrustedPeer {
+            name: peer.name,
+            pubkey: public_key,
+            addr: peer.address,
+            meta: crate::PeerMeta::default(),
+        };
+        self.register_private_trusted_peer(trusted_peer).await
     }
 
     async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
         let public_key =
             PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
-        self.unregister_private_trust_edge(&public_key).await
+        self.unregister_private_trusted_peer(&public_key).await
     }
 
     fn dismiss_received(&self) -> bool {
@@ -1435,29 +1441,39 @@ impl CommsRuntime {
         Ok(removed)
     }
 
-    /// Register a private (admission-only) trust edge for a peer key.
+    /// Register a trust edge whose peer entry is marked private.
     ///
-    /// Unlike [`register_trusted_peer`](Self::register_trusted_peer), this
-    /// seam never touches the router's public `TrustedPeers` list — the peer
-    /// will NOT appear in `resolve_peer_directory()` output or the
-    /// `comms.peers` REST/RPC/MCP surface. The sole effect is to admit
-    /// incoming envelopes from that peer through the classified inbox's
-    /// admission gate. Intended for control-plane edges such as the
-    /// supervisor→member lifecycle channel for session-backed mob members.
-    pub async fn register_private_trust_edge(&self, public_key: &PubKey) -> Result<(), SendError> {
-        let peer_id = public_key.to_peer_id();
-        self.inbox.lock().await.note_private_trust_added(&peer_id);
+    /// The peer goes through the same router + classified-inbox sync as
+    /// [`register_trusted_peer`](Self::register_trusted_peer) — admission
+    /// and send-resolution behave identically — but its pubkey is added
+    /// to the router's private-pubkey directory filter so
+    /// `resolve_peer_directory()` (and downstream `comms.peers`
+    /// REST/RPC/MCP handlers) filter it out. Intended for control-plane
+    /// edges such as the supervisor→member lifecycle channel for
+    /// session-backed mob members, where delivery AND reply-routing must
+    /// work but the recipient must not appear as an ordinary sendable
+    /// peer on user-facing surfaces.
+    pub async fn register_private_trusted_peer(&self, peer: TrustedPeer) -> Result<(), SendError> {
+        let peer_id = peer.pubkey.to_peer_id();
+        let pubkey = peer.pubkey;
+        self.router.add_trusted_peer(peer);
+        self.router.mark_private(pubkey);
+        self.inbox.lock().await.note_trusted_peer_added(&peer_id);
         Ok(())
     }
 
-    /// Remove a previously registered private-trust edge. Returns `true`
-    /// when the edge was present and removed, `false` otherwise.
-    pub async fn unregister_private_trust_edge(
+    /// Remove a previously registered private-trust edge.
+    pub async fn unregister_private_trusted_peer(
         &self,
         public_key: &PubKey,
     ) -> Result<bool, SendError> {
         let peer_id = public_key.to_peer_id();
-        Ok(self.inbox.lock().await.note_private_trust_removed(&peer_id))
+        let removed = self.router.remove_trusted_peer(public_key);
+        self.router.unmark_private(public_key);
+        if removed {
+            self.inbox.lock().await.note_trusted_peer_removed(&peer_id);
+        }
+        Ok(removed)
     }
 
     /// Canonical runtime trust-removal seam using a public key.
@@ -1553,6 +1569,18 @@ impl CommsRuntime {
             let trusted = self.trusted_peers.read();
             for peer in &trusted.peers {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
+                    continue;
+                }
+                // Private peers are admission-visible and send-resolvable
+                // but never appear in the directory — that's the point of
+                // the private-trust seam (e.g. supervisor bridge for
+                // session-backed mob members). Still mark the name and
+                // pubkey as "known" so an unrelated inproc entry with the
+                // same identity doesn't fall through to the `Inproc`
+                // source below.
+                if self.router.is_private(&peer.pubkey) {
+                    trusted_names.insert(peer.name.clone());
+                    trusted_pubkeys.insert(peer.pubkey);
                     continue;
                 }
                 trusted_names.insert(peer.name.clone());

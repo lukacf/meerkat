@@ -296,6 +296,34 @@ pub fn spawn_comms_drain(
                     | PeerInputClass::PlainEvent => {
                         // Route through the adapter as a peer input.
                         let interaction_id = candidate.interaction.id;
+
+                        // W1-A: inbound peer-request admission is the
+                        // canonical fire site for `PeerRequestReceived`.
+                        // Classes that correspond to actual peer requests
+                        // (SilentRequest, ActionableRequest) populate the
+                        // DSL's `inbound_peer_requests` map; the
+                        // `CommsRuntime::send(PeerResponse)` path closes the
+                        // lifecycle with `PeerResponseReplied` on terminal
+                        // reply. Other classes (messages, lifecycle, plain
+                        // events) are not requests and skip the fire.
+                        let is_inbound_peer_request = matches!(
+                            candidate.class,
+                            PeerInputClass::SilentRequest | PeerInputClass::ActionableRequest
+                        );
+                        if is_inbound_peer_request
+                            && let Some(handle) = comms_runtime.peer_interaction_handle()
+                        {
+                            let corr_id =
+                                meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
+                            if let Err(err) = handle.request_received(corr_id) {
+                                tracing::warn!(
+                                    error = %err,
+                                    corr_id = %corr_id,
+                                    "PeerInteractionHandle::request_received rejected"
+                                );
+                            }
+                        }
+
                         let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                         let input =
                             classified_interaction_to_runtime_input(&candidate, &runtime_id);

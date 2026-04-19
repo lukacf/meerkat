@@ -392,6 +392,114 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
 }
 
 // ---------------------------------------------------------------------------
+// CONTRACT-MOB-002d (W1-A): inbound `PeerResponseReplied` fires on terminal
+//                           reply through `CommsRuntime::send(PeerResponse)`.
+//
+// Proves the mirror side of the outbound lifecycle: a receiver that has an
+// installed `PeerInteractionHandle`, after observing an inbound request
+// (DSL state `Received`), fires `response_replied` exactly when a terminal
+// PeerResponse goes out on the wire. Accepted (progress) responses do NOT
+// close the inbound entry; only Completed/Failed do.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
+    use meerkat_core::handles::PeerInteractionHandle;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let responder_name = format!("c002d-responder-{suffix}");
+    let originator_name = format!("c002d-originator-{suffix}");
+
+    let responder = Arc::new(CommsRuntime::inproc_only(&responder_name).unwrap());
+    let originator = CommsRuntime::inproc_only(&originator_name).unwrap();
+
+    // Install DSL handle on the responder side; this is the machinery
+    // `comms_drain.rs` relies on to fire `request_received` and this test
+    // drives directly (the drain itself needs a full runtime adapter
+    // which is out of scope for this unit-contract test).
+    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+    dsl.apply_signal(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+        "test::initialize",
+    )
+    .expect("Initialize");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(format!(
+                "c002d-{suffix}"
+            )),
+        },
+        "test::register_session",
+    )
+    .expect("RegisterSession");
+    let handle: Arc<dyn PeerInteractionHandle> = Arc::new(
+        meerkat_runtime::RuntimePeerInteractionHandle::new(Arc::clone(&dsl)),
+    );
+    responder.install_peer_interaction_handle(Arc::clone(&handle));
+
+    CoreCommsRuntime::add_trusted_peer(
+        responder.as_ref(),
+        TrustedPeerSpec::new(
+            &originator_name,
+            originator.public_key().to_peer_id(),
+            format!("inproc://{originator_name}"),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // Seed an inbound entry directly — mirrors what `comms_drain.rs` would
+    // fire on classified ActionableRequest admission.
+    let request_corr_id = meerkat_core::PeerCorrelationId::new();
+    handle
+        .request_received(request_corr_id)
+        .expect("inbound request_received must advance DSL");
+    assert_eq!(
+        handle.inbound_state(request_corr_id),
+        Some(meerkat_core::InboundPeerRequestState::Received)
+    );
+
+    // Accepted (progress) reply: inbound entry must remain `Received`.
+    let in_reply_to = meerkat_core::InteractionId(request_corr_id.as_uuid());
+    CoreCommsRuntime::send(
+        responder.as_ref(),
+        CommsCommand::PeerResponse {
+            to: PeerName::new(originator_name.clone()).unwrap(),
+            in_reply_to,
+            status: meerkat_core::ResponseStatus::Accepted,
+            result: serde_json::json!({"progress": true}),
+            handling_mode: None,
+        },
+    )
+    .await
+    .expect("Accepted response must send");
+    assert_eq!(
+        handle.inbound_state(request_corr_id),
+        Some(meerkat_core::InboundPeerRequestState::Received),
+        "Accepted (progress) reply must not close the inbound entry"
+    );
+
+    // Terminal Completed reply: entry removed, `response_replied` fired.
+    CoreCommsRuntime::send(
+        responder.as_ref(),
+        CommsCommand::PeerResponse {
+            to: PeerName::new(originator_name.clone()).unwrap(),
+            in_reply_to,
+            status: meerkat_core::ResponseStatus::Completed,
+            result: serde_json::json!({"done": true}),
+            handling_mode: None,
+        },
+    )
+    .await
+    .expect("Completed response must send");
+    assert!(
+        handle.inbound_state(request_corr_id).is_none(),
+        "terminal reply must close the inbound entry via response_replied"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CONTRACT-MOB-003: Inproc namespace isolation
 // ---------------------------------------------------------------------------
 

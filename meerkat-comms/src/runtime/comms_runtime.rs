@@ -553,11 +553,36 @@ impl CoreCommsRuntime for CommsRuntime {
                 result,
                 handling_mode,
             } => {
+                let core_status = status;
                 let status = match status {
                     meerkat_core::ResponseStatus::Accepted => crate::Status::Accepted,
                     meerkat_core::ResponseStatus::Completed => crate::Status::Completed,
                     meerkat_core::ResponseStatus::Failed => crate::Status::Failed,
                 };
+                // W1-A: fire the inbound `PeerResponseReplied` transition
+                // on terminal status only. Accepted is a progress signal
+                // that does not close the inbound lifecycle; only
+                // Completed/Failed terminate the inbound entry. Guard
+                // rejects a reply to an unknown corr_id, but we tolerate
+                // that because the receiver's ingress may not have
+                // installed an inbound DSL entry (plain-event-driven
+                // reply paths, bridge surfaces).
+                let is_terminal_reply = matches!(
+                    core_status,
+                    meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
+                );
+                if is_terminal_reply && let Some(handle) = self.peer_interaction_handle() {
+                    let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
+                    if handle.inbound_state(corr_id).is_some() {
+                        if let Err(err) = handle.response_replied(corr_id) {
+                            tracing::warn!(
+                                error = %err,
+                                corr_id = %corr_id,
+                                "PeerInteractionHandle::response_replied rejected"
+                            );
+                        }
+                    }
+                }
 
                 self.send_peer_command(
                     to.as_str(),

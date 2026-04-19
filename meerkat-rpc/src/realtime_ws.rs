@@ -1503,6 +1503,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             }
                                             _ => false,
                                         };
+                                        let tool_call_requested = matches!(
+                                            &event,
+                                            RealtimeSessionEvent::ToolCallRequested { .. }
+                                        );
                                         let turn_committed = matches!(&event, RealtimeSessionEvent::TurnCommitted);
                                         let output_started = matches!(
                                             &event,
@@ -1579,6 +1583,16 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         }
                                         if turn_committed {
                                             product_turn_committed = true;
+                                        }
+                                        if tool_call_requested {
+                                            // A provider-issued tool call is part of the
+                                            // currently active provider-managed turn even if the
+                                            // backend never emitted an explicit TurnStarted
+                                            // marker. Treating it as idle lets the canonical
+                                            // tool-dispatch mutation masquerade as an external
+                                            // between-turn edit and spuriously reconstruct the
+                                            // provider session.
+                                            product_turn_in_flight = true;
                                         }
                                         if output_started {
                                             product_output_started = true;

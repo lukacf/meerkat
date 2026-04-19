@@ -160,6 +160,63 @@ fn inbound_replied_rejects_unknown_corr_id() {
 }
 
 #[test]
+fn cleanup_observer_fires_on_terminal_transitions() {
+    use meerkat_core::handles::PeerInteractionCleanupObserver;
+    use std::sync::Mutex;
+
+    struct Recorder(Mutex<Vec<PeerCorrelationId>>);
+    impl PeerInteractionCleanupObserver for Recorder {
+        fn on_peer_interaction_cleanup(&self, corr_id: PeerCorrelationId) {
+            self.0.lock().unwrap().push(corr_id);
+        }
+    }
+
+    let handle = new_handle();
+    let rec = Arc::new(Recorder(Mutex::new(Vec::new())));
+    handle.install_cleanup_observer(Arc::clone(&rec) as Arc<dyn PeerInteractionCleanupObserver>);
+
+    // Sent / Progress do NOT fire cleanup.
+    let a = PeerCorrelationId::new();
+    handle.request_sent(a, "peer-a".into()).unwrap();
+    handle.response_progress(a).unwrap();
+    assert!(
+        rec.0.lock().unwrap().is_empty(),
+        "non-terminal transitions must not fire cleanup"
+    );
+
+    // Terminal Completed fires cleanup once.
+    handle
+        .response_terminal(a, PeerTerminalDisposition::Completed)
+        .unwrap();
+    assert_eq!(rec.0.lock().unwrap().clone(), vec![a]);
+
+    // Terminal Failed fires cleanup once.
+    let b = PeerCorrelationId::new();
+    handle.request_sent(b, "peer-b".into()).unwrap();
+    handle
+        .response_terminal(b, PeerTerminalDisposition::Failed)
+        .unwrap();
+    assert_eq!(rec.0.lock().unwrap().clone(), vec![a, b]);
+
+    // TimedOut fires cleanup once.
+    let c = PeerCorrelationId::new();
+    handle.request_sent(c, "peer-c".into()).unwrap();
+    handle.request_timed_out(c).unwrap();
+    assert_eq!(rec.0.lock().unwrap().clone(), vec![a, b, c]);
+
+    // Inbound reply does NOT fire `PeerInteractionCleanup` (it emits the
+    // inbound state-change effect on a different variant).
+    let d = PeerCorrelationId::new();
+    handle.request_received(d).unwrap();
+    handle.response_replied(d).unwrap();
+    assert_eq!(
+        rec.0.lock().unwrap().clone(),
+        vec![a, b, c],
+        "inbound lifecycle does not emit PeerInteractionCleanup"
+    );
+}
+
+#[test]
 fn outbound_inbound_are_independent_namespaces() {
     // Mixing outbound and inbound on the same corr_id must not alias.
     let handle = new_handle();

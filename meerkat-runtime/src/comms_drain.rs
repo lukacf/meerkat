@@ -201,28 +201,33 @@ pub fn spawn_comms_drain(
                                 }
                             };
 
-                            // W1-A: advance the DSL peer-interaction lifecycle
-                            // into its terminal state BEFORE admitting the
-                            // input into the runtime. The `PeerInteractionCleanup`
-                            // effect fires once the terminal transition lands,
-                            // draining subscriber / stream channels keyed on
-                            // the same correlation id. Skip if no handle is
-                            // installed (standalone tests / WASM).
+                            // W1-A ordering: pull the subscriber FIRST (it
+                            // is the one-shot the completion bridge hands
+                            // the terminal event to), THEN fire the DSL
+                            // terminal transition. The transition emits
+                            // `PeerInteractionCleanup`; the observer drops
+                            // the now-idle stream registry entry. If the
+                            // DSL is not installed (standalone / WASM),
+                            // `mark_interaction_complete` below handles
+                            // cleanup; when the DSL IS installed, the
+                            // effect drives cleanup and `mark_interaction_complete`
+                            // becomes a no-op.
+                            let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
+                            let dsl_installed = comms_runtime.peer_interaction_handle().is_some();
                             if let (Some(handle), Some(disposition)) =
                                 (comms_runtime.peer_interaction_handle(), terminal_status)
                             {
                                 let corr_id =
                                     meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
                                 if let Err(err) = handle.response_terminal(corr_id, disposition) {
-                                    tracing::debug!(
+                                    tracing::warn!(
                                         error = %err,
                                         corr_id = %corr_id,
-                                        "PeerInteractionHandle::response_terminal rejected"
+                                        "PeerInteractionHandle::response_terminal rejected (no DSL entry — classified drain saw an unknown corr_id)"
                                     );
                                 }
                             }
 
-                            let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let content_input =
                                 classified_interaction_to_runtime_input(&candidate, &runtime_id);
                             let result = adapter
@@ -237,7 +242,7 @@ pub fn spawn_comms_drain(
                                             subscriber,
                                             handle,
                                         );
-                                    } else {
+                                    } else if !dsl_installed {
                                         comms_runtime.mark_interaction_complete(&interaction_id);
                                     }
                                 }
@@ -246,7 +251,9 @@ pub fn spawn_comms_drain(
                                         error = %err,
                                         "comms_drain: failed to inject terminal response"
                                     );
-                                    comms_runtime.mark_interaction_complete(&interaction_id);
+                                    if !dsl_installed {
+                                        comms_runtime.mark_interaction_complete(&interaction_id);
+                                    }
                                 }
                             }
                         } else {
@@ -263,7 +270,7 @@ pub fn spawn_comms_drain(
                                 let corr_id =
                                     meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
                                 if let Err(err) = handle.response_progress(corr_id) {
-                                    tracing::debug!(
+                                    tracing::warn!(
                                         error = %err,
                                         corr_id = %corr_id,
                                         "PeerInteractionHandle::response_progress rejected"

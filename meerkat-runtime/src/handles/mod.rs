@@ -87,12 +87,28 @@ impl HandleDslAuthority {
         input: mm_dsl::MeerkatMachineInput,
         context: &'static str,
     ) -> Result<(), DslTransitionError> {
+        self.apply_input_with_effects(input, context).map(|_| ())
+    }
+
+    /// Apply a DSL input and return the emitted effects.
+    ///
+    /// Handles that need to react to effect emission (e.g.,
+    /// [`crate::handles::RuntimePeerInteractionHandle`] consuming
+    /// `PeerInteractionCleanup` to drop shell-side channel projections)
+    /// use this variant so the effect is observed under the same lock as
+    /// the state update — the "terminal transition → effect → cleanup"
+    /// chain is causal, not lexically adjacent.
+    pub fn apply_input_with_effects(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         mm_dsl::MeerkatMachineMutator::apply(&mut *guard, input)
-            .map(|_| ())
+            .map(|transition| transition.effects)
             .map_err(|err| DslTransitionError::new(context, format!("{err}")))
     }
 

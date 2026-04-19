@@ -76,11 +76,21 @@ impl From<PeerCorrelationId> for Uuid {
 
 /// Typed lifecycle state of an outbound peer request (local is sender).
 ///
-/// This is the sender-side projection of the peer conversation: it tracks
-/// every step from `Sent` through progress/terminal responses and timeouts.
-/// It is unit-variant on purpose — error detail travels on the typed DSL
-/// input that drove the transition, not on the state enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+/// This enum spans both active and terminal states. The active lifetime
+/// runs `Sent → AcceptedProgress` while the correlation id lives in
+/// `pending_peer_requests`; terminal transitions remove the entry from the
+/// map and emit `PeerInteractionStateChanged { new_state: <terminal> }`
+/// followed by `PeerInteractionCleanup`. Callers observing via
+/// [`crate::handles::PeerInteractionHandle::outbound_state`] therefore see
+/// `Some(Sent | AcceptedProgress)` or `None` — terminal variants surface
+/// only on the state-change effect, not on the active map.
+///
+/// Unit-variant on purpose — error detail travels on the typed DSL input
+/// that drove the transition, not on the state enum.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[non_exhaustive]
 pub enum OutboundPeerRequestState {
     /// Request sent; no response yet.
     #[default]
@@ -88,11 +98,14 @@ pub enum OutboundPeerRequestState {
     /// At least one progress response (`ResponseStatus::Accepted`) has
     /// arrived; waiting on a terminal response.
     AcceptedProgress,
-    /// Terminal response with `Completed` status has arrived.
+    /// Terminal: response with `Completed` status arrived. Reported on
+    /// the state-change effect only; never stored in the active map.
     Completed,
-    /// Terminal response with `Failed` status has arrived.
+    /// Terminal: response with `Failed` status arrived. Reported on the
+    /// state-change effect only; never stored in the active map.
     Failed,
-    /// Timed out before any terminal response arrived.
+    /// Terminal: timed out before any terminal response arrived. Reported
+    /// on the state-change effect only; never stored in the active map.
     TimedOut,
 }
 
@@ -107,14 +120,19 @@ impl OutboundPeerRequestState {
 /// Typed lifecycle state of an inbound peer request (local is receiver).
 ///
 /// Mirrors [`OutboundPeerRequestState`] on the receiver side: the request
-/// has been received and later replied to (with any status). Held as a map
-/// entry so the receiver can reject duplicate replies at the DSL guard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+/// has been received and later replied to (with any status). The inbound
+/// map removes the entry on `Replied`, so the active map only ever holds
+/// `Received` — `Replied` surfaces as the effect's `new_state`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[non_exhaustive]
 pub enum InboundPeerRequestState {
     /// Request received; receiver has not sent a reply yet.
     #[default]
     Received,
-    /// Receiver has replied with a terminal response (Completed or Failed).
+    /// Terminal: receiver has replied with a terminal response. Reported
+    /// on the state-change effect only; never stored in the active map.
     Replied,
 }
 

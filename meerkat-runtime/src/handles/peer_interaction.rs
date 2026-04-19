@@ -2,15 +2,17 @@
 //!
 //! Routes peer request/response lifecycle events into the session's
 //! MeerkatMachine DSL (`pending_peer_requests` / `inbound_peer_requests`
-//! substate maps). Downstream projection consumers (the comms runtime's
-//! subscriber / stream registries) observe the `PeerInteractionCleanup`
-//! effect to drop channel handles on terminal transitions — the channels
-//! are a pure shell-owned projection of DSL state, not shadow truth.
+//! substate maps) and fans the emitted `PeerInteractionCleanup` effects
+//! out to the installed shell-side observer, so the subscriber / stream
+//! registries update causally — the map is a strict projection of DSL
+//! truth, not shadow state that happens to be updated lexically near each
+//! terminal transition.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use meerkat_core::handles::{
-    DslTransitionError, PeerInteractionHandle, PeerTerminalDisposition as CorePeerDisposition,
+    DslTransitionError, PeerInteractionCleanupObserver, PeerInteractionHandle,
+    PeerTerminalDisposition as CorePeerDisposition,
 };
 use meerkat_core::peer_correlation::{
     InboundPeerRequestState as CoreInboundState, OutboundPeerRequestState as CoreOutboundState,
@@ -23,24 +25,80 @@ use crate::meerkat_machine::dsl as mm_dsl;
 /// Runtime-backed [`PeerInteractionHandle`] impl.
 ///
 /// Every trait method routes to the corresponding DSL input on the session's
-/// shared MeerkatMachine authority. `PeerTerminalDisposition` on the core
-/// trait maps to the DSL's bridging `PeerTerminalDisposition` enum via
-/// [`From`].
-#[derive(Debug)]
+/// shared MeerkatMachine authority. After the transition lands, emitted
+/// effects are scanned for `PeerInteractionCleanup` and dispatched to the
+/// installed [`PeerInteractionCleanupObserver`] (if any) — closing the
+/// "terminal transition → effect → shell projection cleanup" loop.
 pub struct RuntimePeerInteractionHandle {
     dsl: Arc<HandleDslAuthority>,
+    cleanup_observer: RwLock<Option<Arc<dyn PeerInteractionCleanupObserver>>>,
+}
+
+impl std::fmt::Debug for RuntimePeerInteractionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let observer_tag = self
+            .cleanup_observer
+            .read()
+            .ok()
+            .as_deref()
+            .and_then(|o| o.as_ref().map(|_| "<observer>"));
+        f.debug_struct("RuntimePeerInteractionHandle")
+            .field("dsl", &self.dsl)
+            .field("cleanup_observer", &observer_tag)
+            .finish()
+    }
 }
 
 impl RuntimePeerInteractionHandle {
     /// Construct a handle backed by the session's shared DSL authority.
     pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
-        Self { dsl }
+        Self {
+            dsl,
+            cleanup_observer: RwLock::new(None),
+        }
     }
 
     /// Construct a handle backed by an ephemeral DSL authority (tests /
     /// legacy recovery paths).
     pub fn ephemeral() -> Self {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
+    }
+
+    fn apply_input_and_dispatch_cleanup(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<(), DslTransitionError> {
+        let effects = self.dsl.apply_input_with_effects(input, context)?;
+        let observer_opt = self
+            .cleanup_observer
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer_opt {
+            for effect in effects {
+                if let mm_dsl::MeerkatMachineEffect::PeerInteractionCleanup { corr_id } = effect {
+                    observer.on_peer_interaction_cleanup(dsl_corr_id_to_core(corr_id));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn dsl_corr_id_to_core(dsl_id: mm_dsl::PeerCorrelationId) -> PeerCorrelationId {
+    // Round-trip through the string wire form. The DSL key is the
+    // stringified UUID produced by `From<PeerCorrelationId>` at fire time,
+    // so parse must succeed on the canonical path.
+    match uuid::Uuid::parse_str(&dsl_id.0) {
+        Ok(uuid) => PeerCorrelationId::from_uuid(uuid),
+        Err(_) => {
+            tracing::warn!(
+                raw = %dsl_id.0,
+                "PeerInteractionCleanup: corr_id not a valid UUID; using nil"
+            );
+            PeerCorrelationId::from_uuid(uuid::Uuid::nil())
+        }
     }
 }
 
@@ -50,7 +108,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         corr_id: PeerCorrelationId,
         to: String,
     ) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestSent {
                 corr_id: corr_id.into(),
                 to,
@@ -60,7 +118,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     }
 
     fn response_progress(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerResponseProgressArrived {
                 corr_id: corr_id.into(),
             },
@@ -73,7 +131,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
         corr_id: PeerCorrelationId,
         disposition: CorePeerDisposition,
     ) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerResponseTerminalArrived {
                 corr_id: corr_id.into(),
                 disposition: disposition.into(),
@@ -83,7 +141,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     }
 
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestTimedOut {
                 corr_id: corr_id.into(),
             },
@@ -92,7 +150,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     }
 
     fn request_received(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerRequestReceived {
                 corr_id: corr_id.into(),
             },
@@ -101,7 +159,7 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     }
 
     fn response_replied(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError> {
-        self.dsl.apply_input(
+        self.apply_input_and_dispatch_cleanup(
             mm_dsl::MeerkatMachineInput::PeerResponseReplied {
                 corr_id: corr_id.into(),
             },
@@ -127,5 +185,12 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
             .get(&dsl_key)
             .copied()
             .map(Into::into)
+    }
+
+    fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>) {
+        *self
+            .cleanup_observer
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
     }
 }

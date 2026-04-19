@@ -351,6 +351,17 @@ impl CoreCommsRuntime for CommsRuntime {
                         if entry.created_at.elapsed() > RESERVATION_TTL {
                             entry.state = ReservationState::Expired;
                             registry.remove(&id);
+                            drop(registry);
+                            // W1-A: if this expired reservation corresponds
+                            // to a live outbound peer-request DSL entry,
+                            // fire the timeout transition so the authority
+                            // state matches reality.
+                            if let Some(handle) = self.peer_interaction_handle() {
+                                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(id);
+                                if handle.outbound_state(corr_id).is_some() {
+                                    let _ = handle.request_timed_out(corr_id);
+                                }
+                            }
                             return Err(StreamError::Timeout(format!(
                                 "reservation expired for interaction {}",
                                 interaction_id.0
@@ -462,6 +473,25 @@ impl CoreCommsRuntime for CommsRuntime {
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
 
+                // W1-A: fire the DSL authority FIRST. If a handle is
+                // installed and the DSL rejects (duplicate corr_id, illegal
+                // phase), the shell refuses to reserve channels or send —
+                // DSL is authority, not observer. When no handle is
+                // installed (standalone / WASM), the shell retains the
+                // legacy inline behavior unchanged.
+                if let Some(handle) = self.peer_interaction_handle()
+                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                {
+                    tracing::warn!(
+                        error = %err,
+                        corr_id = %corr_id,
+                        "PeerInteractionHandle::request_sent rejected — refusing to send"
+                    );
+                    return Err(SendError::Validation(format!(
+                        "DSL rejected PeerRequestSent for corr_id {corr_id}: {err}"
+                    )));
+                }
+
                 if stream_reserved {
                     // Reserve under the canonical request envelope id so
                     // replies can correlate via in_reply_to without an extra
@@ -497,24 +527,18 @@ impl CoreCommsRuntime for CommsRuntime {
                                 .remove(&interaction_id);
                             self.subscriber_registry.lock().remove(&interaction_id);
                         }
+                        // Roll the DSL forward to `TimedOut` so the
+                        // authoritative lifecycle matches reality (send
+                        // failed, no response will come). This also emits
+                        // `PeerInteractionCleanup` — harmless here because
+                        // the shell already cleaned up, and the observer's
+                        // second drop is a no-op.
+                        if let Some(handle) = self.peer_interaction_handle() {
+                            let _ = handle.request_timed_out(corr_id);
+                        }
                         return Err(e);
                     }
                 };
-
-                // Record the outbound request in the DSL (W1-A). The
-                // `pending_peer_requests` map is now the authoritative
-                // source for the subscriber / stream registry cleanup
-                // invariant; the handle is optional to keep standalone
-                // and WASM paths working unchanged.
-                if let Some(handle) = self.peer_interaction_handle()
-                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
-                {
-                    tracing::debug!(
-                        error = %err,
-                        corr_id = %corr_id,
-                        "PeerInteractionHandle::request_sent rejected — DSL guard fired"
-                    );
-                }
 
                 Ok(SendReceipt::PeerRequestSent {
                     envelope_id,
@@ -606,6 +630,22 @@ impl CoreCommsRuntime for CommsRuntime {
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+
+                // W1-A: DSL authority runs first — see the mirror comment
+                // in the `send` path's PeerRequest arm.
+                if let Some(handle) = self.peer_interaction_handle()
+                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
+                {
+                    tracing::warn!(
+                        error = %err,
+                        corr_id = %corr_id,
+                        "PeerInteractionHandle::request_sent rejected — refusing to send"
+                    );
+                    return Err(SendAndStreamError::Send(SendError::Validation(format!(
+                        "DSL rejected PeerRequestSent for corr_id {corr_id}: {err}"
+                    ))));
+                }
+
                 let (sender, receiver) = mpsc::channel::<meerkat_core::AgentEvent>(4096);
                 self.subscriber_registry
                     .lock()
@@ -634,19 +674,12 @@ impl CoreCommsRuntime for CommsRuntime {
                             .lock()
                             .remove(&interaction_id);
                         self.subscriber_registry.lock().remove(&interaction_id);
+                        if let Some(handle) = self.peer_interaction_handle() {
+                            let _ = handle.request_timed_out(corr_id);
+                        }
                         return Err(SendAndStreamError::Send(e));
                     }
                 };
-
-                if let Some(handle) = self.peer_interaction_handle()
-                    && let Err(err) = handle.request_sent(corr_id, to.to_string())
-                {
-                    tracing::debug!(
-                        error = %err,
-                        corr_id = %corr_id,
-                        "PeerInteractionHandle::request_sent rejected — DSL guard fired"
-                    );
-                }
 
                 let receipt = SendReceipt::PeerRequestSent {
                     envelope_id,
@@ -1359,14 +1392,23 @@ impl CommsRuntime {
     /// Install the session's peer-interaction DSL handle (W1-A).
     ///
     /// Called by the surface after the session's `SessionRuntimeBindings`
-    /// land. Once set, outbound `PeerRequest` sends fire
-    /// `PeerInteractionHandle::request_sent`, making `pending_peer_requests`
-    /// the authoritative source for the subscriber / stream registry's
-    /// cleanup-on-terminal invariant.
+    /// land. Two things happen here:
+    ///
+    /// 1. The runtime stores the handle so outbound `PeerRequest` sends
+    ///    fire `PeerInteractionHandle::request_sent` (DSL authority).
+    /// 2. The runtime registers *itself* as the handle's cleanup observer,
+    ///    so every DSL `PeerInteractionCleanup` effect drops the matching
+    ///    entries in `subscriber_registry` / `interaction_stream_registry`.
+    ///    That closes the "terminal transition → effect → cleanup" causal
+    ///    chain — the shell registries are a projection of DSL truth, not
+    ///    shadow state updated by lexical adjacency.
     pub fn install_peer_interaction_handle(
-        &self,
+        self: &Arc<Self>,
         handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle>,
     ) {
+        let observer: Arc<dyn meerkat_core::handles::PeerInteractionCleanupObserver> =
+            Arc::clone(self) as Arc<dyn meerkat_core::handles::PeerInteractionCleanupObserver>;
+        handle.install_cleanup_observer(observer);
         *self.peer_interaction_handle.write() = Some(handle);
     }
 
@@ -1843,6 +1885,28 @@ impl CommsRuntime {
         }
     }
 
+    /// Drop the registry entries for a correlation id without the
+    /// ReservationState CAS guard.
+    ///
+    /// Invoked from the `PeerInteractionCleanup` DSL effect observer
+    /// (W1-A): the DSL has already decided the peer-interaction lifecycle
+    /// is terminal, so the shell-side projection unconditionally matches.
+    /// Callers that want the reservation-lifecycle-aware CAS should use
+    /// [`mark_interaction_complete`].
+    fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
+        let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
+        let removed_stream = self
+            .interaction_stream_registry
+            .lock()
+            .remove(&interaction_id);
+        if removed_sender.is_some() || removed_stream.is_some() {
+            tracing::debug!(
+                interaction_id = %interaction_id,
+                "peer interaction projection dropped via DSL cleanup effect"
+            );
+        }
+    }
+
     /// Mark an interaction stream as completed (terminal event received).
     ///
     /// Uses CAS to ensure exactly-once cleanup: if the consumer already closed
@@ -1866,19 +1930,45 @@ impl CommsRuntime {
     }
 
     /// Reap expired reservations that were never attached within the TTL.
+    ///
+    /// For each reaped reservation that corresponds to an outbound peer
+    /// request with a live DSL entry, fires `PeerRequestTimedOut` so the
+    /// DSL authority observes the timeout and emits
+    /// `PeerInteractionCleanup` (which this runtime's observer impl then
+    /// translates into the same registry removal this sweep does — fully
+    /// compatible: the registry is the projection).
     pub fn reap_expired_reservations(&self) {
-        let mut registry = self.interaction_stream_registry.lock();
-        registry.retain(|id, entry| {
-            if entry.state == ReservationState::Reserved
-                && entry.created_at.elapsed() > RESERVATION_TTL
-            {
-                tracing::debug!(interaction_id = %id, "reservation expired (TTL)");
-                entry.state = ReservationState::Expired;
-                false
-            } else {
-                true
+        let expired_ids: Vec<Uuid> = {
+            let mut registry = self.interaction_stream_registry.lock();
+            let mut expired = Vec::new();
+            registry.retain(|id, entry| {
+                if entry.state == ReservationState::Reserved
+                    && entry.created_at.elapsed() > RESERVATION_TTL
+                {
+                    tracing::debug!(interaction_id = %id, "reservation expired (TTL)");
+                    entry.state = ReservationState::Expired;
+                    expired.push(*id);
+                    false
+                } else {
+                    true
+                }
+            });
+            expired
+        };
+        if !expired_ids.is_empty()
+            && let Some(handle) = self.peer_interaction_handle()
+        {
+            for id in expired_ids {
+                let corr_id = meerkat_core::PeerCorrelationId::from_uuid(id);
+                if handle.outbound_state(corr_id).is_some() {
+                    // Only fire if the outbound entry is live in the DSL.
+                    // Plain-event reservations share the registry but have
+                    // no DSL peer-request entry; firing for them would
+                    // fail the guard harmlessly, but we skip for clarity.
+                    let _ = handle.request_timed_out(corr_id);
+                }
             }
-        });
+        }
     }
 
     pub fn router_arc(&self) -> Arc<Router> {
@@ -2017,6 +2107,15 @@ impl CommsRuntime {
             }
             self.listeners_started = false;
         }
+    }
+}
+
+impl meerkat_core::handles::PeerInteractionCleanupObserver for CommsRuntime {
+    fn on_peer_interaction_cleanup(&self, corr_id: meerkat_core::PeerCorrelationId) {
+        // The DSL decided the peer-interaction lifecycle is terminal; the
+        // shell registries are a projection — drop the entries keyed on
+        // the same correlation id.
+        self.drop_peer_interaction_projection(corr_id.as_uuid());
     }
 }
 

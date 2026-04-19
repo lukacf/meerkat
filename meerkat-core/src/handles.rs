@@ -20,6 +20,7 @@
 //! these traits).
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
@@ -493,6 +494,7 @@ pub trait McpServerLifecycleHandle: Send + Sync {
 /// Carried as a typed wire value so the DSL can route `Completed` / `Failed`
 /// terminal transitions without the shell re-interpreting `ResponseStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerTerminalDisposition {
     /// Terminal response with `Completed` status.
     Completed,
@@ -525,14 +527,17 @@ pub trait PeerInteractionHandle: Send + Sync {
 
     /// Fire `PeerResponseProgressArrived { corr_id }`.
     ///
-    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
-    /// `Sent` (a progress after a progress is allowed as a self-loop).
+    /// Guard: `corr_id` is in `pending_peer_requests`. Progress after
+    /// progress is admitted as a self-loop (the DSL overwrites the state
+    /// slot). Rejects on unknown corr_id.
     fn response_progress(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
     /// Fire `PeerResponseTerminalArrived { corr_id, disposition }`.
     ///
-    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
-    /// not already terminal. Emits the DSL `PeerInteractionCleanup` effect.
+    /// Guard: `corr_id` is in `pending_peer_requests`. Terminal transitions
+    /// remove the map entry and emit the `PeerInteractionCleanup` effect,
+    /// so any second terminal on the same corr_id is rejected at the
+    /// `pending_exists` guard by construction.
     fn response_terminal(
         &self,
         corr_id: PeerCorrelationId,
@@ -541,8 +546,9 @@ pub trait PeerInteractionHandle: Send + Sync {
 
     /// Fire `PeerRequestTimedOut { corr_id }`.
     ///
-    /// Guard: `corr_id` is in `pending_peer_requests` and current state is
-    /// not already terminal. Emits `PeerInteractionCleanup`.
+    /// Guard: `corr_id` is in `pending_peer_requests`. Like `response_terminal`,
+    /// the map entry is removed on success and the `PeerInteractionCleanup`
+    /// effect is emitted; subsequent fires fail the guard.
     fn request_timed_out(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
 
     /// Fire `PeerRequestReceived { corr_id }` (inbound).
@@ -562,4 +568,33 @@ pub trait PeerInteractionHandle: Send + Sync {
 
     /// Observe the DSL-owned state of an inbound peer request.
     fn inbound_state(&self, corr_id: PeerCorrelationId) -> Option<InboundPeerRequestState>;
+
+    /// Install a projection-cleanup observer for the peer-interaction
+    /// lifecycle. The runtime handle invokes the observer whenever a DSL
+    /// transition emits `PeerInteractionCleanup`, closing the loop
+    /// "terminal transition → effect → shell projection cleanup".
+    ///
+    /// Implementations with no observer simply drop any emitted cleanup
+    /// notifications on the floor. Standalone / WASM paths leave this
+    /// unset.
+    fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>);
+}
+
+/// Observer invoked by [`PeerInteractionHandle`] when a DSL
+/// `PeerInteractionCleanup` effect is emitted.
+///
+/// Shell-owned projection consumers (the comms runtime's subscriber /
+/// stream registries) implement this to drop channel entries keyed on the
+/// terminated correlation id. The observer is invoked under the same
+/// authority lock as the transition that emitted the effect, so the
+/// "terminal transition → effect → cleanup" chain is causal, not lexically
+/// adjacent.
+pub trait PeerInteractionCleanupObserver: Send + Sync {
+    /// Called once per emitted `PeerInteractionCleanup { corr_id }` effect.
+    ///
+    /// Idempotent: a well-formed DSL run emits exactly one cleanup per
+    /// correlation id because terminal transitions remove the map entry
+    /// (subsequent attempts are rejected at the `pending_exists` guard),
+    /// but observers should tolerate a redundant call defensively.
+    fn on_peer_interaction_cleanup(&self, corr_id: PeerCorrelationId);
 }

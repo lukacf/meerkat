@@ -8,7 +8,7 @@
 //! truth, not shadow state that happens to be updated lexically near each
 //! terminal transition.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use meerkat_core::handles::{
     DslTransitionError, PeerInteractionCleanupObserver, PeerInteractionHandle,
@@ -29,9 +29,19 @@ use crate::meerkat_machine::dsl as mm_dsl;
 /// effects are scanned for `PeerInteractionCleanup` and dispatched to the
 /// installed [`PeerInteractionCleanupObserver`] (if any) — closing the
 /// "terminal transition → effect → shell projection cleanup" loop.
+///
+/// The cleanup observer is held as a `Weak` reference. In production the
+/// observer is the session's `CommsRuntime`, which in turn holds a strong
+/// `Arc<dyn PeerInteractionHandle>` to this struct; storing the observer
+/// strongly would create a cycle that prevents `CommsRuntime::drop` from
+/// firing on session teardown (dropped listeners, leaked session-identity
+/// claims, zombie `InprocRegistry` entries). `Weak` breaks the cycle —
+/// once the runtime drops, `upgrade()` returns `None` and subsequent
+/// effect dispatches become no-ops, which is the desired semantics
+/// post-teardown.
 pub struct RuntimePeerInteractionHandle {
     dsl: Arc<HandleDslAuthority>,
-    cleanup_observer: RwLock<Option<Arc<dyn PeerInteractionCleanupObserver>>>,
+    cleanup_observer: RwLock<Option<Weak<dyn PeerInteractionCleanupObserver>>>,
 }
 
 impl std::fmt::Debug for RuntimePeerInteractionHandle {
@@ -70,11 +80,14 @@ impl RuntimePeerInteractionHandle {
         context: &'static str,
     ) -> Result<(), DslTransitionError> {
         let effects = self.dsl.apply_input_with_effects(input, context)?;
+        // Upgrade the weak observer once per apply; if the owner has been
+        // dropped, the cleanup notification is a no-op by design.
         let observer_opt = self
             .cleanup_observer
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .as_ref()
+            .and_then(Weak::upgrade);
         if let Some(observer) = observer_opt {
             for effect in effects {
                 if let mm_dsl::MeerkatMachineEffect::PeerInteractionCleanup { corr_id } = effect {
@@ -191,9 +204,15 @@ impl PeerInteractionHandle for RuntimePeerInteractionHandle {
     }
 
     fn install_cleanup_observer(&self, observer: Arc<dyn PeerInteractionCleanupObserver>) {
+        // Downgrade to a `Weak` so this handle does not keep the observer
+        // (typically the session's `CommsRuntime`) alive. The caller retains
+        // the canonical strong `Arc` via its own field; when the runtime is
+        // dropped, the weak here fails to upgrade and cleanup dispatch
+        // becomes a no-op — matching the "post-teardown, no more work"
+        // semantics the shell-side projection expects.
         *self
             .cleanup_observer
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(&observer));
     }
 }

@@ -217,6 +217,54 @@ fn cleanup_observer_fires_on_terminal_transitions() {
 }
 
 #[test]
+fn cleanup_observer_is_weakly_held_no_arc_cycle() {
+    // P1 regression guard: the runtime impl stores the cleanup observer as
+    // a `Weak`, so installing it does not keep the owner alive. Drop the
+    // strong `Arc` and confirm subsequent cleanup fires no longer reach the
+    // observer — i.e., the handle held the Weak, the strong count dropped
+    // to zero with the `Arc`, and the handle's `upgrade()` now returns
+    // `None`. Without the fix this test would either keep the recorder
+    // alive (and see new records) or, in the production cycle, leak the
+    // `CommsRuntime`.
+    use meerkat_core::handles::PeerInteractionCleanupObserver;
+    use std::sync::Mutex;
+
+    struct Recorder(Mutex<Vec<PeerCorrelationId>>);
+    impl PeerInteractionCleanupObserver for Recorder {
+        fn on_peer_interaction_cleanup(&self, corr_id: PeerCorrelationId) {
+            self.0.lock().unwrap().push(corr_id);
+        }
+    }
+
+    let handle = new_handle();
+    let rec: Arc<Recorder> = Arc::new(Recorder(Mutex::new(Vec::new())));
+    let rec_weak = Arc::downgrade(&rec);
+    handle.install_cleanup_observer(Arc::clone(&rec) as Arc<dyn PeerInteractionCleanupObserver>);
+    assert_eq!(
+        Arc::strong_count(&rec),
+        1,
+        "handle must not hold a strong ref"
+    );
+
+    // Drop the caller's last strong ref; observer should vanish.
+    drop(rec);
+    assert!(
+        rec_weak.upgrade().is_none(),
+        "observer must be fully dropped once the caller releases its Arc — no cycle"
+    );
+
+    // A terminal transition after observer drop must still succeed on the
+    // DSL side and must not panic in the dispatch path when the weak fails
+    // to upgrade.
+    let corr_id = PeerCorrelationId::new();
+    handle.request_sent(corr_id, "peer-a".into()).unwrap();
+    handle
+        .response_terminal(corr_id, PeerTerminalDisposition::Completed)
+        .expect("terminal transition must succeed with dropped observer");
+    assert!(handle.outbound_state(corr_id).is_none());
+}
+
+#[test]
 fn outbound_inbound_are_independent_namespaces() {
     // Mixing outbound and inbound on the same corr_id must not alias.
     let handle = new_handle();

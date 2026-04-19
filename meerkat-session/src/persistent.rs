@@ -952,9 +952,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             mcp_server_lifecycle: Arc::new(
                                 meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
                             ),
-                            peer_interaction: Some(Arc::new(
-                                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
-                            )),
+                            // W1-A (#264): recovery path leaves the peer-interaction
+                            // handle unset. An ephemeral handle here would start in
+                            // `Initializing` without receiving `Initialize` /
+                            // `RegisterSession`, so every `request_sent` would fail
+                            // the phase guard and silently break PeerRequest sends on
+                            // recovered sessions. The factory still treats the handle
+                            // as optional — once the runtime epoch rebinds through
+                            // normal `prepare_bindings`, a properly-initialized handle
+                            // replaces this `None` via the ordinary install path.
+                            peer_interaction: None,
                         },
                     )
                 })

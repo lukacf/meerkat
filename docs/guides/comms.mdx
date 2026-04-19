@@ -598,7 +598,7 @@ The important architectural split is:
 2. the active keep-alive/drain lifecycle path owns **consumption**
 3. formatted message injection into the session is a projection of that lifecycle truth
 
-Historically this was sometimes described as "turn-boundary inbox draining." That is not the primary 0.5 mental model. The canonical model is runtime-backed queueing and admission.
+Historically this was sometimes described as "turn-boundary inbox draining." That is not the primary mental model anymore. The canonical model is runtime-backed queueing and admission.
 
 ### Message injection format
 

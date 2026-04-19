@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-1.94+-orange?logo=rust" alt="Rust 1.89+">
+  <img src="https://img.shields.io/badge/Rust-1.94+-orange?logo=rust" alt="Rust 1.94+">
   <img src="https://img.shields.io/badge/License-MIT%2FApache--2.0-blue" alt="License">
 </p>
 
@@ -40,7 +40,7 @@ The library comes first; surfaces come second. The CLI, REST API, JSON-RPC serve
 | **Modularity** | Opt-in subsystems, from bare agent loop to full harness | All-or-nothing |
 | **Surfaces** | CLI, REST, JSON-RPC, MCP server, Rust/Python/TS SDKs | CLI + SDK |
 | **Agent infra** | Hooks, skills, semantic memory across sessions | File-based context |
-| **Multi-agent** | Sub-agents, peer-to-peer comms, mob orchestration | Single agent |
+| **Multi-agent** | Mob members, peer-to-peer comms, mob orchestration | Single agent |
 | **Portable deployment** | Signed `.mobpack` artifacts (`pack/deploy/embed/compile`) + WASM web bundles (`mob web build`) | No equivalent portable team artifact flow |
 | **Deployment** | Single 5MB binary, <10ms startup, ~20MB RAM | Runtime + dependencies |
 
@@ -71,7 +71,7 @@ rkat run --tools full \
 **Extract structured data** with schema validation and budget controls:
 
 ```bash
-rkat run --model claude-sonnet-4-5 --tools workspace \
+rkat run --model claude-sonnet-4-6 --tools workspace \
   --schema '{"type":"object","properties":{"issues":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"severity":{"type":"string","enum":["critical","high","medium","low"]},"description":{"type":"string"}},"required":["file","severity","description"]}}},"required":["issues"]}' \
   --max-tokens 4000 \
   "Audit the last 20 commits for security issues. Check each changed file."
@@ -89,23 +89,23 @@ transport = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
 api_style = "chat_completions"
 
-[self_hosted.models.gemma-4-27b]
+[self_hosted.models.gemma-4-31b]
 server = "local"
-remote_model = "gemma4:27b"
-display_name = "Gemma 4 27B"
+remote_model = "gemma4:31b"
+display_name = "Gemma 4 31B"
 family = "gemma-4"
-context_window = 128000
+context_window = 256000
 vision = true
 ```
 
 Then use it like any other model:
 
 ```bash
-rkat run -m gemma-4-27b "Explain the code in main.rs"
+rkat run -m gemma-4-31b "Explain the code in main.rs"
 rkat doctor  # validate server connectivity
 ```
 
-Self-hosted models work across all surfaces -- CLI, REST, RPC, MCP, and SDKs. See the [self-hosted guide](https://docs.rkat.ai/guides/self-hosted) for Ollama, vLLM, and LM Studio recipes.
+Self-hosted models work across all surfaces -- CLI, REST, RPC, MCP, and SDKs. See the [self-hosted Gemma 4 guide](https://docs.rkat.ai/guides/self-hosted-gemma4) for Ollama, vLLM, and LM Studio recipes.
 
 ## Testing
 
@@ -149,9 +149,9 @@ Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider l
 
 **Hooks and skills.** Eight hook points (pre/post LLM, pre/post tool, turn boundary, run lifecycle) with observe, rewrite, and guardrail semantics. Skills are composable knowledge packs that inject context and capabilities.
 
-**Multi-agent.** Sub-agents with budget and tool isolation. Peer-to-peer inter-agent messaging with cryptographic identity. Mobs for orchestrating teams of agents with role-based coordination, shared task boards, and DAG-based flows. Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
+**Multi-agent.** Mob members run as session-backed workers with budget and tool isolation. Peer-to-peer inter-agent messaging uses cryptographic identity, while mobs provide team orchestration, shared task boards, and DAG-based flows. Portable mob artifacts (`.mobpack`) support reproducible deploys via CLI and browser-target web bundles.
 
-**Realtime voice.** Attach an OpenAI Realtime audio channel to any session or mob member while keeping the session as the canonical source of conversational truth. Identity-first attach/detach (`mob/realtime_attach` / `mob/realtime_detach`) keyed on `AgentIdentity` survives respawn; per-binding authority-epoch tokens guard provider callbacks against races and stale transports. Hot-swap provider/model mid-call via the DSL-guarded live-topology reconfigure flow. See the [realtime voice guide](https://docs.rkat.ai/guides/realtime).
+**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime` and the runtime brings the OpenAI Realtime transport up automatically for that session or mob member. The session remains the canonical source of truth, provider callbacks are fenced by authority-epoch tokens, and model swaps flow through the guarded live-topology reconfigure path. See the [realtime guide](https://docs.rkat.ai/guides/realtime).
 
 **Packaging and targets.** Build once as a signed `.mobpack`, then choose runtime target: direct deploy, embedded native binary, optimized compile, or browser WASM bundle.
 
@@ -230,7 +230,7 @@ Use an agent as a processing component in your service -- typed output, budget-l
 
 ```rust
 let mut agent = AgentBuilder::new()
-    .model("claude-sonnet-4-5")
+    .model("claude-sonnet-4-6")
     .system_prompt("You are an incident triage system.")
     .output_schema(OutputSchema::new(triage_schema)?)
     .budget(BudgetLimits::default().with_max_tokens(2000))
@@ -260,7 +260,7 @@ result = await client.create_session(
     f"member task (use gemini-3-flash-preview for speed) to investigate the root cause by "
     f"reading the relevant source files. Collect results and return structured JSON.\n\n"
     f"{ci_log}",
-    model="claude-sonnet-4-5",
+    model="claude-sonnet-4-6",
     enable_shell=True,
     enable_mob=True,
     output_schema={
@@ -288,7 +288,7 @@ Mobs are tool-driven -- the agent uses `mob_*` tools to create a team, spawn mem
 ```toml
 # audit-team.toml
 [profiles.analyst]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 system_prompt = "You analyze code for error handling gaps, security issues, and test coverage."
 tools = { shell = true, builtins = true }
 
@@ -339,7 +339,7 @@ export GOOGLE_API_KEY=...
 ```toml
 # .rkat/config.toml (project) or ~/.rkat/config.toml (user)
 [agent]
-model = "claude-sonnet-4-5"
+model = "claude-sonnet-4-6"
 max_tokens = 4096
 ```
 
@@ -353,7 +353,7 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, tools, providers, configuration, realms |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, realtime voice, structured output |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Hooks, skills, memory, comms, mobs, realtime audio, structured output |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI reference, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, session contracts |

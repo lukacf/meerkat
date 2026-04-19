@@ -1,5 +1,5 @@
 ---
-title: "Realtime voice"
+title: "Realtime"
 description: "Enable low-latency audio on a session by choosing a realtime-capable model — transport attach/detach is automatic."
 icon: "microphone"
 ---
@@ -93,7 +93,7 @@ The runtime resolves the model, sees `ModelCapabilities.realtime == true`, and b
 
 ### Configuration defaults
 
-The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime"` makes realtime the default for the whole install. See the [Configuration guide](/guides/configuration).
+The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime"` makes realtime the default for the whole install. See the [Configuration guide](/concepts/configuration).
 
 ### Mid-session: swap to a realtime-capable model
 
@@ -315,7 +315,7 @@ Every member spawned under that profile is initialized on `gpt-realtime` and its
 ## See also
 
 - [Mobs guide](/guides/mobs) — spawning members, profiles, realtime-capable per-member models
-- [Configuration guide](/guides/configuration) — setting `default_model`
+- [Configuration guide](/concepts/configuration) — setting `default_model`
 - [JSON-RPC API](/api/rpc) — `session/create`, `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, `realtime/*` bootstrap
 - [REST API](/api/rest) — REST routes for session creation and realtime attachment status
 - Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`

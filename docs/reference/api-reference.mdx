@@ -4,7 +4,7 @@ description: "Index of public types, traits, and error codes in Meerkat."
 icon: "book"
 ---
 
-This page is a quick-lookup index. For settled 0.5 session/runtime semantics, see [Session contracts](/reference/session-contracts). For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
+This page is a quick-lookup index. For current session/runtime semantics, see [Session contracts](/reference/session-contracts). For detailed usage with examples, see the [Rust SDK reference](/rust/overview).
 
 ## Core types
 
@@ -164,30 +164,31 @@ async fn orchestrate(
 Agent-side mob capability is exposed by composing:
 
 - `meerkat_mob_mcp::MobMcpState`
-- `meerkat_mob_mcp::MobMcpDispatcher`
+- `meerkat_mob_mcp::AgentMobToolSurfaceFactory`
 
 into:
 
-- `SessionBuildOptions.external_tools` (`meerkat_core::service`).
+- `SessionBuildOptions.mob_tools` (`meerkat_core::service`).
 
 ```rust
 use std::sync::Arc;
 use meerkat_core::service::SessionBuildOptions;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_mob::MobSessionService;
-use meerkat_mob_mcp::{MobMcpDispatcher, MobMcpState};
+use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 
 fn with_mob_tools(session_service: Arc<dyn MobSessionService>) -> SessionBuildOptions {
     let state = Arc::new(MobMcpState::new(session_service));
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(MobMcpDispatcher::new(state));
     SessionBuildOptions {
-        external_tools: Some(tools),
+        mob_tools: Some(Arc::new(AgentMobToolSurfaceFactory::new(state))),
         ..Default::default()
     }
 }
 ```
 
 This is the in-session mechanism for granting `mob_*` tools to the agent.
+`external_tools` remains the surface for custom callback tools and MCP-backed
+dispatchers; mob orchestration now has its own late-bound factory slot.
+
 Public host surfaces use typed control planes instead:
 
 - JSON-RPC / SDKs: typed `mob/*` methods
@@ -268,7 +269,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
 | `WireUsage` | Token/cost usage breakdown |
-| `ContractVersion` | Semver version (`0.5.1` currently) |
+| `ContractVersion` | Semver version (`0.6.0` currently) |
 | `CoreCreateParams` | Session creation parameters |
 | `StructuredOutputParams` | Schema + retry count |
 | `CommsParams` | Keep-alive + comms identity parameters |

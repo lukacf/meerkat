@@ -662,21 +662,21 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.5.1",
+  "contract_version": "0.6.0",
   "providers": [
     {
       "provider": "anthropic",
-      "default_model_id": "claude-sonnet-4-6",
+      "default_model_id": "claude-opus-4-7",
       "models": [
         {
-          "id": "claude-sonnet-4-6",
-          "display_name": "Claude Sonnet 4.5",
-          "tier": "standard",
-          "context_window": 200000,
-          "max_output_tokens": 64000,
+          "id": "claude-opus-4-7",
+          "display_name": "Claude Opus 4.7",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
           "profile": {
-            "model_family": "claude",
-            "supports_temperature": true,
+            "model_family": "claude-opus-4",
+            "supports_temperature": false,
             "supports_thinking": true,
             "supports_reasoning": false,
             "params_schema": {}
@@ -696,7 +696,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 5, "patch": 1},
+  "contract_version": {"major": 0, "minor": 6, "patch": 0},
   "capabilities": [
     {
       "id": "sessions",

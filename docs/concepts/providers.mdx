@@ -17,13 +17,14 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
     | Model | Context | Max output | Best for |
     |-------|---------|------------|----------|
     | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
-    | `claude-sonnet-4-6` | 200K / 1M (beta) | 64K | Balanced performance and cost |
-    | `claude-opus-4-5` | 200K | 64K | Legacy Opus (still supported) |
-    | `claude-haiku-4-5` | 200K | 64K | Fast, simple tasks |
+    | `claude-opus-4-7` | 1M | 128K | Default Anthropic recommendation |
+    | `claude-opus-4-6` | 1M | 128K | Supported Opus fallback |
+    | `claude-sonnet-4-6` | 1M | 64K | Balanced performance and cost |
+    | `claude-sonnet-4-5` | 200K | 64K | Legacy supported Sonnet |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "claude-opus-4-6"
+    model = "claude-opus-4-7"
     max_tokens_per_turn = 16384
     ```
   </Tab>
@@ -34,12 +35,13 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
 
     | Model | Context | Best for |
     |-------|---------|----------|
-    | `gpt-5.2` | 1M | General purpose, advanced reasoning |
-    | `gpt-5.2-pro` | 1M | Highest quality reasoning |
+    | `gpt-5.4` | 1.05M | Default OpenAI recommendation |
+    | `gpt-5.3-codex` | 400K | Coding-focused workflows |
+    | `gpt-realtime-1.5` | 128K | Realtime audio sessions |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "gpt-5.2"
+    model = "gpt-5.4"
     max_tokens_per_turn = 8192
     ```
   </Tab>
@@ -50,12 +52,13 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
 
     | Model | Context | Best for |
     |-------|---------|----------|
-    | `gemini-3-pro-preview` | 1M | Advanced reasoning, complex tasks |
-    | `gemini-3-flash-preview` | 1M | Fast, balanced performance |
+    | `gemini-3-flash-preview` | 1M | Default Gemini recommendation |
+    | `gemini-3.1-pro-preview` | 1M | Advanced reasoning, complex tasks |
+    | `gemini-3.1-flash-lite-preview` | 1M | Lightweight fast-path tasks |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "gemini-3-pro-preview"
+    model = "gemini-3-flash-preview"
     max_tokens_per_turn = 8192
     ```
   </Tab>
@@ -114,11 +117,11 @@ When using Meerkat as a Rust library, enable only the providers you need:
 <CodeGroup>
 
 ```toml Anthropic only (smallest binary)
-meerkat = { version = "0.5", features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "0.6.0", features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "0.5", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "0.6.0", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -145,7 +148,7 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
     | `seed` | Integer | Seed for deterministic outputs |
 
     ```bash
-    rkat run --model gpt-5.2 --param reasoning_effort=high "Prove this theorem"
+    rkat run --model gpt-5.4 --param reasoning_effort=high "Prove this theorem"
     ```
   </Tab>
   <Tab title="Gemini">

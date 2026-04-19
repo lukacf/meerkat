@@ -11,7 +11,6 @@ const outputDir = path.join(
   repoRoot,
   "docs",
   "architecture",
-  "two-kernel-research",
   "posters",
 );
 
@@ -59,6 +58,7 @@ const MACHINE_SPECS = [
       "meerkat-machine-schema",
       "src",
       "catalog",
+      "dsl",
       "meerkat_machine.rs",
     ),
     accent: "#c96d54",
@@ -395,6 +395,7 @@ const MACHINE_SPECS = [
       "meerkat-machine-schema",
       "src",
       "catalog",
+      "dsl",
       "mob_machine.rs",
     ),
     accent: "#6d8fa0",

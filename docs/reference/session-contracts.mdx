@@ -1,10 +1,10 @@
 ---
 title: "Session contracts"
-description: "Canonical 0.5 session, runtime, keep-alive, and commit-boundary contracts."
+description: "Canonical session, runtime, keep-alive, and commit-boundary contracts."
 icon: "file-lines"
 ---
 
-This page is the canonical settled-state 0.5 contract for session and runtime behavior.
+This page is the canonical settled-state contract for session and runtime behavior.
 
 ## Ownership model
 
@@ -96,7 +96,7 @@ Rust supports `system_prompt` on `StartTurnRequest` only for a deferred session'
 - deferred + first turn: allowed
 - existing history/messages: rejected
 
-This keeps Rust aligned with the 0.5 runtime contract instead of implying arbitrary mid-session prompt replacement.
+This keeps Rust aligned with the current runtime contract instead of implying arbitrary mid-session prompt replacement.
 
 ### interrupt
 
@@ -144,7 +144,7 @@ External events are queue-only runtime-backed inputs.
 
 - they are admitted into runtime ingress
 - they do not invent a second direct execution path
-- “turn-boundary inbox draining” is not the primary mental model for 0.5
+- “turn-boundary inbox draining” is not the primary mental model for the current runtime-backed design
 
 ## Explicit override semantics
 

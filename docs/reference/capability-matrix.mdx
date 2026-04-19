@@ -57,19 +57,19 @@ string code and a transport-specific representation:
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "0.5", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.0", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "0.5", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "0.6.0", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "0.5", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "0.6.0", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add scheduling
-meerkat = { version = "0.5", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "0.6.0", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Kitchen sink
-meerkat = { version = "0.5", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp", "schedule"] }
+meerkat = { version = "0.6.0", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp", "schedule"] }
 ```
 
 ## Model capabilities

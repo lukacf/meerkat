@@ -9,7 +9,7 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-meerkat = "0.5"
+meerkat = "0.6.0"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>
@@ -104,7 +104,7 @@ Same code, different model. The provider is inferred from the model name:
 
 ```bash
 rkat run --model claude-sonnet-4-6 "Explain monads"
-rkat run --model gpt-5.2 "Explain monads"
+rkat run --model gpt-5.4 "Explain monads"
 rkat run --model gemini-3-flash-preview "Explain monads"
 ```
 

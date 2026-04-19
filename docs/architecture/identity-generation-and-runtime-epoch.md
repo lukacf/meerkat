@@ -125,9 +125,10 @@ Either choice is acceptable only if:
 - Do not treat many processes in one realm as proof that one session needs
   distributed co-ownership.
 
-## Related Research
+## Follow-on Material
 
-- [generation-epoch-mapping.md](/Users/luka/.codex/worktrees/c5c6/meerkat/docs/architecture/two-kernel-research/generation-epoch-mapping.md)
-- [abstract-member-contract.md](/Users/luka/.codex/worktrees/c5c6/meerkat/docs/architecture/two-kernel-research/abstract-member-contract.md)
-- [bridge-alphabet.md](/Users/luka/.codex/worktrees/c5c6/meerkat/docs/architecture/two-kernel-research/bridge-alphabet.md)
-- [owned-facts-ledger.md](/Users/luka/.codex/worktrees/c5c6/meerkat/docs/architecture/two-kernel-research/owned-facts-ledger.md)
+- Canonical machine and composition definitions live under
+  `meerkat-machine-schema/src/catalog/dsl/`.
+- Canonical generated specs live under `specs/machines/` and
+  `specs/compositions/`.
+- The public architecture hub is [Architecture](/reference/architecture).

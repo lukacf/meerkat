@@ -26,7 +26,7 @@ Surface → SessionService → AgentFactory::build_agent() → Agent<C, T, S>
 
 No surface constructs agents directly. `AgentFactory` consolidates provider resolution, tool dispatch wiring, comms setup, hook resolution, and skill injection into a single construction pipeline.
 
-The important 0.5 distinction is ownership:
+The important distinction is ownership:
 
 - runtime-backed surfaces own `keep_alive`, Queue/Steer routing, comms drain, and commit/cancel semantics
 - `SessionService` is the substrate seam they route through

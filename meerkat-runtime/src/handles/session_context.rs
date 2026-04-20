@@ -71,18 +71,13 @@ impl SessionContextHandle for RuntimeSessionContextHandle {
             "SessionContextHandle::context_advanced",
         ) {
             Ok(effects) => effects,
-            Err(err) => {
-                // The monotonic guard rejection surfaces as a
-                // `DslTransitionError` today because the DSL macro does
-                // not distinguish "guard rejected" from "hard error".
-                // Treat "guard rejected" as `Ok(false)` so callers can
-                // fire unconditionally without tracking their own
-                // watermark. Any other shape propagates.
-                if err.reason.contains("monotonic") {
-                    return Ok(false);
-                }
-                return Err(err);
-            }
+            // The monotonic guard surfaces as a typed `GuardRejected` —
+            // treat as `Ok(false)` so callers can fire unconditionally
+            // without tracking their own watermark. Any other rejection
+            // (e.g., `NoMatchingTransition` from a mis-phased call) is a
+            // real error and propagates.
+            Err(err) if err.is_guard_rejected() => return Ok(false),
+            Err(err) => return Err(err),
         };
 
         let observer_opt = self

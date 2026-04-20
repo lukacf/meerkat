@@ -18,6 +18,11 @@ pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &st
         mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { phase, trigger } => {
             format!("DSL authority ({context}): no matching transition from {phase} for {trigger}")
         }
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { phase, trigger } => {
+            format!(
+                "DSL authority ({context}): guard rejected transition from {phase} for {trigger}"
+            )
+        }
     }
 }
 

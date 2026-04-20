@@ -41,9 +41,11 @@ impl RuntimeRealtimeProductTurnHandle {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 
-    /// Apply the input; map "guard rejected" (all five product-turn
+    /// Apply the input; map typed guard rejection (all five product-turn
     /// transitions are idempotent via guards) to `Ok(false)` while
-    /// propagating any other transition error.
+    /// propagating any other transition error. Classification routes
+    /// through the typed [`meerkat_core::handles::DslRejectionKind`] so
+    /// no substring matching on rendered messages is required.
     fn apply_idempotent(
         &self,
         input: mm_dsl::MeerkatMachineInput,
@@ -51,19 +53,8 @@ impl RuntimeRealtimeProductTurnHandle {
     ) -> Result<bool, DslTransitionError> {
         match self.dsl.apply_input(input, context) {
             Ok(()) => Ok(true),
-            Err(err) => {
-                // The DSL macro does not distinguish "guard rejected" from
-                // "hard error" at the error-type level today. Any
-                // `NoMatchingTransition`-shaped error carries "no matching
-                // transition" in its message; since these transitions are
-                // fired in direct response to provider-session events, a
-                // guard-rejected fire is the expected idempotent case.
-                if err.reason.contains("no matching transition") || err.reason.contains("guard") {
-                    Ok(false)
-                } else {
-                    Err(err)
-                }
-            }
+            Err(err) if err.is_guard_rejected() => Ok(false),
+            Err(err) => Err(err),
         }
     }
 }

@@ -99,7 +99,21 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum #error_name {
+            /// No transition is declared for this `(phase, trigger)` pair at
+            /// all — the trigger variant is semantically out of scope for
+            /// the current phase. Shell callers should treat this as a hard
+            /// error: firing the wrong input for the current phase is a
+            /// programming mistake.
             NoMatchingTransition { phase: String, trigger: String },
+            /// A transition is declared for this `(phase, trigger)` pair
+            /// but every candidate transition's guard(s) evaluated false.
+            /// Typed signal that the input was *rejected on state*, not
+            /// *unrecognised*. Shell callers that fire idempotently (e.g.,
+            /// a realtime dispatcher firing `ProductTurnCommitted` on every
+            /// observed `TurnCommitted` event, expecting the DSL to drop
+            /// duplicates) should treat this as a successful no-op rather
+            /// than an error.
+            GuardRejected { phase: String, trigger: String },
         }
 
         impl std::fmt::Display for #error_name {
@@ -107,6 +121,9 @@ pub fn generate(def: &MachineDef) -> TokenStream {
                 match self {
                     Self::NoMatchingTransition { phase, trigger } => {
                         write!(f, "no matching transition from phase {} for {}", phase, trigger)
+                    }
+                    Self::GuardRejected { phase, trigger } => {
+                        write!(f, "guard rejected transition from phase {} for {}", phase, trigger)
                     }
                 }
             }
@@ -224,7 +241,7 @@ fn gen_transition_chain(
                 if #combined {
                     #body
                 } else {
-                    return Err(#error_name::NoMatchingTransition {
+                    return Err(#error_name::GuardRejected {
                         phase: format!("{:?}", from_phase),
                         trigger: #variant_str.to_string(),
                     });
@@ -257,7 +274,7 @@ fn gen_transition_chain(
         if last_has_guard {
             let variant_str = transitions[0].trigger.variant.to_string();
             arms.push(quote! { else {
-                return Err(#error_name::NoMatchingTransition {
+                return Err(#error_name::GuardRejected {
                     phase: format!("{:?}", from_phase),
                     trigger: #variant_str.to_string(),
                 });

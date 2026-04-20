@@ -89,28 +89,76 @@ pub enum AuthLeasePhase {
     Released,
 }
 
+/// Typed classification of why a DSL transition was rejected.
+///
+/// Emitted by the generated kernel's `apply` / `apply_signal` methods and
+/// bridged into [`DslTransitionError::kind`]. Callers that fire
+/// idempotently (realtime dispatchers, monotonic watermark advances,
+/// etc.) inspect this to distinguish "input was out of scope for this
+/// phase" (a real error) from "input was recognised but the guard dropped
+/// it" (a successful no-op).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DslRejectionKind {
+    /// No transition is declared for this `(phase, trigger)` pair — the
+    /// shell fired an input that is semantically out of scope for the
+    /// current phase. This is a programming mistake on the shell side.
+    NoMatchingTransition,
+    /// A transition is declared for this `(phase, trigger)` pair but
+    /// every candidate transition's guard evaluated false. Callers
+    /// firing idempotently treat this as a no-op; callers firing
+    /// unconditionally treat it as a user-visible error.
+    GuardRejected,
+}
+
 /// Error surfaced when a DSL transition is rejected.
 ///
-/// Wraps the generated kernel's `NoMatchingTransition` and carries the
-/// transition name for diagnostics. Trait impls populate `context` from the
-/// trait method name so callers can tell which handle rejected.
+/// Wraps the generated kernel's typed rejection. Trait impls populate
+/// `context` from the trait method name so callers can tell which handle
+/// rejected; `kind` lets callers distinguish guard rejection from
+/// out-of-scope input without substring-matching the rendered message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("DSL transition rejected in {context}: {reason}")]
 pub struct DslTransitionError {
     /// Name of the trait method / DSL variant whose transition was rejected.
     pub context: &'static str,
+    /// Typed classification of the rejection — see [`DslRejectionKind`].
+    pub kind: DslRejectionKind,
     /// Underlying rejection reason (typically the generated
-    /// `NoMatchingTransition { phase, trigger }` formatted).
+    /// `NoMatchingTransition`/`GuardRejected` formatted).
     pub reason: String,
 }
 
 impl DslTransitionError {
-    /// Construct a new transition error with the given context and reason.
+    /// Construct a `NoMatchingTransition` error with the given context
+    /// and reason. Back-compat constructor used by legacy callers that
+    /// haven't adopted the typed `kind` field; new code paths should
+    /// prefer [`DslTransitionError::no_matching`] or
+    /// [`DslTransitionError::guard_rejected`] for clarity.
     pub fn new(context: &'static str, reason: impl Into<String>) -> Self {
+        Self::no_matching(context, reason)
+    }
+
+    /// Construct an error with `kind = NoMatchingTransition`.
+    pub fn no_matching(context: &'static str, reason: impl Into<String>) -> Self {
         Self {
             context,
+            kind: DslRejectionKind::NoMatchingTransition,
             reason: reason.into(),
         }
+    }
+
+    /// Construct an error with `kind = GuardRejected`.
+    pub fn guard_rejected(context: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            context,
+            kind: DslRejectionKind::GuardRejected,
+            reason: reason.into(),
+        }
+    }
+
+    /// True iff this rejection came from a guard evaluating false.
+    pub fn is_guard_rejected(&self) -> bool {
+        self.kind == DslRejectionKind::GuardRejected
     }
 }
 

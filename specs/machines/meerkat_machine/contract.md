@@ -23,6 +23,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
 - `last_session_context_updated_at_ms`: `u64`
+- `reserved_interaction_streams`: `Set<PeerCorrelationId>`
+- `attached_interaction_streams`: `Set<PeerCorrelationId>`
 - `realtime_product_turn_phase`: `RealtimeProductTurnPhase`
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
@@ -85,6 +87,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerRequestReceived`(corr_id: PeerCorrelationId)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `AdvanceSessionContext`(updated_at_ms: u64)
+- `InteractionStreamReserved`(corr_id: PeerCorrelationId)
+- `InteractionStreamAttached`(corr_id: PeerCorrelationId)
+- `InteractionStreamCompleted`(corr_id: PeerCorrelationId)
+- `InteractionStreamExpired`(corr_id: PeerCorrelationId)
+- `InteractionStreamClosedEarly`(corr_id: PeerCorrelationId)
 - `ProductTurnInFlight`
 - `ProductTurnCommitted`
 - `ProductOutputStarted`
@@ -184,6 +191,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerInteractionCleanup`(corr_id: PeerCorrelationId)
 - `InboundPeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: InboundPeerRequestState)
 - `SessionContextAdvanced`(updated_at_ms: u64)
+- `InteractionStreamStateChanged`(corr_id: PeerCorrelationId, new_state: InteractionStreamState)
+- `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
 - `RealtimeProductTurnPhaseChanged`(new_phase: RealtimeProductTurnPhase)
 - `LiveTopologyPhaseChanged`
 
@@ -2027,6 +2036,211 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `monotonic`
 - Emits: `SessionContextAdvanced`
+- To: `Stopped`
+
+### `InteractionStreamReservedIdle`
+- From: `Idle`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `not_reserved`
+  - `not_attached`
+- Emits: `InteractionStreamStateChanged`
+- To: `Idle`
+
+### `InteractionStreamReservedAttached`
+- From: `Attached`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `not_reserved`
+  - `not_attached`
+- Emits: `InteractionStreamStateChanged`
+- To: `Attached`
+
+### `InteractionStreamReservedRunning`
+- From: `Running`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `not_reserved`
+  - `not_attached`
+- Emits: `InteractionStreamStateChanged`
+- To: `Running`
+
+### `InteractionStreamReservedRetired`
+- From: `Retired`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `not_reserved`
+  - `not_attached`
+- Emits: `InteractionStreamStateChanged`
+- To: `Retired`
+
+### `InteractionStreamReservedStopped`
+- From: `Stopped`
+- On: `InteractionStreamReserved`(corr_id)
+- Guards:
+  - `not_reserved`
+  - `not_attached`
+- Emits: `InteractionStreamStateChanged`
+- To: `Stopped`
+
+### `InteractionStreamAttachedIdle`
+- From: `Idle`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`
+- To: `Idle`
+
+### `InteractionStreamAttachedAttached`
+- From: `Attached`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`
+- To: `Attached`
+
+### `InteractionStreamAttachedRunning`
+- From: `Running`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`
+- To: `Running`
+
+### `InteractionStreamAttachedRetired`
+- From: `Retired`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`
+- To: `Retired`
+
+### `InteractionStreamAttachedStopped`
+- From: `Stopped`
+- On: `InteractionStreamAttached`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`
+- To: `Stopped`
+
+### `InteractionStreamCompletedIdle`
+- From: `Idle`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Idle`
+
+### `InteractionStreamCompletedAttached`
+- From: `Attached`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Attached`
+
+### `InteractionStreamCompletedRunning`
+- From: `Running`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Running`
+
+### `InteractionStreamCompletedRetired`
+- From: `Retired`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Retired`
+
+### `InteractionStreamCompletedStopped`
+- From: `Stopped`
+- On: `InteractionStreamCompleted`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Stopped`
+
+### `InteractionStreamExpiredIdle`
+- From: `Idle`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Idle`
+
+### `InteractionStreamExpiredAttached`
+- From: `Attached`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Attached`
+
+### `InteractionStreamExpiredRunning`
+- From: `Running`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Running`
+
+### `InteractionStreamExpiredRetired`
+- From: `Retired`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Retired`
+
+### `InteractionStreamExpiredStopped`
+- From: `Stopped`
+- On: `InteractionStreamExpired`(corr_id)
+- Guards:
+  - `is_reserved`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Stopped`
+
+### `InteractionStreamClosedEarlyIdle`
+- From: `Idle`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Idle`
+
+### `InteractionStreamClosedEarlyAttached`
+- From: `Attached`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Attached`
+
+### `InteractionStreamClosedEarlyRunning`
+- From: `Running`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Running`
+
+### `InteractionStreamClosedEarlyRetired`
+- From: `Retired`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+- To: `Retired`
+
+### `InteractionStreamClosedEarlyStopped`
+- From: `Stopped`
+- On: `InteractionStreamClosedEarly`(corr_id)
+- Guards:
+  - `is_attached`
+- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
 - To: `Stopped`
 
 ### `ProductTurnInFlightInitializing`

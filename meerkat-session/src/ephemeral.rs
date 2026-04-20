@@ -245,9 +245,12 @@ impl SessionTaskControl {
 /// for the DSL's `AdvanceSessionContext` input. `UNIX_EPOCH`-relative.
 /// Saturates to `u64::MAX` on dates far in the future (unreachable under
 /// any realistic clock).
+///
+/// Uses [`meerkat_core::time_compat::UNIX_EPOCH`] so the same `SystemTime`
+/// alias applies on both native and wasm32 (which uses `web_time`).
 fn summary_updated_at_ms(updated_at: SystemTime) -> u64 {
     updated_at
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }

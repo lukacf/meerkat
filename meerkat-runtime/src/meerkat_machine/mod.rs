@@ -87,7 +87,7 @@ mod dispatch_ingress;
 mod dispatch_session;
 #[allow(unused_variables, dead_code, clippy::cmp_owned)]
 #[allow(clippy::assign_op_pattern)]
-pub(crate) mod dsl;
+pub mod dsl;
 pub(crate) mod dsl_authority;
 mod llm_reconfigure;
 mod runtime_control;

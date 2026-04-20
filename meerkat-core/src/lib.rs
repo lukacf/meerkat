@@ -46,6 +46,7 @@ pub mod model_profile;
 pub mod model_registry;
 pub mod ops;
 pub mod ops_lifecycle;
+pub mod peer_correlation;
 pub mod peer_meta;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod prompt;
@@ -90,6 +91,7 @@ pub use compact::{
 };
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
+pub use peer_correlation::{InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId};
 pub use peer_meta::PeerMeta;
 
 pub use completion_feed::{

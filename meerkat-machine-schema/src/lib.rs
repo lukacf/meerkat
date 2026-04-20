@@ -7,7 +7,7 @@ mod composition;
 mod machine;
 pub mod types;
 
-pub use types::McpServerId;
+pub use types::{McpServerId, PeerCorrelationId};
 
 pub use catalog::{
     CodeAnchor, CompositionCoverageManifest, MachineCoverageManifest, ScenarioCoverage,

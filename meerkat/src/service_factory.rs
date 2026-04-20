@@ -739,6 +739,9 @@ mod tests {
             mcp_server_lifecycle: Arc::new(
                 meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
             ),
+            peer_interaction: Some(Arc::new(
+                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
+            )),
         };
 
         let req = CreateSessionRequest {
@@ -926,6 +929,9 @@ mod tests {
             mcp_server_lifecycle: Arc::new(
                 meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
             ),
+            peer_interaction: Some(Arc::new(
+                meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
+            )),
         };
 
         let req = CreateSessionRequest {

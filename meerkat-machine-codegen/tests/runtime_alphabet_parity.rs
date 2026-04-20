@@ -47,6 +47,15 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "McpServerDisconnected",
         "McpServerFailed",
         "McpServerReload",
+        // W1-A (issue #264): peer-interaction lifecycle is driven via
+        // `PeerInteractionHandle` (meerkat-core/src/handles.rs) from the
+        // comms runtime and drain task, not through `MeerkatMachineCommand`.
+        "PeerRequestSent",
+        "PeerResponseProgressArrived",
+        "PeerResponseTerminalArrived",
+        "PeerRequestTimedOut",
+        "PeerRequestReceived",
+        "PeerResponseReplied",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()

@@ -20,6 +20,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_next_authority_epoch`: `u64`
 - `live_topology_phase`: `String`
 - `mcp_server_states`: `Map<McpServerId, McpServerState>`
+- `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
+- `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -71,6 +73,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `McpServerFailed`(server_id: McpServerId, error: String)
 - `McpServerDisconnected`(server_id: McpServerId)
 - `McpServerReload`(server_id: McpServerId)
+- `PeerRequestSent`(corr_id: PeerCorrelationId, to: String)
+- `PeerResponseProgressArrived`(corr_id: PeerCorrelationId)
+- `PeerResponseTerminalArrived`(corr_id: PeerCorrelationId, disposition: PeerTerminalDisposition)
+- `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
+- `PeerRequestReceived`(corr_id: PeerCorrelationId)
+- `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
 - `ApplyLiveTopologyIdentity`
@@ -158,6 +166,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RealtimeBindingRotated`(authority_epoch: u64)
 - `McpServerStateChanged`(server_id: McpServerId, new_state: McpServerState)
 - `McpServerReloadRequested`(server_id: McpServerId)
+- `PeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: OutboundPeerRequestState)
+- `PeerInteractionCleanup`(corr_id: PeerCorrelationId)
+- `InboundPeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: InboundPeerRequestState)
 - `LiveTopologyPhaseChanged`
 
 ## Invariants
@@ -1669,6 +1680,296 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
 - Emits: `McpServerReloadRequested`, `McpServerStateChanged`
+- To: `Stopped`
+
+### `PeerRequestSentIdle`
+- From: `Idle`
+- On: `PeerRequestSent`(corr_id, to)
+- Guards:
+  - `not_already_pending`
+- Emits: `PeerInteractionStateChanged`
+- To: `Idle`
+
+### `PeerRequestSentAttached`
+- From: `Attached`
+- On: `PeerRequestSent`(corr_id, to)
+- Guards:
+  - `not_already_pending`
+- Emits: `PeerInteractionStateChanged`
+- To: `Attached`
+
+### `PeerRequestSentRunning`
+- From: `Running`
+- On: `PeerRequestSent`(corr_id, to)
+- Guards:
+  - `not_already_pending`
+- Emits: `PeerInteractionStateChanged`
+- To: `Running`
+
+### `PeerRequestSentRetired`
+- From: `Retired`
+- On: `PeerRequestSent`(corr_id, to)
+- Guards:
+  - `not_already_pending`
+- Emits: `PeerInteractionStateChanged`
+- To: `Retired`
+
+### `PeerRequestSentStopped`
+- From: `Stopped`
+- On: `PeerRequestSent`(corr_id, to)
+- Guards:
+  - `not_already_pending`
+- Emits: `PeerInteractionStateChanged`
+- To: `Stopped`
+
+### `PeerResponseProgressArrivedIdle`
+- From: `Idle`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`
+- To: `Idle`
+
+### `PeerResponseProgressArrivedAttached`
+- From: `Attached`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`
+- To: `Attached`
+
+### `PeerResponseProgressArrivedRunning`
+- From: `Running`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`
+- To: `Running`
+
+### `PeerResponseProgressArrivedRetired`
+- From: `Retired`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`
+- To: `Retired`
+
+### `PeerResponseProgressArrivedStopped`
+- From: `Stopped`
+- On: `PeerResponseProgressArrived`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`
+- To: `Stopped`
+
+### `PeerResponseTerminalArrivedCompletedIdle`
+- From: `Idle`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `completed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerResponseTerminalArrivedCompletedAttached`
+- From: `Attached`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `completed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerResponseTerminalArrivedCompletedRunning`
+- From: `Running`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `completed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerResponseTerminalArrivedCompletedRetired`
+- From: `Retired`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `completed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerResponseTerminalArrivedCompletedStopped`
+- From: `Stopped`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `completed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
+### `PeerResponseTerminalArrivedFailedIdle`
+- From: `Idle`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerResponseTerminalArrivedFailedAttached`
+- From: `Attached`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerResponseTerminalArrivedFailedRunning`
+- From: `Running`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerResponseTerminalArrivedFailedRetired`
+- From: `Retired`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerResponseTerminalArrivedFailedStopped`
+- From: `Stopped`
+- On: `PeerResponseTerminalArrived`(corr_id, disposition)
+- Guards:
+  - `pending_exists`
+  - `failed`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
+### `PeerRequestTimedOutIdle`
+- From: `Idle`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Idle`
+
+### `PeerRequestTimedOutAttached`
+- From: `Attached`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Attached`
+
+### `PeerRequestTimedOutRunning`
+- From: `Running`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Running`
+
+### `PeerRequestTimedOutRetired`
+- From: `Retired`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Retired`
+
+### `PeerRequestTimedOutStopped`
+- From: `Stopped`
+- On: `PeerRequestTimedOut`(corr_id)
+- Guards:
+  - `pending_exists`
+- Emits: `PeerInteractionStateChanged`, `PeerInteractionCleanup`
+- To: `Stopped`
+
+### `PeerRequestReceivedIdle`
+- From: `Idle`
+- On: `PeerRequestReceived`(corr_id)
+- Guards:
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Idle`
+
+### `PeerRequestReceivedAttached`
+- From: `Attached`
+- On: `PeerRequestReceived`(corr_id)
+- Guards:
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Attached`
+
+### `PeerRequestReceivedRunning`
+- From: `Running`
+- On: `PeerRequestReceived`(corr_id)
+- Guards:
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Running`
+
+### `PeerRequestReceivedRetired`
+- From: `Retired`
+- On: `PeerRequestReceived`(corr_id)
+- Guards:
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Retired`
+
+### `PeerRequestReceivedStopped`
+- From: `Stopped`
+- On: `PeerRequestReceived`(corr_id)
+- Guards:
+  - `not_already_inbound`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Stopped`
+
+### `PeerResponseRepliedIdle`
+- From: `Idle`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Idle`
+
+### `PeerResponseRepliedAttached`
+- From: `Attached`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Attached`
+
+### `PeerResponseRepliedRunning`
+- From: `Running`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Running`
+
+### `PeerResponseRepliedRetired`
+- From: `Retired`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
+- To: `Retired`
+
+### `PeerResponseRepliedStopped`
+- From: `Stopped`
+- On: `PeerResponseReplied`(corr_id)
+- Guards:
+  - `inbound_exists`
+- Emits: `InboundPeerInteractionStateChanged`
 - To: `Stopped`
 
 ### `BeginLiveTopologyReconfigureIdle`

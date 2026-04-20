@@ -305,6 +305,17 @@ pub(super) struct MobActor {
     pub(super) phase_watch_tx: tokio::sync::watch::Sender<MobState>,
     pub(super) default_external_tools_provider: Option<crate::ExternalToolsProvider>,
     pub(super) realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+    /// W3-H: broadcast channel for `MemberRealtimeBindingEvent`s. The actor
+    /// publishes on this sender from `log_realtime_binding_effects` whenever
+    /// the MobMachine emits a `MemberRealtimeBindingSet / Rotated /
+    /// Released` DSL effect. Downstream consumers (notably the realtime WS
+    /// in meerkat-rpc) subscribe via `MobHandle::subscribe_binding_events`.
+    ///
+    /// Broadcast is lag-tolerant — slow subscribers miss intermediate
+    /// rotations, but the canonical binding map in `MobMachineAuthority`
+    /// remains the source of truth they can re-read on reconnect.
+    pub(super) realtime_binding_tx:
+        tokio::sync::broadcast::Sender<super::state::MemberRealtimeBindingEvent>,
 }
 
 impl MobActor {
@@ -726,6 +737,103 @@ impl MobActor {
         Ok(())
     }
 
+    /// Apply a DSL input and return the emitted effects for inspection by the
+    /// caller. Parallel to [`apply_dsl_input`] but surfaces the effect vector
+    /// so W3-H binding observers (wired in a follow-up PR) can consume
+    /// `MemberRealtimeBinding*` events without altering the canonical state
+    /// transition semantics.
+    fn apply_dsl_input_with_effects(
+        &mut self,
+        input: mob_dsl::MobMachineInput,
+        context: &str,
+    ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
+            .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
+        if transition.from_phase != transition.to_phase {
+            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+        Ok(transition.effects)
+    }
+
+    /// W3-H: forward the canonical MobMachine realtime-binding effects onto
+    /// the mob's broadcast channel for downstream observers (notably the
+    /// realtime WS in meerkat-rpc), and emit a debug trace line for
+    /// operator visibility. Three typed variants — Set for a fresh binding,
+    /// Rotated for a respawn-driven atomic session pointer swap, Released
+    /// for a terminal retire — mirror the DSL's guard-split emits.
+    fn log_realtime_binding_effects(
+        &self,
+        agent_identity: &crate::ids::AgentIdentity,
+        effects: &[mob_dsl::MobMachineEffect],
+    ) {
+        let mob_id = &self.definition.id;
+        for effect in effects {
+            match effect {
+                mob_dsl::MobMachineEffect::MemberRealtimeBindingSet {
+                    bridge_session_id, ..
+                } => {
+                    tracing::debug!(
+                        %mob_id,
+                        %agent_identity,
+                        bridge_session_id = %bridge_session_id.0,
+                        "MemberRealtimeBindingSet"
+                    );
+                    let event = super::state::MemberRealtimeBindingEvent::Set {
+                        mob_id: mob_id.clone(),
+                        agent_identity: agent_identity.clone(),
+                        bridge_session_id: meerkat_core::types::SessionId::parse(
+                            &bridge_session_id.0,
+                        )
+                        .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                    };
+                    // send() fails iff there are no subscribers, which is
+                    // normal when the RPC surface isn't consuming events;
+                    // the DSL binding map remains authoritative.
+                    let _ = self.realtime_binding_tx.send(event);
+                }
+                mob_dsl::MobMachineEffect::MemberRealtimeBindingRotated {
+                    old_session_id,
+                    new_session_id,
+                    ..
+                } => {
+                    tracing::debug!(
+                        %mob_id,
+                        %agent_identity,
+                        old_session_id = %old_session_id.0,
+                        new_session_id = %new_session_id.0,
+                        "MemberRealtimeBindingRotated"
+                    );
+                    let event = super::state::MemberRealtimeBindingEvent::Rotated {
+                        mob_id: mob_id.clone(),
+                        agent_identity: agent_identity.clone(),
+                        old_session_id: meerkat_core::types::SessionId::parse(&old_session_id.0)
+                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                        new_session_id: meerkat_core::types::SessionId::parse(&new_session_id.0)
+                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                    };
+                    let _ = self.realtime_binding_tx.send(event);
+                }
+                mob_dsl::MobMachineEffect::MemberRealtimeBindingReleased { session_id, .. } => {
+                    tracing::debug!(
+                        %mob_id,
+                        %agent_identity,
+                        session_id = %session_id.0,
+                        "MemberRealtimeBindingReleased"
+                    );
+                    let event = super::state::MemberRealtimeBindingEvent::Released {
+                        mob_id: mob_id.clone(),
+                        agent_identity: agent_identity.clone(),
+                        session_id: meerkat_core::types::SessionId::parse(&session_id.0)
+                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                    };
+                    let _ = self.realtime_binding_tx.send(event);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn apply_dsl_signal(
         &mut self,
         signal: mob_dsl::MobMachineSignal,
@@ -814,6 +922,10 @@ impl MobActor {
             // `MobHandle` returned from `MobBuilder`. Tools built from the
             // actor do not dial realtime endpoints.
             realtime_session_factory: None,
+            // W3-H: share the same broadcast sender so internal handle-for-
+            // tools consumers observe the same binding events as external
+            // subscribers. Clone is cheap (Arc internally).
+            realtime_binding_tx: self.realtime_binding_tx.clone(),
         }
     }
 
@@ -2262,6 +2374,7 @@ impl MobActor {
                         tasks: dsl.tasks.clone(),
                         in_progress_task_ids: dsl.in_progress_task_ids.clone(),
                         completed_task_ids: dsl.completed_task_ids.clone(),
+                        member_realtime_bindings: dsl.member_realtime_bindings.clone(),
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
@@ -2269,6 +2382,21 @@ impl MobActor {
                         pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
                         ready_runtime_ids: self.ready_runtime_ids_from_dsl(),
                     });
+                }
+                MobCommand::CurrentRealtimeBinding {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                    let binding = self
+                        .dsl_authority
+                        .state
+                        .member_realtime_bindings
+                        .get(&dsl_identity)
+                        .and_then(|dsl_session_id| {
+                            meerkat_core::types::SessionId::parse(&dsl_session_id.0).ok()
+                        });
+                    let _ = reply_tx.send(binding);
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self
@@ -3931,23 +4059,52 @@ impl MobActor {
         // `live_runtime_ids` + `externally_addressable_runtime_ids` and
         // downstream guards (Retire, SubmitWork, …) operate on authoritative
         // membership state instead of shell-only roster tracking.
-        if let Err(error) = self.apply_dsl_input(
+        //
+        // W3-H: populate the new `bridge_session_id` + `replacing` fields
+        // from the current DSL binding state. `replacing` carries the prior
+        // bridge session id if this identity was already bound (respawn
+        // case); the DSL's guard-split between SpawnRunningFresh vs
+        // SpawnRunningReplacing then emits the correct
+        // MemberRealtimeBindingSet vs MemberRealtimeBindingRotated effect.
+        // Members without a session-backed binding (e.g. `MemberRef::BackendPeer`)
+        // pass a synthetic empty session id — they are not realtime-WS
+        // targets and their binding map entry is inert.
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&identity);
+        let bridge_session_id = match member_ref.bridge_session_id() {
+            Some(sid) => mob_dsl::SessionId::from_domain(sid),
+            None => mob_dsl::SessionId::default(),
+        };
+        let replacing = self
+            .dsl_authority
+            .state
+            .member_realtime_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let spawn_effects = self.apply_dsl_input_with_effects(
             mob_dsl::MobMachineInput::Spawn {
-                agent_identity: mob_dsl::AgentIdentity::from_domain(&identity),
+                agent_identity: dsl_identity.clone(),
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&agent_runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                 generation: mob_dsl::Generation::from_domain(generation),
                 external_addressable,
+                bridge_session_id,
+                replacing,
             },
             "finalize_spawn_from_pending_dsl_spawn",
-        ) {
-            tracing::warn!(
-                mob_id = %self.definition.id,
-                agent_identity = %agent_identity,
-                agent_runtime_id = %agent_runtime_id,
-                %error,
-                "Spawn DSL input rejected; downstream DSL membership guards may diverge from roster"
-            );
+        );
+        match spawn_effects {
+            Ok(effects) => {
+                self.log_realtime_binding_effects(&identity, &effects);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    agent_runtime_id = %agent_runtime_id,
+                    %error,
+                    "Spawn DSL input rejected; downstream DSL membership guards may diverge from roster"
+                );
+            }
         }
         self.restore_diagnostics
             .write()
@@ -4285,19 +4442,41 @@ impl MobActor {
         // `live_runtime_ids` or the phase forbids it. That matches the existing
         // idempotent semantics of handle_retire_inner (already-retired / unknown
         // => no-op), so a guard rejection is logged but does not fail the retire.
-        if let Err(error) = self.apply_dsl_input(
+        //
+        // W3-H: populate `agent_identity` + `releasing` from the current DSL
+        // binding state. `releasing` carries the prior bridge session id when
+        // the identity has a realtime binding; the DSL's guard-split picks
+        // RetireRunningReleasing vs RetireRunningNoBinding (and Stopped
+        // variants) accordingly, emitting MemberRealtimeBindingReleased when
+        // a binding was present.
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        let releasing = self
+            .dsl_authority
+            .state
+            .member_realtime_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let retire_effects = self.apply_dsl_input_with_effects(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                agent_identity: dsl_identity,
+                releasing,
             },
             "handle_retire_inner_mark_retiring",
-        ) {
-            tracing::debug!(
-                mob_id = %self.definition.id,
-                agent_identity = %agent_identity,
-                agent_runtime_id = %entry.agent_runtime_id,
-                %error,
-                "Retire DSL input rejected (likely already retiring); continuing disposal"
-            );
+        );
+        match retire_effects {
+            Ok(effects) => {
+                self.log_realtime_binding_effects(agent_identity, &effects);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    agent_runtime_id = %entry.agent_runtime_id,
+                    %error,
+                    "Retire DSL input rejected (likely already retiring); continuing disposal"
+                );
+            }
         }
         self.sync_retiring_projection_into_roster().await;
 
@@ -5738,19 +5917,37 @@ impl MobActor {
         // See handle_retire_inner for the rationale; DSL guards reject Retire
         // when the runtime_id is absent or the phase forbids it, which matches
         // the existing idempotent semantics here.
-        if let Err(error) = self.apply_dsl_input(
+        //
+        // W3-H: populate `agent_identity` + `releasing` from the current DSL
+        // binding state (see handle_retire_inner for the guard-split story).
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        let releasing = self
+            .dsl_authority
+            .state
+            .member_realtime_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let retire_effects = self.apply_dsl_input_with_effects(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                agent_identity: dsl_identity,
+                releasing,
             },
             "destroy_remote_member_for_destroy_mark_retiring",
-        ) {
-            tracing::debug!(
-                mob_id = %self.definition.id,
-                agent_identity = %agent_identity,
-                agent_runtime_id = %entry.agent_runtime_id,
-                %error,
-                "Retire DSL input rejected (likely already retiring); continuing destroy"
-            );
+        );
+        match retire_effects {
+            Ok(effects) => {
+                self.log_realtime_binding_effects(&agent_identity, &effects);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %agent_identity,
+                    agent_runtime_id = %entry.agent_runtime_id,
+                    %error,
+                    "Retire DSL input rejected (likely already retiring); continuing destroy"
+                );
+            }
         }
         self.sync_retiring_projection_into_roster().await;
 

@@ -112,12 +112,60 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub in_progress_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
     pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
+    // W3-H-1: canonical identity→bridge-session binding map, projected from
+    // `MobMachineAuthority.state.member_realtime_bindings`. Used by the
+    // runtime-parity snapshot to expose the DSL's realtime binding map to
+    // integration tests.
+    pub member_realtime_bindings: std::collections::BTreeMap<
+        crate::machines::mob_machine::AgentIdentity,
+        crate::machines::mob_machine::SessionId,
+    >,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MobStartupKickoffSnapshot {
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
+}
+
+/// W3-H: mob-side event mirror of the MobMachine's
+/// `MemberRealtimeBindingSet / Rotated / Released` DSL effects. The mob
+/// actor forwards each DSL effect onto a `broadcast::Sender` so external
+/// observers (notably the realtime WS in meerkat-rpc, which needs this
+/// type at its visibility boundary to type the receiver) can subscribe to
+/// identity→session binding lifecycle without needing to poll.
+///
+/// Each variant carries the `mob_id` the event originated from plus the
+/// `agent_identity` it concerns so subscribers can filter to only the
+/// events they care about.
+///
+/// Three-variant shape intentional — rotation is a first-class
+/// machine-emitted meaning. Collapsing to a Cleared+Set pair would push
+/// "interpret a debounce window as rotation" into the observer, which is
+/// exactly the pattern dogma #3 targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberRealtimeBindingEvent {
+    /// The identity gained a fresh realtime binding (no prior binding).
+    Set {
+        mob_id: crate::ids::MobId,
+        agent_identity: crate::ids::AgentIdentity,
+        bridge_session_id: meerkat_core::types::SessionId,
+    },
+    /// The identity's realtime binding atomically rotated to a new bridge
+    /// session (respawn flow — shell retired the old member then spawned a
+    /// replacement under the same identity).
+    Rotated {
+        mob_id: crate::ids::MobId,
+        agent_identity: crate::ids::AgentIdentity,
+        old_session_id: meerkat_core::types::SessionId,
+        new_session_id: meerkat_core::types::SessionId,
+    },
+    /// The identity's realtime binding was released (terminal retire).
+    Released {
+        mob_id: crate::ids::MobId,
+        agent_identity: crate::ids::AgentIdentity,
+        session_id: meerkat_core::types::SessionId,
+    },
 }
 
 /// Heap-allocated payload for `MobCommand::SubmitWork`. Boxing keeps the
@@ -244,6 +292,15 @@ pub(super) enum MobCommand {
     },
     StartupKickoffSnapshot {
         reply_tx: oneshot::Sender<MobStartupKickoffSnapshot>,
+    },
+    /// W3-H: query the current realtime binding for an identity. Returns
+    /// the bridge session id currently bound (projected from the canonical
+    /// `member_realtime_bindings` map) or `None` if the identity has no
+    /// binding. Used by the realtime WS surface at open time to initialize
+    /// the task-local `current_session_id` for a `MobMember` target.
+    CurrentRealtimeBinding {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<Option<meerkat_core::types::SessionId>>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

@@ -20244,6 +20244,10 @@ struct MobRuntimeParitySnapshotSummary {
     tasks: BTreeMap<String, String>,
     in_progress_task_ids: BTreeSet<String>,
     completed_task_ids: BTreeSet<String>,
+    // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
+    // empty BTreeMap for the parity evaluator; full projection through the
+    // runtime-parity snapshot is a follow-up to the observer wiring PR.
+    member_realtime_bindings: BTreeMap<String, String>,
 }
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
@@ -20911,6 +20915,7 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks_map,
         in_progress_task_ids,
         completed_task_ids,
+        member_realtime_bindings,
     ) = dsl_t2
         .map(|snap| {
             (
@@ -20938,6 +20943,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
+                snap.member_realtime_bindings
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
+                    .collect::<BTreeMap<_, _>>(),
             )
         })
         .unwrap_or_default();
@@ -20975,6 +20984,7 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks: tasks_map,
         in_progress_task_ids,
         completed_task_ids,
+        member_realtime_bindings,
     })
 }
 
@@ -21024,6 +21034,13 @@ fn mob_runtime_parity_field_value(
         )),
         "completed_task_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.completed_task_ids.clone(),
+        )),
+        "member_realtime_bindings" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_realtime_bindings
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.externally_addressable_runtime_ids.clone(),

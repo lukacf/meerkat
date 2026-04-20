@@ -298,38 +298,66 @@ fn realtime_status_from_mob_status(status: &Value) -> Result<RealtimeChannelStat
     Ok(projected)
 }
 
+/// W3-H: resolve a `RealtimeChannelTarget` to the concrete bridge session id
+/// the RPC query should operate on. `SessionTarget` returns its session id
+/// directly; `MobMember` looks up the current binding from the MobMachine's
+/// canonical binding map via the mob handle — the single-source-of-truth
+/// read path (dogma #1).
+async fn resolve_target_session_id(
+    state: &Arc<MobMcpState>,
+    target: &RealtimeChannelTarget,
+) -> Result<meerkat_core::types::SessionId, McpToolError> {
+    match target {
+        RealtimeChannelTarget::SessionTarget { session_id } => {
+            meerkat_core::types::SessionId::parse(session_id)
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))
+        }
+        RealtimeChannelTarget::MobMember {
+            mob_id,
+            agent_identity,
+        } => {
+            let dsl_mob_id = meerkat_mob::ids::MobId::from(mob_id.as_str());
+            let mob_handle = state
+                .handle_for(&dsl_mob_id)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            let identity = meerkat_mob::ids::AgentIdentity::from(agent_identity.as_str());
+            mob_handle
+                .current_realtime_binding(identity)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?
+                .ok_or_else(|| {
+                    McpToolError::invalid_params(format!(
+                        "mob {mob_id:?} has no realtime binding for identity {agent_identity:?}"
+                    ))
+                })
+        }
+    }
+}
+
 async fn realtime_status_payload(
     state: &Arc<MobMcpState>,
     params: RealtimeStatusParams,
 ) -> Result<RealtimeStatusResult, McpToolError> {
-    let status = match params.target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            let session_id = meerkat_core::types::SessionId::parse(&session_id)
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let status = state
-                .realtime_session_realtime_attachment_status(&session_id)
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            realtime_status_from_runtime(status)
-        }
-    };
-    Ok(RealtimeStatusResult { status })
+    let session_id = resolve_target_session_id(state, &params.target).await?;
+    let status = state
+        .realtime_session_realtime_attachment_status(&session_id)
+        .await
+        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+    Ok(RealtimeStatusResult {
+        status: realtime_status_from_runtime(status),
+    })
 }
 
 async fn realtime_capabilities_payload(
     state: &Arc<MobMcpState>,
     params: RealtimeCapabilitiesParams,
 ) -> Result<RealtimeCapabilitiesResult, McpToolError> {
-    match params.target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            let session_id = meerkat_core::types::SessionId::parse(&session_id)
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            state
-                .realtime_validate_session_target(&session_id)
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-        }
-    }
+    let session_id = resolve_target_session_id(state, &params.target).await?;
+    state
+        .realtime_validate_session_target(&session_id)
+        .await
+        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
 
     Ok(RealtimeCapabilitiesResult {
         capabilities: conservative_phase_one_capabilities(),
@@ -674,25 +702,19 @@ pub async fn handle_public_tools_call(
     match name {
         "meerkat_realtime_open_info" => {
             let input: RealtimeOpenRequest = parse_args(arguments)?;
-            match &input.target {
-                RealtimeChannelTarget::SessionTarget { session_id } => {
-                    meerkat_core::types::SessionId::parse(session_id)
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                }
-            }
+            // W3-H: resolve the channel target to a concrete session id for
+            // both validation and downstream proxying. MobMember targets go
+            // through the canonical binding map; SessionTarget validates
+            // its string form.
+            let _ = resolve_target_session_id(state, &input.target).await?;
             if let Some(addr) = state.realtime_rpc_tcp_addr() {
                 return proxy_realtime_open_info_over_tcp(&addr, &input).await;
             }
-            match &input.target {
-                RealtimeChannelTarget::SessionTarget { session_id } => {
-                    let session_id = meerkat_core::types::SessionId::parse(session_id)
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                    state
-                        .realtime_validate_session_target(&session_id)
-                        .await
-                        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-                }
-            }
+            let session_id = resolve_target_session_id(state, &input.target).await?;
+            state
+                .realtime_validate_session_target(&session_id)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Err(McpToolError::capability_unavailable(
                 "realtime/open_info is unavailable until the realtime websocket host ships",
             ))

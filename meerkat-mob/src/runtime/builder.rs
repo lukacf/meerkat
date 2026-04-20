@@ -611,6 +611,12 @@ impl MobBuilder {
             command_tx: command_tx.clone(),
             command_rx,
         };
+        // W3-H: preview handle gets a placeholder broadcast sender. The
+        // handle is only used for reconcile_resume which doesn't invoke
+        // realtime binding paths; the real binding channel is created in
+        // start_runtime_with_components alongside the actor that will emit
+        // onto it.
+        let (preview_realtime_binding_tx, _) = tokio::sync::broadcast::channel(1);
         let preview_handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster_state.clone(),
@@ -622,6 +628,7 @@ impl MobBuilder {
             restore_diagnostics,
             phase_watch_rx: preview_phase_rx,
             realtime_session_factory: realtime_session_factory.clone(),
+            realtime_binding_tx: preview_realtime_binding_tx,
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -1363,6 +1370,12 @@ impl MobBuilder {
         // call before any DSL transition returns the right answer.
         let (phase_watch_tx_actor, phase_watch_rx) =
             tokio::sync::watch::channel(wiring_initial_phase);
+        // W3-H: broadcast channel for `MemberRealtimeBindingEvent`s. 128 is a
+        // comfortable capacity for the typical event rate (one event per
+        // spawn/respawn/retire). Slow subscribers are lag-tolerant — they
+        // miss intermediate rotations but can re-read the canonical binding
+        // map from the DSL authority on recovery.
+        let (realtime_binding_tx, _) = tokio::sync::broadcast::channel(128);
         let handle = MobHandle {
             command_tx: command_tx.clone(),
             roster: roster.clone(),
@@ -1374,6 +1387,7 @@ impl MobBuilder {
             restore_diagnostics: restore_diagnostics.clone(),
             phase_watch_rx,
             realtime_session_factory,
+            realtime_binding_tx: realtime_binding_tx.clone(),
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(
             MultiBackendProvisioner::new(
@@ -1470,6 +1484,7 @@ impl MobBuilder {
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,
+            realtime_binding_tx,
         };
         tokio::spawn(actor.run(command_rx));
 

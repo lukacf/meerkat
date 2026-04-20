@@ -1466,50 +1466,80 @@ async fn realtime_status(
     State(state): State<AppState>,
     Json(body): Json<RealtimeStatusParams>,
 ) -> Result<Json<RealtimeStatusResult>, Response> {
-    let status = match body.target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            let sid = SessionId::parse(&session_id).map_err(|err| {
+    // W3-H: resolve the channel target to a concrete bridge session id via
+    // the MobMcpState resolver. SessionTarget parses directly; MobMember
+    // reads the canonical binding map on the MobMachine.
+    let sid = resolve_realtime_target_session_rest(&state, &body.target).await?;
+    ensure_runtime_session_registered(&state, &sid).await?;
+    let adapter = get_runtime_adapter(&state);
+    let live_status = adapter
+        .realtime_attachment_status(&sid)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": err.to_string()})),
+            )
+                .into_response()
+        })?;
+    let status = realtime_status_from_runtime(live_status);
+
+    Ok(Json(RealtimeStatusResult { status }))
+}
+
+/// W3-H: resolve a `RealtimeChannelTarget` to a `SessionId` inside a REST
+/// handler. Delegates to `MobMcpState::resolve_realtime_target_session`
+/// for `MobMember`; synchronous parse for `SessionTarget`.
+#[cfg(feature = "mob")]
+async fn resolve_realtime_target_session_rest(
+    state: &AppState,
+    target: &RealtimeChannelTarget,
+) -> Result<SessionId, Response> {
+    state
+        .mob_state
+        .resolve_realtime_target_session(target)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": err.to_string()})),
+            )
+                .into_response()
+        })
+}
+
+#[cfg(not(feature = "mob"))]
+async fn resolve_realtime_target_session_rest(
+    _state: &AppState,
+    target: &RealtimeChannelTarget,
+) -> Result<SessionId, Response> {
+    match target {
+        RealtimeChannelTarget::SessionTarget { session_id } => SessionId::parse(session_id)
+            .map_err(|err| {
                 (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": err.to_string()})),
                 )
                     .into_response()
-            })?;
-            ensure_runtime_session_registered(&state, &sid).await?;
-            let adapter = get_runtime_adapter(&state);
-            let live_status = adapter
-                .realtime_attachment_status(&sid)
-                .await
-                .map_err(|err| {
-                    (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({"error": err.to_string()})),
-                    )
-                        .into_response()
-                })?;
-            realtime_status_from_runtime(live_status)
-        }
-    };
-
-    Ok(Json(RealtimeStatusResult { status }))
+            }),
+        RealtimeChannelTarget::MobMember { .. } => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "mob-member realtime targets require the `mob` feature"
+            })),
+        )
+            .into_response()),
+    }
 }
 
 async fn realtime_capabilities(
     State(state): State<AppState>,
     Json(body): Json<RealtimeCapabilitiesParams>,
 ) -> Result<Json<RealtimeCapabilitiesResult>, Response> {
-    match &body.target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            let sid = SessionId::parse(session_id).map_err(|err| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": err.to_string()})),
-                )
-                    .into_response()
-            })?;
-            ensure_runtime_session_registered(&state, &sid).await?;
-        }
-    }
+    // W3-H: same resolver as status; MobMember reads the canonical binding
+    // map before the capabilities projection is returned.
+    let sid = resolve_realtime_target_session_rest(&state, &body.target).await?;
+    ensure_runtime_session_registered(&state, &sid).await?;
 
     Ok(Json(RealtimeCapabilitiesResult {
         capabilities: conservative_phase_one_realtime_capabilities(),
@@ -1520,18 +1550,12 @@ async fn realtime_open_info(
     State(state): State<AppState>,
     Json(body): Json<RealtimeOpenRequest>,
 ) -> Result<Json<Value>, Response> {
-    match &body.target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            let sid = SessionId::parse(session_id).map_err(|err| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": err.to_string()})),
-                )
-                    .into_response()
-            })?;
-            ensure_runtime_session_registered(&state, &sid).await?;
-        }
-    }
+    // W3-H: same resolver as status/capabilities. For MobMember the resolved
+    // session id is what the downstream WS dial will pin on its first tick;
+    // the WS accept path re-resolves via the canonical binding map and
+    // subscribes to rotation events.
+    let sid = resolve_realtime_target_session_rest(&state, &body.target).await?;
+    ensure_runtime_session_registered(&state, &sid).await?;
 
     if let Some(addr) = state.realtime_rpc_tcp_addr.as_deref() {
         let payload = proxy_realtime_open_info_over_tcp(addr, &body)

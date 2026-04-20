@@ -429,7 +429,12 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
     }
 
     for required in [
-        "RetireRunning",
+        // W3-H-1: RetireRunning is split into RetireRunningReleasing /
+        // RetireRunningNoBinding; we anchor on the NoBinding variant to
+        // keep this contract assertion aligned with the post-split
+        // topology (the Releasing variant exists conditionally on
+        // prior realtime binding state).
+        "RetireRunningNoBinding",
         "RetireAllRunning",
         "WireRunning",
         "UnwireRunning",

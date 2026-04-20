@@ -19,13 +19,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `tasks`: `Map<TaskId, MobTask>`
 - `in_progress_task_ids`: `Set<TaskId>`
 - `completed_task_ids`: `Set<TaskId>`
+- `member_realtime_bindings`: `Map<AgentIdentity, SessionId>`
 
 ## Inputs
 - `RunFlow`
 - `CancelFlow`
 - `FlowStatus`
-- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool)
-- `Retire`(agent_runtime_id: AgentRuntimeId)
+- `Spawn`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, bridge_session_id: SessionId, replacing: Option<SessionId>)
+- `Retire`(agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId>)
 - `Respawn`(agent_runtime_id: AgentRuntimeId)
 - `RetireAll`
 - `Wire`
@@ -121,16 +122,32 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
+- `MemberRealtimeBindingSet`(agent_identity: AgentIdentity, bridge_session_id: SessionId)
+- `MemberRealtimeBindingRotated`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
+- `MemberRealtimeBindingReleased`(agent_identity: AgentIdentity, session_id: SessionId)
 
 ## Invariants
+- `bindings_require_known_identity`
 
 ## Transitions
-### `SpawnRunning`
+### `SpawnRunningFresh`
 - From: `Running`
-- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable)
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
 - Guards:
   - `coordinator_bound`
-- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
+  - `no_prior_realtime_binding`
+  - `replacing_absent`
+- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberRealtimeBindingSet`
+- To: `Running`
+
+### `SpawnRunningReplacing`
+- From: `Running`
+- On: `Spawn`(agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing)
+- Guards:
+  - `coordinator_bound`
+  - `prior_realtime_binding_present`
+  - `replacing_present`
+- Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`, `MemberRealtimeBindingRotated`
 - To: `Running`
 
 ### `ObserveRuntimeReady`
@@ -624,21 +641,47 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `NotifyCoordinator`
 - To: `Running`
 
-### `RetireRunning`
+### `RetireRunningReleasing`
 - From: `Running`
-- On: `Retire`(agent_runtime_id)
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `prior_realtime_binding_present`
+  - `releasing_present`
+- Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
+- To: `Running`
+
+### `RetireRunningNoBinding`
+- From: `Running`
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
+- Guards:
+  - `active_members_present`
+  - `runtime_id_present`
+  - `no_prior_realtime_binding`
+  - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Running`
 
-### `RetireStopped`
+### `RetireStoppedReleasing`
 - From: `Stopped`
-- On: `Retire`(agent_runtime_id)
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
 - Guards:
   - `active_members_present`
   - `runtime_id_present`
+  - `prior_realtime_binding_present`
+  - `releasing_present`
+- Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
+- To: `Stopped`
+
+### `RetireStoppedNoBinding`
+- From: `Stopped`
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
+- Guards:
+  - `active_members_present`
+  - `runtime_id_present`
+  - `no_prior_realtime_binding`
+  - `releasing_absent`
 - Emits: `RequestRuntimeRetire`
 - To: `Stopped`
 

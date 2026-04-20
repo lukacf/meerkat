@@ -579,6 +579,13 @@ pub struct MobHandle {
     /// provided (production mob paths typically wire the factory at the
     /// surface layer directly).
     pub(super) realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
+    /// W3-H: broadcast sender the actor uses to publish
+    /// `MemberRealtimeBindingEvent`s; handle holds a clone so callers can
+    /// `subscribe()` for new receivers. Dogma-#13 projection: DSL binding
+    /// map is the source of truth, events are rebuilable from transition
+    /// replay.
+    pub(super) realtime_binding_tx:
+        tokio::sync::broadcast::Sender<super::state::MemberRealtimeBindingEvent>,
 }
 
 impl MobHandle {
@@ -588,6 +595,45 @@ impl MobHandle {
         &self,
     ) -> Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> {
         self.realtime_session_factory.as_ref().map(Arc::clone)
+    }
+
+    /// W3-H: subscribe to this mob's `MemberRealtimeBindingEvent`s — the
+    /// stream of Set / Rotated / Released effects the MobMachine emits for
+    /// identity→session rebindings. Consumed by the realtime WS surface in
+    /// meerkat-rpc to atomically rotate a `MobMember` channel's target
+    /// session when the MobMachine rotates the binding (respawn flow) and
+    /// to close with a typed terminal frame when the binding is released.
+    pub fn subscribe_realtime_binding_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<super::state::MemberRealtimeBindingEvent> {
+        self.realtime_binding_tx.subscribe()
+    }
+
+    /// W3-H: read the current bridge session id bound to `agent_identity`
+    /// in this mob, projected from the MobMachine's canonical
+    /// `member_realtime_bindings` map. Returns `None` if the identity has
+    /// no binding. Used by the realtime WS surface at `MobMember` channel
+    /// open time to initialize the task-local current_session_id before
+    /// subscribing to binding events.
+    pub async fn current_realtime_binding(
+        &self,
+        agent_identity: crate::ids::AgentIdentity,
+    ) -> Result<Option<meerkat_core::types::SessionId>, crate::MobError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(super::state::MobCommand::CurrentRealtimeBinding {
+                agent_identity,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                crate::MobError::Internal(
+                    "mob actor exited before responding to CurrentRealtimeBinding".to_string(),
+                )
+            })?;
+        reply_rx.await.map_err(|_| {
+            crate::MobError::Internal("mob actor dropped CurrentRealtimeBinding reply".to_string())
+        })
     }
 }
 

@@ -1,3 +1,4 @@
+use super::OptionValueExt;
 use meerkat_machine_dsl::machine;
 
 machine! {
@@ -33,6 +34,12 @@ machine! {
             // updates and illegal status transitions (e.g. Completed→Pending).
             in_progress_task_ids: Set<TaskId>,
             completed_task_ids: Set<TaskId>,
+            // W3-H / dogma #4: canonical identity→bridge-session map for
+            // realtime WS observers. Key absence == Unbound; presence carries
+            // the current bridge session id that identity's realtime channel
+            // should pin to. Respawn updates the value atomically in the same
+            // DSL transition that rebinds the runtime id.
+            member_realtime_bindings: Map<AgentIdentity, SessionId>,
         }
 
         init(Running) {
@@ -48,6 +55,7 @@ machine! {
             tasks = EmptyMap,
             in_progress_task_ids = EmptySet,
             completed_task_ids = EmptySet,
+            member_realtime_bindings = EmptyMap,
         }
 
         terminal [Destroyed]
@@ -63,8 +71,8 @@ machine! {
             RunFlow,
             CancelFlow,
             FlowStatus,
-            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool },
-            Retire { agent_runtime_id: AgentRuntimeId },
+            Spawn { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, bridge_session_id: SessionId, replacing: Option<SessionId> },
+            Retire { agent_runtime_id: AgentRuntimeId, agent_identity: AgentIdentity, releasing: Option<SessionId> },
             Respawn { agent_runtime_id: AgentRuntimeId },
             RetireAll,
             Wire,
@@ -163,6 +171,15 @@ machine! {
             AdmitPeerInput,
             EmitProgressNote,
             EmitTaskNotice,
+            // W3-H / dogma #4: canonical realtime-binding lifecycle effects.
+            // Three-variant shape (Set / Rotated / Released) so rotation is a
+            // first-class machine-emitted meaning rather than a shell-observer
+            // pattern-match over a Cleared+Set debounce window — the latter
+            // would re-impose the "shell interprets DSL state as semantic"
+            // pattern dogma #3 specifically targets.
+            MemberRealtimeBindingSet { agent_identity: AgentIdentity, bridge_session_id: SessionId },
+            MemberRealtimeBindingRotated { agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId },
+            MemberRealtimeBindingReleased { agent_identity: AgentIdentity, session_id: SessionId },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -181,6 +198,22 @@ machine! {
         disposition AdmitPeerInput => external,
         disposition EmitProgressNote => external,
         disposition EmitTaskNotice => external,
+        disposition MemberRealtimeBindingSet => external,
+        disposition MemberRealtimeBindingRotated => external,
+        disposition MemberRealtimeBindingReleased => external,
+
+        // =====================================================================
+        // Invariants
+        // =====================================================================
+
+        // W3-H / dogma #4: "no zombie realtime binding" — every identity that
+        // has a bound session must appear in `identity_to_runtime` (i.e. must
+        // be an identity MobMachine has spawned). keys(bindings) ⊆
+        // keys(identity_to_runtime). Paired with Retire's `remove` and
+        // Spawn's guard/state consistency.
+        invariant bindings_require_known_identity {
+            for_all(id in self.member_realtime_bindings.keys(), self.identity_to_runtime.contains_key(id))
+        }
 
         // =====================================================================
         // Direct transitions
@@ -188,10 +221,18 @@ machine! {
 
         // Spawn is a Running self-loop: the real runtime starts in Running
         // and does not expose a durable pre-start top-level phase.
-        transition SpawnRunning {
-            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable }
+        //
+        // W3-H: Spawn splits into Fresh (no prior realtime binding) and
+        // Replacing (prior binding present, respawn-style rotation). Guards
+        // check BOTH the input's `replacing` witness AND the state's
+        // `member_realtime_bindings` key presence so the DSL enforces
+        // caller/state consistency.
+        transition SpawnRunningFresh {
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "replacing_absent" { replacing == None }
             update {
                 // Spawn is the "member joined live_runtime_ids" fact. The
                 // pending_spawn_count lifecycle is owned by StageSpawn (+1)
@@ -205,10 +246,35 @@ machine! {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_realtime_bindings.insert(agent_identity, bridge_session_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit MemberRealtimeBindingSet { agent_identity: agent_identity, bridge_session_id: bridge_session_id }
+        }
+
+        transition SpawnRunningReplacing {
+            on input Spawn { agent_identity, agent_runtime_id, fence_token, generation, external_addressable, bridge_session_id, replacing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "coordinator_bound" { self.coordinator_bound == true }
+            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "replacing_present" { replacing != None }
+            update {
+                self.live_runtime_ids.insert(agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_realtime_bindings.insert(agent_identity, bridge_session_id);
+            }
+            to Running
+            emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
+            emit MemberRealtimeBindingRotated { agent_identity: agent_identity, old_session_id: replacing.get("value"), new_session_id: bridge_session_id }
         }
 
         transition ObserveRuntimeReady {
@@ -1001,11 +1067,33 @@ machine! {
         // Retire / RetireAll
         // =====================================================================
 
-        transition RetireRunning {
-            on input Retire { agent_runtime_id }
+        // W3-H: Retire splits into Releasing (identity has a realtime
+        // binding — clear it and emit MemberRealtimeBindingReleased) and
+        // NoBinding (identity has no realtime binding — no-op on the map).
+        // Guards enforce caller/state consistency in both phase variants.
+        transition RetireRunningReleasing {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "releasing_present" { releasing != None }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Running
+            emit RequestRuntimeRetire
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+        }
+
+        transition RetireRunningNoBinding {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
@@ -1013,11 +1101,29 @@ machine! {
             emit RequestRuntimeRetire
         }
 
-        transition RetireStopped {
-            on input Retire { agent_runtime_id }
+        transition RetireStoppedReleasing {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
             guard { self.lifecycle_phase == Phase::Stopped }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "releasing_present" { releasing != None }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_realtime_bindings.remove(agent_identity);
+            }
+            to Stopped
+            emit RequestRuntimeRetire
+            emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+        }
+
+        transition RetireStoppedNoBinding {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "no_prior_realtime_binding" { self.member_realtime_bindings.contains_key(agent_identity) == false }
+            guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
             }
@@ -1163,6 +1269,17 @@ impl<T: Into<String>> From<T> for WorkId {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TaskId(pub String);
 impl<T: Into<String>> From<T> for TaskId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Bridging type for bridge session id. Maps to
+/// `meerkat_core::session::SessionId` — the bridge session a mob member is
+/// attached to for the current runtime generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(pub String);
+impl<T: Into<String>> From<T> for SessionId {
     fn from(s: T) -> Self {
         Self(s.into())
     }

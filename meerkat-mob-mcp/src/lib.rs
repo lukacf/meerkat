@@ -1357,6 +1357,44 @@ impl MobMcpState {
             .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))
     }
 
+    /// W3-H: resolve a realtime channel target to the concrete bridge
+    /// session id. `SessionTarget` returns its parsed session id directly;
+    /// `MobMember` resolves `(mob_id, agent_identity)` against the
+    /// MobMachine's canonical `member_realtime_bindings` map via the mob
+    /// handle — a single read through the authoritative source (dogma #1).
+    ///
+    /// Surfaces that receive a `RealtimeChannelTarget` from a caller route
+    /// through this resolver to get the concrete session id they need for
+    /// downstream runtime-adapter queries. Keeps each surface's MobMember
+    /// handling uniform.
+    pub async fn resolve_realtime_target_session(
+        &self,
+        target: &meerkat_contracts::RealtimeChannelTarget,
+    ) -> Result<meerkat_core::types::SessionId, MobError> {
+        match target {
+            meerkat_contracts::RealtimeChannelTarget::SessionTarget { session_id } => {
+                meerkat_core::types::SessionId::parse(session_id)
+                    .map_err(|err| MobError::Internal(format!("invalid session target: {err}")))
+            }
+            meerkat_contracts::RealtimeChannelTarget::MobMember {
+                mob_id,
+                agent_identity,
+            } => {
+                let mob_id = MobId::from(mob_id.as_str());
+                let handle = self.handle_for(&mob_id).await?;
+                let identity = AgentIdentity::from(agent_identity.as_str());
+                handle
+                    .current_realtime_binding(identity.clone())
+                    .await?
+                    .ok_or_else(|| {
+                        MobError::Internal(format!(
+                            "mob {mob_id} has no realtime binding for identity {identity}"
+                        ))
+                    })
+            }
+        }
+    }
+
     // ─── Realm profile CRUD ──────────────────────────────────────────
 
     fn require_realm_profile_store(

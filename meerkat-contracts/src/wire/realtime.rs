@@ -112,6 +112,11 @@ pub enum RealtimeErrorCode {
     CommitTurnUnavailable,
     /// Channel is reconnecting; the caller must wait for a ready state.
     ChannelReconnecting,
+    /// W3-H: the mob member this channel was bound to has been retired and
+    /// its realtime binding released by the MobMachine
+    /// (`MemberRealtimeBindingReleased` effect). Signalled only for
+    /// `MobMember` targets; `SessionTarget` channels do not encounter this.
+    BindingReleased,
 }
 
 impl RealtimeErrorCode {
@@ -146,6 +151,7 @@ impl RealtimeErrorCode {
             Self::UnexpectedChannelOpen => "unexpected_channel_open",
             Self::CommitTurnUnavailable => "commit_turn_unavailable",
             Self::ChannelReconnecting => "channel_reconnecting",
+            Self::BindingReleased => "binding_released",
         }
     }
 }
@@ -199,14 +205,30 @@ pub struct ToolCallTimeoutContext {
 
 /// Target for a public realtime channel.
 ///
-/// Identity-first: callers resolve any mob membership back to the session_id
-/// explicitly (via `mob/member_status` then `realtime/open_info`) — the
-/// channel protocol itself only knows about sessions.
+/// Two variants, one for each addressing mode:
+///
+/// - `SessionTarget` — standalone sessions (no mob-member continuity). The
+///   session id is pinned for the channel's lifetime; when that session
+///   ends, the channel ends.
+///
+/// - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
+///   canonical anchor, and the server resolves the current bridge session
+///   on every tick from the MobMachine's `member_realtime_bindings` map.
+///   Respawn atomically rotates the bound session via the
+///   `MemberRealtimeBindingRotated` effect; the channel survives without
+///   any SDK round-trip. A terminal `MemberRealtimeBindingReleased`
+///   closes the channel with `RealtimeErrorCode::BindingReleased`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeChannelTarget {
-    SessionTarget { session_id: String },
+    SessionTarget {
+        session_id: String,
+    },
+    MobMember {
+        mob_id: String,
+        agent_identity: String,
+    },
 }
 
 /// Opening role for a realtime channel.

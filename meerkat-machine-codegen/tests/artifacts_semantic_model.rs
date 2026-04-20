@@ -22,6 +22,12 @@ fn mob_semantic_model_is_identity_and_runtime_native() {
     assert!(rendered.contains("AgentIdentityValues"));
     assert!(rendered.contains("AgentRuntimeIdValues"));
     assert!(rendered.contains("FenceTokenValues"));
-    assert!(!rendered.contains("SessionIdValues"));
+    // W3-H-1: SessionIdValues is now present in the MobMachine semantic
+    // model because `member_realtime_bindings: Map<AgentIdentity, SessionId>`
+    // makes the bridge session id a first-class MobMachine-owned value.
+    // This is the intentional expansion that issue #264 calls for — the
+    // binding map is the canonical join between identity continuity
+    // (MobMachine) and realtime attachment (MeerkatMachine).
+    assert!(rendered.contains("SessionIdValues"));
     assert!(!rendered.contains("MeerkatIdValues"));
 }

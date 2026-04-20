@@ -16,7 +16,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `retire-respawn-destroy` — member retires, respawns with a new runtime incarnation, and destroys cleanly
 
 ### Transitions
-- `SpawnRunning`
+- `SpawnRunningFresh`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `SpawnRunningReplacing`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `ObserveRuntimeReady`
@@ -247,10 +250,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FinishRunRunningZero`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `RetireRunning`
+- `RetireRunningReleasing`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
-- `RetireStopped`
+- `RetireRunningNoBinding`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireStoppedReleasing`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireStoppedNoBinding`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireAllRunning`
@@ -321,9 +330,20 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EmitTaskNotice`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberRealtimeBindingSet`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberRealtimeBindingRotated`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `MemberRealtimeBindingReleased`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 
 ### Invariants
-- `(none)`
+- `bindings_require_known_identity`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 
 
 <!-- GENERATED_COVERAGE_END -->

@@ -1273,11 +1273,19 @@ mod tests {
                         ("fence_token".into(), KernelValue::U64(41)),
                         ("generation".into(), KernelValue::U64(2)),
                         ("external_addressable".into(), KernelValue::Bool(false)),
+                        // W3-H-1: new realtime-binding fields. `replacing`
+                        // is None (no prior binding) so the Fresh branch
+                        // fires.
+                        (
+                            "bridge_session_id".into(),
+                            KernelValue::String("bridge.worker.1".into()),
+                        ),
+                        ("replacing".into(), KernelValue::None),
                     ]),
                 },
             )
             .expect("spawn member");
-        assert_eq!(running.transition, "SpawnRunning");
+        assert_eq!(running.transition, "SpawnRunningFresh");
         assert_eq!(running.next_state.phase, "Running");
         assert!(
             running

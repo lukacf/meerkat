@@ -41,18 +41,13 @@ export interface MemberSendOptions {
 
 export interface MemberDeliveryReceipt {
   agentIdentity: string;
-  agentRuntimeId: string;
   memberRef: MobMemberRef;
-  generation?: number;
   handlingMode: MobHandlingMode;
 }
 
 export interface MemberRespawnReceipt {
   agentIdentity: string;
-  agentRuntimeId: string;
-  previousFenceToken: number;
-  fenceToken: number;
-  generation?: number;
+  memberRef: MobMemberRef;
 }
 
 export interface MobRespawnResult {
@@ -107,9 +102,7 @@ export interface MobHelperResult {
   output?: string;
   tokensUsed: number;
   agentIdentity: string;
-  agentRuntimeId: string;
   memberRef: MobMemberRef;
-  generation?: number;
 }
 
 export class Member {

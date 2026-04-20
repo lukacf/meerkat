@@ -527,7 +527,6 @@ fn spawn_result_payload(mob_id: &MobId, result: &meerkat_mob::SpawnResult) -> se
     let identity_str = result.agent_identity.to_string();
     serde_json::json!({
         "agent_identity": result.agent_identity,
-        "agent_runtime_id": result.agent_runtime_id,
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
 }
@@ -549,7 +548,6 @@ fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> 
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity,
-        "agent_runtime_id": result.agent_runtime_id,
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
 }
@@ -1859,9 +1857,9 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let members = mob_state.mob_list_members(&id).await.map_err(err_mob)?;
-    // Serialize through the domain shape, then splice in the server-
-    // resolved `member_ref` so app code receives a typed opaque handle
-    // instead of binding-era `fence_token`.
+    // Serialize through the domain shape, then splice in the server-resolved
+    // `member_ref` and drop the binding-era `agent_runtime_id` / `fence_token`
+    // fields so app code never reasons about incarnation counters.
     let mut array = serde_json::to_value(&members)
         .map_err(|e| err_str("serialize_error", e))?
         .as_array()
@@ -1869,6 +1867,8 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
         .unwrap_or_default();
     for (entry, member) in array.iter_mut().zip(members.iter()) {
         if let Some(obj) = entry.as_object_mut() {
+            obj.remove("agent_runtime_id");
+            obj.remove("fence_token");
             let identity_str = member.agent_identity.to_string();
             obj.insert(
                 "member_ref".to_string(),
@@ -2083,7 +2083,6 @@ pub async fn mob_member_send(
     let identity_str = receipt.identity.to_string();
     let payload = serde_json::json!({
         "agent_identity": receipt.identity,
-        "agent_runtime_id": receipt.agent_runtime_id,
         "member_ref": meerkat_contracts::WireMemberRef::encode(id.as_str(), &identity_str),
         "handling_mode": match receipt.handling_mode {
             meerkat_core::HandlingMode::Queue => "queue",
@@ -2728,7 +2727,10 @@ mod tests {
 
         let payload = spawn_result_payload(&mob_id, &result);
         assert_eq!(payload["agent_identity"], "test-member");
-        assert!(!payload["agent_runtime_id"].is_null());
+        assert!(
+            payload.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing payloads"
+        );
         let member_ref = payload["member_ref"].as_str().expect("member_ref");
         assert!(!member_ref.is_empty(), "member_ref must be populated");
 
@@ -2780,7 +2782,10 @@ mod tests {
         assert!(payload.get("output").is_some());
         assert!(payload["tokens_used"].as_u64().is_some());
         assert_eq!(payload["agent_identity"], "helper-1");
-        assert!(!payload["agent_runtime_id"].is_null());
+        assert!(
+            payload.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing payloads"
+        );
         let member_ref = payload["member_ref"].as_str().expect("member_ref");
         assert!(!member_ref.is_empty(), "member_ref must be populated");
     }

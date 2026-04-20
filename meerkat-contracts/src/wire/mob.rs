@@ -518,11 +518,10 @@ pub struct MobMemberSendResult {
     pub mob_id: String,
     /// Identity-native member identity (0.6).
     pub agent_identity: String,
-    /// Identity-native runtime ID for this incarnation (0.6).
-    pub agent_runtime_id: WireAgentRuntimeId,
     /// Server-resolved opaque handle for subsequent member-targeted calls.
-    /// Replaces the binding-era `fence_token` that previously leaked from
-    /// this surface.
+    /// App code routes through `member_ref`; the binding-era
+    /// `{identity, generation}` pair carried by `WireAgentRuntimeId` is
+    /// retired from app-facing responses per dogma #10.
     pub member_ref: WireMemberRef,
     pub handling_mode: WireHandlingMode,
 }
@@ -801,7 +800,6 @@ fn base64_url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobSpawnReceiptWire {
     pub agent_identity: String,
-    pub agent_runtime_id: WireAgentRuntimeId,
     /// Server-resolved opaque handle for subsequent member-targeted calls
     /// (work submission, cancellation, lifecycle). Replaces the binding-era
     /// `generation` / `fence_token` pair on app-facing surfaces.
@@ -828,7 +826,6 @@ pub enum WireMobMemberStatus {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberListEntryWire {
     pub agent_identity: String,
-    pub agent_runtime_id: WireAgentRuntimeId,
     pub member_ref: WireMemberRef,
     pub role: String,
     pub runtime_mode: WireMobRuntimeMode,
@@ -981,7 +978,6 @@ pub struct MobSubmitWorkParams {
 pub struct MobSubmitWorkResult {
     pub mob_id: String,
     pub work_ref: String,
-    pub agent_runtime_id: WireAgentRuntimeId,
     pub member_ref: WireMemberRef,
 }
 

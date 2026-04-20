@@ -1852,7 +1852,6 @@ async fn mob_spawn_helper(
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity.as_str(),
-        "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })))
 }
@@ -1946,7 +1945,6 @@ async fn mob_fork_helper(
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity.as_str(),
-        "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })))
 }
@@ -6283,12 +6281,15 @@ mod tests {
         );
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["agent_identity"], "helper-rest");
-        assert!(payload["agent_runtime_id"].is_object());
         assert!(
             payload["member_ref"]
                 .as_str()
                 .is_some_and(|s| !s.is_empty()),
             "member_ref must be populated"
+        );
+        assert!(
+            payload.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing responses"
         );
     }
 

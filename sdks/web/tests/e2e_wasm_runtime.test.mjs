@@ -389,7 +389,10 @@ test("MeerkatRuntime surfaces lagged subscription signals through the shipped pa
         },
       ]);
       assert.equal(spawned[0].agent_identity, "worker-1");
-      assert.ok(spawned[0].agent_runtime_id);
+      assert.ok(
+        typeof spawned[0].member_ref === "string" && spawned[0].member_ref.length > 0,
+        "spawn should return an opaque member_ref",
+      );
 
       const subscription = await mob.member("worker-1").subscribe();
       await mob.member("worker-1").send("Trigger a long streamed response.");
@@ -449,7 +452,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         {
           mob_id: "mob-web-parity",
           agent_identity: "worker-1",
-          agent_runtime_id: "worker-1:1",
           member_ref: "ref-worker-1",
         },
       ]);
@@ -473,7 +475,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify([
         {
           agent_identity: "worker-1",
-          agent_runtime_id: "worker-1:1",
           member_ref: "ref-worker-1",
           profile: "worker",
         },
@@ -490,7 +491,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       calls.push(["member_send", agentIdentity, JSON.parse(requestJson)]);
       return JSON.stringify({
         agent_identity: agentIdentity,
-        agent_runtime_id: `${agentIdentity}:1`,
         member_ref: `ref-${agentIdentity}`,
         handling_mode: "queue",
       });
@@ -509,9 +509,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         status: "completed",
         receipt: {
           agent_identity: agentIdentity,
-          agent_runtime_id: `${agentIdentity}:2`,
-          previous_fence_token: 1,
-          fence_token: 2,
+          member_ref: `ref-${agentIdentity}`,
         },
       });
     },
@@ -524,7 +522,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         output: "helper complete",
         tokens_used: 11,
         agent_identity: "helper-1",
-        agent_runtime_id: "helper-1:1",
         member_ref: "ref-helper-1",
       });
     },
@@ -534,7 +531,6 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         output: "fork complete",
         tokens_used: 13,
         agent_identity: "fork-1",
-        agent_runtime_id: "fork-1:1",
         member_ref: "ref-fork-1",
       });
     },
@@ -582,20 +578,26 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       },
     ]);
     assert.equal(spawned[0].agent_identity, "worker-1");
-    assert.equal(spawned[0].agent_runtime_id, "worker-1:1");
     assert.equal(spawned[0].member_ref, "ref-worker-1");
+    assert.equal(
+      spawned[0].agent_runtime_id,
+      undefined,
+      "binding-era agent_runtime_id must not leak to app-facing spawn result",
+    );
 
     const listed = await mob.listMembers();
     assert.equal(listed[0].agent_identity, "worker-1");
-    assert.equal(listed[0].agent_runtime_id, "worker-1:1");
     assert.equal(listed[0].member_ref, "ref-worker-1");
+    assert.equal(listed[0].agent_runtime_id, undefined);
 
     const receipt = await mob.member("worker-1").send("hello");
     assert.equal(receipt.agent_identity, "worker-1");
-    assert.equal(receipt.agent_runtime_id, "worker-1:1");
     assert.equal(receipt.member_ref, "ref-worker-1");
+    assert.equal(receipt.agent_runtime_id, undefined);
 
     const snapshot = await mob.memberStatus("worker-1");
+    // memberStatus is a diagnostic snapshot; binding-era fields intentionally
+    // pass through to support observability tooling.
     assert.equal(snapshot.agent_runtime_id, "worker-1:1");
     assert.equal(snapshot.fence_token, 1);
 
@@ -608,9 +610,10 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
 
     const respawn = await mob.respawn("worker-1");
     assert.equal(respawn.receipt.agent_identity, "worker-1");
-    assert.equal(respawn.receipt.agent_runtime_id, "worker-1:2");
-    assert.equal(respawn.receipt.previous_fence_token, 1);
-    assert.equal(respawn.receipt.fence_token, 2);
+    assert.equal(respawn.receipt.member_ref, "ref-worker-1");
+    assert.equal(respawn.receipt.agent_runtime_id, undefined);
+    assert.equal(respawn.receipt.fence_token, undefined);
+    assert.equal(respawn.receipt.previous_fence_token, undefined);
 
     await mob.forceCancel("worker-1");
 
@@ -619,8 +622,8 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       profileName: "worker",
     });
     assert.equal(helper.agent_identity, "helper-1");
-    assert.equal(helper.agent_runtime_id, "helper-1:1");
     assert.equal(helper.member_ref, "ref-helper-1");
+    assert.equal(helper.agent_runtime_id, undefined);
 
     const fork = await mob.forkHelper("worker-1", "Review the draft.", {
       agentIdentity: "fork-1",
@@ -628,8 +631,8 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       forkContext: { mode: "full_history" },
     });
     assert.equal(fork.agent_identity, "fork-1");
-    assert.equal(fork.agent_runtime_id, "fork-1:1");
     assert.equal(fork.member_ref, "ref-fork-1");
+    assert.equal(fork.agent_runtime_id, undefined);
 
     assert.deepEqual(
       calls.filter(([name]) =>

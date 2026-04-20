@@ -3181,8 +3181,14 @@ mod tests {
             .unwrap();
         let sent = result_value(&send_resp);
         assert_eq!(sent["agent_identity"], "worker-1");
-        assert_eq!(sent["agent_runtime_id"]["identity"], "worker-1");
-        assert_eq!(sent["agent_runtime_id"]["generation"], 0);
+        assert!(
+            sent["member_ref"].as_str().is_some_and(|s| !s.is_empty()),
+            "mob/member_send must return the opaque member_ref"
+        );
+        assert!(
+            sent.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing mob/member_send"
+        );
         assert_eq!(sent["handling_mode"], "queue");
     }
 

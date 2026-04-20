@@ -12,8 +12,8 @@ use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::{
-    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireAgentRuntimeId, WireMemberState,
-    WireMobMemberStatus, WireMobRuntimeMode,
+    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobMemberStatus,
+    WireMobRuntimeMode,
 };
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
@@ -43,9 +43,34 @@ fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Val
     serde_json::json!({
         "mob_id": mob_id,
         "agent_identity": result.agent_identity,
-        "agent_runtime_id": result.agent_runtime_id,
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
+}
+
+/// Project a domain `MobMemberStatus` into its wire twin.
+///
+/// `MobMemberStatus` is `#[non_exhaustive]`, so a plain exhaustive match is not
+/// possible without a wildcard. We do map every known variant explicitly and
+/// log at `error!` on the wildcard arm so a future upstream variant surfaces in
+/// traces as "wire projection silently collapsed to Unknown" rather than
+/// vanishing into a defaulted value. Adding the variant to this match is the
+/// expected response to the log line.
+fn project_member_status(status: MobMemberStatus) -> WireMobMemberStatus {
+    match status {
+        MobMemberStatus::Active => WireMobMemberStatus::Active,
+        MobMemberStatus::Retiring => WireMobMemberStatus::Retiring,
+        MobMemberStatus::Broken => WireMobMemberStatus::Broken,
+        MobMemberStatus::Completed => WireMobMemberStatus::Completed,
+        MobMemberStatus::Unknown => WireMobMemberStatus::Unknown,
+        other => {
+            tracing::error!(
+                ?other,
+                "MobMemberStatus variant has no WireMobMemberStatus mapping; \
+                 projecting to Unknown — add an explicit arm in `project_member_status`"
+            );
+            WireMobMemberStatus::Unknown
+        }
+    }
 }
 
 /// Convert a mob roster entry into the public typed wire shape. Used for
@@ -58,10 +83,6 @@ fn member_list_entry_wire(
     let identity_str = entry.agent_identity.to_string();
     MobMemberListEntryWire {
         agent_identity: identity_str.clone(),
-        agent_runtime_id: WireAgentRuntimeId {
-            identity: entry.agent_runtime_id.identity.to_string(),
-            generation: entry.agent_runtime_id.generation.get(),
-        },
         member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         role: entry.role.to_string(),
         runtime_mode: match entry.runtime_mode {
@@ -78,17 +99,7 @@ fn member_list_entry_wire(
             .map(std::string::ToString::to_string)
             .collect(),
         labels: entry.labels.clone(),
-        status: match entry.status {
-            MobMemberStatus::Active => WireMobMemberStatus::Active,
-            MobMemberStatus::Retiring => WireMobMemberStatus::Retiring,
-            MobMemberStatus::Broken => WireMobMemberStatus::Broken,
-            MobMemberStatus::Completed => WireMobMemberStatus::Completed,
-            MobMemberStatus::Unknown => WireMobMemberStatus::Unknown,
-            // The mob domain marks `MobMemberStatus` non-exhaustive; treat
-            // unknown future variants as `Unknown` on the wire so callers see
-            // a defined value instead of the field disappearing.
-            _ => WireMobMemberStatus::Unknown,
-        },
+        status: project_member_status(entry.status),
         error: entry.error.clone(),
         is_final: entry.is_final,
     }
@@ -350,9 +361,7 @@ struct SpawnManyResultEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_identity: Option<meerkat_mob::AgentIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    agent_runtime_id: Option<meerkat_mob::AgentRuntimeId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fence_token: Option<meerkat_mob::FenceToken>,
+    member_ref: Option<meerkat_contracts::WireMemberRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -389,18 +398,22 @@ pub async fn handle_spawn_many(
             let entries: Vec<SpawnManyResultEntry> = results
                 .into_iter()
                 .map(|r| match r {
-                    Ok(spawn_result) => SpawnManyResultEntry {
-                        ok: true,
-                        agent_identity: Some(spawn_result.agent_identity),
-                        agent_runtime_id: Some(spawn_result.agent_runtime_id),
-                        fence_token: Some(spawn_result.fence_token),
-                        error: None,
-                    },
+                    Ok(spawn_result) => {
+                        let identity_str = spawn_result.agent_identity.to_string();
+                        SpawnManyResultEntry {
+                            ok: true,
+                            agent_identity: Some(spawn_result.agent_identity),
+                            member_ref: Some(meerkat_contracts::WireMemberRef::encode(
+                                mob_id.as_str(),
+                                &identity_str,
+                            )),
+                            error: None,
+                        }
+                    }
                     Err(err) => SpawnManyResultEntry {
                         ok: false,
                         agent_identity: None,
-                        agent_runtime_id: None,
-                        fence_token: None,
+                        member_ref: None,
                         error: Some(err.to_string()),
                     },
                 })
@@ -475,11 +488,14 @@ pub async fn handle_respawn(
 
 fn respawn_receipt_value(mob_id: &MobId, receipt: &MemberRespawnReceipt) -> serde_json::Value {
     let identity_str = receipt.identity.to_string();
+    // App-facing respawn receipt exposes only identity-native fields and the
+    // server-resolved `member_ref`. Binding-era fence tokens are retired per
+    // dogma #10 — callers never reason about incarnation counters. The
+    // `status: "completed"` envelope field on the parent response communicates
+    // success; clients that need "before vs after" observability should track
+    // their own state around the call.
     serde_json::json!({
         "identity": receipt.identity,
-        "agent_runtime_id": receipt.agent_runtime_id,
-        "previous_fence_token": receipt.previous_fence_token,
-        "fence_token": receipt.fence_token,
         "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
 }
@@ -683,10 +699,6 @@ pub async fn handle_member_send(
                 MobMemberSendResult {
                     mob_id: mob_id.to_string(),
                     agent_identity: identity_str.clone(),
-                    agent_runtime_id: WireAgentRuntimeId {
-                        identity: receipt.agent_runtime_id.identity.to_string(),
-                        generation: receipt.agent_runtime_id.generation.get(),
-                    },
                     member_ref: meerkat_contracts::WireMemberRef::encode(
                         mob_id.as_str(),
                         &identity_str,
@@ -945,7 +957,6 @@ pub async fn handle_spawn_helper(
                     "output": result.output,
                     "tokens_used": result.tokens_used,
                     "agent_identity": result.agent_identity,
-                    "agent_runtime_id": result.agent_runtime_id,
                     "member_ref": meerkat_contracts::WireMemberRef::encode(
                         mob_id.as_str(),
                         &identity_str,
@@ -1025,7 +1036,6 @@ pub async fn handle_fork_helper(
                     "output": result.output,
                     "tokens_used": result.tokens_used,
                     "agent_identity": result.agent_identity,
-                    "agent_runtime_id": result.agent_runtime_id,
                     "member_ref": meerkat_contracts::WireMemberRef::encode(
                         mob_id.as_str(),
                         &identity_str,
@@ -1277,10 +1287,6 @@ pub async fn handle_submit_work(
             let body = MobSubmitWorkResult {
                 mob_id: mob_id.to_string(),
                 work_ref: receipt.work_ref.to_string(),
-                agent_runtime_id: WireAgentRuntimeId {
-                    identity: identity_str.clone(),
-                    generation: receipt.runtime_id.generation.get(),
-                },
                 member_ref: WireMemberRef::encode(mob_id.as_str(), &identity_str),
             };
             RpcResponse::success(id, body)
@@ -1689,10 +1695,6 @@ fn spawn_receipt_wire(
     let identity_str = result.agent_identity.to_string();
     meerkat_contracts::MobSpawnReceiptWire {
         agent_identity: identity_str.clone(),
-        agent_runtime_id: meerkat_contracts::WireAgentRuntimeId {
-            identity: result.agent_runtime_id.identity.to_string(),
-            generation: result.agent_runtime_id.generation.get(),
-        },
         member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     }
 }

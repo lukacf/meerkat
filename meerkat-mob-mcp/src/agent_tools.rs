@@ -242,7 +242,6 @@ impl AgentMobToolSurface {
         let identity_str = result.agent_identity.to_string();
         json!({
             "agent_identity": result.agent_identity,
-            "agent_runtime_id": result.agent_runtime_id,
             "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         })
     }
@@ -2904,8 +2903,14 @@ mod tests {
             "Mob-MCP operator results should surface the canonical agent identity"
         );
         assert!(
-            spawn_payload["agent_runtime_id"].is_object(),
-            "Mob-MCP operator results should surface the canonical agent runtime id"
+            spawn_payload["member_ref"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "Mob-MCP operator results should surface the server-resolved member_ref"
+        );
+        assert!(
+            spawn_payload.get("agent_runtime_id").is_none(),
+            "Mob-MCP operator results must not leak the binding-era agent_runtime_id"
         );
 
         let handle = state.handle_for(&mob_id).await.expect("handle");

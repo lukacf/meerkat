@@ -36,9 +36,7 @@ MemberDeliveryReceipt = TypedDict(
     "MemberDeliveryReceipt",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
         "member_ref": MobMemberRef,
-        "generation": NotRequired[int],
         "handling_mode": Literal["queue", "steer"],
     },
 )
@@ -47,10 +45,7 @@ MemberRespawnReceipt = TypedDict(
     "MemberRespawnReceipt",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "previous_fence_token": int,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
     },
 )
 
@@ -59,9 +54,7 @@ MobSpawnResult = TypedDict(
     {
         "mob_id": str,
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
     },
 )
 
@@ -147,9 +140,7 @@ MobHelperResult = TypedDict(
         "output": NotRequired[str],
         "tokens_used": int,
         "agent_identity": str,
-        "agent_runtime_id": str,
         "member_ref": MobMemberRef,
-        "generation": NotRequired[int],
     },
 )
 
@@ -157,9 +148,7 @@ MobMember = TypedDict(
     "MobMember",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
         "profile": str,
         "peer_id": NotRequired[str],
         "external_peer_specs": NotRequired[dict[str, dict[str, Any]]],

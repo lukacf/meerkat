@@ -1686,24 +1686,6 @@
   },
   "MobMemberSendResult": {
     "$defs": {
-      "WireAgentRuntimeId": {
-        "description": "Response payload for host-side mob member delivery.",
-        "properties": {
-          "generation": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "identity": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "identity",
-          "generation"
-        ],
-        "type": "object"
-      },
       "WireHandlingMode": {
         "description": "Public handling mode for mob member delivery.",
         "enum": [
@@ -1724,16 +1706,12 @@
         "description": "Identity-native member identity (0.6).",
         "type": "string"
       },
-      "agent_runtime_id": {
-        "$ref": "#/$defs/WireAgentRuntimeId",
-        "description": "Identity-native runtime ID for this incarnation (0.6)."
-      },
       "handling_mode": {
         "$ref": "#/$defs/WireHandlingMode"
       },
       "member_ref": {
         "$ref": "#/$defs/WireMemberRef",
-        "description": "Server-resolved opaque handle for subsequent member-targeted calls.\nReplaces the binding-era `fence_token` that previously leaked from\nthis surface."
+        "description": "Server-resolved opaque handle for subsequent member-targeted calls.\nApp code routes through `member_ref`; the binding-era\n`{identity, generation}` pair carried by `WireAgentRuntimeId` is\nretired from app-facing responses per dogma #10."
       },
       "mob_id": {
         "type": "string"
@@ -1742,7 +1720,6 @@
     "required": [
       "mob_id",
       "agent_identity",
-      "agent_runtime_id",
       "member_ref",
       "handling_mode"
     ],

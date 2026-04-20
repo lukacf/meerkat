@@ -110,13 +110,12 @@ export class Member {
     );
     const receipt = JSON.parse(json) as Partial<MemberDeliveryReceipt>;
     const legacyIdentity = (receipt as { identity?: unknown }).identity;
-    const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
     const memberRef =
       typeof receipt.member_ref === 'string' && receipt.member_ref.length > 0
         ? receipt.member_ref
         : undefined;
-    if (!runtime.value || !memberRef) {
-      throw new Error('Invalid mob member delivery response: missing runtime identity fields');
+    if (!memberRef) {
+      throw new Error('Invalid mob member delivery response: missing member_ref');
     }
     return {
       agent_identity:
@@ -125,9 +124,7 @@ export class Member {
           : typeof legacyIdentity === 'string' && legacyIdentity.length > 0
             ? legacyIdentity
           : this.agentIdentity,
-      agent_runtime_id: runtime.value,
       member_ref: memberRef,
-      generation: runtime.generation,
       handling_mode: receipt.handling_mode ?? handlingMode,
     };
   }
@@ -186,27 +183,21 @@ export class Mob {
     }
     return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry, index) => {
       const requestedIdentity = specs[index]?.agent_identity ?? '';
-      let runtime = parseAgentRuntimeId(entry.agent_runtime_id);
       const agentIdentity =
         typeof entry.agent_identity === 'string'
           ? entry.agent_identity
           : requestedIdentity;
-      if (!runtime.value && agentIdentity) {
-        runtime = { value: `${agentIdentity}:0`, generation: 0 };
-      }
       const memberRef =
         typeof entry.member_ref === 'string' && entry.member_ref.length > 0
           ? entry.member_ref
           : undefined;
-      if (!agentIdentity || !runtime.value || !memberRef) {
-        throw new Error('Invalid mob spawn response: missing runtime identity fields');
+      if (!agentIdentity || !memberRef) {
+        throw new Error('Invalid mob spawn response: missing member_ref');
       }
       return {
         mob_id: typeof entry.mob_id === 'string' ? entry.mob_id : this.mobId,
         agent_identity: agentIdentity,
-        agent_runtime_id: runtime.value,
         member_ref: memberRef,
-        generation: runtime.generation,
       };
     });
   }
@@ -247,20 +238,17 @@ export class Mob {
     const json = await this.bindings.mob_list_members(this.mobId);
     return (JSON.parse(json) as Array<Record<string, unknown>>).map((member) => {
       const agentIdentity = String(member.agent_identity ?? member.member_id ?? '');
-      let runtime = parseAgentRuntimeId(member.agent_runtime_id);
-      if (!runtime.value && agentIdentity.length > 0) {
-        runtime = { value: `${agentIdentity}:0`, generation: 0 };
-      }
       const memberRef =
         typeof member.member_ref === 'string' && member.member_ref.length > 0
           ? member.member_ref
           : '';
+      if (!agentIdentity || !memberRef) {
+        throw new Error('Invalid mob list_members entry: missing member_ref');
+      }
       return {
         agent_identity: agentIdentity,
-        agent_runtime_id: runtime.value,
         member_ref: memberRef,
-        generation: runtime.generation,
-        profile: String(member.profile_name ?? member.profile ?? ''),
+        profile: String(member.profile_name ?? member.profile ?? member.role ?? ''),
         peer_id: member.peer_id != null ? String(member.peer_id) : undefined,
         external_peer_specs:
           member.external_peer_specs && typeof member.external_peer_specs === 'object'
@@ -339,9 +327,15 @@ export class Mob {
     if (!result.receipt || typeof result.receipt !== 'object') {
       throw new Error('Invalid mob respawn response: missing receipt');
     }
-    const receipt = result.receipt;
+    const receipt = result.receipt as Record<string, unknown>;
     const legacyIdentity = (receipt as { identity?: unknown }).identity;
-    const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
+    const memberRef =
+      typeof receipt.member_ref === 'string' && receipt.member_ref.length > 0
+        ? receipt.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new Error('Invalid mob respawn response: receipt missing member_ref');
+    }
     return {
       status: result.status === 'topology_restore_failed' ? 'topology_restore_failed' : 'completed',
       receipt: {
@@ -351,13 +345,7 @@ export class Mob {
             : typeof legacyIdentity === 'string' && legacyIdentity.length > 0
               ? legacyIdentity
             : agentIdentity,
-        agent_runtime_id: runtime.value,
-        previous_fence_token:
-          typeof receipt.previous_fence_token === 'number'
-            ? receipt.previous_fence_token
-            : 0,
-        fence_token: typeof receipt.fence_token === 'number' ? receipt.fence_token : 0,
-        generation: runtime.generation,
+        member_ref: memberRef,
       },
       failed_peer_ids: Array.isArray(result.failed_peer_ids)
         ? result.failed_peer_ids.map((peerId) => String(peerId))
@@ -415,10 +403,12 @@ export class Mob {
         }),
     );
     const result = JSON.parse(json) as Partial<MobHelperResult>;
-    let runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    if (!runtime.value) {
-      const identityHint = options?.agentIdentity ?? 'helper';
-      runtime = { value: `${identityHint}:0`, generation: 0 };
+    const memberRef =
+      typeof result.member_ref === 'string' && result.member_ref.length > 0
+        ? result.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new Error('Invalid mob spawn_helper response: missing member_ref');
     }
     return {
       output: typeof result.output === 'string' ? result.output : undefined,
@@ -427,12 +417,7 @@ export class Mob {
         typeof result.agent_identity === 'string'
           ? result.agent_identity
           : (options?.agentIdentity ?? ''),
-      agent_runtime_id: runtime.value,
-      fence_token:
-        typeof result.fence_token === 'number' && Number.isFinite(result.fence_token)
-          ? result.fence_token
-          : 0,
-      generation: runtime.generation,
+      member_ref: memberRef,
     };
   }
 
@@ -461,10 +446,12 @@ export class Mob {
         }),
     );
     const result = JSON.parse(json) as Partial<MobHelperResult>;
-    let runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    if (!runtime.value) {
-      const identityHint = options?.agentIdentity ?? 'fork';
-      runtime = { value: `${identityHint}:0`, generation: 0 };
+    const memberRef =
+      typeof result.member_ref === 'string' && result.member_ref.length > 0
+        ? result.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new Error('Invalid mob fork_helper response: missing member_ref');
     }
     return {
       output: typeof result.output === 'string' ? result.output : undefined,
@@ -473,12 +460,7 @@ export class Mob {
         typeof result.agent_identity === 'string'
           ? result.agent_identity
           : (options?.agentIdentity ?? ''),
-      agent_runtime_id: runtime.value,
-      fence_token:
-        typeof result.fence_token === 'number' && Number.isFinite(result.fence_token)
-          ? result.fence_token
-          : 0,
-      generation: runtime.generation,
+      member_ref: memberRef,
     };
   }
 

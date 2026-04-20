@@ -1051,9 +1051,12 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                entry.get("agent_runtime_id")
-            )
+            member_ref = entry.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/members response: entry missing member_ref",
+                )
             normalized.append(
                 {
                     "agent_identity": (
@@ -1061,14 +1064,13 @@ class MeerkatClient:
                         if entry.get("agent_identity") is not None
                         else ""
                     ),
-                    "agent_runtime_id": runtime_id,
-                    "fence_token": (
-                        int(entry["fence_token"])
-                        if isinstance(entry.get("fence_token"), int)
-                        else 0
+                    "member_ref": member_ref,
+                    "profile": str(
+                        entry.get("profile_name")
+                        or entry.get("profile")
+                        or entry.get("role")
+                        or ""
                     ),
-                    **({"generation": generation} if generation is not None else {}),
-                    "profile": str(entry.get("profile_name") or entry.get("profile") or ""),
                     **(
                         {"peer_id": str(entry["peer_id"])}
                         if entry.get("peer_id") is not None
@@ -1151,14 +1153,11 @@ class MeerkatClient:
                 "render_metadata": render_metadata,
             },
         )
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
         member_ref = result.get("member_ref")
-        if not runtime_id or not isinstance(member_ref, str) or not member_ref:
+        if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/member_send response: missing runtime identity fields",
+                "Invalid mob/member_send response: missing member_ref",
             )
         receipt_handling_mode = result.get("handling_mode")
         return {
@@ -1172,9 +1171,7 @@ class MeerkatClient:
                     else agent_identity
                 )
             ),
-            "agent_runtime_id": runtime_id,
             "member_ref": member_ref,
-            **({"generation": generation} if generation is not None else {}),
             "handling_mode": (
                 receipt_handling_mode
                 if receipt_handling_mode in {"queue", "steer"}
@@ -1207,10 +1204,6 @@ class MeerkatClient:
             "additional_instructions": additional_instructions,
         }
         result = await self._request_with_member_identity_compat("mob/spawn", params)
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
-        fence_token = result.get("fence_token")
         resolved_identity = (
             result["agent_identity"]
             if isinstance(result.get("agent_identity"), str)
@@ -1221,23 +1214,16 @@ class MeerkatClient:
                 else agent_identity
             )
         )
-        if not runtime_id and resolved_identity:
-            runtime_id = f"{resolved_identity}:0"
-            if generation is None:
-                generation = 0
-        if not isinstance(fence_token, int):
-            fence_token = 0 if runtime_id else None
-        if not runtime_id or fence_token is None:
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/spawn response: missing runtime identity fields",
+                "Invalid mob/spawn response: missing member_ref",
             )
         return {
             "mob_id": str(result.get("mob_id", mob_id)),
             "agent_identity": resolved_identity,
-            "agent_runtime_id": runtime_id,
-            "fence_token": fence_token,
-            **({"generation": generation} if generation is not None else {}),
+            "member_ref": member_ref,
         }
 
 
@@ -1274,10 +1260,6 @@ class MeerkatClient:
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict) or not bool(entry.get("ok")):
                 continue
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                entry.get("agent_runtime_id")
-            )
-            fence_token = entry.get("fence_token")
             requested_identity = (
                 str(specs[index].get("agent_identity", ""))
                 if index < len(specs)
@@ -1289,24 +1271,17 @@ class MeerkatClient:
                 and str(entry["agent_identity"])
                 else requested_identity
             )
-            if not runtime_id and resolved_identity:
-                runtime_id = f"{resolved_identity}:0"
-                if generation is None:
-                    generation = 0
-            if not isinstance(fence_token, int):
-                fence_token = 0 if runtime_id else None
-            if not runtime_id or fence_token is None:
+            member_ref = entry.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: missing runtime identity fields",
+                    "Invalid mob/spawn_many response: successful entry missing member_ref",
                 )
             normalized.append(
                 {
                     "mob_id": str(entry.get("mob_id", mob_id)),
                     "agent_identity": resolved_identity,
-                    "agent_runtime_id": runtime_id,
-                    "fence_token": fence_token,
-                    **({"generation": generation} if generation is not None else {}),
+                    "member_ref": member_ref,
                 }
             )
         return normalized
@@ -1350,13 +1325,11 @@ class MeerkatClient:
         )
         receipt = result.get("receipt")
         if isinstance(receipt, dict):
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                receipt.get("agent_runtime_id")
-            )
-            if not runtime_id:
+            member_ref = receipt.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/respawn response: missing runtime identity fields",
+                    "Invalid mob/respawn response: receipt missing member_ref",
                 )
             result = dict(result)
             result["receipt"] = {
@@ -1371,10 +1344,7 @@ class MeerkatClient:
                         else agent_identity
                     )
                 ),
-                "agent_runtime_id": runtime_id,
-                "previous_fence_token": int(receipt.get("previous_fence_token", 0)),
-                "fence_token": int(receipt.get("fence_token", 0)),
-                **({"generation": generation} if generation is not None else {}),
+                "member_ref": member_ref,
             }
         return {
             "status": (
@@ -1609,9 +1579,6 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -1627,9 +1594,7 @@ class MeerkatClient:
                 and result["agent_identity"]
                 else (agent_identity or "")
             ),
-            "agent_runtime_id": runtime_id,
             "member_ref": member_ref,
-            **({"generation": generation} if generation is not None else {}),
         }
 
     async def fork_mob_helper(
@@ -1656,9 +1621,6 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -1674,9 +1636,7 @@ class MeerkatClient:
                 and result["agent_identity"]
                 else (agent_identity or "")
             ),
-            "agent_runtime_id": runtime_id,
             "member_ref": member_ref,
-            **({"generation": generation} if generation is not None else {}),
         }
 
     async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:

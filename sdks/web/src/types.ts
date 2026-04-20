@@ -145,19 +145,14 @@ export interface MobAppendSystemContextResult {
 /** Delivery receipt for a direct mob member turn. */
 export interface MemberDeliveryReceipt {
   agent_identity: string;
-  agent_runtime_id: string;
   member_ref: MobMemberRef;
-  generation?: number;
   handling_mode: HandlingMode;
 }
 
 /** Respawn receipt for a mob member. */
 export interface MemberRespawnReceipt {
   agent_identity: string;
-  agent_runtime_id: string;
-  previous_fence_token: number;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
 }
 
 /** Result envelope for a member respawn operation. */
@@ -344,17 +339,13 @@ export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'des
 export interface SpawnResult {
   mob_id: string;
   agent_identity: string;
-  agent_runtime_id: string;
   member_ref: MobMemberRef;
-  generation?: number;
 }
 
 /** A mob member entry from listMembers. */
 export interface MobMember {
   agent_identity: string;
-  agent_runtime_id: string;
   member_ref: MobMemberRef;
-  generation?: number;
   profile: string;
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
@@ -416,9 +407,7 @@ export interface MobHelperResult {
   output?: string;
   tokens_used: number;
   agent_identity: string;
-  agent_runtime_id: string;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
 }
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────

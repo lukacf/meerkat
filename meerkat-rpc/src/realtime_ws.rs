@@ -910,11 +910,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     // itself a session mutation; if we used that mutation as an
                     // immediate refresh trigger after `TurnCommitted`, we would
                     // rebuild the provider session right before it emits the
-                    // assistant response. Keep the projection refresh blocked
-                    // until the turn reaches its terminal event.
-                    let mut product_turn_in_flight = false;
-                    let mut product_turn_committed = false;
-                    let mut product_output_started = false;
+                    // assistant response. The DSL-owned
+                    // `realtime_product_turn_phase` (U9 / dogma #4) tracks the
+                    // turn lifecycle; the shell reads
+                    // `RealtimeProductTurnHandle::current_phase` for routing
+                    // decisions instead of hand-tracking three booleans.
+                    //
                     // Gates for proactive reconnect on clean provider-session
                     // close (`RealtimeProductSessionUpdate::Closed`). A clean
                     // close is treated as a mid-work disconnect worth
@@ -942,21 +943,28 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let mut poll_interval = tokio::time::interval(RECONNECT_POLL_INTERVAL);
                     poll_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-                    // W2-E: install a typed observer on the session's DSL
-                    // handle so `SessionContextAdvanced` effects arrive as
+                    // W2-E + U9: install typed observers on the session's DSL
+                    // handles so `SessionContextAdvanced` effects arrive as
                     // typed notifications instead of a hand-polled watch
-                    // channel. `install_observer_with_baseline` captures
-                    // the current watermark AND installs the observer in
-                    // a single critical section under the DSL authority
-                    // lock, so no tick can slip between the sampled
-                    // baseline and the observer becoming visible.
-                    // Separate `current_watermark_ms` + `install_observer`
-                    // calls would re-introduce the original two-read race
-                    // the handle abstraction is meant to eliminate.
+                    // channel, and the product-turn lifecycle is owned by the
+                    // MeerkatMachine DSL (no shell-local boolean triple). Both
+                    // handles share the session's authority via
+                    // `prepare_bindings`. `install_observer_with_baseline`
+                    // captures the current watermark AND installs the observer
+                    // in a single critical section under the DSL authority
+                    // lock, so no tick can slip between the sampled baseline
+                    // and the observer becoming visible. Separate
+                    // `current_watermark_ms` + `install_observer` calls would
+                    // re-introduce the original two-read race the handle
+                    // abstraction is meant to eliminate.
                     let (projection_refresh_tx, mut projection_refresh_rx) =
                         mpsc::channel::<u64>(16);
+                    let realtime_handles =
+                        resolve_session_realtime_handles(&state.runtime, binding.as_ref()).await;
                     let session_context_handle =
-                        resolve_session_context_handle(&state.runtime, binding.as_ref()).await;
+                        realtime_handles.as_ref().map(|(ctx, _)| Arc::clone(ctx));
+                    let product_turn_handle =
+                        realtime_handles.as_ref().map(|(_, turn)| Arc::clone(turn));
                     let initial_baseline_ms = if let Some(handle) = session_context_handle.as_ref()
                     {
                         let observer: Arc<
@@ -1211,19 +1219,20 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     continue;
                                                 }
                                                 if let Some(product_session) = product_session.as_mut() {
-                                                    let preempt = should_preempt_product_turn_on_input(
-                                                        product_turn_in_flight,
-                                                        product_turn_committed,
-                                                        product_output_started,
-                                                    );
+                                                    let preempt = product_turn_handle
+                                                        .as_ref()
+                                                        .is_some_and(|h| h.should_preempt_on_input());
                                                     if preempt
                                                         && std::env::var_os(
                                                             "RKAT_OPENAI_REALTIME_TRACE_LIFECYCLE",
                                                         )
                                                         .is_some()
                                                     {
+                                                        let phase = product_turn_handle
+                                                            .as_ref()
+                                                            .map(|h| h.current_phase());
                                                         eprintln!(
-                                                            "[realtime-ws-input] preempt triggered: in_flight={product_turn_in_flight} committed={product_turn_committed} output_started={product_output_started}",
+                                                            "[realtime-ws-input] preempt triggered: phase={phase:?}",
                                                         );
                                                     }
                                                     if preempt {
@@ -1236,16 +1245,20 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             .await;
                                                         match respond_rx.await {
                                                             Ok(Ok(())) => {
-                                                                product_turn_in_flight = false;
-                                                                product_turn_committed = false;
-                                                                product_output_started = false;
+                                                                if let Some(handle) =
+                                                                    product_turn_handle.as_ref()
+                                                                {
+                                                                    let _ = handle.turn_terminal();
+                                                                }
                                                             }
                                                             Ok(Err(error))
                                                                 if preemptive_interrupt_can_be_ignored(&error) =>
                                                             {
-                                                                product_turn_in_flight = false;
-                                                                product_turn_committed = false;
-                                                                product_output_started = false;
+                                                                if let Some(handle) =
+                                                                    product_turn_handle.as_ref()
+                                                                {
+                                                                    let _ = handle.turn_terminal();
+                                                                }
                                                             }
                                                             Ok(Err(error)) => {
                                                                 let _ = send_server_frame(
@@ -1266,7 +1279,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             }
                                                         }
                                                     }
-                                                    let starting_new_turn = !product_turn_in_flight;
+                                                    let turn_was_idle = product_turn_handle
+                                                        .as_ref()
+                                                        .is_none_or(|h| !h.is_in_flight());
                                                     // Barge-in continuity:
                                                     // after preempting the in-flight response, the
                                                     // caller is about to stream the audio/text for the
@@ -1279,7 +1294,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     // when this input chunk is arriving on a cleanly
                                                     // idle provider session.
                                                     if !preempt
-                                                        && !product_turn_in_flight
+                                                        && turn_was_idle
                                                         && projection_freshness.is_stale_immediate()
                                                     {
                                                         // Derived provider projections should refresh
@@ -1329,10 +1344,18 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         .await;
                                                     match respond_rx.await {
                                                         Ok(Ok(())) => {
-                                                            if starting_new_turn {
-                                                                product_output_started = false;
+                                                            // The DSL `ProductTurnInFlight`
+                                                            // transition is guard-rejected when
+                                                            // already non-idle, so this single
+                                                            // fire handles both "starting new
+                                                            // turn" and "continuing within the
+                                                            // same turn" paths. Handle returns
+                                                            // `Ok(false)` on the continuation case.
+                                                            if let Some(handle) =
+                                                                product_turn_handle.as_ref()
+                                                            {
+                                                                let _ = handle.turn_in_flight();
                                                             }
-                                                            product_turn_in_flight = true;
                                                             // Client-initiated work has now
                                                             // started on the provider session.
                                                             // Any subsequent clean close while
@@ -1481,8 +1504,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         max_notified = next_notified;
                                     }
                                 }
+                                let turn_in_flight = product_turn_handle
+                                    .as_ref()
+                                    .is_some_and(|h| h.is_in_flight());
                                 projection_freshness = projection_freshness
-                                    .on_context_advanced(max_notified, product_turn_in_flight);
+                                    .on_context_advanced(max_notified, turn_in_flight);
                                 if let Some(product_session) = product_session.as_mut()
                                     && projection_freshness.is_stale_immediate()
                                 {
@@ -1537,40 +1563,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 eprintln!("[realtime-ws-update] {tag}");
                                             }
                                         }
-                                        let advances_projection_known_state = match &event {
-                                            RealtimeSessionEvent::TurnCommitted => true,
-                                            RealtimeSessionEvent::TurnCompleted { stop_reason, .. } => {
-                                                product_turn_completion_is_logically_terminal(*stop_reason)
-                                            }
-                                            RealtimeSessionEvent::ToolCallRequested { .. } => true,
-                                            // InputTranscriptFinal is the canonical-append point for
-                                            // audio turns (the transcript-final event is what mutates
-                                            // the runtime session history). The projection baseline
-                                            // must advance here or the async mutation signal will set
-                                            // `projection_refresh_dirty` for an own-turn mutation and
-                                            // cause a spurious provider-session reopen at turn end.
-                                            RealtimeSessionEvent::InputTranscriptFinal { .. } => true,
-                                            _ => false,
-                                        };
-                                        let logical_turn_completed = match &event {
-                                            RealtimeSessionEvent::TurnCompleted { stop_reason, .. } => {
-                                                product_turn_completion_is_logically_terminal(*stop_reason)
-                                            }
-                                            _ => false,
-                                        };
-                                        let tool_call_requested = matches!(
-                                            &event,
-                                            RealtimeSessionEvent::ToolCallRequested { .. }
-                                        );
-                                        let turn_committed = matches!(&event, RealtimeSessionEvent::TurnCommitted);
-                                        let output_started = matches!(
-                                            &event,
-                                            RealtimeSessionEvent::OutputTextDelta { .. }
-                                                | RealtimeSessionEvent::OutputAudioChunk { .. }
-                                                | RealtimeSessionEvent::OutputVideoChunk { .. }
-                                                | RealtimeSessionEvent::ToolCallRequested { .. }
-                                        );
-                                        let interrupted = matches!(&event, RealtimeSessionEvent::Interrupted);
+                                        let lifecycle = classify_product_session_event(&event);
                                         match match event {
                                             RealtimeSessionEvent::ToolCallRequested {
                                                 call_id,
@@ -1639,7 +1632,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         // spurious provider-session rebuild for our own-turn
                                         // transcript commit (the fix the old
                                         // `known == current => clear dirty` check encoded).
-                                        if advances_projection_known_state {
+                                        if lifecycle.advances_projection_known_state {
                                             let watermark_ms = session_context_handle
                                                 .as_ref()
                                                 .map(|h| h.current_watermark_ms())
@@ -1649,9 +1642,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             // don't transition into `StaleDeferred` — the DSL
                                             // already recorded this advance, and we're about to
                                             // consume it via `on_refreshed` below.
-                                            while let Ok(_notified_at) =
-                                                projection_refresh_rx.try_recv()
-                                            {
+                                            while projection_refresh_rx.try_recv().is_ok() {
                                                 // Intentionally discarded. The canonical DSL
                                                 // watermark is authoritative; the observer just
                                                 // signalled us to look.
@@ -1663,43 +1654,47 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             projection_freshness =
                                                 projection_freshness.on_refreshed(watermark_ms);
                                         }
-                                        if turn_committed {
-                                            product_turn_committed = true;
+                                        if let Some(handle) = product_turn_handle.as_ref() {
+                                            // U9: fire typed lifecycle inputs in the order the
+                                            // event carries them. A provider-issued tool call is
+                                            // both output_started (it triggers assistant-side
+                                            // progress) and an in-flight turn marker; the DSL
+                                            // handles both via two guard-rejected-idempotent
+                                            // fires.
+                                            if lifecycle.turn_committed {
+                                                let _ = handle.turn_committed();
+                                            }
+                                            if lifecycle.tool_call_requested {
+                                                // A provider-issued tool call is part of the
+                                                // currently active provider-managed turn even if
+                                                // the backend never emitted an explicit
+                                                // TurnStarted marker. Fire in-flight so a
+                                                // `ToolCallRequested`-only turn (no prior Input)
+                                                // doesn't look idle to the projection gate.
+                                                let _ = handle.turn_in_flight();
+                                            }
+                                            if lifecycle.output_started {
+                                                let _ = handle.output_started();
+                                            }
+                                            if lifecycle.interrupted {
+                                                let _ = handle.turn_interrupted();
+                                            }
                                         }
-                                        if tool_call_requested {
-                                            // A provider-issued tool call is part of the
-                                            // currently active provider-managed turn even if the
-                                            // backend never emitted an explicit TurnStarted
-                                            // marker. Treating it as idle lets the canonical
-                                            // tool-dispatch mutation masquerade as an external
-                                            // between-turn edit and spuriously reconstruct the
-                                            // provider session.
-                                            product_turn_in_flight = true;
-                                            // A provider-issued tool call is
-                                            // not yet a terminal turn
-                                            // completion, so a subsequent
-                                            // clean close must not treat the
-                                            // preceding turn as "finished"
-                                            // when deciding whether to
-                                            // auto-reconnect.
+                                        if lifecycle.tool_call_requested {
+                                            // A provider-issued tool call is not yet a terminal
+                                            // turn completion, so a subsequent clean close must
+                                            // not treat the preceding turn as "finished" when
+                                            // deciding whether to auto-reconnect.
                                             last_turn_terminally_completed = false;
                                         }
-                                        if output_started {
-                                            product_output_started = true;
-                                        }
-                                        if interrupted {
-                                            product_output_started = false;
-                                        }
-                                        if logical_turn_completed {
-                                            product_turn_in_flight = false;
-                                            product_turn_committed = false;
-                                            product_output_started = false;
-                                            // Record that the last in-flight
-                                            // turn reached a terminal stop
-                                            // reason so a subsequent clean
-                                            // close is treated as "session
-                                            // finished the requested work"
-                                            // rather than a mid-turn drop.
+                                        if lifecycle.logical_turn_completed {
+                                            if let Some(handle) = product_turn_handle.as_ref() {
+                                                let _ = handle.turn_terminal();
+                                            }
+                                            // Record that the last in-flight turn reached a
+                                            // terminal stop reason so a subsequent clean close
+                                            // is treated as "session finished the requested
+                                            // work" rather than a mid-turn drop.
                                             last_turn_terminally_completed = true;
                                             // W2-E: promote `StaleDeferred` → `StaleImmediate`
                                             // at turn end. This is the specific fix for the s71
@@ -1753,9 +1748,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         }
                                     }
                                     Some(RealtimeProductSessionUpdate::Closed) => {
-                                        product_turn_in_flight = false;
-                                        product_turn_committed = false;
-                                        product_output_started = false;
+                                        if let Some(handle) = product_turn_handle.as_ref() {
+                                            let _ = handle.turn_terminal();
+                                        }
                                         // W2-E: the observer remains installed on the
                                         // session's DSL handle — no separate task to abort.
                                         // The freshness state resets to the current
@@ -1819,9 +1814,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         }
                                     }
                                     Some(RealtimeProductSessionUpdate::Error { error, retryable }) => {
-                                        product_turn_in_flight = false;
-                                        product_turn_committed = false;
-                                        product_output_started = false;
+                                        if let Some(handle) = product_turn_handle.as_ref() {
+                                            let _ = handle.turn_terminal();
+                                        }
                                         // W2-E: observer lifetime is bound to the DSL
                                         // handle; no separate task to abort. Reset
                                         // freshness to a fresh `Clean` baseline.
@@ -2492,24 +2487,70 @@ fn channel_event(event: RealtimeEvent) -> RealtimeServerFrame {
     RealtimeServerFrame::ChannelEvent(RealtimeChannelEventFrame { event })
 }
 
-fn should_preempt_product_turn_on_input(
-    product_turn_in_flight: bool,
-    product_turn_committed: bool,
-    product_output_started: bool,
-) -> bool {
-    // Product-layer barge-in rule:
-    // in provider-managed mode, the host must not infer that every chunk
-    // arriving after `TurnCommitted` starts a brand-new turn. Server VAD can
-    // commit while the client is still draining trailing silence or buffered
-    // chunks from the same utterance. Cancelling on that boundary guesses at
-    // provider semantics and can kill a response before assistant output has
-    // even begun.
-    //
-    // Preemption is only sound once the committed turn has visible
-    // assistant-side progress. Before that, the provider remains the semantic
-    // owner of whether the current input stream still belongs to the same
-    // utterance.
-    product_turn_in_flight && product_turn_committed && product_output_started
+/// Typed classification of a [`RealtimeSessionEvent`] into the
+/// lifecycle-meaningful aspects the realtime-WS dispatch loop consumes.
+///
+/// The three "meaningful for turn lifecycle" bits (committed /
+/// output_started / interrupted / tool_call) are fed into the
+/// [`RealtimeProductTurnHandle`] as typed DSL inputs; the projection-
+/// refresh bit (`advances_projection_known_state`) feeds the freshness
+/// state machine. Centralising the classification here keeps the dispatch
+/// loop free of `matches!` folklore over provider-session event variants.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProductSessionEventLifecycle {
+    /// This event advances canonical session-context truth, so the
+    /// realtime projection baseline should be re-seeded on observation.
+    advances_projection_known_state: bool,
+    /// Equivalent to the old `logical_turn_completed` — a `TurnCompleted`
+    /// whose stop reason is logically terminal for the provider turn.
+    logical_turn_completed: bool,
+    /// The provider just issued a tool call.
+    tool_call_requested: bool,
+    /// `TurnCommitted` arrived.
+    turn_committed: bool,
+    /// An output delta / chunk / tool call arrived (any visible
+    /// assistant-side progress).
+    output_started: bool,
+    /// The provider interrupted the in-flight turn.
+    interrupted: bool,
+}
+
+fn classify_product_session_event(event: &RealtimeSessionEvent) -> ProductSessionEventLifecycle {
+    let logical_turn_completed = matches!(
+        event,
+        RealtimeSessionEvent::TurnCompleted { stop_reason, .. }
+            if product_turn_completion_is_logically_terminal(*stop_reason)
+    );
+    let advances_projection_known_state = matches!(
+        event,
+        RealtimeSessionEvent::TurnCommitted
+            | RealtimeSessionEvent::ToolCallRequested { .. }
+            // InputTranscriptFinal is the canonical-append point for audio
+            // turns (the transcript-final event mutates the runtime session
+            // history). The projection baseline must advance here or the
+            // async mutation signal would set `StaleDeferred` for an own-
+            // turn mutation and cause a spurious provider-session reopen at
+            // turn end.
+            | RealtimeSessionEvent::InputTranscriptFinal { .. }
+    ) || logical_turn_completed;
+    let tool_call_requested = matches!(event, RealtimeSessionEvent::ToolCallRequested { .. });
+    let turn_committed = matches!(event, RealtimeSessionEvent::TurnCommitted);
+    let output_started = matches!(
+        event,
+        RealtimeSessionEvent::OutputTextDelta { .. }
+            | RealtimeSessionEvent::OutputAudioChunk { .. }
+            | RealtimeSessionEvent::OutputVideoChunk { .. }
+            | RealtimeSessionEvent::ToolCallRequested { .. }
+    );
+    let interrupted = matches!(event, RealtimeSessionEvent::Interrupted);
+    ProductSessionEventLifecycle {
+        advances_projection_known_state,
+        logical_turn_completed,
+        tool_call_requested,
+        turn_committed,
+        output_started,
+        interrupted,
+    }
 }
 
 async fn require_product_session_reattach(
@@ -3045,7 +3086,8 @@ async fn refresh_product_session_projection(
 ///      a turn is in flight; mark `StaleImmediate` otherwise.
 ///   2. Turn-lifecycle transition (`logical_turn_completed`): promote
 ///      `StaleDeferred` to `StaleImmediate` and drain.
-///   3. Input-chunk arrival with `!product_turn_in_flight`: drain
+///   3. Input-chunk arrival with an idle product-turn phase
+///      (`!RealtimeProductTurnHandle::is_in_flight`): drain
 ///      `StaleImmediate` at the canonical refresh site.
 ///
 /// The discriminant is always one of:
@@ -3152,15 +3194,21 @@ impl meerkat_core::handles::SessionContextAdvancedObserver for ProjectionRefresh
     }
 }
 
-/// Resolve the session's [`SessionContextHandle`] for this socket by
-/// re-preparing bindings via the runtime adapter. Returns `None` when the
-/// socket has no bound session yet — the observer is then never installed
-/// and the realtime socket runs in "no projection refresh" mode (which is
-/// fine: standalone / unbound sockets have nothing to refresh).
-async fn resolve_session_context_handle(
+/// Resolve the session's realtime DSL handles (context-refresh +
+/// product-turn lifecycle) for this socket by re-preparing bindings via
+/// the runtime adapter.
+///
+/// Returns `None` when the socket has no bound session yet — the
+/// observers are then never installed and the realtime socket runs in
+/// "no projection refresh" mode (standalone / unbound sockets have
+/// nothing to refresh and no turn lifecycle to track through the DSL).
+async fn resolve_session_realtime_handles(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
-) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
+) -> Option<(
+    Arc<dyn meerkat_core::handles::SessionContextHandle>,
+    Arc<dyn meerkat_core::handles::RealtimeProductTurnHandle>,
+)> {
     let session_id = resolve_primary_session_id(
         runtime,
         binding,
@@ -3169,15 +3217,17 @@ async fn resolve_session_context_handle(
     .await
     .ok()?;
     // `prepare_bindings` re-binds the session's DSL authority to a fresh
-    // runtime epoch; the `session_context` field on the returned bindings
-    // is the canonical handle shared by every other consumer of this
-    // session's DSL authority.
+    // runtime epoch; the returned bindings expose the canonical handles
+    // shared by every other consumer of this session's DSL authority.
     let bindings = runtime
         .runtime_adapter()
         .prepare_bindings(session_id)
         .await
         .ok()?;
-    Some(Arc::clone(&bindings.session_context))
+    Some((
+        Arc::clone(&bindings.session_context),
+        Arc::clone(&bindings.realtime_product_turn),
+    ))
 }
 
 async fn handle_channel_input(
@@ -3461,7 +3511,7 @@ mod tests {
         RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion, RealtimeReconnectFailure,
         RealtimeReconnectOverlay, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
         RealtimeWsHost, product_turn_completion_disposition,
-        product_turn_completion_is_logically_terminal, should_preempt_product_turn_on_input,
+        product_turn_completion_is_logically_terminal,
     };
     use tokio::time::Instant;
 
@@ -3539,17 +3589,85 @@ mod tests {
 
     #[test]
     fn product_turn_preemption_requires_visible_output_progress() {
-        assert!(
-            !should_preempt_product_turn_on_input(true, true, false),
-            "post-commit chunks from the same utterance must not be reclassified as a new turn before assistant output starts"
+        use meerkat_core::handles::{RealtimeProductTurnHandle, RealtimeProductTurnPhase};
+        use meerkat_runtime::RuntimeRealtimeProductTurnHandle;
+
+        // Committed-but-no-output: must not preempt. Post-commit chunks
+        // from the same utterance can't be reclassified as a new turn
+        // before assistant output starts.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.turn_committed().unwrap());
+        assert_eq!(handle.current_phase(), RealtimeProductTurnPhase::Committed);
+        assert!(!handle.should_preempt_on_input());
+
+        // Committed + output_started: barge-in remains valid once the
+        // committed turn has visible assistant-side progress.
+        assert!(handle.output_started().unwrap());
+        assert_eq!(
+            handle.current_phase(),
+            RealtimeProductTurnPhase::Preemptible
         );
-        assert!(
-            should_preempt_product_turn_on_input(true, true, true),
-            "barge-in remains valid once the committed turn has visible assistant-side progress"
+        assert!(handle.should_preempt_on_input());
+
+        // In-flight + output_started but not yet committed: input still
+        // belongs to the current user utterance.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.output_started().unwrap());
+        assert_eq!(
+            handle.current_phase(),
+            RealtimeProductTurnPhase::OutputStarted
         );
-        assert!(
-            !should_preempt_product_turn_on_input(true, false, true),
-            "input before commit still belongs to the current user utterance"
+        assert!(!handle.should_preempt_on_input());
+    }
+
+    #[test]
+    fn product_turn_phase_is_idempotent_under_guard_rejection() {
+        use meerkat_core::handles::{RealtimeProductTurnHandle, RealtimeProductTurnPhase};
+        use meerkat_runtime::RuntimeRealtimeProductTurnHandle;
+
+        // Duplicate `turn_in_flight()` from `AwaitingProgress` is
+        // guard-rejected and surfaces as `Ok(false)`.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(!handle.turn_in_flight().unwrap());
+        assert_eq!(
+            handle.current_phase(),
+            RealtimeProductTurnPhase::AwaitingProgress
+        );
+
+        // `turn_terminal()` from `Idle` is guard-rejected.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(!handle.turn_terminal().unwrap());
+        assert_eq!(handle.current_phase(), RealtimeProductTurnPhase::Idle);
+    }
+
+    #[test]
+    fn product_turn_interrupt_clears_output_started_only() {
+        use meerkat_core::handles::{RealtimeProductTurnHandle, RealtimeProductTurnPhase};
+        use meerkat_runtime::RuntimeRealtimeProductTurnHandle;
+
+        // Preemptible → Committed on interrupt.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.turn_committed().unwrap());
+        assert!(handle.output_started().unwrap());
+        assert_eq!(
+            handle.current_phase(),
+            RealtimeProductTurnPhase::Preemptible
+        );
+        assert!(handle.turn_interrupted().unwrap());
+        assert_eq!(handle.current_phase(), RealtimeProductTurnPhase::Committed);
+
+        // OutputStarted → AwaitingProgress on interrupt.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.output_started().unwrap());
+        assert!(handle.turn_interrupted().unwrap());
+        assert_eq!(
+            handle.current_phase(),
+            RealtimeProductTurnPhase::AwaitingProgress
         );
     }
 

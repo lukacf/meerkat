@@ -66,6 +66,15 @@ machine! {
             reserved_interaction_streams: Set<PeerCorrelationId>,
             attached_interaction_streams: Set<PeerCorrelationId>,
 
+            // --- Realtime product-turn lifecycle (U9 / dogma #4) ---
+            //
+            // Closed-phase encoding of the product-session turn lifecycle:
+            // `Idle` → `AwaitingProgress` → {`Committed`, `OutputStarted`}
+            // → `Preemptible` → `Idle`. Replaces the shell-local boolean
+            // triple (`product_turn_in_flight`, `product_turn_committed`,
+            // `product_output_started`) in the realtime-WS dispatcher.
+            realtime_product_turn_phase: Enum<RealtimeProductTurnPhase>,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport capability
@@ -102,6 +111,7 @@ machine! {
             last_session_context_updated_at_ms = 0,
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
+            realtime_product_turn_phase = RealtimeProductTurnPhase::Idle,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -211,6 +221,14 @@ machine! {
             InteractionStreamCompleted { corr_id: PeerCorrelationId },
             InteractionStreamExpired { corr_id: PeerCorrelationId },
             InteractionStreamClosedEarly { corr_id: PeerCorrelationId },
+            // Realtime product-turn lifecycle inputs (U9 / dogma #4). Fired
+            // from the realtime-WS dispatcher on every observed provider-
+            // session event; idempotent transitions are guard-rejected.
+            ProductTurnInFlight,
+            ProductTurnCommitted,
+            ProductOutputStarted,
+            ProductTurnInterrupted,
+            ProductTurnTerminal,
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -335,6 +353,8 @@ machine! {
             // Interaction stream lifecycle effects (U6 / dogma #5).
             InteractionStreamStateChanged { corr_id: PeerCorrelationId, new_state: Enum<InteractionStreamState> },
             InteractionStreamCleanup { corr_id: PeerCorrelationId },
+            // Realtime product-turn phase change effect (U9 / dogma #4).
+            RealtimeProductTurnPhaseChanged { new_phase: Enum<RealtimeProductTurnPhase> },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -393,6 +413,7 @@ machine! {
         disposition SessionContextAdvanced => external,
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
+        disposition RealtimeProductTurnPhaseChanged => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -1892,6 +1913,114 @@ machine! {
         }
 
         // =====================================================================
+        // Realtime product-turn lifecycle transitions (U9 / dogma #4)
+        // =====================================================================
+
+        transition ProductTurnInFlight {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInFlight
+            guard "only_from_idle" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
+        }
+
+        transition ProductTurnCommittedFromAwaiting {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnCommitted
+            guard "from_awaiting" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
+        }
+
+        transition ProductTurnCommittedFromOutput {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnCommitted
+            guard "from_output_started" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
+        }
+
+        transition ProductOutputStartedFromAwaiting {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductOutputStarted
+            guard "from_awaiting" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::OutputStarted;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::OutputStarted }
+        }
+
+        transition ProductOutputStartedFromCommitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductOutputStarted
+            guard "from_committed" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Committed
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
+        }
+
+        transition ProductTurnInterruptedFromPreemptible {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInterrupted
+            guard "from_preemptible" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Preemptible
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
+        }
+
+        transition ProductTurnInterruptedFromOutput {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInterrupted
+            guard "from_output_started" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
+        }
+
+        transition ProductTurnTerminal {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnTerminal
+            guard "not_already_idle" {
+                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Idle;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Idle }
+        }
+
+        // =====================================================================
         // Live-topology reconfigure transitions
         // =====================================================================
 
@@ -2178,6 +2307,25 @@ pub enum RealtimeBindingState {
     BindingNotReady,
     BindingReady,
     ReplacementPending,
+}
+
+/// Product-turn lifecycle phase for a provider-managed realtime session
+/// (U9 / dogma #4).
+///
+/// Unit variants — collapses the old shell-local boolean triple
+/// (`product_turn_in_flight`, `product_turn_committed`,
+/// `product_output_started`) into a closed five-phase lifecycle owned
+/// by the DSL. The `Preemptible` phase corresponds exactly to the "both
+/// committed and output-started" conjunction that the realtime shell
+/// used to compute via `should_preempt_product_turn_on_input`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeProductTurnPhase {
+    #[default]
+    Idle,
+    AwaitingProgress,
+    Committed,
+    OutputStarted,
+    Preemptible,
 }
 
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).

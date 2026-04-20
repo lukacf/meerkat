@@ -79,6 +79,15 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "AttachSessionIngress",
         "AttachMobIngress",
         "DetachIngress",
+        // U9 (dogma #4): realtime product-turn lifecycle is driven via
+        // `RealtimeProductTurnHandle` (meerkat-core/src/handles.rs) from the
+        // realtime-WS dispatch loop in `meerkat-rpc::realtime_ws`, not
+        // through `MeerkatMachineCommand`.
+        "ProductTurnInFlight",
+        "ProductTurnCommitted",
+        "ProductOutputStarted",
+        "ProductTurnInterrupted",
+        "ProductTurnTerminal",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()

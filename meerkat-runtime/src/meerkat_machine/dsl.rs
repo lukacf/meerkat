@@ -288,6 +288,49 @@ pub enum RealtimeBindingState {
     ReplacementPending,
 }
 
+/// Product-turn lifecycle phase for a provider-managed realtime session
+/// (U9 / dogma #4).
+///
+/// The realtime-WS shell previously tracked turn lifecycle as three shell
+/// locals (`product_turn_in_flight`, `product_turn_committed`,
+/// `product_output_started`). This enum collapses the product of those
+/// three orthogonal milestones into a closed set of phases the DSL owns:
+///
+/// - `Idle`: between turns — no input accepted yet.
+/// - `AwaitingProgress`: input accepted; no commit, no output observed.
+/// - `Committed`: `TurnCommitted` arrived but no output delta yet.
+/// - `OutputStarted`: output delta / tool call arrived but no commit yet.
+/// - `Preemptible`: both `TurnCommitted` and output have landed — the
+///   only state in which an input chunk should preempt the current
+///   provider-managed turn (the "committed turn has visible assistant-side
+///   progress" rule documented on `should_preempt_on_input`).
+///
+/// Transitions are idempotent via guard rejection: the runtime handle
+/// reports guard-rejected transitions as `Ok(false)` so the shell can
+/// fire unconditionally on every lifecycle event without tracking its
+/// own phase.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeProductTurnPhase {
+    #[default]
+    Idle,
+    AwaitingProgress,
+    Committed,
+    OutputStarted,
+    Preemptible,
+}
+
 /// Bridging type for an MCP server identifier, matching the catalog type.
 /// Used as the key in `mcp_server_states` and carried on MCP lifecycle
 /// inputs and effects.
@@ -959,6 +1002,16 @@ machine! {
             reserved_interaction_streams: Set<PeerCorrelationId>,
             attached_interaction_streams: Set<PeerCorrelationId>,
 
+            // --- Realtime product-turn lifecycle (U9 / dogma #4) ---
+            //
+            // Collapses the old shell locals (`product_turn_in_flight`,
+            // `product_turn_committed`, `product_output_started`) into a
+            // canonical five-phase closed set owned by the DSL. The
+            // realtime-WS shell fires one input per lifecycle event and
+            // reads `should_preempt_on_input` off the typed handle; no
+            // shell-side bool tracking, no helper-local event matching.
+            realtime_product_turn_phase: Enum<RealtimeProductTurnPhase>,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport
@@ -1067,6 +1120,7 @@ machine! {
             last_session_context_updated_at_ms = 0,
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
+            realtime_product_turn_phase = RealtimeProductTurnPhase::Idle,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -1289,6 +1343,17 @@ machine! {
             InteractionStreamCompleted { corr_id: PeerCorrelationId },
             InteractionStreamExpired { corr_id: PeerCorrelationId },
             InteractionStreamClosedEarly { corr_id: PeerCorrelationId },
+            // Realtime product-turn lifecycle inputs (U9 / dogma #4). The
+            // realtime-WS shell fires one of these per observed provider-
+            // session event (input accepted, TurnCommitted, output delta /
+            // tool call, interrupted, logical turn completed); idempotent
+            // transitions are guard-rejected and surfaced as `Ok(false)`
+            // by the handle.
+            ProductTurnInFlight,
+            ProductTurnCommitted,
+            ProductOutputStarted,
+            ProductTurnInterrupted,
+            ProductTurnTerminal,
             // Peer-ingress transport capability ownership (W2-G).
             //
             // `AttachSessionIngress` only succeeds from `Unattached`:
@@ -1407,6 +1472,12 @@ machine! {
             // shell-side channel projection.
             InteractionStreamStateChanged { corr_id: PeerCorrelationId, new_state: InteractionStreamState },
             InteractionStreamCleanup { corr_id: PeerCorrelationId },
+            // Realtime product-turn lifecycle effect (U9 / dogma #4). Emitted
+            // on every phase-advancing transition so the realtime-WS shell
+            // can log / observe phase changes without polling the handle.
+            // The realtime-WS dispatch loop reads the typed handle directly
+            // for preempt decisions; this effect is currently informational.
+            RealtimeProductTurnPhaseChanged { new_phase: Enum<RealtimeProductTurnPhase> },
         }
 
         // =====================================================================
@@ -1470,6 +1541,7 @@ machine! {
         disposition SessionContextAdvanced => external,
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
+        disposition RealtimeProductTurnPhaseChanged => external,
 
         // =====================================================================
         // Invariants
@@ -4387,6 +4459,135 @@ machine! {
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::ClosedEarly }
             emit InteractionStreamCleanup { corr_id: corr_id }
+        }
+
+        // =====================================================================
+        // Realtime product-turn lifecycle (U9 / dogma #4)
+        // =====================================================================
+        //
+        // Five-phase lifecycle: Idle → AwaitingProgress → {Committed,
+        // OutputStarted} → Preemptible → Idle. Each transition is guarded
+        // on the source phase(s) for which it advances; idempotent fires
+        // (e.g., `ProductTurnCommitted` when already `Committed` or
+        // `Preemptible`) are guard-rejected and surfaced as `Ok(false)` by
+        // the runtime handle, so the realtime-WS shell can fire
+        // unconditionally on every observed provider-session event without
+        // tracking its own phase.
+
+        // Input accepted — only meaningful from Idle. In-flight inputs on
+        // live turns do not rewind the phase.
+        transition ProductTurnInFlight {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInFlight
+            guard "only_from_idle" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
+        }
+
+        // `TurnCommitted` arrived from the provider. Valid from
+        // AwaitingProgress (→ Committed) and OutputStarted (→ Preemptible).
+        transition ProductTurnCommittedFromAwaiting {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnCommitted
+            guard "from_awaiting" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
+        }
+
+        transition ProductTurnCommittedFromOutput {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnCommitted
+            guard "from_output_started" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
+        }
+
+        // Output delta / tool call arrived. Valid from AwaitingProgress
+        // (→ OutputStarted) and Committed (→ Preemptible).
+        transition ProductOutputStartedFromAwaiting {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductOutputStarted
+            guard "from_awaiting" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::OutputStarted;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::OutputStarted }
+        }
+
+        transition ProductOutputStartedFromCommitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductOutputStarted
+            guard "from_committed" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Committed
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
+        }
+
+        // Interrupt clears the "output-started" milestone without tearing
+        // down the turn. Preemptible → Committed; OutputStarted →
+        // AwaitingProgress. Idempotent from Idle / AwaitingProgress /
+        // Committed is handled by the monotonic pair below.
+        transition ProductTurnInterruptedFromPreemptible {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInterrupted
+            guard "from_preemptible" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Preemptible
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
+        }
+
+        transition ProductTurnInterruptedFromOutput {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnInterrupted
+            guard "from_output_started" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
+        }
+
+        // Logical-turn terminal. Rewinds any active phase back to Idle.
+        // Idempotent from Idle is rejected by the guard.
+        transition ProductTurnTerminal {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ProductTurnTerminal
+            guard "not_already_idle" {
+                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Idle;
+            }
+            to Idle
+            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Idle }
         }
 
         // =====================================================================

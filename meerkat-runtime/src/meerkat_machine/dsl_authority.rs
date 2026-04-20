@@ -157,6 +157,7 @@ pub(crate) fn project_state(
         last_session_context_updated_at_ms: 0,
         reserved_interaction_streams: std::collections::BTreeSet::new(),
         attached_interaction_streams: std::collections::BTreeSet::new(),
+        realtime_product_turn_phase: mm_dsl::RealtimeProductTurnPhase::Idle,
         peer_ingress_owner_kind: super::dsl::PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,

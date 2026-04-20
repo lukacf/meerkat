@@ -328,6 +328,11 @@ impl MeerkatMachine {
                                 &shared_handle_authority,
                             )),
                         )),
+                        realtime_product_turn: Arc::new(
+                            crate::handles::RuntimeRealtimeProductTurnHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
+                        ),
                     },
                 ))
             }

@@ -774,6 +774,9 @@ mod tests {
             interaction_stream: Some(Arc::new(
                 meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
             )),
+            realtime_product_turn: Arc::new(
+                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
+            ),
         };
 
         let req = CreateSessionRequest {
@@ -969,6 +972,9 @@ mod tests {
             interaction_stream: Some(Arc::new(
                 meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
             )),
+            realtime_product_turn: Arc::new(
+                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
+            ),
         };
 
         let req = CreateSessionRequest {

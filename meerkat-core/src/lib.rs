@@ -133,7 +133,8 @@ pub use gateway::{
 };
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslTransitionError,
-    ExternalToolSurfaceHandle, McpServerLifecycleHandle, PeerCommsHandle, SessionAdmissionHandle,
+    ExternalToolSurfaceHandle, McpServerLifecycleHandle, PeerCommsHandle,
+    RealtimeProductTurnHandle, RealtimeProductTurnPhase, SessionAdmissionHandle,
     SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle, TurnStateSnapshot,
 };
 pub use hooks::{

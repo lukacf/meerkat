@@ -68,7 +68,8 @@ pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,
     RuntimeMcpServerLifecycleHandle, RuntimePeerCommsHandle, RuntimePeerInteractionHandle,
-    RuntimeSessionAdmissionHandle, RuntimeSessionContextHandle, RuntimeTurnStateHandle,
+    RuntimeRealtimeProductTurnHandle, RuntimeSessionAdmissionHandle, RuntimeSessionContextHandle,
+    RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,

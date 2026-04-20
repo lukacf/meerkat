@@ -979,6 +979,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                     as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
                             // U6 (dogma #5): same rationale as `peer_interaction`.
                             interaction_stream: None,
+                            realtime_product_turn: Arc::new(
+                                meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
+                            ),
                         },
                     )
                 })

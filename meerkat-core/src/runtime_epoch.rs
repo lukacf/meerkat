@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
     AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, InteractionStreamHandle,
-    McpServerLifecycleHandle, PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle,
-    SessionClaimHandle, SessionContextHandle, TurnStateHandle,
+    McpServerLifecycleHandle, PeerCommsHandle, PeerInteractionHandle, RealtimeProductTurnHandle,
+    SessionAdmissionHandle, SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -207,6 +207,14 @@ pub struct SessionRuntimeBindings {
     /// without a session DSL leave this `None` and the comms runtime falls
     /// back to standalone bookkeeping seeded by an ephemeral handle.
     pub interaction_stream: Option<Arc<dyn InteractionStreamHandle>>,
+    /// Realtime product-turn lifecycle DSL handle (U9 / dogma #4).
+    ///
+    /// Replaces the shell-local `product_turn_in_flight` /
+    /// `product_turn_committed` / `product_output_started` triple in the
+    /// realtime-WS dispatcher with a canonical typed phase owned by the
+    /// session's MeerkatMachine. Shares the same `HandleDslAuthority` as
+    /// the other handles.
+    pub realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -228,6 +236,7 @@ impl Clone for SessionRuntimeBindings {
             session_context: Arc::clone(&self.session_context),
             session_claim_handle: Arc::clone(&self.session_claim_handle),
             interaction_stream: self.interaction_stream.as_ref().map(Arc::clone),
+            realtime_product_turn: Arc::clone(&self.realtime_product_turn),
         }
     }
 }
@@ -263,6 +272,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
                     .as_ref()
                     .map(|_| "<dyn InteractionStreamHandle>"),
             )
+            .field("realtime_product_turn", &"<dyn RealtimeProductTurnHandle>")
             .finish()
     }
 }

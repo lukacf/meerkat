@@ -23,8 +23,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
 - `last_session_context_updated_at_ms`: `u64`
-- `reserved_interaction_streams`: `Set<PeerCorrelationId>`
-- `attached_interaction_streams`: `Set<PeerCorrelationId>`
+- `realtime_product_turn_phase`: `RealtimeProductTurnPhase`
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
 - `peer_ingress_mob_id`: `Option<MobId>`
@@ -86,11 +85,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerRequestReceived`(corr_id: PeerCorrelationId)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
 - `AdvanceSessionContext`(updated_at_ms: u64)
-- `InteractionStreamReserved`(corr_id: PeerCorrelationId)
-- `InteractionStreamAttached`(corr_id: PeerCorrelationId)
-- `InteractionStreamCompleted`(corr_id: PeerCorrelationId)
-- `InteractionStreamExpired`(corr_id: PeerCorrelationId)
-- `InteractionStreamClosedEarly`(corr_id: PeerCorrelationId)
+- `ProductTurnInFlight`
+- `ProductTurnCommitted`
+- `ProductOutputStarted`
+- `ProductTurnInterrupted`
+- `ProductTurnTerminal`
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
 - `ApplyLiveTopologyIdentity`
@@ -185,8 +184,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerInteractionCleanup`(corr_id: PeerCorrelationId)
 - `InboundPeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: InboundPeerRequestState)
 - `SessionContextAdvanced`(updated_at_ms: u64)
-- `InteractionStreamStateChanged`(corr_id: PeerCorrelationId, new_state: InteractionStreamState)
-- `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
+- `RealtimeProductTurnPhaseChanged`(new_phase: RealtimeProductTurnPhase)
 - `LiveTopologyPhaseChanged`
 
 ## Invariants
@@ -2031,209 +2029,388 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SessionContextAdvanced`
 - To: `Stopped`
 
-### `InteractionStreamReservedIdle`
-- From: `Idle`
-- On: `InteractionStreamReserved`(corr_id)
+### `ProductTurnInFlightInitializing`
+- From: `Initializing`
+- On: `ProductTurnInFlight`()
 - Guards:
-  - `not_reserved`
-  - `not_attached`
-- Emits: `InteractionStreamStateChanged`
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnInFlightIdle`
+- From: `Idle`
+- On: `ProductTurnInFlight`()
+- Guards:
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Idle`
 
-### `InteractionStreamReservedAttached`
+### `ProductTurnInFlightAttached`
 - From: `Attached`
-- On: `InteractionStreamReserved`(corr_id)
+- On: `ProductTurnInFlight`()
 - Guards:
-  - `not_reserved`
-  - `not_attached`
-- Emits: `InteractionStreamStateChanged`
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Attached`
 
-### `InteractionStreamReservedRunning`
+### `ProductTurnInFlightRunning`
 - From: `Running`
-- On: `InteractionStreamReserved`(corr_id)
+- On: `ProductTurnInFlight`()
 - Guards:
-  - `not_reserved`
-  - `not_attached`
-- Emits: `InteractionStreamStateChanged`
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Running`
 
-### `InteractionStreamReservedRetired`
+### `ProductTurnInFlightRetired`
 - From: `Retired`
-- On: `InteractionStreamReserved`(corr_id)
+- On: `ProductTurnInFlight`()
 - Guards:
-  - `not_reserved`
-  - `not_attached`
-- Emits: `InteractionStreamStateChanged`
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Retired`
 
-### `InteractionStreamReservedStopped`
+### `ProductTurnInFlightStopped`
 - From: `Stopped`
-- On: `InteractionStreamReserved`(corr_id)
+- On: `ProductTurnInFlight`()
 - Guards:
-  - `not_reserved`
-  - `not_attached`
-- Emits: `InteractionStreamStateChanged`
+  - `only_from_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Stopped`
 
-### `InteractionStreamAttachedIdle`
-- From: `Idle`
-- On: `InteractionStreamAttached`(corr_id)
+### `ProductTurnCommittedFromAwaitingInitializing`
+- From: `Initializing`
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnCommittedFromAwaitingIdle`
+- From: `Idle`
+- On: `ProductTurnCommitted`()
+- Guards:
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Idle`
 
-### `InteractionStreamAttachedAttached`
+### `ProductTurnCommittedFromAwaitingAttached`
 - From: `Attached`
-- On: `InteractionStreamAttached`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Attached`
 
-### `InteractionStreamAttachedRunning`
+### `ProductTurnCommittedFromAwaitingRunning`
 - From: `Running`
-- On: `InteractionStreamAttached`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Running`
 
-### `InteractionStreamAttachedRetired`
+### `ProductTurnCommittedFromAwaitingRetired`
 - From: `Retired`
-- On: `InteractionStreamAttached`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Retired`
 
-### `InteractionStreamAttachedStopped`
+### `ProductTurnCommittedFromAwaitingStopped`
 - From: `Stopped`
-- On: `InteractionStreamAttached`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Stopped`
 
-### `InteractionStreamCompletedIdle`
-- From: `Idle`
-- On: `InteractionStreamCompleted`(corr_id)
+### `ProductTurnCommittedFromOutputInitializing`
+- From: `Initializing`
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnCommittedFromOutputIdle`
+- From: `Idle`
+- On: `ProductTurnCommitted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Idle`
 
-### `InteractionStreamCompletedAttached`
+### `ProductTurnCommittedFromOutputAttached`
 - From: `Attached`
-- On: `InteractionStreamCompleted`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Attached`
 
-### `InteractionStreamCompletedRunning`
+### `ProductTurnCommittedFromOutputRunning`
 - From: `Running`
-- On: `InteractionStreamCompleted`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Running`
 
-### `InteractionStreamCompletedRetired`
+### `ProductTurnCommittedFromOutputRetired`
 - From: `Retired`
-- On: `InteractionStreamCompleted`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Retired`
 
-### `InteractionStreamCompletedStopped`
+### `ProductTurnCommittedFromOutputStopped`
 - From: `Stopped`
-- On: `InteractionStreamCompleted`(corr_id)
+- On: `ProductTurnCommitted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Stopped`
 
-### `InteractionStreamExpiredIdle`
-- From: `Idle`
-- On: `InteractionStreamExpired`(corr_id)
+### `ProductOutputStartedFromAwaitingInitializing`
+- From: `Initializing`
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductOutputStartedFromAwaitingIdle`
+- From: `Idle`
+- On: `ProductOutputStarted`()
+- Guards:
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Idle`
 
-### `InteractionStreamExpiredAttached`
+### `ProductOutputStartedFromAwaitingAttached`
 - From: `Attached`
-- On: `InteractionStreamExpired`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Attached`
 
-### `InteractionStreamExpiredRunning`
+### `ProductOutputStartedFromAwaitingRunning`
 - From: `Running`
-- On: `InteractionStreamExpired`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Running`
 
-### `InteractionStreamExpiredRetired`
+### `ProductOutputStartedFromAwaitingRetired`
 - From: `Retired`
-- On: `InteractionStreamExpired`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Retired`
 
-### `InteractionStreamExpiredStopped`
+### `ProductOutputStartedFromAwaitingStopped`
 - From: `Stopped`
-- On: `InteractionStreamExpired`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_reserved`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_awaiting`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Stopped`
 
-### `InteractionStreamClosedEarlyIdle`
-- From: `Idle`
-- On: `InteractionStreamClosedEarly`(corr_id)
+### `ProductOutputStartedFromCommittedInitializing`
+- From: `Initializing`
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductOutputStartedFromCommittedIdle`
+- From: `Idle`
+- On: `ProductOutputStarted`()
+- Guards:
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Idle`
 
-### `InteractionStreamClosedEarlyAttached`
+### `ProductOutputStartedFromCommittedAttached`
 - From: `Attached`
-- On: `InteractionStreamClosedEarly`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Attached`
 
-### `InteractionStreamClosedEarlyRunning`
+### `ProductOutputStartedFromCommittedRunning`
 - From: `Running`
-- On: `InteractionStreamClosedEarly`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Running`
 
-### `InteractionStreamClosedEarlyRetired`
+### `ProductOutputStartedFromCommittedRetired`
 - From: `Retired`
-- On: `InteractionStreamClosedEarly`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Retired`
 
-### `InteractionStreamClosedEarlyStopped`
+### `ProductOutputStartedFromCommittedStopped`
 - From: `Stopped`
-- On: `InteractionStreamClosedEarly`(corr_id)
+- On: `ProductOutputStarted`()
 - Guards:
-  - `is_attached`
-- Emits: `InteractionStreamStateChanged`, `InteractionStreamCleanup`
+  - `from_committed`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Stopped`
+
+### `ProductTurnInterruptedFromPreemptibleInitializing`
+- From: `Initializing`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnInterruptedFromPreemptibleIdle`
+- From: `Idle`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Idle`
+
+### `ProductTurnInterruptedFromPreemptibleAttached`
+- From: `Attached`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Attached`
+
+### `ProductTurnInterruptedFromPreemptibleRunning`
+- From: `Running`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Running`
+
+### `ProductTurnInterruptedFromPreemptibleRetired`
+- From: `Retired`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Retired`
+
+### `ProductTurnInterruptedFromPreemptibleStopped`
+- From: `Stopped`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_preemptible`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Stopped`
+
+### `ProductTurnInterruptedFromOutputInitializing`
+- From: `Initializing`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnInterruptedFromOutputIdle`
+- From: `Idle`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Idle`
+
+### `ProductTurnInterruptedFromOutputAttached`
+- From: `Attached`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Attached`
+
+### `ProductTurnInterruptedFromOutputRunning`
+- From: `Running`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Running`
+
+### `ProductTurnInterruptedFromOutputRetired`
+- From: `Retired`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Retired`
+
+### `ProductTurnInterruptedFromOutputStopped`
+- From: `Stopped`
+- On: `ProductTurnInterrupted`()
+- Guards:
+  - `from_output_started`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Stopped`
+
+### `ProductTurnTerminalInitializing`
+- From: `Initializing`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Initializing`
+
+### `ProductTurnTerminalIdle`
+- From: `Idle`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Idle`
+
+### `ProductTurnTerminalAttached`
+- From: `Attached`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Attached`
+
+### `ProductTurnTerminalRunning`
+- From: `Running`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Running`
+
+### `ProductTurnTerminalRetired`
+- From: `Retired`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Retired`
+
+### `ProductTurnTerminalStopped`
+- From: `Stopped`
+- On: `ProductTurnTerminal`()
+- Guards:
+  - `not_already_idle`
+- Emits: `RealtimeProductTurnPhaseChanged`
 - To: `Stopped`
 
 ### `BeginLiveTopologyReconfigureIdle`

@@ -346,6 +346,19 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     )
     .await
     .unwrap();
+    // Bidirectional trust — W1-B's typed admission drops from untrusted
+    // senders at the receiver's inbox.
+    CoreCommsRuntime::add_trusted_peer(
+        &receiver,
+        TrustedPeerSpec::new(
+            &sender_name,
+            sender.public_key().to_peer_id(),
+            format!("inproc://{sender_name}"),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
 
     // Seed the DSL with a `Sent` entry for a specific corr_id.
     let corr_id = meerkat_core::PeerCorrelationId::new();
@@ -443,6 +456,22 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
             &originator_name,
             originator.public_key().to_peer_id(),
             format!("inproc://{originator_name}"),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    // Bidirectional trust — W1-B's typed admission drops responses from
+    // untrusted senders at the receiver (originator)'s inbox. Without
+    // originator trusting responder, `send(PeerResponse)` surfaces an
+    // `AdmissionDropped { reason: UntrustedSender }` error even though
+    // the DSL transition on the sender side (responder) fires correctly.
+    CoreCommsRuntime::add_trusted_peer(
+        &originator,
+        TrustedPeerSpec::new(
+            &responder_name,
+            responder.public_key().to_peer_id(),
+            format!("inproc://{responder_name}"),
         )
         .unwrap(),
     )

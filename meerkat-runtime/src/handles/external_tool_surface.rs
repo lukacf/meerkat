@@ -44,8 +44,14 @@ impl RuntimeExternalToolSurfaceHandle {
         Some(SurfaceSnapshot {
             surface_id: key.clone(),
             base_state: state.surface_base_state.get(&key).cloned(),
-            pending_op: state.surface_pending_op.get(&key).cloned(),
-            staged_op: state.surface_staged_op.get(&key).cloned(),
+            pending_op: state
+                .surface_pending_op
+                .get(&key)
+                .map(|op| op.as_str().to_string()),
+            staged_op: state
+                .surface_staged_op
+                .get(&key)
+                .map(|op| op.as_str().to_string()),
             staged_intent_sequence: state.surface_staged_intent_sequence.get(&key).copied(),
             pending_task_sequence: state.surface_pending_task_sequence.get(&key).copied(),
             pending_lineage_sequence: state.surface_pending_lineage_sequence.get(&key).copied(),
@@ -187,7 +193,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
             .collect();
         entries.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         SurfaceDiagnosticSnapshot {
-            surface_phase: state.surface_phase.clone(),
+            surface_phase: state.surface_phase.as_str().to_string(),
             known_surfaces: state.known_surfaces.clone(),
             visible_surfaces: state.visible_surfaces.clone(),
             snapshot_epoch: state.snapshot_epoch,
@@ -225,7 +231,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
             .surface_pending_op
             .into_iter()
             .filter_map(|(surface_id, pending_op)| {
-                if pending_op == "None" {
+                if pending_op == mm_dsl::SurfacePendingOp::None {
                     None
                 } else {
                     Some(surface_id)
@@ -239,11 +245,11 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         state
             .surface_pending_op
             .values()
-            .any(|pending_op| pending_op != "None")
+            .any(|pending_op| *pending_op != mm_dsl::SurfacePendingOp::None)
             || state
                 .surface_staged_op
                 .values()
-                .any(|staged_op| staged_op != "None")
+                .any(|staged_op| *staged_op != mm_dsl::SurfaceStagedOp::None)
     }
 
     fn snapshot_epoch(&self) -> u64 {

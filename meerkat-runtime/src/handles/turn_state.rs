@@ -280,7 +280,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     fn snapshot(&self) -> TurnStateSnapshot {
         let state = self.dsl.snapshot_state();
         TurnStateSnapshot {
-            turn_phase: state.turn_phase.clone(),
+            turn_phase: state.turn_phase.as_str().to_string(),
             primitive_kind: state.primitive_kind.clone(),
             admitted_content_shape: state.admitted_content_shape.clone(),
             vision_enabled: state.vision_enabled,

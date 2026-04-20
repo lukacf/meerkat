@@ -502,6 +502,256 @@ pub enum PeerIngressOwnerKind {
     MobOwned,
 }
 
+/// Typed turn-execution phase, mirrored 1:1 by the closed set of literals the
+/// DSL transitions assign to `turn_phase`. Replaces the prior stringly-typed
+/// encoding so the ephemeral driver and runtime handles consume an exhaustive
+/// enum instead of parsing folklore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnPhase {
+    #[default]
+    Ready,
+    ApplyingPrimitive,
+    CallingLlm,
+    WaitingForOps,
+    DrainingBoundary,
+    Extracting,
+    ErrorRecovery,
+    Cancelling,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TurnPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::ApplyingPrimitive => "ApplyingPrimitive",
+            Self::CallingLlm => "CallingLlm",
+            Self::WaitingForOps => "WaitingForOps",
+            Self::DrainingBoundary => "DrainingBoundary",
+            Self::Extracting => "Extracting",
+            Self::ErrorRecovery => "ErrorRecovery",
+            Self::Cancelling => "Cancelling",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+/// Typed registration substate. Closed set of literals previously assigned to
+/// `registration_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RegistrationPhase {
+    #[default]
+    Queuing,
+    Active,
+}
+
+impl RegistrationPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queuing => "Queuing",
+            Self::Active => "Active",
+        }
+    }
+}
+
+/// Typed comms drain substate. Mirrors the closed set of literals the DSL
+/// transitions assign to `drain_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DrainPhase {
+    #[default]
+    Inactive,
+    Running,
+    Stopped,
+    ExitedRespawnable,
+}
+
+impl DrainPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "Inactive",
+            Self::Running => "Running",
+            Self::Stopped => "Stopped",
+            Self::ExitedRespawnable => "ExitedRespawnable",
+        }
+    }
+}
+
+/// Typed comms drain mode. Mirrors `crate::meerkat_machine::CommsDrainMode`
+/// (which is the shell-side enum) so the DSL can hold a closed set of typed
+/// variants instead of a `Debug`-formatted string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DrainMode {
+    #[default]
+    Timed,
+    AttachedSession,
+    PersistentHost,
+}
+
+impl DrainMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timed => "Timed",
+            Self::AttachedSession => "AttachedSession",
+            Self::PersistentHost => "PersistentHost",
+        }
+    }
+}
+
+impl From<crate::meerkat_machine::CommsDrainMode> for DrainMode {
+    fn from(mode: crate::meerkat_machine::CommsDrainMode) -> Self {
+        match mode {
+            crate::meerkat_machine::CommsDrainMode::Timed => Self::Timed,
+            crate::meerkat_machine::CommsDrainMode::AttachedSession => Self::AttachedSession,
+            crate::meerkat_machine::CommsDrainMode::PersistentHost => Self::PersistentHost,
+        }
+    }
+}
+
+/// Typed external-tool surface global phase. Closed set of literals previously
+/// assigned to `surface_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfacePhase {
+    #[default]
+    Operating,
+    Shutdown,
+}
+
+impl SurfacePhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operating => "Operating",
+            Self::Shutdown => "Shutdown",
+        }
+    }
+}
+
+/// Typed live-topology reconfigure phase. Closed set of literals previously
+/// assigned to `live_topology_phase`. The catalog DSL holds a parallel copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveTopologyPhase {
+    #[default]
+    Idle,
+    Reconfiguring,
+    Detached,
+    HostIdentityApplied,
+    HostVisibilityApplied,
+}
+
+impl LiveTopologyPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Reconfiguring => "Reconfiguring",
+            Self::Detached => "Detached",
+            Self::HostIdentityApplied => "HostIdentityApplied",
+            Self::HostVisibilityApplied => "HostVisibilityApplied",
+        }
+    }
+}
+
+/// Typed input-lifecycle phase, mirroring the closed set of literals the DSL
+/// transitions assign to `input_phases`. The shell projects from this onto the
+/// richer `crate::input_state::InputLifecycleState` (which keeps an `Accepted`
+/// pre-DSL-admission variant the DSL itself never writes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputPhase {
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+impl InputPhase {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+
+/// Typed input terminal kind, mirroring the closed set of literals the DSL
+/// transitions assign to `input_terminal_kind`. The companion fields
+/// (`input_superseded_by`, `input_aggregate_id`, `input_abandon_reason`,
+/// `input_abandon_attempt_count`) carry payload metadata for variants that
+/// need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputTerminalKind {
+    #[default]
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+impl InputTerminalKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+
+/// Typed pending external-surface op. Closed set of literals previously
+/// assigned to `surface_pending_op`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfacePendingOp {
+    #[default]
+    None,
+    Add,
+    Reload,
+}
+
+impl SurfacePendingOp {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Add => "Add",
+            Self::Reload => "Reload",
+        }
+    }
+}
+
+/// Typed staged external-surface op. Closed set of literals previously
+/// assigned to `surface_staged_op`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceStagedOp {
+    #[default]
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+impl SurfaceStagedOp {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Add => "Add",
+            Self::Remove => "Remove",
+            Self::Reload => "Reload",
+        }
+    }
+}
+
 // Ensure we keep the exact generated schema DSL body from the catalog source.
 machine! {
     machine MeerkatMachine {
@@ -515,7 +765,7 @@ machine! {
             active_fence_token: Option<FenceToken>,
             current_run_id: Option<RunId>,
             pre_run_phase: Option<String>,
-            turn_phase: String,
+            turn_phase: TurnPhase,
             primitive_kind: Option<String>,
             admitted_content_shape: Option<String>,
             vision_enabled: bool,
@@ -533,11 +783,11 @@ machine! {
             silent_intent_overrides: Set<String>,
 
             // --- Registration substate ---
-            registration_phase: String,
+            registration_phase: RegistrationPhase,
 
             // --- Comms drain substate ---
-            drain_phase: String,
-            drain_mode: Option<String>,
+            drain_phase: DrainPhase,
+            drain_mode: Option<DrainMode>,
 
             // --- Visibility substate ---
             active_filter: String,
@@ -548,8 +798,8 @@ machine! {
             staged_deferred_names: Set<String>,
 
             // --- Input lifecycle substate ---
-            input_phases: Map<String, String>,
-            input_terminal_kind: Map<String, String>,
+            input_phases: Map<String, InputPhase>,
+            input_terminal_kind: Map<String, InputTerminalKind>,
             input_superseded_by: Map<String, String>,
             input_aggregate_id: Map<String, String>,
             input_abandon_reason: Map<String, String>,
@@ -578,8 +828,8 @@ machine! {
             known_surfaces: Set<String>,
             visible_surfaces: Set<String>,
             surface_base_state: Map<String, String>,
-            surface_pending_op: Map<String, String>,
-            surface_staged_op: Map<String, String>,
+            surface_pending_op: Map<String, SurfacePendingOp>,
+            surface_staged_op: Map<String, SurfaceStagedOp>,
             surface_staged_intent_sequence: Map<String, u64>,
             next_staged_intent_sequence: u64,
             surface_pending_task_sequence: Map<String, u64>,
@@ -593,7 +843,7 @@ machine! {
             surface_draining_since_ms: Map<String, u64>,
             surface_removal_timeout_at_ms: Map<String, u64>,
             surface_removal_applied_at_turn: Map<String, u64>,
-            surface_phase: String,
+            surface_phase: SurfacePhase,
             removal_timeout_ms: u64,
 
             // --- Realtime-attachment authority (per-session) ---
@@ -604,7 +854,7 @@ machine! {
             realtime_next_authority_epoch: u64,
 
             // --- Live-topology reconfigure phase ---
-            live_topology_phase: String,
+            live_topology_phase: LiveTopologyPhase,
 
             // --- MCP server lifecycle ---
             //
@@ -667,7 +917,7 @@ machine! {
             active_fence_token = None,
             current_run_id = None,
             pre_run_phase = None,
-            turn_phase = "Ready",
+            turn_phase = TurnPhase::Ready,
             primitive_kind = None,
             admitted_content_shape = None,
             vision_enabled = false,
@@ -684,9 +934,9 @@ machine! {
             max_extraction_retries = 0,
             silent_intent_overrides = EmptySet,
             // Registration substate
-            registration_phase = "Queuing",
+            registration_phase = RegistrationPhase::Queuing,
             // Comms drain substate
-            drain_phase = "Inactive",
+            drain_phase = DrainPhase::Inactive,
             drain_mode = None,
             // Visibility substate
             active_filter = "",
@@ -738,14 +988,14 @@ machine! {
             surface_draining_since_ms = EmptyMap,
             surface_removal_timeout_at_ms = EmptyMap,
             surface_removal_applied_at_turn = EmptyMap,
-            surface_phase = "Operating",
+            surface_phase = SurfacePhase::Operating,
             removal_timeout_ms = 30000,
             realtime_intent_present = false,
             realtime_binding_state = RealtimeBindingState::Unbound,
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
-            live_topology_phase = "Idle",
+            live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
@@ -895,7 +1145,7 @@ machine! {
             RequestWaitAll { operation_ids: Set<String> },
             SatisfyWaitAll,
             // Comms drain inputs
-            SpawnDrain { mode: String },
+            SpawnDrain { mode: DrainMode },
             StopDrain,
             DrainExitedClean,
             DrainExitedRespawnable,
@@ -1218,7 +1468,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
@@ -1232,7 +1482,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
@@ -1246,7 +1496,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
@@ -1260,7 +1510,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
@@ -1274,7 +1524,7 @@ machine! {
                 self.active_fence_token = None;
                 self.current_run_id = None;
                 self.pre_run_phase = None;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Idle
         }
@@ -1703,7 +1953,7 @@ machine! {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
-                self.registration_phase = "Queuing";
+                self.registration_phase = RegistrationPhase::Queuing;
             }
             to Destroyed
             emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
@@ -1756,7 +2006,7 @@ machine! {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Idle }
             update {
-                self.registration_phase = "Active";
+                self.registration_phase = RegistrationPhase::Active;
             }
             to Attached
         }
@@ -1765,7 +2015,7 @@ machine! {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.registration_phase = "Active";
+                self.registration_phase = RegistrationPhase::Active;
             }
             to Attached
         }
@@ -1773,7 +2023,7 @@ machine! {
             on input EnsureSessionWithExecutor { session_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.registration_phase = "Active";
+                self.registration_phase = RegistrationPhase::Active;
             }
             to Running
         }
@@ -2098,14 +2348,14 @@ machine! {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = vision_enabled;
@@ -2128,14 +2378,14 @@ machine! {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = vision_enabled;
@@ -2158,14 +2408,14 @@ machine! {
             on input StartConversationRun { run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(primitive_kind);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = vision_enabled;
@@ -2189,14 +2439,14 @@ machine! {
             on input StartImmediateAppend { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2219,14 +2469,14 @@ machine! {
             on input StartImmediateAppend { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2249,14 +2499,14 @@ machine! {
             on input StartImmediateAppend { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2280,14 +2530,14 @@ machine! {
             on input StartImmediateContext { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateContextAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2310,14 +2560,14 @@ machine! {
             on input StartImmediateContext { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateContextAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2340,14 +2590,14 @@ machine! {
             on input StartImmediateContext { run_id, admitted_content_shape }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_resettable" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
                 self.current_run_id = Some(run_id);
-                self.turn_phase = "ApplyingPrimitive";
+                self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some("ImmediateContextAppend");
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
@@ -2371,11 +2621,11 @@ machine! {
             on input PrimitiveApplied
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_applying_conversation" {
-                self.turn_phase == "ApplyingPrimitive"
+                self.turn_phase == TurnPhase::ApplyingPrimitive
                 && self.primitive_kind == Some("ConversationTurn")
             }
             update {
-                self.turn_phase = "CallingLlm";
+                self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
             emit TurnCheckCompaction
@@ -2385,13 +2635,13 @@ machine! {
             on input PrimitiveApplied
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_applying_immediate" {
-                self.turn_phase == "ApplyingPrimitive"
+                self.turn_phase == TurnPhase::ApplyingPrimitive
                 && (self.primitive_kind == Some("ImmediateAppend")
                     || self.primitive_kind == Some("ImmediateContextAppend"))
             }
             update {
                 self.boundary_count = self.boundary_count + 1;
-                self.turn_phase = "Completed";
+                self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some("Completed");
             }
             to Running
@@ -2403,10 +2653,10 @@ machine! {
         transition LlmReturnedToolCallsPositive {
             on input LlmReturnedToolCalls { tool_count }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             guard "tool_count_positive" { tool_count > 0 }
             update {
-                self.turn_phase = "WaitingForOps";
+                self.turn_phase = TurnPhase::WaitingForOps;
                 self.tool_calls_pending = tool_count;
             }
             to Running
@@ -2415,10 +2665,10 @@ machine! {
         transition LlmReturnedToolCallsZero {
             on input LlmReturnedToolCalls { tool_count }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             guard "tool_count_zero" { tool_count == 0 }
             update {
-                self.turn_phase = "DrainingBoundary";
+                self.turn_phase = TurnPhase::DrainingBoundary;
                 self.tool_calls_pending = 0;
             }
             to Running
@@ -2427,9 +2677,9 @@ machine! {
         transition LlmReturnedTerminal {
             on input LlmReturnedTerminal
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_calling_llm" { self.turn_phase == "CallingLlm" }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
             update {
-                self.turn_phase = "DrainingBoundary";
+                self.turn_phase = TurnPhase::DrainingBoundary;
             }
             to Running
         }
@@ -2437,9 +2687,9 @@ machine! {
         transition RegisterPendingOps {
             on input RegisterPendingOps { op_refs, barrier_operation_ids }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_waiting_or_calling" { self.turn_phase == "CallingLlm" || self.turn_phase == "WaitingForOps" }
+            guard "turn_waiting_or_calling" { self.turn_phase == TurnPhase::CallingLlm || self.turn_phase == TurnPhase::WaitingForOps }
             update {
-                self.turn_phase = "WaitingForOps";
+                self.turn_phase = TurnPhase::WaitingForOps;
                 self.pending_op_refs = op_refs;
                 self.barrier_operation_ids = barrier_operation_ids;
                 self.has_barrier_ops = self.barrier_operation_ids != EmptySet;
@@ -2452,10 +2702,10 @@ machine! {
         transition ToolCallsResolvedToCalling {
             on input ToolCallsResolved
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "barrier_not_satisfied" { self.barrier_satisfied == false }
             update {
-                self.turn_phase = "CallingLlm";
+                self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
         }
@@ -2463,10 +2713,10 @@ machine! {
         transition ToolCallsResolvedToBoundary {
             on input ToolCallsResolved
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "barrier_satisfied" { self.barrier_satisfied == true }
             update {
-                self.turn_phase = "DrainingBoundary";
+                self.turn_phase = TurnPhase::DrainingBoundary;
             }
             to Running
         }
@@ -2474,7 +2724,7 @@ machine! {
         transition OpsBarrierSatisfied {
             on input OpsBarrierSatisfied { operation_ids }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_waiting_for_ops" { self.turn_phase == "WaitingForOps" }
+            guard "turn_waiting_for_ops" { self.turn_phase == TurnPhase::WaitingForOps }
             guard "matching_barrier_ids" { operation_ids == self.barrier_operation_ids }
             update {
                 self.barrier_satisfied = true;
@@ -2488,10 +2738,10 @@ machine! {
         transition BoundaryContinue {
             on input BoundaryContinue
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
                 self.boundary_count = self.boundary_count + 1;
-                self.turn_phase = "CallingLlm";
+                self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
@@ -2501,10 +2751,10 @@ machine! {
         transition BoundaryComplete {
             on input BoundaryComplete
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
                 self.boundary_count = self.boundary_count + 1;
-                self.turn_phase = "Completed";
+                self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some("Completed");
             }
             to Running
@@ -2516,9 +2766,9 @@ machine! {
         transition EnterExtraction {
             on input EnterExtraction
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_draining_boundary" { self.turn_phase == "DrainingBoundary" }
+            guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
             update {
-                self.turn_phase = "Extracting";
+                self.turn_phase = TurnPhase::Extracting;
                 self.extraction_attempts = self.extraction_attempts + 1;
             }
             to Running
@@ -2527,7 +2777,7 @@ machine! {
         transition ExtractionStart {
             on input ExtractionStart
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {}
             to Running
         }
@@ -2535,9 +2785,9 @@ machine! {
         transition ExtractionValidationPassed {
             on input ExtractionValidationPassed
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {
-                self.turn_phase = "Completed";
+                self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some("Completed");
             }
             to Running
@@ -2548,10 +2798,10 @@ machine! {
         transition ExtractionValidationFailedRetry {
             on input ExtractionValidationFailed { error }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_remaining" { self.extraction_attempts < self.max_extraction_retries }
             update {
-                self.turn_phase = "CallingLlm";
+                self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
             emit TurnCheckCompaction
@@ -2560,10 +2810,10 @@ machine! {
         transition ExtractionValidationFailedExhausted {
             on input ExtractionValidationFailed { error }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_extracting" { self.turn_phase == "Extracting" }
+            guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some("ExtractionExhausted");
             }
             to Running
@@ -2574,13 +2824,13 @@ machine! {
             on input RecoverableFailure { error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_non_terminal" {
-                self.turn_phase == "CallingLlm"
-                || self.turn_phase == "WaitingForOps"
-                || self.turn_phase == "DrainingBoundary"
-                || self.turn_phase == "Extracting"
+                self.turn_phase == TurnPhase::CallingLlm
+                || self.turn_phase == TurnPhase::WaitingForOps
+                || self.turn_phase == TurnPhase::DrainingBoundary
+                || self.turn_phase == TurnPhase::Extracting
             }
             update {
-                self.turn_phase = "ErrorRecovery";
+                self.turn_phase = TurnPhase::ErrorRecovery;
             }
             to Running
         }
@@ -2588,9 +2838,9 @@ machine! {
         transition FatalFailure {
             on input FatalFailure { error }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(error);
             }
             to Running
@@ -2600,9 +2850,9 @@ machine! {
         transition RetryRequested {
             on input RetryRequested
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_error_recovery" { self.turn_phase == "ErrorRecovery" }
+            guard "turn_error_recovery" { self.turn_phase == TurnPhase::ErrorRecovery }
             update {
-                self.turn_phase = "CallingLlm";
+                self.turn_phase = TurnPhase::CallingLlm;
             }
             to Running
             emit TurnCheckCompaction
@@ -2612,13 +2862,13 @@ machine! {
             on input CancelNow
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_cancellable" {
-                self.turn_phase != "Ready"
-                && self.turn_phase != "Completed"
-                && self.turn_phase != "Failed"
-                && self.turn_phase != "Cancelled"
+                self.turn_phase != TurnPhase::Ready
+                && self.turn_phase != TurnPhase::Completed
+                && self.turn_phase != TurnPhase::Failed
+                && self.turn_phase != TurnPhase::Cancelled
             }
             update {
-                self.turn_phase = "Cancelling";
+                self.turn_phase = TurnPhase::Cancelling;
             }
             to Running
         }
@@ -2627,10 +2877,10 @@ machine! {
             on input RequestCancelAfterBoundary
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_cancellable" {
-                self.turn_phase != "Ready"
-                && self.turn_phase != "Completed"
-                && self.turn_phase != "Failed"
-                && self.turn_phase != "Cancelled"
+                self.turn_phase != TurnPhase::Ready
+                && self.turn_phase != TurnPhase::Completed
+                && self.turn_phase != TurnPhase::Failed
+                && self.turn_phase != TurnPhase::Cancelled
             }
             update {
                 self.cancel_after_boundary = true;
@@ -2641,9 +2891,9 @@ machine! {
         transition CancellationObserved {
             on input CancellationObserved
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_cancelling" { self.turn_phase == "Cancelling" }
+            guard "turn_cancelling" { self.turn_phase == TurnPhase::Cancelling }
             update {
-                self.turn_phase = "Cancelled";
+                self.turn_phase = TurnPhase::Cancelled;
                 self.terminal_outcome = Some("Cancelled");
             }
             to Running
@@ -2654,12 +2904,12 @@ machine! {
             on input AcknowledgeTerminal { outcome }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_terminal" {
-                self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
-                self.turn_phase = "Ready";
+                self.turn_phase = TurnPhase::Ready;
                 self.primitive_kind = None;
                 self.admitted_content_shape = None;
                 self.vision_enabled = false;
@@ -2681,9 +2931,9 @@ machine! {
         transition TurnLimitReached {
             on input TurnLimitReached
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some("TurnLimitReached");
             }
             to Running
@@ -2693,9 +2943,9 @@ machine! {
         transition BudgetExhausted {
             on input BudgetExhausted
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some("BudgetExhausted");
             }
             to Running
@@ -2705,9 +2955,9 @@ machine! {
         transition TimeBudgetExceeded {
             on input TimeBudgetExceeded
             guard { self.lifecycle_phase == Phase::Running }
-            guard "turn_not_terminal" { self.turn_phase != "Completed" && self.turn_phase != "Failed" && self.turn_phase != "Cancelled" }
+            guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some("TimeBudgetExceeded");
             }
             to Running
@@ -2718,9 +2968,9 @@ machine! {
             on input ForceCancelNoRun
             guard { self.lifecycle_phase == Phase::Running }
             guard "no_run_bound" { self.current_run_id == None }
-            guard "turn_ready" { self.turn_phase == "Ready" }
+            guard "turn_ready" { self.turn_phase == TurnPhase::Ready }
             update {
-                self.turn_phase = "Cancelled";
+                self.turn_phase = TurnPhase::Cancelled;
                 self.terminal_outcome = Some("ForceCancelNoRun");
             }
             to Running
@@ -2731,7 +2981,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
-                self.turn_phase = "Completed";
+                self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some("Completed");
             }
             to Running
@@ -2742,7 +2992,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
-                self.turn_phase = "Failed";
+                self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(error);
             }
             to Running
@@ -2753,7 +3003,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
-                self.turn_phase = "Cancelled";
+                self.turn_phase = TurnPhase::Cancelled;
                 self.terminal_outcome = Some("RunCancelled");
             }
             to Running
@@ -2779,10 +3029,10 @@ machine! {
         transition SurfaceStageAddAttached {
             on input SurfaceStageAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Add");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2791,10 +3041,10 @@ machine! {
         transition SurfaceStageAddRunning {
             on input SurfaceStageAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Add");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2804,10 +3054,10 @@ machine! {
         transition SurfaceStageRemoveAttached {
             on input SurfaceStageRemove { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Remove");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Remove);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2816,10 +3066,10 @@ machine! {
         transition SurfaceStageRemoveRunning {
             on input SurfaceStageRemove { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Remove");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Remove);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2829,10 +3079,10 @@ machine! {
         transition SurfaceStageReloadAttached {
             on input SurfaceStageReload { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Reload");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Reload);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2841,10 +3091,10 @@ machine! {
         transition SurfaceStageReloadRunning {
             on input SurfaceStageReload { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "surface_operating" { self.surface_phase == "Operating" }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.surface_staged_op.insert(surface_id, "Reload");
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Reload);
                 self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
                 self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
             }
@@ -2872,7 +3122,7 @@ machine! {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_last_delta_phase.insert(surface_id, "Applied");
             }
             to Attached
@@ -2881,7 +3131,7 @@ machine! {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_last_delta_phase.insert(surface_id, "Applied");
             }
             to Running
@@ -2891,7 +3141,7 @@ machine! {
             on input SurfaceMarkPendingFailed { surface_id, reason }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_last_delta_phase.insert(surface_id, "Failed");
             }
             to Attached
@@ -2900,7 +3150,7 @@ machine! {
             on input SurfaceMarkPendingFailed { surface_id, reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.surface_pending_op.insert(surface_id, "None");
+                self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_last_delta_phase.insert(surface_id, "Failed");
             }
             to Running
@@ -3001,7 +3251,7 @@ machine! {
             on input SurfaceShutdown
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.surface_phase = "Shutdown";
+                self.surface_phase = SurfacePhase::Shutdown;
             }
             to Attached
         }
@@ -3009,7 +3259,7 @@ machine! {
             on input SurfaceShutdown
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.surface_phase = "Shutdown";
+                self.surface_phase = SurfacePhase::Shutdown;
             }
             to Running
         }
@@ -3123,7 +3373,7 @@ machine! {
             on input QueueAccepted { input_id }
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Queued");
+                self.input_phases.insert(input_id, InputPhase::Queued);
                 self.queue_lane.insert(input_id);
                 self.input_admission_seq.insert(input_id, self.next_admission_seq);
                 self.next_admission_seq += 1;
@@ -3138,7 +3388,7 @@ machine! {
             on input StageForRun { input_id, run_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Staged");
+                self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
             }
             to Idle
@@ -3162,7 +3412,7 @@ machine! {
             on input RollbackStaged { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Queued");
+                self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_run_associations.remove(input_id);
             }
             to Idle
@@ -3175,7 +3425,7 @@ machine! {
             on input MarkApplied { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Applied");
+                self.input_phases.insert(input_id, InputPhase::Applied);
             }
             to Idle
             emit InputLifecycleNotice
@@ -3187,7 +3437,7 @@ machine! {
             on input MarkAppliedPendingConsumption { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "AppliedPendingConsumption");
+                self.input_phases.insert(input_id, InputPhase::AppliedPendingConsumption);
             }
             to Idle
             emit InputLifecycleNotice
@@ -3199,7 +3449,7 @@ machine! {
             on input ConsumeOnAccept { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Consumed");
+                self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.queue_lane.remove(input_id);
                 self.steer_lane.remove(input_id);
             }
@@ -3225,10 +3475,10 @@ machine! {
             on input ConsumeInput { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Consumed");
+                self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.queue_lane.remove(input_id);
                 self.steer_lane.remove(input_id);
-                self.input_terminal_kind.insert(input_id, "Consumed");
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
                 self.input_superseded_by.remove(input_id);
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
@@ -3244,9 +3494,9 @@ machine! {
             on input SupersedeInput { input_id, superseded_by }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Superseded");
+                self.input_phases.insert(input_id, InputPhase::Superseded);
                 self.queue_lane.remove(input_id);
-                self.input_terminal_kind.insert(input_id, "Superseded");
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Superseded);
                 self.input_superseded_by.insert(input_id, superseded_by);
                 self.input_aggregate_id.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
@@ -3262,9 +3512,9 @@ machine! {
             on input CoalesceInput { input_id, aggregate_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Coalesced");
+                self.input_phases.insert(input_id, InputPhase::Coalesced);
                 self.queue_lane.remove(input_id);
-                self.input_terminal_kind.insert(input_id, "Coalesced");
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Coalesced);
                 self.input_aggregate_id.insert(input_id, aggregate_id);
                 self.input_superseded_by.remove(input_id);
                 self.input_abandon_reason.remove(input_id);
@@ -3280,10 +3530,10 @@ machine! {
             on input AbandonInput { input_id, reason, attempt_count }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
             update {
-                self.input_phases.insert(input_id, "Abandoned");
+                self.input_phases.insert(input_id, InputPhase::Abandoned);
                 self.queue_lane.remove(input_id);
                 self.steer_lane.remove(input_id);
-                self.input_terminal_kind.insert(input_id, "Abandoned");
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Abandoned);
                 self.input_abandon_reason.insert(input_id, reason);
                 self.input_abandon_attempt_count.insert(input_id, attempt_count);
                 self.input_superseded_by.remove(input_id);
@@ -3489,9 +3739,9 @@ machine! {
         transition SpawnDrain {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SpawnDrain { mode }
-            guard "drain_can_spawn" { self.drain_phase == "Inactive" || self.drain_phase == "Stopped" || self.drain_phase == "ExitedRespawnable" }
+            guard "drain_can_spawn" { self.drain_phase == DrainPhase::Inactive || self.drain_phase == DrainPhase::Stopped || self.drain_phase == DrainPhase::ExitedRespawnable }
             update {
-                self.drain_phase = "Running";
+                self.drain_phase = DrainPhase::Running;
                 self.drain_mode = Some(mode);
             }
             to Idle
@@ -3502,9 +3752,9 @@ machine! {
         transition StopDrain {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StopDrain
-            guard "drain_is_running" { self.drain_phase == "Running" }
+            guard "drain_is_running" { self.drain_phase == DrainPhase::Running }
             update {
-                self.drain_phase = "Stopped";
+                self.drain_phase = DrainPhase::Stopped;
             }
             to Idle
         }
@@ -3514,7 +3764,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input DrainExitedClean
             update {
-                self.drain_phase = "Inactive";
+                self.drain_phase = DrainPhase::Inactive;
                 self.drain_mode = None;
             }
             to Idle
@@ -3525,7 +3775,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input DrainExitedRespawnable
             update {
-                self.drain_phase = "ExitedRespawnable";
+                self.drain_phase = DrainPhase::ExitedRespawnable;
             }
             to Idle
         }
@@ -3599,7 +3849,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input BeginRealtimeBinding
             guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
                 self.realtime_binding_state = RealtimeBindingState::BindingNotReady;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
@@ -3614,7 +3864,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ReplaceRealtimeBinding
             guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
                 self.realtime_binding_state = RealtimeBindingState::ReplacementPending;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
@@ -3655,7 +3905,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PublishRealtimeSignal { authority_epoch, next_binding_state }
             guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             guard "valid_next_state" {
                 next_binding_state == RealtimeBindingState::BindingNotReady
                 || next_binding_state == RealtimeBindingState::BindingReady
@@ -3677,9 +3927,9 @@ machine! {
             on input BeginLiveTopologyReconfigure { authority_epoch }
             guard "session_registered" { self.session_id != None }
             guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "topology_idle" { self.live_topology_phase == "Idle" }
+            guard "topology_idle" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
-                self.live_topology_phase = "Reconfiguring";
+                self.live_topology_phase = LiveTopologyPhase::Reconfiguring;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -3703,16 +3953,16 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input MarkLiveTopologyDetached
             guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
             guard "turn_at_safe_boundary" {
-                self.turn_phase == "Ready"
-                || self.turn_phase == "DrainingBoundary"
-                || self.turn_phase == "Completed"
-                || self.turn_phase == "Failed"
-                || self.turn_phase == "Cancelled"
+                self.turn_phase == TurnPhase::Ready
+                || self.turn_phase == TurnPhase::DrainingBoundary
+                || self.turn_phase == TurnPhase::Completed
+                || self.turn_phase == TurnPhase::Failed
+                || self.turn_phase == TurnPhase::Cancelled
             }
             update {
-                self.live_topology_phase = "Detached";
+                self.live_topology_phase = LiveTopologyPhase::Detached;
                 self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = false;
@@ -3726,9 +3976,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ApplyLiveTopologyIdentity
             guard "session_registered" { self.session_id != None }
-            guard "topology_detached" { self.live_topology_phase == "Detached" }
+            guard "topology_detached" { self.live_topology_phase == LiveTopologyPhase::Detached }
             update {
-                self.live_topology_phase = "HostIdentityApplied";
+                self.live_topology_phase = LiveTopologyPhase::HostIdentityApplied;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -3738,9 +3988,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ApplyLiveTopologyVisibility
             guard "session_registered" { self.session_id != None }
-            guard "host_identity_applied" { self.live_topology_phase == "HostIdentityApplied" }
+            guard "host_identity_applied" { self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied }
             update {
-                self.live_topology_phase = "HostVisibilityApplied";
+                self.live_topology_phase = LiveTopologyPhase::HostVisibilityApplied;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -3750,9 +4000,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CompleteLiveTopology
             guard "session_registered" { self.session_id != None }
-            guard "host_visibility_applied" { self.live_topology_phase == "HostVisibilityApplied" }
+            guard "host_visibility_applied" { self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -3762,9 +4012,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AbortLiveTopologyBeforeDetach
             guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -3775,12 +4025,12 @@ machine! {
             on input FailLiveTopologyAfterDetach
             guard "session_registered" { self.session_id != None }
             guard "topology_past_detach" {
-                self.live_topology_phase == "Detached"
-                || self.live_topology_phase == "HostIdentityApplied"
-                || self.live_topology_phase == "HostVisibilityApplied"
+                self.live_topology_phase == LiveTopologyPhase::Detached
+                || self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied
+                || self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied
             }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
                 self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;

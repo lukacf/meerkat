@@ -18,7 +18,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_binding_authority_epoch`: `Option<u64>`
 - `realtime_reattach_required`: `Bool`
 - `realtime_next_authority_epoch`: `u64`
-- `live_topology_phase`: `String`
+- `live_topology_phase`: `LiveTopologyPhase`
 - `mcp_server_states`: `Map<McpServerId, McpServerState>`
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`

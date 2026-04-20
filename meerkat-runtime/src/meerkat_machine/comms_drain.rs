@@ -378,7 +378,6 @@ impl MeerkatMachine {
             // conceptual drain alive and only swaps the bound transport task.
             let mut sessions = self.sessions.write().await;
             if let Some(entry) = sessions.get_mut(session_id) {
-                let mode_str = format!("{mode:?}");
                 let apply_result = {
                     let mut authority = entry
                         .dsl_authority
@@ -387,7 +386,7 @@ impl MeerkatMachine {
                     crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                         &mut *authority,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::SpawnDrain {
-                            mode: mode_str,
+                            mode: crate::meerkat_machine::dsl::DrainMode::from(mode),
                         },
                     )
                 };

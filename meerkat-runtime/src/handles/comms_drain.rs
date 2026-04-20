@@ -39,10 +39,19 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn spawn_drain(&self, mode: &str) -> Result<(), DslTransitionError> {
+        let typed = match mode {
+            "Timed" => mm_dsl::DrainMode::Timed,
+            "AttachedSession" => mm_dsl::DrainMode::AttachedSession,
+            "PersistentHost" => mm_dsl::DrainMode::PersistentHost,
+            other => {
+                return Err(DslTransitionError::new(
+                    "CommsDrainHandle::spawn_drain",
+                    format!("unknown drain mode literal: {other}"),
+                ));
+            }
+        };
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::SpawnDrain {
-                mode: mode.to_string(),
-            },
+            mm_dsl::MeerkatMachineInput::SpawnDrain { mode: typed },
             "CommsDrainHandle::spawn_drain",
         )
     }

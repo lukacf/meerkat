@@ -24,7 +24,7 @@ machine! {
             realtime_next_authority_epoch: u64,
             // Live-topology reconfigure phase — temporarily blocks realtime
             // publishes/attaches while an LLM-identity swap is in progress.
-            live_topology_phase: String,
+            live_topology_phase: Enum<LiveTopologyPhase>,
             // MCP server connection authority. Keyed on the configured server
             // name (McpServerId). The runtime reads this map to drive the
             // deterministic [MCP_PENDING] system-notice toggle and to gate
@@ -81,7 +81,7 @@ machine! {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
-            live_topology_phase = "Idle",
+            live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
@@ -1558,7 +1558,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input BeginRealtimeBinding
             guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
                 self.realtime_binding_state = RealtimeBindingState::BindingNotReady;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
@@ -1573,7 +1573,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ReplaceRealtimeBinding
             guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
                 self.realtime_binding_state = RealtimeBindingState::ReplacementPending;
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
@@ -1614,7 +1614,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PublishRealtimeSignal { authority_epoch, next_binding_state }
             guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == "Idle" }
+            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
             guard "valid_next_state" {
                 next_binding_state == RealtimeBindingState::BindingNotReady
                 || next_binding_state == RealtimeBindingState::BindingReady
@@ -1809,9 +1809,9 @@ machine! {
             on input BeginLiveTopologyReconfigure { authority_epoch }
             guard "session_registered" { self.session_id != None }
             guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "topology_idle" { self.live_topology_phase == "Idle" }
+            guard "topology_idle" { self.live_topology_phase == LiveTopologyPhase::Idle }
             update {
-                self.live_topology_phase = "Reconfiguring";
+                self.live_topology_phase = LiveTopologyPhase::Reconfiguring;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -1821,7 +1821,7 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input MarkLiveTopologyDetached
             guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
             // DSL-native "safe to detach now" guard.
             //
             // **Catalog/runtime divergence (intentional):** the runtime DSL
@@ -1837,7 +1837,7 @@ machine! {
             // guard, so invariants proven here hold in production.
             guard "no_active_run" { self.current_run_id == None }
             update {
-                self.live_topology_phase = "Detached";
+                self.live_topology_phase = LiveTopologyPhase::Detached;
                 // Compose the detach into the binding authority.
                 self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
@@ -1852,9 +1852,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ApplyLiveTopologyIdentity
             guard "session_registered" { self.session_id != None }
-            guard "topology_detached" { self.live_topology_phase == "Detached" }
+            guard "topology_detached" { self.live_topology_phase == LiveTopologyPhase::Detached }
             update {
-                self.live_topology_phase = "HostIdentityApplied";
+                self.live_topology_phase = LiveTopologyPhase::HostIdentityApplied;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -1864,9 +1864,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ApplyLiveTopologyVisibility
             guard "session_registered" { self.session_id != None }
-            guard "host_identity_applied" { self.live_topology_phase == "HostIdentityApplied" }
+            guard "host_identity_applied" { self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied }
             update {
-                self.live_topology_phase = "HostVisibilityApplied";
+                self.live_topology_phase = LiveTopologyPhase::HostVisibilityApplied;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -1876,9 +1876,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input CompleteLiveTopology
             guard "session_registered" { self.session_id != None }
-            guard "host_visibility_applied" { self.live_topology_phase == "HostVisibilityApplied" }
+            guard "host_visibility_applied" { self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -1888,9 +1888,9 @@ machine! {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input AbortLiveTopologyBeforeDetach
             guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == "Reconfiguring" }
+            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
             }
             to Idle
             emit LiveTopologyPhaseChanged
@@ -1901,12 +1901,12 @@ machine! {
             on input FailLiveTopologyAfterDetach
             guard "session_registered" { self.session_id != None }
             guard "topology_past_detach" {
-                self.live_topology_phase == "Detached"
-                || self.live_topology_phase == "HostIdentityApplied"
-                || self.live_topology_phase == "HostVisibilityApplied"
+                self.live_topology_phase == LiveTopologyPhase::Detached
+                || self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied
+                || self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied
             }
             update {
-                self.live_topology_phase = "Idle";
+                self.live_topology_phase = LiveTopologyPhase::Idle;
                 self.realtime_binding_state = RealtimeBindingState::Unbound;
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;
@@ -2094,6 +2094,20 @@ pub enum OperationKind {
     #[default]
     ToolCall,
     Completion,
+}
+
+/// Live-topology reconfigure phase (catalog DSL twin of the runtime
+/// `LiveTopologyPhase`). Closed set of phases the LLM-identity-swap pipeline
+/// progresses through; the `realtime_binding_*` invariants pair it with the
+/// binding authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LiveTopologyPhase {
+    #[default]
+    Idle,
+    Reconfiguring,
+    Detached,
+    HostIdentityApplied,
+    HostVisibilityApplied,
 }
 
 // =====================================================================

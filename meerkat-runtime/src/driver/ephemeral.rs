@@ -311,22 +311,26 @@ impl EphemeralRuntimeDriver {
     /// post-GC).
     pub fn input_phase(&self, input_id: &InputId) -> Option<InputLifecycleState> {
         let key = Self::dsl_key(input_id);
-        let phase = self.dsl.0.state.input_phases.get(&key)?;
-        Self::parse_phase_str(phase.as_str())
+        let phase = self.dsl.0.state.input_phases.get(&key).copied()?;
+        Some(Self::input_phase_to_lifecycle(phase))
     }
 
-    fn parse_phase_str(phase: &str) -> Option<InputLifecycleState> {
+    /// Project the DSL's typed [`mm_dsl::InputPhase`] onto the shell-side
+    /// [`InputLifecycleState`]. The DSL never writes the pre-admission
+    /// `Accepted` variant — admission always lands in `Queued` — so the
+    /// projection is a total function over `InputPhase`.
+    fn input_phase_to_lifecycle(phase: mm_dsl::InputPhase) -> InputLifecycleState {
         match phase {
-            "Accepted" => Some(InputLifecycleState::Accepted),
-            "Queued" => Some(InputLifecycleState::Queued),
-            "Staged" => Some(InputLifecycleState::Staged),
-            "Applied" => Some(InputLifecycleState::Applied),
-            "AppliedPendingConsumption" => Some(InputLifecycleState::AppliedPendingConsumption),
-            "Consumed" => Some(InputLifecycleState::Consumed),
-            "Superseded" => Some(InputLifecycleState::Superseded),
-            "Coalesced" => Some(InputLifecycleState::Coalesced),
-            "Abandoned" => Some(InputLifecycleState::Abandoned),
-            _ => None,
+            mm_dsl::InputPhase::Queued => InputLifecycleState::Queued,
+            mm_dsl::InputPhase::Staged => InputLifecycleState::Staged,
+            mm_dsl::InputPhase::Applied => InputLifecycleState::Applied,
+            mm_dsl::InputPhase::AppliedPendingConsumption => {
+                InputLifecycleState::AppliedPendingConsumption
+            }
+            mm_dsl::InputPhase::Consumed => InputLifecycleState::Consumed,
+            mm_dsl::InputPhase::Superseded => InputLifecycleState::Superseded,
+            mm_dsl::InputPhase::Coalesced => InputLifecycleState::Coalesced,
+            mm_dsl::InputPhase::Abandoned => InputLifecycleState::Abandoned,
         }
     }
 
@@ -347,20 +351,20 @@ impl EphemeralRuntimeDriver {
     /// DSL's typed terminal metadata maps.
     pub fn input_terminal_outcome(&self, input_id: &InputId) -> Option<InputTerminalOutcome> {
         let key = Self::dsl_key(input_id);
-        let kind = self.dsl.0.state.input_terminal_kind.get(&key)?;
-        match kind.as_str() {
-            "Consumed" => Some(InputTerminalOutcome::Consumed),
-            "Superseded" => {
+        let kind = self.dsl.0.state.input_terminal_kind.get(&key).copied()?;
+        match kind {
+            mm_dsl::InputTerminalKind::Consumed => Some(InputTerminalOutcome::Consumed),
+            mm_dsl::InputTerminalKind::Superseded => {
                 let raw = self.dsl.0.state.input_superseded_by.get(&key)?;
                 let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
                 Some(InputTerminalOutcome::Superseded { superseded_by: id })
             }
-            "Coalesced" => {
+            mm_dsl::InputTerminalKind::Coalesced => {
                 let raw = self.dsl.0.state.input_aggregate_id.get(&key)?;
                 let id = raw.parse::<uuid::Uuid>().ok().map(InputId::from_uuid)?;
                 Some(InputTerminalOutcome::Coalesced { aggregate_id: id })
             }
-            "Abandoned" => {
+            mm_dsl::InputTerminalKind::Abandoned => {
                 let reason_str = self.dsl.0.state.input_abandon_reason.get(&key)?;
                 let reason = match reason_str.as_str() {
                     "Retired" => InputAbandonReason::Retired,
@@ -383,7 +387,6 @@ impl EphemeralRuntimeDriver {
                 };
                 Some(InputTerminalOutcome::Abandoned { reason })
             }
-            _ => None,
         }
     }
 
@@ -561,16 +564,23 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    fn phase_str_for(lifecycle: InputLifecycleState) -> &'static str {
+    fn lifecycle_to_input_phase(lifecycle: InputLifecycleState) -> mm_dsl::InputPhase {
         match lifecycle {
-            InputLifecycleState::Accepted | InputLifecycleState::Queued => "Queued",
-            InputLifecycleState::Staged => "Staged",
-            InputLifecycleState::Applied => "Applied",
-            InputLifecycleState::AppliedPendingConsumption => "AppliedPendingConsumption",
-            InputLifecycleState::Consumed => "Consumed",
-            InputLifecycleState::Superseded => "Superseded",
-            InputLifecycleState::Coalesced => "Coalesced",
-            InputLifecycleState::Abandoned => "Abandoned",
+            // The DSL never represents the pre-admission `Accepted` state —
+            // admission lands directly in `Queued` so recovery normalizes
+            // both shell variants onto the same DSL slot.
+            InputLifecycleState::Accepted | InputLifecycleState::Queued => {
+                mm_dsl::InputPhase::Queued
+            }
+            InputLifecycleState::Staged => mm_dsl::InputPhase::Staged,
+            InputLifecycleState::Applied => mm_dsl::InputPhase::Applied,
+            InputLifecycleState::AppliedPendingConsumption => {
+                mm_dsl::InputPhase::AppliedPendingConsumption
+            }
+            InputLifecycleState::Consumed => mm_dsl::InputPhase::Consumed,
+            InputLifecycleState::Superseded => mm_dsl::InputPhase::Superseded,
+            InputLifecycleState::Coalesced => mm_dsl::InputPhase::Coalesced,
+            InputLifecycleState::Abandoned => mm_dsl::InputPhase::Abandoned,
         }
     }
 
@@ -601,17 +611,18 @@ impl EphemeralRuntimeDriver {
             request_id,
             reservation_key,
         );
-        self.dsl.0.state.input_phases.insert(
-            key.clone(),
-            Self::phase_str_for(lifecycle_state).to_string(),
-        );
+        self.dsl
+            .0
+            .state
+            .input_phases
+            .insert(key.clone(), Self::lifecycle_to_input_phase(lifecycle_state));
         match recovered_seed.terminal_outcome.clone() {
             Some(InputTerminalOutcome::Consumed) => {
                 self.dsl
                     .0
                     .state
                     .input_terminal_kind
-                    .insert(key.clone(), "Consumed".to_string());
+                    .insert(key.clone(), mm_dsl::InputTerminalKind::Consumed);
                 self.dsl.0.state.input_superseded_by.remove(&key);
                 self.dsl.0.state.input_aggregate_id.remove(&key);
                 self.dsl.0.state.input_abandon_reason.remove(&key);
@@ -622,7 +633,7 @@ impl EphemeralRuntimeDriver {
                     .0
                     .state
                     .input_terminal_kind
-                    .insert(key.clone(), "Superseded".to_string());
+                    .insert(key.clone(), mm_dsl::InputTerminalKind::Superseded);
                 self.dsl
                     .0
                     .state
@@ -637,7 +648,7 @@ impl EphemeralRuntimeDriver {
                     .0
                     .state
                     .input_terminal_kind
-                    .insert(key.clone(), "Coalesced".to_string());
+                    .insert(key.clone(), mm_dsl::InputTerminalKind::Coalesced);
                 self.dsl
                     .0
                     .state
@@ -652,7 +663,7 @@ impl EphemeralRuntimeDriver {
                     .0
                     .state
                     .input_terminal_kind
-                    .insert(key.clone(), "Abandoned".to_string());
+                    .insert(key.clone(), mm_dsl::InputTerminalKind::Abandoned);
                 self.dsl
                     .0
                     .state

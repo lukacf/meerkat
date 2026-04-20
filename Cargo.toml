@@ -73,7 +73,7 @@ sha2 = "0.10"
 base64 = "0.22"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Error handling
 thiserror = "2.0"

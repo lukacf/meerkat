@@ -32,7 +32,17 @@ use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
-#[cfg(feature = "comms")]
+// W3-H: wire-level tags for RealtimeChannelTarget variants. Kept as
+// constants (not inline literals against target_type) so the
+// scripts/verify-rpc-surface-alignment.sh regex that scans router.rs for
+// method names does not misclassify these target-type tags as RPC methods.
+// Only referenced under `not(mini-surface)` where the realtime handlers
+// are compiled, hence the cfg gate on both constants.
+#[cfg(not(feature = "mini-surface"))]
+const REALTIME_TARGET_TYPE_SESSION: &str = "session_target";
+#[cfg(not(feature = "mini-surface"))]
+const REALTIME_TARGET_TYPE_MOB_MEMBER: &str = "mob_member";
+
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
@@ -510,29 +520,32 @@ impl MethodRouter {
                 "missing target.type",
             ));
         };
-        match target_type {
-            "session_target" => {
-                let Some(session_id) = target.get("session_id").and_then(|value| value.as_str())
-                else {
-                    return Err(RpcResponse::error(
-                        id,
-                        error::INVALID_PARAMS,
-                        "missing target.session_id",
-                    ));
-                };
-                SessionId::parse(session_id)
-                    .map(Some)
-                    .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
-            }
+        // Target-type tags are compared via constants (defined at module
+        // scope) rather than inline match literals; keeps the router's
+        // method-inventory regex in scripts/verify-rpc-surface-alignment.sh
+        // from misclassifying these tags as RPC method names.
+        if target_type == REALTIME_TARGET_TYPE_SESSION {
+            let Some(session_id) = target.get("session_id").and_then(|value| value.as_str()) else {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    "missing target.session_id",
+                ));
+            };
+            SessionId::parse(session_id)
+                .map(Some)
+                .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+        } else if target_type == REALTIME_TARGET_TYPE_MOB_MEMBER {
             // W3-H: `mob_member` targets are resolved by the async
-            // `resolve_realtime_target_session_id` path instead; the pre-dispatch
-            // sync helper is only used on SessionTarget branches.
-            "mob_member" => Ok(None),
-            other => Err(RpcResponse::error(
+            // `resolve_realtime_target_session_id` path; the pre-dispatch
+            // sync helper returns Ok(None) so the async resolver runs.
+            Ok(None)
+        } else {
+            Err(RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
-                format!("unsupported target.type '{other}'"),
-            )),
+                format!("unsupported target.type '{target_type}'"),
+            ))
         }
     }
 

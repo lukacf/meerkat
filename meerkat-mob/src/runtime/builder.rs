@@ -64,6 +64,66 @@ fn seed_mob_authority(
     authority
 }
 
+/// Seed the DSL authority's membership-tracking fields from a reconstructed
+/// shell roster on resume paths.
+///
+/// The shell roster is projected from the event log (`Roster::project`), but
+/// the DSL authority has no corresponding event-projection because only the
+/// live spawn pipeline calls `MobMachineInput::Spawn`. On resume the DSL
+/// would otherwise start with empty `live_runtime_ids`, which breaks any
+/// MobMachine-owned guard that checks membership — including the work-lane
+/// `SubmitWork` transitions that own External/Internal legality.
+///
+/// This helper replays every live roster entry into the DSL exactly as a
+/// fresh spawn would have done, populating `live_runtime_ids`,
+/// `runtime_fence_tokens`, `externally_addressable_runtime_ids`, and
+/// `identity_to_runtime`. `external_addressable` is resolved from the
+/// definition's inline profile (realm-profile overrides are resolved
+/// asynchronously elsewhere; callers that need realm overrides can re-feed
+/// spawn events through the live pipeline).
+fn seed_mob_authority_sync_from_roster(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    roster: &Roster,
+    definition: &MobDefinition,
+) {
+    use crate::machines::mob_machine as mob_dsl;
+    for entry in roster.list_all() {
+        // Use the inline profile where available. Realm-profile overrides
+        // are not observed here (the realm store is async-only); resumes
+        // that depend on a realm override for addressability would need to
+        // also emit a spawn event through the normal async pipeline, which
+        // `handle_submit_work` would then see once the entry re-enters the
+        // DSL via that path.
+        let external_addressable = definition
+            .profiles
+            .get(&entry.role)
+            .and_then(|binding| binding.as_inline())
+            .map(|profile| profile.external_addressable)
+            .unwrap_or(false);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let dsl_fence = mob_dsl::FenceToken::from_domain(entry.fence_token);
+        authority
+            .state
+            .live_runtime_ids
+            .insert(dsl_runtime_id.clone());
+        if external_addressable {
+            authority
+                .state
+                .externally_addressable_runtime_ids
+                .insert(dsl_runtime_id.clone());
+        }
+        authority
+            .state
+            .runtime_fence_tokens
+            .insert(dsl_runtime_id.clone(), dsl_fence);
+        authority
+            .state
+            .identity_to_runtime
+            .insert(dsl_identity, dsl_runtime_id);
+    }
+}
+
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
@@ -72,6 +132,15 @@ struct RuntimeWiring {
     /// authority. The DSL authority is the single source of truth for the
     /// lifecycle phase — no atomic shadow exists (dogma #1, #13, #17).
     initial_phase: MobState,
+    /// DSL authority pre-seeded from the reconstructed roster on resume paths
+    /// (and from scratch on create paths). Carried through the wiring so the
+    /// actor receives membership-populated authority state before the first
+    /// command is processed — MobMachine guards that check
+    /// `live_runtime_ids` / `externally_addressable_runtime_ids` see the
+    /// resumed members immediately. Boxed so `RuntimeWiring` stays slim
+    /// inside the async `resume()` future (the DSL state struct itself is
+    /// several hundred bytes worth of maps + sets).
+    dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
@@ -526,10 +595,15 @@ impl MobBuilder {
         // before the actor spawns. The real actor-side sender replaces
         // this once start_runtime_with_components owns the final pair.
         let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
-        let wiring = RuntimeWiring {
+        let mut wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             initial_phase: resumed_state,
+            // Placeholder; the final authority is seeded below after
+            // `reconcile_resume` finalizes the shell roster. The DSL
+            // membership state is populated from the finalized roster so
+            // MobMachine guards see the resumed members immediately.
+            dsl_authority: Box::new(seed_mob_authority(resumed_state)),
             restore_diagnostics: restore_diagnostics.clone(),
             runtime_metadata: storage.runtime_metadata.clone(),
             supervisor_bridge: supervisor_bridge.clone(),
@@ -568,6 +642,12 @@ impl MobBuilder {
             .await?;
         }
 
+        // Seed the DSL authority from the finalized roster. After
+        // `reconcile_resume` the roster reflects every member that was
+        // alive at resume time; replaying those as DSL spawns is what
+        // lets MobMachine guards (SubmitWork legality, Retire membership,
+        // etc.) see resumed members on the first command.
+        seed_mob_authority_sync_from_roster(&mut wiring.dsl_authority, &roster, &definition);
         *wiring.roster.write().await = RosterAuthority::from_roster(roster);
         *wiring.task_board.write().await = task_board;
 
@@ -1195,6 +1275,13 @@ impl MobBuilder {
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
+        // Seed the DSL authority from the reconstructed shell roster so the
+        // MobMachine sees already-spawned members immediately on resume.
+        // Profile lookup is best-effort-sync here — resume paths thread a
+        // concrete profile via `start_runtime_with_components`; fresh create
+        // paths pass an empty roster so the replay is a no-op either way.
+        let mut dsl_authority = Box::new(seed_mob_authority(initial_state));
+        seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition);
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
@@ -1219,6 +1306,7 @@ impl MobBuilder {
             roster,
             task_board,
             initial_phase: initial_state,
+            dsl_authority,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1261,6 +1349,7 @@ impl MobBuilder {
             roster,
             task_board,
             initial_phase: wiring_initial_phase,
+            dsl_authority,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1377,7 +1466,7 @@ impl MobBuilder {
             supervisor_bridge,
             task_board_service,
             spawn_policy,
-            dsl_authority: seed_mob_authority(initial_phase),
+            dsl_authority: *dsl_authority,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,

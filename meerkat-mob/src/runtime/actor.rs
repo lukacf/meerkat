@@ -2157,34 +2157,9 @@ impl MobActor {
                     };
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::ExternalTurn {
-                    agent_identity,
-                    content,
-                    handling_mode,
-                    render_metadata,
-                    reply_tx,
-                } => {
+                MobCommand::SubmitWork { payload, reply_tx } => {
                     let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => {
-                            Box::pin(self.handle_external_turn(
-                                agent_identity,
-                                content,
-                                handling_mode,
-                                render_metadata,
-                            ))
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::InternalTurn {
-                    agent_identity,
-                    content,
-                    reply_tx,
-                } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_internal_turn(agent_identity, content).await,
+                        Ok(()) => Box::pin(self.handle_submit_work(payload)).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -2703,6 +2678,17 @@ impl MobActor {
                 } => {
                     let result = match self.require_state(&[MobState::Running]) {
                         Ok(()) => self.handle_force_cancel(agent_identity).await,
+                        Err(error) => Err(error),
+                    };
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CancelAllWork {
+                    runtime_id,
+                    fence_token,
+                    reply_tx,
+                } => {
+                    let result = match self.require_state(&[MobState::Running]) {
+                        Ok(()) => self.handle_cancel_all_work(runtime_id, fence_token).await,
                         Err(error) => Err(error),
                     };
                     let _ = reply_tx.send(result);
@@ -6562,26 +6548,62 @@ impl MobActor {
             .await
     }
 
-    /// P1-T10: external_turn enforces addressability.
+    /// Unified work-lane entry.
     ///
-    /// When the target meerkat is not in the roster and a [`SpawnPolicy`] is
-    /// set, the policy is consulted. If it resolves a [`SpawnSpec`], the
-    /// member is auto-spawned and the message is delivered after provisioning
-    /// completes.
-    async fn handle_external_turn(
+    /// The `MobMachine` DSL owns work-origin legality: whether this runtime is
+    /// live, which origin is admissible (External vs Internal), and whether
+    /// external callers may address this runtime. The shell no longer
+    /// re-decides any of those facts — it forwards the caller-declared
+    /// [`WorkOrigin`] to the DSL and lets the guards accept or reject.
+    ///
+    /// Shell-owned pre-work (shell is the only place that can do these):
+    ///   * Fence-token freshness (concurrency invariant, not legality).
+    ///   * Auto-spawn via the roster's [`SpawnPolicy`] when the target member
+    ///     is absent but a policy resolves a spec. Only meaningful for
+    ///     externally-originated work — internal origins never auto-spawn.
+    ///   * `ensure_member_not_broken` / `MemberState::Active` filtering so
+    ///     broken or retiring members return typed [`MobError::MemberNotFound`].
+    ///   * Post-authorization dispatch — reading the machine's
+    ///     `RequestRuntimeIngress` effect and materializing it as an actual
+    ///     runtime ingress (event injector or `StartTurnRequest`). This is
+    ///     the shell's realization of the DSL's routed-to-MeerkatMachine
+    ///     effect.
+    async fn handle_submit_work(
         &mut self,
-        agent_identity: MeerkatId,
-        content: ContentInput,
-        handling_mode: meerkat_core::types::HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        payload: Box<super::state::SubmitWorkPayload>,
     ) -> Result<(), MobError> {
-        self.ensure_pending_spawn_alignment("handle_external_turn preflight")?;
-        // Look up the entry
-        let entry = {
+        let super::state::SubmitWorkPayload {
+            runtime_id,
+            fence_token,
+            work_ref,
+            content,
+            origin,
+            handling_mode,
+            render_metadata,
+        } = *payload;
+        self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
+
+        let agent_identity = MeerkatId::from(&runtime_id.identity);
+
+        // Resolve entry + validate fence freshness in a single roster read.
+        // Fence-token freshness is a shell-owned concurrency invariant (a
+        // stale token means the caller is talking to a superseded
+        // incarnation); auto-spawn is an external-only policy seam that
+        // runs when the target member is absent and a `SpawnPolicy` is set.
+        let initial_entry = {
             let roster = self.roster.read().await;
             roster.get(&agent_identity).cloned()
         };
-        let entry = match entry {
+        if let Some(ref entry) = initial_entry
+            && entry.fence_token != fence_token
+        {
+            return Err(MobError::StaleFenceToken {
+                runtime_id,
+                expected: entry.fence_token,
+                actual: fence_token,
+            });
+        }
+        let entry = match initial_entry {
             Some(e) => {
                 if e.state != crate::roster::MemberState::Active {
                     return Err(MobError::MemberNotFound(agent_identity));
@@ -6590,27 +6612,30 @@ impl MobActor {
                 e
             }
             None => {
-                let agent_identity = AgentIdentity::from(agent_identity.as_str());
-                if let Some(spec) = self.spawn_policy.resolve(&agent_identity).await {
-                    Box::pin(self.spawn_from_policy_inline(&agent_identity, spec))
+                if matches!(origin, WorkOrigin::Internal) {
+                    return Err(MobError::MemberNotFound(agent_identity));
+                }
+                let identity = AgentIdentity::from(agent_identity.as_str());
+                if let Some(spec) = self.spawn_policy.resolve(&identity).await {
+                    Box::pin(self.spawn_from_policy_inline(&identity, spec))
                         .await
                         .map_err(|error| {
                             MobError::Internal(format!(
-                                "auto-spawn failed for '{agent_identity}': {error}"
+                                "auto-spawn failed for '{identity}': {error}"
                             ))
                         })?;
                     let spawned_entry = {
                         let roster = self.roster.read().await;
-                        roster.get(&agent_identity).cloned()
+                        roster.get(&identity).cloned()
                     }
                     .ok_or_else(|| {
                         MobError::Internal(format!(
-                            "auto-spawned member '{agent_identity}' missing from roster after completion"
+                            "auto-spawned member '{identity}' missing from roster after completion"
                         ))
                     })?;
                     if spawned_entry.state != crate::roster::MemberState::Active {
                         return Err(MobError::Internal(format!(
-                            "auto-spawned member '{agent_identity}' is not active"
+                            "auto-spawned member '{identity}' is not active"
                         )));
                     }
                     spawned_entry
@@ -6620,30 +6645,72 @@ impl MobActor {
             }
         };
 
-        // Check external_addressable
-        let profile = if let Some(profile) = entry.effective_profile_override.clone() {
-            profile
-        } else {
-            self.definition
-                .resolve_profile(&entry.role, self.realm_profile_store.as_ref())
-                .await?
-        };
+        // Project the caller's identifiers into DSL bridging types.
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
+        let dsl_work_id = mob_dsl::WorkId::from_work_ref(&work_ref);
+        let dsl_origin = mob_dsl::WorkOrigin::from(origin);
 
-        if !profile.external_addressable {
-            return Err(MobError::NotExternallyAddressable(agent_identity));
+        // Apply the DSL SubmitWork input. The MobMachine owns work-origin
+        // legality: `SubmitWorkRunningExternal` / `SubmitWorkRunningInternal`
+        // encode the origin + addressability + live-runtime + phase guards.
+        // A rejection is a state-legality violation, not a freshness issue.
+        let transition = mob_dsl::MobMachineMutator::apply(
+            &mut self.dsl_authority,
+            mob_dsl::MobMachineInput::SubmitWork {
+                agent_runtime_id: dsl_runtime_id,
+                fence_token: dsl_fence_token,
+                work_id: dsl_work_id,
+                origin: dsl_origin,
+            },
+        )
+        .map_err(|_| match origin {
+            WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
+            WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
+        })?;
+        if transition.from_phase != transition.to_phase {
+            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+
+        // The MobMachine emits `RequestRuntimeIngress` whenever SubmitWork
+        // is admitted. The shell realizes that routed-to-MeerkatMachine
+        // effect by actually dispatching the turn. Every admitted path
+        // must emit at least one ingress effect — if none is present the
+        // machine schema has drifted. Drop the transition before the await
+        // so the large `MobMachineTransition` struct doesn't balloon the
+        // command-loop future size across yield points.
+        let ingress_admitted = transition.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }
+            )
+        });
+        drop(transition);
+        if !ingress_admitted {
+            return Err(MobError::Internal(
+                "MobMachine accepted SubmitWork but emitted no RequestRuntimeIngress effect".into(),
+            ));
         }
 
         self.dispatch_member_turn(&entry, content, handling_mode, render_metadata)
             .await
     }
 
-    /// Internal-turn path bypasses external_addressable checks.
-    async fn handle_internal_turn(
-        &self,
-        agent_identity: MeerkatId,
-        content: ContentInput,
+    /// Unified work-lane cancel entry.
+    ///
+    /// The MobMachine DSL `CancelAllWork` transition owns live-runtime
+    /// membership + phase legality; fence-token freshness is a shell-owned
+    /// concurrency invariant (matches the submit-work pattern). Once the
+    /// machine accepts, the shell dispatches `interrupt_member` on the
+    /// current bridge session.
+    async fn handle_cancel_all_work(
+        &mut self,
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
     ) -> Result<(), MobError> {
-        self.ensure_pending_spawn_alignment("handle_internal_turn preflight")?;
+        let agent_identity = MeerkatId::from(&runtime_id.identity);
+
         let entry = {
             let roster = self.roster.read().await;
             roster
@@ -6651,18 +6718,29 @@ impl MobActor {
                 .cloned()
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?
         };
-        if entry.state != crate::roster::MemberState::Active {
-            return Err(MobError::MemberNotFound(agent_identity));
+        if entry.fence_token != fence_token {
+            return Err(MobError::StaleFenceToken {
+                runtime_id,
+                expected: entry.fence_token,
+                actual: fence_token,
+            });
         }
-        self.ensure_member_not_broken(&entry.agent_identity).await?;
 
-        self.dispatch_member_turn(
-            &entry,
-            content,
-            meerkat_core::types::HandlingMode::Queue,
-            None,
-        )
-        .await
+        // Feed the DSL CancelAllWork input. Guards enforce live-runtime
+        // membership + phase == Running. A rejection here is a state
+        // legality violation.
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
+        self.apply_dsl_input(
+            mob_dsl::MobMachineInput::CancelAllWork {
+                agent_runtime_id: dsl_runtime_id,
+                fence_token: dsl_fence_token,
+            },
+            "handle_cancel_all_work",
+        )?;
+
+        // Dispatch the interrupt now that the machine has authorized.
+        self.provisioner.interrupt_member(&entry.member_ref).await
     }
 
     async fn dispatch_member_turn(

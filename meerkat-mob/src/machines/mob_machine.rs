@@ -389,8 +389,6 @@ machine! {
             RetireAll,
             Wire,
             Unwire,
-            ExternalTurn,
-            InternalTurn,
             SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
@@ -1004,22 +1002,6 @@ machine! {
             update {}
             to Running
             emit NotifyCoordinator
-        }
-
-        transition ExternalTurnRunning {
-            on input ExternalTurn
-            guard { self.lifecycle_phase == Phase::Running }
-            update {}
-            to Running
-            emit EmitProgressNote
-        }
-
-        transition InternalTurnRunning {
-            on input InternalTurn
-            guard { self.lifecycle_phase == Phase::Running }
-            update {}
-            to Running
-            emit EmitProgressNote
         }
 
         // TaskCreate: real mutator. Rejects duplicate task ids.

@@ -120,6 +120,19 @@ pub(crate) struct MobStartupKickoffSnapshot {
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
 }
 
+/// Heap-allocated payload for `MobCommand::SubmitWork`. Boxing keeps the
+/// command-channel variant width bounded by the pointer, not by the full
+/// `ContentInput` + render metadata footprint.
+pub(super) struct SubmitWorkPayload {
+    pub runtime_id: AgentRuntimeId,
+    pub fence_token: FenceToken,
+    pub work_ref: WorkRef,
+    pub content: ContentInput,
+    pub origin: WorkOrigin,
+    pub handling_mode: meerkat_core::types::HandlingMode,
+    pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+}
+
 // ---------------------------------------------------------------------------
 // MobCommand
 // ---------------------------------------------------------------------------
@@ -160,16 +173,26 @@ pub(super) enum MobCommand {
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
-    ExternalTurn {
-        agent_identity: MeerkatId,
-        content: ContentInput,
-        handling_mode: meerkat_core::types::HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    /// Unified work-lane ingress: the MobMachine DSL decides work-origin
+    /// legality (External vs Internal, addressability, live-runtime, phase),
+    /// the shell observes the machine's `RequestRuntimeIngress` effect and
+    /// dispatches the turn. There is no shell-side re-decision of origin;
+    /// the `origin` field is forwarded into the DSL input verbatim.
+    ///
+    /// Boxed so the `ContentInput` + render/handling metadata doesn't widen
+    /// the command channel's per-message stack footprint for every variant.
+    SubmitWork {
+        payload: Box<SubmitWorkPayload>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
-    InternalTurn {
-        agent_identity: MeerkatId,
-        content: ContentInput,
+    /// Unified work-lane cancellation: the MobMachine DSL owns live-runtime
+    /// membership and phase legality via the `CancelAllWork` transition;
+    /// fence-token freshness is a shell-level concurrency invariant. The
+    /// actor feeds the machine, then interrupts the member when the
+    /// transition lands.
+    CancelAllWork {
+        runtime_id: AgentRuntimeId,
+        fence_token: FenceToken,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     #[cfg(feature = "runtime-adapter")]

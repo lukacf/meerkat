@@ -973,77 +973,34 @@ impl MobHandle {
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::ExternalTurn {
-                agent_identity,
-                content,
-                handling_mode,
-                render_metadata,
-            } => {
-                self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
-                    agent_identity,
-                    content,
+            MobMachineCommand::SubmitWork(cmd) => {
+                // Shell dispatch is a thin forward: the mob actor owns
+                // work-origin legality via the MobMachine DSL. There is no
+                // origin re-decision here — `spec.origin` is forwarded
+                // verbatim and the DSL accepts or rejects.
+                let crate::mob_machine::SubmitWorkCommand {
+                    runtime_id,
+                    fence_token,
+                    work_ref,
+                    spec,
                     handling_mode,
                     render_metadata,
-                    reply_tx,
+                } = *cmd;
+                let receipt_work_ref = work_ref.clone();
+                let payload = Box::new(super::state::SubmitWorkPayload {
+                    runtime_id,
+                    fence_token,
+                    work_ref,
+                    content: spec.content,
+                    origin: spec.origin,
+                    handling_mode,
+                    render_metadata,
+                });
+                self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
+                    .await??;
+                Ok(MobMachineCommandResult::WorkReceipt {
+                    work_ref: receipt_work_ref,
                 })
-                .await??;
-                Ok(MobMachineCommandResult::Unit)
-            }
-            MobMachineCommand::InternalTurn {
-                agent_identity,
-                content,
-            } => {
-                self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
-                    agent_identity,
-                    content,
-                    reply_tx,
-                })
-                .await??;
-                Ok(MobMachineCommandResult::Unit)
-            }
-            MobMachineCommand::SubmitWork {
-                runtime_id,
-                fence_token,
-                work_ref,
-                spec,
-            } => {
-                let meerkat_id = MeerkatId::from(&runtime_id.identity);
-                let entry = self
-                    .roster
-                    .read()
-                    .await
-                    .entry(&meerkat_id)
-                    .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
-                if entry.fence_token != fence_token {
-                    return Err(MobError::StaleFenceToken {
-                        runtime_id,
-                        expected: entry.fence_token,
-                        actual: fence_token,
-                    });
-                }
-                // WorkSpec.content is already ContentInput after DELETE_ME C6.
-                let content = spec.content;
-                match spec.origin {
-                    WorkOrigin::External => {
-                        self.send_actor_command(|reply_tx| MobCommand::ExternalTurn {
-                            agent_identity: meerkat_id,
-                            content,
-                            handling_mode: HandlingMode::Queue,
-                            render_metadata: None,
-                            reply_tx,
-                        })
-                        .await??;
-                    }
-                    WorkOrigin::Internal => {
-                        self.send_actor_command(|reply_tx| MobCommand::InternalTurn {
-                            agent_identity: meerkat_id,
-                            content,
-                            reply_tx,
-                        })
-                        .await??;
-                    }
-                }
-                Ok(MobMachineCommandResult::WorkReceipt { work_ref })
             }
             MobMachineCommand::CancelWork { work_ref } => {
                 // Work tracking ledger is introduced in C7. Until then,
@@ -1054,22 +1011,15 @@ impl MobHandle {
                 runtime_id,
                 fence_token,
             } => {
-                let meerkat_id = MeerkatId::from(&runtime_id.identity);
-                let entry = self
-                    .roster
-                    .read()
-                    .await
-                    .entry(&meerkat_id)
-                    .ok_or_else(|| MobError::MemberNotFound(meerkat_id.clone()))?;
-                if entry.fence_token != fence_token {
-                    return Err(MobError::StaleFenceToken {
-                        runtime_id,
-                        expected: entry.fence_token,
-                        actual: fence_token,
-                    });
-                }
-                self.send_actor_command(|reply_tx| MobCommand::ForceCancel {
-                    agent_identity: meerkat_id,
+                // Identity derivation is a projection, not a decision: the
+                // MobMachine DSL CancelAllWork guards own live-runtime
+                // membership legality; the fence check is a shell-level
+                // concurrency freshness invariant. The actor's unified
+                // `handle_cancel_all_work` forwards both to the DSL and
+                // then dispatches the interrupt when the machine accepts.
+                self.send_actor_command(|reply_tx| MobCommand::CancelAllWork {
+                    runtime_id,
+                    fence_token,
                     reply_tx,
                 })
                 .await??;
@@ -2605,13 +2555,17 @@ impl MobHandle {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<(), MobError> {
-        self.execute_machine_command(MobMachineCommand::ExternalTurn {
-            agent_identity,
-            content: message,
+        let material = self.canonical_member_list_material(&agent_identity).await;
+        let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id: material.agent_runtime_id,
+            fence_token: material.fence_token,
+            work_ref: WorkRef::new(),
+            spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
             render_metadata,
-        })
-        .await?;
+        });
+        self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
+            .await?;
         Ok(())
     }
 
@@ -2620,11 +2574,17 @@ impl MobHandle {
         agent_identity: MeerkatId,
         message: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
-        self.execute_machine_command(MobMachineCommand::InternalTurn {
-            agent_identity,
-            content: message,
-        })
-        .await?;
+        let material = self.canonical_member_list_material(&agent_identity).await;
+        let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id: material.agent_runtime_id,
+            fence_token: material.fence_token,
+            work_ref: WorkRef::new(),
+            spec: WorkSpec::new(message, WorkOrigin::Internal),
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        });
+        self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
+            .await?;
         Ok(())
     }
 
@@ -2645,13 +2605,16 @@ impl MobHandle {
         work_ref: WorkRef,
         spec: WorkSpec,
     ) -> Result<WorkDeliveryReceipt, MobError> {
+        let cmd = Box::new(crate::mob_machine::SubmitWorkCommand {
+            runtime_id: runtime_id.clone(),
+            fence_token,
+            work_ref: work_ref.clone(),
+            spec,
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        });
         match self
-            .execute_machine_command(MobMachineCommand::SubmitWork {
-                runtime_id: runtime_id.clone(),
-                fence_token,
-                work_ref: work_ref.clone(),
-                spec,
-            })
+            .execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?
         {
             MobMachineCommandResult::WorkReceipt { work_ref: ref_out } => Ok(WorkDeliveryReceipt {

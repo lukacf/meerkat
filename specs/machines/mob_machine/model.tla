@@ -269,20 +269,6 @@ WireRunning ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
-ExternalTurnRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
-
-
-InternalTurnRunning ==
-    /\ phase = "Running"
-    /\ phase' = "Running"
-    /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
-
-
 TaskCreateRunning(task_id, task_payload) ==
     /\ phase = "Running"
     /\ ((task_id \in DOMAIN tasks) = FALSE)
@@ -812,8 +798,6 @@ Next ==
     \/ CompleteRunning
     \/ ResetToRunning
     \/ WireRunning
-    \/ ExternalTurnRunning
-    \/ InternalTurnRunning
     \/ \E task_id \in TaskIdValues : \E task_payload \in MobTaskValues : TaskCreateRunning(task_id, task_payload)
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningPending(task_id, new_status)
     \/ \E task_id \in TaskIdValues : \E new_status \in TaskStatusValues : TaskUpdateRunningInProgress(task_id, new_status)

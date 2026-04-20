@@ -73,23 +73,16 @@ pub(crate) enum MobMachineCommand {
         local: MeerkatId,
         target: crate::PeerTarget,
     },
-    ExternalTurn {
-        agent_identity: MeerkatId,
-        content: meerkat_core::types::ContentInput,
-        handling_mode: meerkat_core::types::HandlingMode,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-    },
-    InternalTurn {
-        agent_identity: MeerkatId,
-        content: meerkat_core::types::ContentInput,
-    },
-    /// Submit a unit of work to a mob member, validated by fence token.
-    SubmitWork {
-        runtime_id: AgentRuntimeId,
-        fence_token: FenceToken,
-        work_ref: WorkRef,
-        spec: WorkSpec,
-    },
+    /// Submit a unit of work to a mob member. Fence-token freshness is
+    /// validated in the actor; work-origin legality (External vs Internal,
+    /// external-addressability, live-runtime membership, phase gates) is
+    /// owned by the `MobMachine` DSL — there is no shell-side branching on
+    /// `spec.origin`. Boxed: `WorkSpec` already carries `ContentInput`, and
+    /// adding render/handling metadata directly in the enum would widen the
+    /// `MobMachineCommand` size for every other variant (every
+    /// `MobHandle::execute_machine_command` call site captures this enum in
+    /// a future).
+    SubmitWork(Box<SubmitWorkCommand>),
     /// Cancel a previously submitted unit of work.
     CancelWork {
         work_ref: WorkRef,
@@ -160,6 +153,16 @@ pub(crate) enum MobMachineCommand {
     ForceCancel {
         agent_identity: MeerkatId,
     },
+}
+
+/// Payload for [`MobMachineCommand::SubmitWork`].
+pub(crate) struct SubmitWorkCommand {
+    pub runtime_id: AgentRuntimeId,
+    pub fence_token: FenceToken,
+    pub work_ref: WorkRef,
+    pub spec: WorkSpec,
+    pub handling_mode: meerkat_core::types::HandlingMode,
+    pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
 }
 
 pub(crate) enum MobMachineCommandResult {

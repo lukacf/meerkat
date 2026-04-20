@@ -371,6 +371,16 @@ pub enum WorkOrigin {
     Internal,
 }
 
+impl WorkOrigin {
+    /// Stable string label consumed by `MobMachine` DSL guards.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            WorkOrigin::External => "External",
+            WorkOrigin::Internal => "Internal",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

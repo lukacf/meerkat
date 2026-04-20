@@ -30,8 +30,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RetireAll`
 - `Wire`
 - `Unwire`
-- `ExternalTurn`
-- `InternalTurn`
 - `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
@@ -281,18 +279,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - From: `Running`
 - On: `Wire`()
 - Emits: `NotifyCoordinator`
-- To: `Running`
-
-### `ExternalTurnRunning`
-- From: `Running`
-- On: `ExternalTurn`()
-- Emits: `EmitProgressNote`
-- To: `Running`
-
-### `InternalTurnRunning`
-- From: `Running`
-- On: `InternalTurn`()
-- Emits: `EmitProgressNote`
 - To: `Running`
 
 ### `TaskCreateRunning`

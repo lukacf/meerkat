@@ -1693,8 +1693,8 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 "handle_respawn",
                 "handle_wire",
                 "handle_unwire",
-                "handle_external_turn",
-                "handle_internal_turn",
+                "handle_submit_work",
+                "handle_cancel_all_work",
                 "retire_all_members",
                 "handle_task_create",
                 "handle_task_update",
@@ -3106,28 +3106,32 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
-            "handle_external_turn",
+            "handle_submit_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["runtime_bridge", "pending_spawns", "roster"],
-            "RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract",
+            "MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract",
             &[
-                "external turn routing and optional auto-spawn path preserve canonical runtime/member membership truth before dispatch",
+                "work-lane submission routes external/internal origin legality through MobMachine DSL guards; the shell forwards WorkOrigin verbatim and observes RequestRuntimeIngress before dispatching the turn; auto-spawn remains an external-only policy seam",
             ],
             &[
-                "delivery semantics cannot branch on shell-only side maps or bypass staged pending-spawn lineage",
+                "shell cannot re-decide External vs Internal addressability after the MobMachine decides, cannot branch on shell-only side maps, and cannot bypass staged pending-spawn lineage",
             ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/actor.rs",
-            "handle_internal_turn",
+            "handle_cancel_all_work",
             BoundaryKind::EnumDispatch,
             "MobActor",
             &["runtime_bridge", "roster"],
-            "RosterAuthority + SessionBackend runtime bridge",
-            &["internal turn routing preserves canonical runtime/member truth before dispatch"],
-            &["delivery semantics cannot branch on shell-only side maps"],
+            "MobMachine DSL CancelAllWork legality + SessionBackend runtime bridge",
+            &[
+                "work-lane cancel routes through MobMachine DSL guards (live-runtime membership + phase) before the shell issues interrupt_member; fence-token freshness stays a shell-level concurrency invariant"
+            ],
+            &[
+                "shell cannot dispatch interrupt_member without a MobMachine authorization nor skip fence-token freshness"
+            ],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

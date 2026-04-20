@@ -4,7 +4,9 @@ use crate::store::SupervisorAuthorityRecord;
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, SendReceipt, TrustedPeerSpec};
-use meerkat_core::interaction::{InteractionContent, PeerInputCandidate};
+use meerkat_core::interaction::{
+    InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
+};
 use meerkat_core::types::HandlingMode;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -221,6 +223,12 @@ impl MobSupervisorBridge {
         Ok(matched)
     }
 
+    /// Extract a terminal response value for the awaited request, if any.
+    ///
+    /// Bridge code does not interpret `ResponseStatus` directly — it routes
+    /// through `classify_response_terminality` and matches the typed
+    /// `TerminalityClass` exhaustively. W1-B made that classifier canonical
+    /// across the system; W2-F closes the bridge layer against drift.
     fn response_value(
         candidate: &PeerInputCandidate,
         request_envelope_id: uuid::Uuid,
@@ -238,10 +246,15 @@ impl MobSupervisorBridge {
             return Ok(None);
         }
 
-        match status {
-            meerkat_core::interaction::ResponseStatus::Completed
-            | meerkat_core::interaction::ResponseStatus::Failed => Ok(Some(result.clone())),
-            meerkat_core::interaction::ResponseStatus::Accepted => Ok(None),
+        // Forward-compat wildcard: `TerminalityClass` is `#[non_exhaustive]`.
+        // Any future variant is treated as non-terminal here so the bridge
+        // keeps waiting rather than invented-terminal-ing on a class it does
+        // not yet understand — matching the conservative pattern in
+        // `meerkat-runtime/src/comms_drain.rs`.
+        match classify_response_terminality(*status) {
+            TerminalityClass::Terminal { .. } => Ok(Some(result.clone())),
+            TerminalityClass::Progress => Ok(None),
+            _ => Ok(None),
         }
     }
 }
@@ -307,6 +320,80 @@ mod tests {
         assert!(
             value.is_none(),
             "Accepted is progress and must not satisfy wait_for_response"
+        );
+    }
+
+    #[test]
+    fn response_value_failed_returns_payload() {
+        let request_envelope_id = uuid::Uuid::new_v4();
+        let expected = serde_json::json!({"error": "boom"});
+        let candidate = response_candidate(
+            request_envelope_id,
+            ResponseStatus::Failed,
+            expected.clone(),
+        );
+
+        let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
+            .expect("failed response should parse");
+
+        assert_eq!(
+            value,
+            Some(expected),
+            "Failed is terminal and must surface the result payload"
+        );
+    }
+
+    #[test]
+    fn response_value_routes_all_statuses_through_canonical_classifier() {
+        use meerkat_core::interaction::{TerminalityClass, classify_response_terminality};
+
+        for status in [
+            ResponseStatus::Accepted,
+            ResponseStatus::Completed,
+            ResponseStatus::Failed,
+        ] {
+            let request_envelope_id = uuid::Uuid::new_v4();
+            let payload = serde_json::json!({"status": format!("{status:?}")});
+            let candidate = response_candidate(request_envelope_id, status, payload.clone());
+
+            let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
+                .expect("status-response should parse");
+
+            match classify_response_terminality(status) {
+                TerminalityClass::Terminal { .. } => assert_eq!(
+                    value,
+                    Some(payload),
+                    "terminal classification must surface payload (status={status:?})"
+                ),
+                TerminalityClass::Progress => assert!(
+                    value.is_none(),
+                    "progress classification must not surface payload (status={status:?})"
+                ),
+                _ => panic!(
+                    "TerminalityClass variant grew; update supervisor_bridge::response_value \
+                     and this test before landing the new class"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn response_value_for_unrelated_envelope_returns_none() {
+        let awaited = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        assert_ne!(awaited, other);
+        let candidate = response_candidate(
+            other,
+            ResponseStatus::Completed,
+            serde_json::json!({"ok": true}),
+        );
+
+        let value = MobSupervisorBridge::response_value(&candidate, awaited)
+            .expect("mismatched envelope should still parse");
+
+        assert!(
+            value.is_none(),
+            "response for a different envelope must not satisfy the current wait"
         );
     }
 }

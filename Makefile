@@ -202,12 +202,12 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
 
 # RMAT read-seam lint: detect shell code that reads authority state to gate
@@ -231,6 +231,14 @@ legacy-surface-inventory:
 deprecated-backend-gate:
 	@echo "$(GREEN)Checking for deprecated backend references...$(NC)"
 	@scripts/deprecated_backend_scan.sh
+
+# W2-F bridge-classifier gate: supervisor_bridge / local_bridge / bridge
+# wire types must not re-interpret `ResponseStatus`. All terminal-vs-progress
+# decisions go through `meerkat_core::interaction::classify_response_terminality`
+# so the canonical classifier stays the single source of truth.
+bridge-no-responsestatus-gate:
+	@echo "$(GREEN)Running W2-F bridge-classifier gate...$(NC)"
+	@scripts/pre-push-bridge-no-responsestatus.sh
 
 deprecated-backend-inventory:
 	@echo "$(GREEN)Generating deprecated backend inventory...$(NC)"

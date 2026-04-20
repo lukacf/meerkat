@@ -83,6 +83,16 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+  # On push: W2-F bridge-classifier gate (no ResponseStatus matches in bridge files)
+  - repo: local
+    hooks:
+      - id: bridge-no-responsestatus
+        name: bridge layer must not re-interpret ResponseStatus (W2-F)
+        entry: scripts/pre-push-bridge-no-responsestatus.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-push]
+
   # On push: deterministic repo gate
   - repo: local
     hooks:

@@ -58,7 +58,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Abort`(session_id: SessionId)
 - `AbortAll`
 - `Wait`(session_id: SessionId)
-- `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: String)
+- `Ingest`(runtime_id: AgentRuntimeId, work_id: WorkId, origin: WorkOrigin)
 - `PublishEvent`(kind: String)
 - `RuntimeState`(runtime_id: String)
 - `RuntimeRealtimeAttachmentStatus`(session_id: SessionId)

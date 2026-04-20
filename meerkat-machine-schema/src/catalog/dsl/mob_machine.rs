@@ -71,7 +71,7 @@ machine! {
             Unwire,
             ExternalTurn,
             InternalTurn,
-            SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String },
+            SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             Stop,
@@ -150,10 +150,10 @@ machine! {
 
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
-            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String },
+            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             RequestRuntimeRetire,
             RequestRuntimeDestroy,
-            EmitMemberLifecycleNotice { kind: String },
+            EmitMemberLifecycleNotice { kind: Enum<MemberLifecycleKind> },
             EmitRunLifecycleNotice,
             EmitFlowRunNotice,
             AppendFailureLedger,
@@ -210,7 +210,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "spawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
         transition ObserveRuntimeReady {
@@ -226,7 +226,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "external_origin" { origin == "External" }
+            guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
             update {}
             to Running
@@ -238,7 +238,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "internal_origin" { origin == "Internal" }
+            guard "internal_origin" { origin == WorkOrigin::Internal }
             update {}
             to Running
             emit RequestRuntimeIngress { agent_runtime_id: agent_runtime_id, fence_token: fence_token, work_id: work_id, origin: origin }
@@ -267,7 +267,7 @@ machine! {
                 self.active_run_count = 0;
             }
             to Stopped
-            emit EmitMemberLifecycleNotice { kind: "retired" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
         transition ResetMember {
@@ -290,7 +290,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "reset" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Reset }
         }
 
         transition RespawnMember {
@@ -310,7 +310,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "respawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
         }
 
         transition MarkCompleted {
@@ -319,7 +319,7 @@ machine! {
             guard "no_active_runs" { self.active_run_count == 0 }
             update {}
             to Completed
-            emit EmitMemberLifecycleNotice { kind: "completed" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Completed }
         }
 
         transition DestroyMob {
@@ -359,7 +359,7 @@ machine! {
                 self.coordinator_bound = false;
             }
             to Destroyed
-            emit EmitMemberLifecycleNotice { kind: "destroyed" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Destroyed }
         }
 
         // =====================================================================
@@ -1051,7 +1051,7 @@ machine! {
                 self.runtime_fence_tokens = EmptyMap;
             }
             to Running
-            emit EmitMemberLifecycleNotice { kind: "retiring" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
 
         transition RetireAllStopped {
@@ -1062,7 +1062,7 @@ machine! {
                 self.runtime_fence_tokens = EmptyMap;
             }
             to Stopped
-            emit EmitMemberLifecycleNotice { kind: "retiring" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
 
         // =====================================================================
@@ -1077,7 +1077,7 @@ machine! {
                 self.pending_spawn_count -= 1;
             }
             to Running
-            emit EmitMemberLifecycleNotice { kind: "spawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
         // =====================================================================
@@ -1220,6 +1220,34 @@ pub enum MobMemberState {
     #[default]
     Active,
     Retiring,
+}
+
+/// Typed work-origin classification. Closed mirror of the real
+/// `meerkat-mob::ids::WorkOrigin` enum — the DSL uses this for guard-visible
+/// truth on `SubmitWork` and `RequestRuntimeIngress`. The `Ingest` variant
+/// exists only on the receiving side of the admission seam (the runtime
+/// control-plane dispatch); mob-originated work only uses
+/// `External`/`Internal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WorkOrigin {
+    #[default]
+    External,
+    Internal,
+    Ingest,
+}
+
+/// Typed member lifecycle notice kind for
+/// `MobMachineEffect::EmitMemberLifecycleNotice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLifecycleKind {
+    #[default]
+    Spawned,
+    Retiring,
+    Retired,
+    Reset,
+    Respawned,
+    Completed,
+    Destroyed,
 }
 
 /// Undirected wiring edge between two identities. Callers MUST normalize

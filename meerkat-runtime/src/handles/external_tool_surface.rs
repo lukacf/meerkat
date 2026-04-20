@@ -7,6 +7,7 @@ use meerkat_core::handles::{
     DslTransitionError, ExternalToolSurfaceHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
 use meerkat_core::tool_scope::{
+    ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
 };
 
@@ -46,7 +47,11 @@ impl RuntimeExternalToolSurfaceHandle {
         }
         Some(SurfaceSnapshot {
             surface_id: key.clone(),
-            base_state: state.surface_base_state.get(&key).cloned(),
+            base_state: state
+                .surface_base_state
+                .get(&key)
+                .copied()
+                .map(ExternalToolSurfaceBaseState::from),
             pending_op: state
                 .surface_pending_op
                 .get(&key)
@@ -63,8 +68,16 @@ impl RuntimeExternalToolSurfaceHandle {
             pending_task_sequence: state.surface_pending_task_sequence.get(&key).copied(),
             pending_lineage_sequence: state.surface_pending_lineage_sequence.get(&key).copied(),
             inflight_calls: state.surface_inflight_calls.get(&key).copied().unwrap_or(0),
-            last_delta_operation: state.surface_last_delta_operation.get(&key).cloned(),
-            last_delta_phase: state.surface_last_delta_phase.get(&key).cloned(),
+            last_delta_operation: state
+                .surface_last_delta_operation
+                .get(&key)
+                .copied()
+                .map(ExternalToolSurfaceDeltaOperation::from),
+            last_delta_phase: state
+                .surface_last_delta_phase
+                .get(&key)
+                .copied()
+                .map(ExternalToolSurfaceDeltaPhase::from),
             removal_draining_since_ms: state.surface_draining_since_ms.get(&key).copied(),
             removal_timeout_at_ms: state.surface_removal_timeout_at_ms.get(&key).copied(),
             removal_applied_at_turn: state.surface_removal_applied_at_turn.get(&key).copied(),
@@ -223,7 +236,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
             .surface_base_state
             .into_iter()
             .filter_map(|(surface_id, base_state)| {
-                if base_state == "Removing" {
+                if base_state == mm_dsl::ExternalToolSurfaceBaseState::Removing {
                     Some(surface_id)
                 } else {
                     None

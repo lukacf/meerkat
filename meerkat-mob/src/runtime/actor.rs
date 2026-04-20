@@ -920,11 +920,17 @@ impl MobActor {
         }
     }
 
-    fn kickoff_notice_intent(intent: &str) -> Option<&'static str> {
+    fn kickoff_notice_intent(
+        intent: crate::machines::mob_machine::KickoffIntent,
+    ) -> Option<&'static str> {
+        use crate::machines::mob_machine::KickoffIntent;
         match intent {
-            "Failed" => Some("mob.kickoff_failed"),
-            "Cancelled" => Some("mob.kickoff_cancelled"),
-            _ => None,
+            KickoffIntent::Failed => Some("mob.kickoff_failed"),
+            KickoffIntent::Cancelled => Some("mob.kickoff_cancelled"),
+            KickoffIntent::Pending
+            | KickoffIntent::Starting
+            | KickoffIntent::Started
+            | KickoffIntent::CallbackPending => None,
         }
     }
 
@@ -1109,7 +1115,7 @@ impl MobActor {
                     member_id: _,
                     intent,
                 } => {
-                    if let Some(notice_intent) = Self::kickoff_notice_intent(&intent)
+                    if let Some(notice_intent) = Self::kickoff_notice_intent(intent)
                         && let Err(error) = self
                             .notify_kickoff_event(agent_identity, notice_intent)
                             .await

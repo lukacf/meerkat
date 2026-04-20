@@ -1297,7 +1297,13 @@ mod tests {
                         ),
                         ("fence_token".into(), KernelValue::U64(41)),
                         ("work_id".into(), KernelValue::String("work-1".into())),
-                        ("origin".into(), KernelValue::String("Internal".into())),
+                        (
+                            "origin".into(),
+                            KernelValue::NamedVariant {
+                                enum_name: "WorkOrigin".into(),
+                                variant: "Internal".into(),
+                            },
+                        ),
                     ]),
                 },
             )

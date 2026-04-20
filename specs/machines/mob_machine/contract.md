@@ -32,7 +32,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Unwire`
 - `ExternalTurn`
 - `InternalTurn`
-- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String)
+- `SubmitWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `CancelWork`(work_id: WorkId)
 - `CancelAllWork`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
 - `Stop`
@@ -108,10 +108,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Effects
 - `RequestRuntimeBinding`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
-- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String)
+- `RequestRuntimeIngress`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: WorkOrigin)
 - `RequestRuntimeRetire`
 - `RequestRuntimeDestroy`
-- `EmitMemberLifecycleNotice`(kind: String)
+- `EmitMemberLifecycleNotice`(kind: MemberLifecycleKind)
 - `EmitRunLifecycleNotice`
 - `EmitFlowRunNotice`
 - `AppendFailureLedger`

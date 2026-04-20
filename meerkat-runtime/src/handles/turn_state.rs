@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use meerkat_core::lifecycle::RunId;
-use meerkat_core::turn_execution_authority::TurnPhase;
+use meerkat_core::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -32,7 +32,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     fn start_conversation_run(
         &self,
         run_id: RunId,
-        primitive_kind: String,
+        primitive_kind: TurnPrimitiveKind,
         admitted_content_shape: String,
         vision_enabled: bool,
         image_tool_results_enabled: bool,
@@ -41,7 +41,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartConversationRun {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                primitive_kind,
+                primitive_kind: mm_dsl::TurnPrimitiveKind::from(primitive_kind),
                 admitted_content_shape,
                 vision_enabled,
                 image_tool_results_enabled,
@@ -215,9 +215,11 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn acknowledge_terminal(&self, outcome: String) -> Result<(), DslTransitionError> {
+    fn acknowledge_terminal(&self, outcome: TurnTerminalOutcome) -> Result<(), DslTransitionError> {
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::AcknowledgeTerminal { outcome },
+            mm_dsl::MeerkatMachineInput::AcknowledgeTerminal {
+                outcome: mm_dsl::TurnTerminalOutcome::from(outcome),
+            },
             "TurnStateHandle::acknowledge_terminal",
         )
     }
@@ -282,7 +284,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         let state = self.dsl.snapshot_state();
         TurnStateSnapshot {
             turn_phase: map_turn_phase(state.turn_phase),
-            primitive_kind: state.primitive_kind.clone(),
+            primitive_kind: state.primitive_kind.map(TurnPrimitiveKind::from),
             admitted_content_shape: state.admitted_content_shape.clone(),
             vision_enabled: state.vision_enabled,
             image_tool_results_enabled: state.image_tool_results_enabled,
@@ -293,7 +295,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             barrier_satisfied: state.barrier_satisfied,
             boundary_count: state.boundary_count,
             cancel_after_boundary: state.cancel_after_boundary,
-            terminal_outcome: state.terminal_outcome.clone(),
+            terminal_outcome: state.terminal_outcome.map(TurnTerminalOutcome::from),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
         }

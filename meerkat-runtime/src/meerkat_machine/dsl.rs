@@ -837,6 +837,302 @@ impl SurfaceStagedOp {
     }
 }
 
+/// Typed turn primitive kind. Closed mirror of
+/// [`meerkat_core::turn_execution_authority::TurnPrimitiveKind`] — replaces the
+/// former literal-string `primitive_kind` field and `StartConversationRun`
+/// input field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnPrimitiveKind {
+    #[default]
+    None,
+    ConversationTurn,
+    ImmediateAppend,
+    ImmediateContextAppend,
+}
+
+impl From<meerkat_core::turn_execution_authority::TurnPrimitiveKind> for TurnPrimitiveKind {
+    fn from(kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind) -> Self {
+        match kind {
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::None => Self::None,
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn => {
+                Self::ConversationTurn
+            }
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ImmediateAppend => {
+                Self::ImmediateAppend
+            }
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ImmediateContextAppend => {
+                Self::ImmediateContextAppend
+            }
+        }
+    }
+}
+
+impl From<TurnPrimitiveKind> for meerkat_core::turn_execution_authority::TurnPrimitiveKind {
+    fn from(kind: TurnPrimitiveKind) -> Self {
+        match kind {
+            TurnPrimitiveKind::None => Self::None,
+            TurnPrimitiveKind::ConversationTurn => Self::ConversationTurn,
+            TurnPrimitiveKind::ImmediateAppend => Self::ImmediateAppend,
+            TurnPrimitiveKind::ImmediateContextAppend => Self::ImmediateContextAppend,
+        }
+    }
+}
+
+/// Typed turn terminal outcome. Closed mirror of
+/// [`meerkat_core::turn_execution_authority::TurnTerminalOutcome`] — replaces
+/// the former literal-string `terminal_outcome` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnTerminalOutcome {
+    #[default]
+    None,
+    Completed,
+    Failed,
+    Cancelled,
+    BudgetExhausted,
+    TimeBudgetExceeded,
+    StructuredOutputValidationFailed,
+}
+
+impl From<meerkat_core::turn_execution_authority::TurnTerminalOutcome> for TurnTerminalOutcome {
+    fn from(outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome) -> Self {
+        match outcome {
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::None => Self::None,
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::Completed => {
+                Self::Completed
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::Failed => Self::Failed,
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::Cancelled => {
+                Self::Cancelled
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::BudgetExhausted => {
+                Self::BudgetExhausted
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::TimeBudgetExceeded => {
+                Self::TimeBudgetExceeded
+            }
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+        }
+    }
+}
+
+impl From<TurnTerminalOutcome> for meerkat_core::turn_execution_authority::TurnTerminalOutcome {
+    fn from(outcome: TurnTerminalOutcome) -> Self {
+        match outcome {
+            TurnTerminalOutcome::None => Self::None,
+            TurnTerminalOutcome::Completed => Self::Completed,
+            TurnTerminalOutcome::Failed => Self::Failed,
+            TurnTerminalOutcome::Cancelled => Self::Cancelled,
+            TurnTerminalOutcome::BudgetExhausted => Self::BudgetExhausted,
+            TurnTerminalOutcome::TimeBudgetExceeded => Self::TimeBudgetExceeded,
+            TurnTerminalOutcome::StructuredOutputValidationFailed => {
+                Self::StructuredOutputValidationFailed
+            }
+        }
+    }
+}
+
+/// Typed pre-run phase marker. Closed set: `idle`, `attached`, `retired`.
+/// Replaces the former literal-string `pre_run_phase` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PreRunPhase {
+    #[default]
+    Idle,
+    Attached,
+    Retired,
+}
+
+/// Typed base lifecycle state for an external tool surface. Closed mirror of
+/// [`meerkat_core::tool_scope::ExternalToolSurfaceBaseState`] — replaces the
+/// former literal-string values in `surface_base_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalToolSurfaceBaseState {
+    #[default]
+    Absent,
+    Active,
+    Removing,
+    Removed,
+}
+
+impl From<meerkat_core::tool_scope::ExternalToolSurfaceBaseState> for ExternalToolSurfaceBaseState {
+    fn from(state: meerkat_core::tool_scope::ExternalToolSurfaceBaseState) -> Self {
+        match state {
+            meerkat_core::tool_scope::ExternalToolSurfaceBaseState::Absent => Self::Absent,
+            meerkat_core::tool_scope::ExternalToolSurfaceBaseState::Active => Self::Active,
+            meerkat_core::tool_scope::ExternalToolSurfaceBaseState::Removing => Self::Removing,
+            meerkat_core::tool_scope::ExternalToolSurfaceBaseState::Removed => Self::Removed,
+        }
+    }
+}
+
+impl From<ExternalToolSurfaceBaseState> for meerkat_core::tool_scope::ExternalToolSurfaceBaseState {
+    fn from(state: ExternalToolSurfaceBaseState) -> Self {
+        match state {
+            ExternalToolSurfaceBaseState::Absent => Self::Absent,
+            ExternalToolSurfaceBaseState::Active => Self::Active,
+            ExternalToolSurfaceBaseState::Removing => Self::Removing,
+            ExternalToolSurfaceBaseState::Removed => Self::Removed,
+        }
+    }
+}
+
+/// Typed last-delta operation for an external tool surface. Closed mirror of
+/// [`meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation`] — replaces
+/// the former literal-string values in `surface_last_delta_operation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalToolSurfaceDeltaOperation {
+    #[default]
+    None,
+    Add,
+    Remove,
+    Reload,
+}
+
+impl From<meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation>
+    for ExternalToolSurfaceDeltaOperation
+{
+    fn from(op: meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation) -> Self {
+        match op {
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation::None => Self::None,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation::Add => Self::Add,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation::Remove => Self::Remove,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation::Reload => Self::Reload,
+        }
+    }
+}
+
+impl From<ExternalToolSurfaceDeltaOperation>
+    for meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation
+{
+    fn from(op: ExternalToolSurfaceDeltaOperation) -> Self {
+        match op {
+            ExternalToolSurfaceDeltaOperation::None => Self::None,
+            ExternalToolSurfaceDeltaOperation::Add => Self::Add,
+            ExternalToolSurfaceDeltaOperation::Remove => Self::Remove,
+            ExternalToolSurfaceDeltaOperation::Reload => Self::Reload,
+        }
+    }
+}
+
+/// Typed last-delta phase for an external tool surface. Closed mirror of
+/// [`meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase`] — replaces the
+/// former literal-string values in `surface_last_delta_phase`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalToolSurfaceDeltaPhase {
+    #[default]
+    None,
+    Pending,
+    Applied,
+    Draining,
+    Failed,
+    Forced,
+}
+
+impl From<meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase>
+    for ExternalToolSurfaceDeltaPhase
+{
+    fn from(phase: meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase) -> Self {
+        match phase {
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::None => Self::None,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::Pending => Self::Pending,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::Applied => Self::Applied,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::Draining => Self::Draining,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::Failed => Self::Failed,
+            meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase::Forced => Self::Forced,
+        }
+    }
+}
+
+impl From<ExternalToolSurfaceDeltaPhase>
+    for meerkat_core::tool_scope::ExternalToolSurfaceDeltaPhase
+{
+    fn from(phase: ExternalToolSurfaceDeltaPhase) -> Self {
+        match phase {
+            ExternalToolSurfaceDeltaPhase::None => Self::None,
+            ExternalToolSurfaceDeltaPhase::Pending => Self::Pending,
+            ExternalToolSurfaceDeltaPhase::Applied => Self::Applied,
+            ExternalToolSurfaceDeltaPhase::Draining => Self::Draining,
+            ExternalToolSurfaceDeltaPhase::Failed => Self::Failed,
+            ExternalToolSurfaceDeltaPhase::Forced => Self::Forced,
+        }
+    }
+}
+
+/// Typed drain-exit reason. Closed mirror of
+/// [`meerkat_core::handles::DrainExitReason`] — replaces the former
+/// literal-string `reason` field on `NotifyDrainExited`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DrainExitReason {
+    #[default]
+    IdleTimeout,
+    Dismissed,
+    Failed,
+    Aborted,
+    SessionShutdown,
+}
+
+impl From<meerkat_core::handles::DrainExitReason> for DrainExitReason {
+    fn from(reason: meerkat_core::handles::DrainExitReason) -> Self {
+        match reason {
+            meerkat_core::handles::DrainExitReason::IdleTimeout => Self::IdleTimeout,
+            meerkat_core::handles::DrainExitReason::Dismissed => Self::Dismissed,
+            meerkat_core::handles::DrainExitReason::Failed => Self::Failed,
+            meerkat_core::handles::DrainExitReason::Aborted => Self::Aborted,
+            meerkat_core::handles::DrainExitReason::SessionShutdown => Self::SessionShutdown,
+        }
+    }
+}
+
+impl From<DrainExitReason> for meerkat_core::handles::DrainExitReason {
+    fn from(reason: DrainExitReason) -> Self {
+        match reason {
+            DrainExitReason::IdleTimeout => Self::IdleTimeout,
+            DrainExitReason::Dismissed => Self::Dismissed,
+            DrainExitReason::Failed => Self::Failed,
+            DrainExitReason::Aborted => Self::Aborted,
+            DrainExitReason::SessionShutdown => Self::SessionShutdown,
+        }
+    }
+}
+
+/// Typed work-lane origin for [`MeerkatMachineInput::Ingest`]. Closed set of
+/// the work-lane labels the DSL observes on the admission seam — replaces
+/// the former literal-string `origin` field. Structurally mirrors the
+/// `MobMachine.RequestRuntimeIngress.origin` seam so the cross-machine
+/// composition binds on a single typed enum instead of parallel
+/// string-typed slots. Transport sources ([`meerkat_core::comms::InputSource`])
+/// arriving from the shell side collapse to `External`; the
+/// runtime-control-plane `Ingest` dispatch uses the dedicated `Ingest`
+/// variant; mob-bridged ingress carries `External`/`Internal` matching
+/// `meerkat-mob::ids::WorkOrigin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WorkOrigin {
+    #[default]
+    External,
+    Internal,
+    /// Canonical admission entrypoint fired by the runtime control plane
+    /// with no surface-level transport or work-lane label.
+    Ingest,
+}
+
+impl From<meerkat_core::comms::InputSource> for WorkOrigin {
+    fn from(src: meerkat_core::comms::InputSource) -> Self {
+        match src {
+            // Transport-originated inputs are `External` work-lane: they
+            // entered the runtime via a non-mob transport (TCP/UDS/stdin/
+            // webhook/RPC). Mob-originated work fires the DSL directly
+            // with `External`/`Internal` instead of going through the
+            // session-admission handle.
+            meerkat_core::comms::InputSource::Tcp
+            | meerkat_core::comms::InputSource::Uds
+            | meerkat_core::comms::InputSource::Stdin
+            | meerkat_core::comms::InputSource::Webhook
+            | meerkat_core::comms::InputSource::Rpc => Self::External,
+        }
+    }
+}
+
 // Ensure we keep the exact generated schema DSL body from the catalog source.
 machine! {
     machine MeerkatMachine {
@@ -849,9 +1145,9 @@ machine! {
             active_runtime_id: Option<AgentRuntimeId>,
             active_fence_token: Option<FenceToken>,
             current_run_id: Option<RunId>,
-            pre_run_phase: Option<String>,
+            pre_run_phase: Option<Enum<PreRunPhase>>,
             turn_phase: TurnPhase,
-            primitive_kind: Option<String>,
+            primitive_kind: Option<Enum<TurnPrimitiveKind>>,
             admitted_content_shape: Option<String>,
             vision_enabled: bool,
             image_tool_results_enabled: bool,
@@ -862,7 +1158,7 @@ machine! {
             barrier_satisfied: bool,
             boundary_count: u64,
             cancel_after_boundary: bool,
-            terminal_outcome: Option<String>,
+            terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
             silent_intent_overrides: Set<String>,
@@ -912,7 +1208,7 @@ machine! {
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
             visible_surfaces: Set<String>,
-            surface_base_state: Map<String, String>,
+            surface_base_state: Map<String, Enum<ExternalToolSurfaceBaseState>>,
             surface_pending_op: Map<String, SurfacePendingOp>,
             surface_staged_op: Map<String, SurfaceStagedOp>,
             surface_staged_intent_sequence: Map<String, u64>,
@@ -921,8 +1217,8 @@ machine! {
             next_pending_task_sequence: u64,
             surface_pending_lineage_sequence: Map<String, u64>,
             surface_inflight_calls: Map<String, u64>,
-            surface_last_delta_operation: Map<String, String>,
-            surface_last_delta_phase: Map<String, String>,
+            surface_last_delta_operation: Map<String, Enum<ExternalToolSurfaceDeltaOperation>>,
+            surface_last_delta_phase: Map<String, Enum<ExternalToolSurfaceDeltaPhase>>,
             snapshot_epoch: u64,
             snapshot_aligned_epoch: u64,
             surface_draining_since_ms: Map<String, u64>,
@@ -1156,7 +1452,7 @@ machine! {
             },
             PrepareBindings { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
             SetPeerIngressContext { keep_alive: bool },
-            NotifyDrainExited { reason: String },
+            NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
             CancelAfterBoundary,
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
@@ -1187,7 +1483,7 @@ machine! {
             Abort { session_id: SessionId },
             AbortAll,
             Wait { session_id: SessionId },
-            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: String },
+            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
@@ -1200,7 +1496,7 @@ machine! {
             Recycle,
             StartConversationRun {
                 run_id: RunId,
-                primitive_kind: String,
+                primitive_kind: Enum<TurnPrimitiveKind>,
                 admitted_content_shape: String,
                 vision_enabled: bool,
                 image_tool_results_enabled: bool,
@@ -1226,7 +1522,7 @@ machine! {
             CancelNow,
             RequestCancelAfterBoundary,
             CancellationObserved,
-            AcknowledgeTerminal { outcome: String },
+            AcknowledgeTerminal { outcome: Enum<TurnTerminalOutcome> },
             TurnLimitReached,
             BudgetExhausted,
             TimeBudgetExceeded,
@@ -2342,7 +2638,7 @@ machine! {
             guard "interrupt_yielding" { interrupt_yielding == false }
             update {
                 self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some("attached");
+                self.pre_run_phase = Some(PreRunPhase::Attached);
             }
             to Running
             emit IngressAccepted
@@ -2470,7 +2766,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             update {
                 self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some("idle");
+                self.pre_run_phase = Some(PreRunPhase::Idle);
             }
             to Running
             emit SubmitRunPrimitive
@@ -2481,7 +2777,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             update {
                 self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some("attached");
+                self.pre_run_phase = Some(PreRunPhase::Attached);
             }
             to Running
             emit SubmitRunPrimitive
@@ -2493,7 +2789,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Retired }
             update {
                 self.current_run_id = Some(run_id);
-                self.pre_run_phase = Some("retired");
+                self.pre_run_phase = Some(PreRunPhase::Retired);
             }
             to Running
             emit SubmitRunPrimitive
@@ -2603,7 +2899,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2633,7 +2929,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2663,7 +2959,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2694,7 +2990,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateContextAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2724,7 +3020,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateContextAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2754,7 +3050,7 @@ machine! {
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
-                self.primitive_kind = Some("ImmediateContextAppend");
+                self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
                 self.admitted_content_shape = Some(admitted_content_shape);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
@@ -2778,7 +3074,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_applying_conversation" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
-                && self.primitive_kind == Some("ConversationTurn")
+                && self.primitive_kind == Some(TurnPrimitiveKind::ConversationTurn)
             }
             update {
                 self.turn_phase = TurnPhase::CallingLlm;
@@ -2792,13 +3088,13 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_applying_immediate" {
                 self.turn_phase == TurnPhase::ApplyingPrimitive
-                && (self.primitive_kind == Some("ImmediateAppend")
-                    || self.primitive_kind == Some("ImmediateContextAppend"))
+                && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
+                    || self.primitive_kind == Some(TurnPrimitiveKind::ImmediateContextAppend))
             }
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
-                self.terminal_outcome = Some("Completed");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
@@ -2911,7 +3207,7 @@ machine! {
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
-                self.terminal_outcome = Some("Completed");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
@@ -2944,7 +3240,7 @@ machine! {
             guard "turn_extracting" { self.turn_phase == TurnPhase::Extracting }
             update {
                 self.turn_phase = TurnPhase::Completed;
-                self.terminal_outcome = Some("Completed");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
@@ -2970,7 +3266,7 @@ machine! {
             guard "retries_exhausted" { self.extraction_attempts >= self.max_extraction_retries }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some("ExtractionExhausted");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }
             to Running
             emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "ExtractionExhausted" }
@@ -2997,7 +3293,7 @@ machine! {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(error);
+                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }
             to Running
             emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: error }
@@ -3050,7 +3346,7 @@ machine! {
             guard "turn_cancelling" { self.turn_phase == TurnPhase::Cancelling }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
-                self.terminal_outcome = Some("Cancelled");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
             emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: "observed" }
@@ -3090,7 +3386,7 @@ machine! {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some("TurnLimitReached");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }
             to Running
             emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "TurnLimitReached" }
@@ -3102,7 +3398,7 @@ machine! {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some("BudgetExhausted");
+                self.terminal_outcome = Some(TurnTerminalOutcome::BudgetExhausted);
             }
             to Running
             emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "BudgetExhausted" }
@@ -3114,7 +3410,7 @@ machine! {
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some("TimeBudgetExceeded");
+                self.terminal_outcome = Some(TurnTerminalOutcome::TimeBudgetExceeded);
             }
             to Running
             emit TurnRunFailed { run_id: self.current_run_id.get("value"), error: "TimeBudgetExceeded" }
@@ -3127,7 +3423,7 @@ machine! {
             guard "turn_ready" { self.turn_phase == TurnPhase::Ready }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
-                self.terminal_outcome = Some("ForceCancelNoRun");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
         }
@@ -3138,7 +3434,7 @@ machine! {
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Completed;
-                self.terminal_outcome = Some("Completed");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
         }
@@ -3149,7 +3445,7 @@ machine! {
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Failed;
-                self.terminal_outcome = Some(error);
+                self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
             }
             to Running
         }
@@ -3160,7 +3456,7 @@ machine! {
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Cancelled;
-                self.terminal_outcome = Some("RunCancelled");
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
         }
@@ -3279,7 +3575,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_last_delta_phase.insert(surface_id, "Applied");
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
             }
             to Attached
         }
@@ -3288,7 +3584,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_last_delta_phase.insert(surface_id, "Applied");
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
             }
             to Running
         }
@@ -3298,7 +3594,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_last_delta_phase.insert(surface_id, "Failed");
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Failed);
             }
             to Attached
         }
@@ -3307,7 +3603,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_last_delta_phase.insert(surface_id, "Failed");
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Failed);
             }
             to Running
         }
@@ -3350,7 +3646,7 @@ machine! {
             on input SurfaceFinalizeRemovalClean { surface_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.surface_base_state.insert(surface_id, "Removed");
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
             }
             to Attached
             emit CloseSurfaceConnection { surface_id: surface_id }
@@ -3359,7 +3655,7 @@ machine! {
             on input SurfaceFinalizeRemovalClean { surface_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.surface_base_state.insert(surface_id, "Removed");
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
             }
             to Running
             emit CloseSurfaceConnection { surface_id: surface_id }
@@ -3369,8 +3665,8 @@ machine! {
             on input SurfaceFinalizeRemovalForced { surface_id }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
-                self.surface_base_state.insert(surface_id, "Removed");
-                self.surface_last_delta_phase.insert(surface_id, "Forced");
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Forced);
             }
             to Attached
             emit CloseSurfaceConnection { surface_id: surface_id }
@@ -3379,8 +3675,8 @@ machine! {
             on input SurfaceFinalizeRemovalForced { surface_id }
             guard { self.lifecycle_phase == Phase::Running }
             update {
-                self.surface_base_state.insert(surface_id, "Removed");
-                self.surface_last_delta_phase.insert(surface_id, "Forced");
+                self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
+                self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Forced);
             }
             to Running
             emit CloseSurfaceConnection { surface_id: surface_id }
@@ -3424,7 +3720,7 @@ machine! {
         transition CommitRunningToIdle {
             on input Commit { input_id, run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
@@ -3435,7 +3731,7 @@ machine! {
         transition CommitRunningToAttached {
             on input Commit { input_id, run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
@@ -3446,7 +3742,7 @@ machine! {
         transition CommitRunningToRetired {
             on input Commit { input_id, run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
@@ -3459,7 +3755,7 @@ machine! {
         transition FailRunningToIdle {
             on input Fail { run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some("idle") }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
@@ -3471,7 +3767,7 @@ machine! {
         transition FailRunningToAttached {
             on input Fail { run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some("attached") }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;
@@ -3483,7 +3779,7 @@ machine! {
         transition FailRunningToRetired {
             on input Fail { run_id }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some("retired") }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
             guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.current_run_id = None;

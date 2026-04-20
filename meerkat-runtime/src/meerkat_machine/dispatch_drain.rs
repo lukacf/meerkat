@@ -85,11 +85,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let reason_str = format!("{reason:?}");
                 self.stage_session_dsl_input(
                     &session_id,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::NotifyDrainExited {
-                        reason: reason_str.clone(),
+                        reason: crate::meerkat_machine::dsl::DrainExitReason::from(reason),
                     },
                     "NotifyDrainExited",
                 )

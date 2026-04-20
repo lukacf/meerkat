@@ -38,21 +38,3 @@ retries = 2
 # — see that override for the full mechanism. Atomic-snapshot fix tracked for W2-E.
 filter = 'test(product_session_tool_call_routes_through_session_service_and_continues_provider)'
 retries = 2
-
-[[profile.default.overrides]]
-# smoke-fixes Cluster F: s44 reviewer retrieval of the staged `[TS-SWARM]`
-# system-context marker is subject to gpt-5.4 referential variance when
-# the reviewer's system prompt also contains identifier-like strings
-# (mob_id, peer_name, peer_id). Diagnostic `tracing::debug!` instrumentation
-# on `take_pending_system_context_boundary` proved the production plumbing
-# delivers the marker end-to-end; 3 unit tests in
-# `meerkat-session/tests/ephemeral_contract.rs` + s40 Python smoke on the
-# same code path confirm the mechanism. The reviewer model was upgraded
-# from gpt-5.4-mini to gpt-5.4 (see `reviewerModel()` helper in
-# `sdks/typescript/tests/e2e_smoke.test.mjs`) which lifted the first-pass
-# rate from 0% to ~60%; retries absorb the residual model-variance so CI
-# stays deterministic. Precedent: the four retry=2 overrides above for
-# `provider_tool_use_boundary`, `test_concurrent_spawns_parallelize_provisioning`,
-# and the two W1-A `session.state.updated_at` races.
-filter = 'test(e2e_smoke_s44_typescript_sdk_mixed_provider_swarm_probe)'
-retries = 2

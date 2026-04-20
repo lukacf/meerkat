@@ -120,16 +120,18 @@ mod tests {
         let json = r#"{"session_id":"sid_123","kind":"generic_json","event_type":"github","payload":{"event":"email","from":"john"}}"#;
         let params: ExternalEventParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.session_id, "sid_123");
-        match params.event {
-            SessionExternalEventEnvelope::GenericJson {
-                event_type,
-                payload,
-                ..
-            } => {
-                assert_eq!(event_type, "github");
-                assert_eq!(payload["event"], "email");
-            }
-            other => panic!("expected generic_json, got {other:?}"),
+        assert!(matches!(
+            params.event,
+            SessionExternalEventEnvelope::GenericJson { .. }
+        ));
+        if let SessionExternalEventEnvelope::GenericJson {
+            event_type,
+            payload,
+            ..
+        } = params.event
+        {
+            assert_eq!(event_type, "github");
+            assert_eq!(payload["event"], "email");
         }
     }
 
@@ -137,19 +139,21 @@ mod tests {
     fn test_external_event_params_reject_variant_deserialization() {
         let json = r#"{"session_id":"sid_123","kind":"peer_response_terminal","peer_name":"analyst","request_id":"req-1","status":"completed","result":{"token":"amber"}}"#;
         let params: ExternalEventParams = serde_json::from_str(json).unwrap();
-        match params.event {
-            SessionExternalEventEnvelope::PeerResponseTerminal {
-                peer_name,
-                request_id,
-                status,
-                result,
-            } => {
-                assert_eq!(peer_name.as_str(), "analyst");
-                assert_eq!(request_id, "req-1");
-                assert_eq!(status, PeerResponseTerminalStatusWire::Completed);
-                assert_eq!(result["token"], "amber");
-            }
-            other => panic!("expected peer_response_terminal, got {other:?}"),
+        assert!(matches!(
+            params.event,
+            SessionExternalEventEnvelope::PeerResponseTerminal { .. }
+        ));
+        if let SessionExternalEventEnvelope::PeerResponseTerminal {
+            peer_name,
+            request_id,
+            status,
+            result,
+        } = params.event
+        {
+            assert_eq!(peer_name.as_str(), "analyst");
+            assert_eq!(request_id, "req-1");
+            assert_eq!(status, PeerResponseTerminalStatusWire::Completed);
+            assert_eq!(result["token"], "amber");
         }
     }
 

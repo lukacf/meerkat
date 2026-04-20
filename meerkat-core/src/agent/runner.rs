@@ -14,13 +14,10 @@ use crate::tokio;
 use crate::tool_scope::{
     EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
-    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, ToolFilter, ToolScopeRevision,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeRevision,
     ToolScopeStageError,
 };
-use crate::turn_execution_authority::{
-    ContentShape, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
-};
+use crate::turn_execution_authority::{ContentShape, TurnPrimitiveKind, TurnTerminalOutcome};
 use crate::types::{ContentInput, Message, RunResult, ToolCallView};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
@@ -30,23 +27,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
-
-fn parse_turn_phase(value: &str) -> Option<TurnPhase> {
-    match value {
-        "Ready" => Some(TurnPhase::Ready),
-        "ApplyingPrimitive" => Some(TurnPhase::ApplyingPrimitive),
-        "CallingLlm" => Some(TurnPhase::CallingLlm),
-        "WaitingForOps" => Some(TurnPhase::WaitingForOps),
-        "DrainingBoundary" => Some(TurnPhase::DrainingBoundary),
-        "Extracting" => Some(TurnPhase::Extracting),
-        "ErrorRecovery" => Some(TurnPhase::ErrorRecovery),
-        "Cancelling" => Some(TurnPhase::Cancelling),
-        "Completed" => Some(TurnPhase::Completed),
-        "Failed" => Some(TurnPhase::Failed),
-        "Cancelled" => Some(TurnPhase::Cancelled),
-        _ => None,
-    }
-}
 
 fn parse_primitive_kind(value: Option<&str>) -> Option<TurnPrimitiveKind> {
     match value {
@@ -83,39 +63,12 @@ fn parse_operation_id(value: &str) -> Option<crate::ops::OperationId> {
     Uuid::parse_str(value).ok().map(crate::ops::OperationId)
 }
 
-fn parse_surface_phase(value: &str) -> Option<ExternalToolSurfaceGlobalPhase> {
-    match value {
-        "Operating" => Some(ExternalToolSurfaceGlobalPhase::Operating),
-        "Shutdown" => Some(ExternalToolSurfaceGlobalPhase::Shutdown),
-        _ => None,
-    }
-}
-
 fn parse_surface_base_state(value: Option<&str>) -> Option<ExternalToolSurfaceBaseState> {
     match value {
         Some("Absent") | None => Some(ExternalToolSurfaceBaseState::Absent),
         Some("Active") => Some(ExternalToolSurfaceBaseState::Active),
         Some("Removing") => Some(ExternalToolSurfaceBaseState::Removing),
         Some("Removed") => Some(ExternalToolSurfaceBaseState::Removed),
-        Some(_) => None,
-    }
-}
-
-fn parse_surface_pending_op(value: Option<&str>) -> Option<ExternalToolSurfacePendingOp> {
-    match value {
-        Some("None") | None => Some(ExternalToolSurfacePendingOp::None),
-        Some("Add") => Some(ExternalToolSurfacePendingOp::Add),
-        Some("Reload") => Some(ExternalToolSurfacePendingOp::Reload),
-        Some(_) => None,
-    }
-}
-
-fn parse_surface_staged_op(value: Option<&str>) -> Option<ExternalToolSurfaceStagedOp> {
-    match value {
-        Some("None") | None => Some(ExternalToolSurfaceStagedOp::None),
-        Some("Add") => Some(ExternalToolSurfaceStagedOp::Add),
-        Some("Remove") => Some(ExternalToolSurfaceStagedOp::Remove),
-        Some("Reload") => Some(ExternalToolSurfaceStagedOp::Reload),
         Some(_) => None,
     }
 }
@@ -148,7 +101,7 @@ fn runtime_execution_snapshot(
     applied_cursor: crate::completion_feed::CompletionSeq,
 ) -> Option<crate::AgentExecutionSnapshot> {
     let snapshot = handle.snapshot();
-    let turn_phase = parse_turn_phase(&snapshot.turn_phase)?;
+    let turn_phase = snapshot.turn_phase;
     let primitive_kind = parse_primitive_kind(snapshot.primitive_kind.as_deref())?;
     let terminal_outcome = parse_terminal_outcome(snapshot.terminal_outcome.as_deref())?;
     let pending_operation_ids = if snapshot.pending_op_refs.is_empty() {
@@ -194,7 +147,7 @@ fn runtime_external_tool_surface_snapshot(
     handle: &dyn crate::ExternalToolSurfaceHandle,
 ) -> Option<ExternalToolSurfaceSnapshot> {
     let snapshot = handle.diagnostic_snapshot();
-    let phase = parse_surface_phase(&snapshot.surface_phase)?;
+    let phase = snapshot.surface_phase;
     let visible_surfaces = snapshot.visible_surfaces;
     let snapshot_epoch = snapshot.snapshot_epoch;
     let snapshot_aligned_epoch = snapshot.snapshot_aligned_epoch;
@@ -207,8 +160,8 @@ fn runtime_external_tool_surface_snapshot(
             has_removal_timing: entry.removal_draining_since_ms.is_some()
                 || entry.removal_timeout_at_ms.is_some()
                 || entry.removal_applied_at_turn.is_some(),
-            pending_op: parse_surface_pending_op(entry.pending_op.as_deref())?,
-            staged_op: parse_surface_staged_op(entry.staged_op.as_deref())?,
+            pending_op: entry.pending_op,
+            staged_op: entry.staged_op,
             staged_intent_sequence: entry.staged_intent_sequence.unwrap_or(0),
             pending_task_sequence: entry.pending_task_sequence.unwrap_or(0),
             pending_lineage_sequence: entry.pending_lineage_sequence.unwrap_or(0),

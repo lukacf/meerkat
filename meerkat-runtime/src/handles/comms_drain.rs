@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use meerkat_core::handles::{CommsDrainHandle, DslTransitionError};
+use meerkat_core::handles::{CommsDrainHandle, DrainExitReason, DrainMode, DslTransitionError};
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -38,20 +38,14 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
         )
     }
 
-    fn spawn_drain(&self, mode: &str) -> Result<(), DslTransitionError> {
-        let typed = match mode {
-            "Timed" => mm_dsl::DrainMode::Timed,
-            "AttachedSession" => mm_dsl::DrainMode::AttachedSession,
-            "PersistentHost" => mm_dsl::DrainMode::PersistentHost,
-            other => {
-                return Err(DslTransitionError::new(
-                    "CommsDrainHandle::spawn_drain",
-                    format!("unknown drain mode literal: {other}"),
-                ));
-            }
+    fn spawn_drain(&self, mode: DrainMode) -> Result<(), DslTransitionError> {
+        let mode = match mode {
+            DrainMode::Timed => mm_dsl::DrainMode::Timed,
+            DrainMode::AttachedSession => mm_dsl::DrainMode::AttachedSession,
+            DrainMode::PersistentHost => mm_dsl::DrainMode::PersistentHost,
         };
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::SpawnDrain { mode: typed },
+            mm_dsl::MeerkatMachineInput::SpawnDrain { mode },
             "CommsDrainHandle::spawn_drain",
         )
     }
@@ -77,10 +71,13 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
         )
     }
 
-    fn notify_drain_exited(&self, reason: &str) -> Result<(), DslTransitionError> {
+    fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError> {
+        // The DSL `reason` slot is still a literal-string today; it will retype
+        // in lockstep with the DSL input's slot. The handle contract already
+        // carries the typed enum so callers cannot misspell a discriminant.
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::NotifyDrainExited {
-                reason: reason.to_string(),
+                reason: reason.as_str().to_owned(),
             },
             "CommsDrainHandle::notify_drain_exited",
         )

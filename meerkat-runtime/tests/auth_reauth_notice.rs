@@ -15,7 +15,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use meerkat_core::handles::AuthLeaseHandle;
+use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase};
 use meerkat_runtime::RuntimeAuthLeaseHandle;
 
 /// Given an ephemeral handle and a binding key, acquiring the lease then
@@ -31,16 +31,16 @@ fn mark_reauth_required_transitions_to_reauth_required_state() {
     // Acquire → state=valid.
     handle.acquire_lease(key, 9_999_999_999).unwrap();
     assert_eq!(
-        handle.snapshot(key).state.as_deref(),
-        Some("valid"),
+        handle.snapshot(key).phase,
+        Some(AuthLeasePhase::Valid),
         "acquire_lease must land in valid"
     );
 
     // Drive directly to reauth_required (short-circuit mid-turn).
     handle.mark_reauth_required(key).unwrap();
     assert_eq!(
-        handle.snapshot(key).state.as_deref(),
-        Some("reauth_required"),
+        handle.snapshot(key).phase,
+        Some(AuthLeasePhase::ReauthRequired),
         "mark_reauth_required must land in reauth_required"
     );
 
@@ -62,16 +62,16 @@ fn refresh_path_terminates_in_reauth_required_on_permanent_failure() {
 
     handle.acquire_lease(key, 1_000).unwrap();
     handle.mark_expiring(key).unwrap();
-    assert_eq!(handle.snapshot(key).state.as_deref(), Some("expiring"));
+    assert_eq!(handle.snapshot(key).phase, Some(AuthLeasePhase::Expiring));
 
     handle.begin_refresh(key).unwrap();
-    assert_eq!(handle.snapshot(key).state.as_deref(), Some("refreshing"));
+    assert_eq!(handle.snapshot(key).phase, Some(AuthLeasePhase::Refreshing));
 
     // Permanent refresh failure → reauth_required.
     handle.refresh_failed(key, true).unwrap();
     assert_eq!(
-        handle.snapshot(key).state.as_deref(),
-        Some("reauth_required"),
+        handle.snapshot(key).phase,
+        Some(AuthLeasePhase::ReauthRequired),
         "permanent refresh failure must land in reauth_required (runner snapshot-polls this state to emit a session notice; dogma §1/§19: the DSL state is the sole canonical truth, no redundant effect emission)"
     );
 }
@@ -108,14 +108,14 @@ fn transient_refresh_failure_returns_to_expiring() {
     handle.begin_refresh(key).unwrap();
     handle.refresh_failed(key, false).unwrap();
     assert_eq!(
-        handle.snapshot(key).state.as_deref(),
-        Some("expiring"),
+        handle.snapshot(key).phase,
+        Some(AuthLeasePhase::Expiring),
         "transient failure must return binding to expiring"
     );
 
     // And begin_refresh is legal again from expiring.
     handle.begin_refresh(key).unwrap();
-    assert_eq!(handle.snapshot(key).state.as_deref(), Some("refreshing"));
+    assert_eq!(handle.snapshot(key).phase, Some(AuthLeasePhase::Refreshing));
 }
 
 /// Release removes the binding from all state sets.
@@ -126,7 +126,7 @@ fn release_clears_all_state() {
 
     handle.acquire_lease(key, 1_000).unwrap();
     handle.release_lease(key).unwrap();
-    assert_eq!(handle.snapshot(key).state, None);
+    assert_eq!(handle.snapshot(key).phase, None);
     assert_eq!(handle.snapshot(key).expires_at, None);
 }
 
@@ -141,7 +141,7 @@ fn snapshot_preserves_expires_at_for_ttl_sampler() {
     // Lease with a specific expiry timestamp.
     handle.acquire_lease(key, 1_700_000_000).unwrap();
     let snap = handle.snapshot(key);
-    assert_eq!(snap.state.as_deref(), Some("valid"));
+    assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
     assert_eq!(snap.expires_at, Some(1_700_000_000));
 
     // After CompleteAuthRefresh, expires_at updates.
@@ -151,6 +151,6 @@ fn snapshot_preserves_expires_at_for_ttl_sampler() {
         .complete_refresh(key, 1_800_000_000, 1_750_000_000)
         .unwrap();
     let snap = handle.snapshot(key);
-    assert_eq!(snap.state.as_deref(), Some("valid"));
+    assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
     assert_eq!(snap.expires_at, Some(1_800_000_000));
 }

@@ -695,7 +695,7 @@ where
                         // begin_refresh. Comparing DSL-recorded TTL
                         // against SystemTime is shell-mechanics; the
                         // DSL's transition guard enforces legality.
-                        if snapshot.state.as_deref() == Some("valid")
+                        if snapshot.phase == Some(crate::handles::AuthLeasePhase::Valid)
                             && let Some(expires_at) = snapshot.expires_at
                         {
                             let now = std::time::SystemTime::now()
@@ -718,7 +718,7 @@ where
                         // Re-read state — may have moved to `expiring`
                         // via the TTL check above.
                         let snapshot = handle.snapshot(binding_key);
-                        match snapshot.state.as_deref() {
+                        match snapshot.phase {
                             // expiring → observable state only. Plan
                             // §1.5r.9's "call provider resolver refresh
                             // → complete_refresh or refresh_failed" leg
@@ -734,13 +734,13 @@ where
                             // `refreshing` state remains reachable from
                             // tests and — when the refresh driver lands
                             // — from a session-scoped driver task.
-                            Some("expiring") => {}
+                            Some(crate::handles::AuthLeasePhase::Expiring) => {}
                             // reauth_required → project the DSL state into a
                             // synthetic session-level system notice, then
                             // terminate the run. The DSL has already
                             // decided that this binding cannot proceed;
                             // the runner only surfaces that decision.
-                            Some("reauth_required") => {
+                            Some(crate::handles::AuthLeasePhase::ReauthRequired) => {
                                 let notice = format!(
                                     "Connection `{binding_key}` requires re-authentication. \
                                      Run `rkat auth login` for the provider, then retry."

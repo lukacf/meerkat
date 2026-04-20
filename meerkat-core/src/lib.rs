@@ -130,9 +130,9 @@ pub use gateway::{
     Availability, AvailabilityCheck, DynamicToolComposite, ToolGateway, ToolGatewayBuilder,
 };
 pub use handles::{
-    CommsDrainHandle, DslTransitionError, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
-    PeerCommsHandle, SessionAdmissionHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
-    TurnStateHandle, TurnStateSnapshot,
+    AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslTransitionError,
+    ExternalToolSurfaceHandle, McpServerLifecycleHandle, PeerCommsHandle, SessionAdmissionHandle,
+    SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle, TurnStateSnapshot,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,

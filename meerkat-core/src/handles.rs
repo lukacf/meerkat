@@ -10,10 +10,13 @@
 //! direct `dsl_authority.apply(...)` calls — no cross-crate trait required.
 //!
 //! Trait methods are named per-DSL input, not per-authority input.
-//! Parameters use primitive types (`String`, `u64`, `bool`) or core-resident
-//! newtypes ([`InputId`], [`RunId`]). Identifiers that currently live in
-//! downstream crates (for example `SurfaceId` in `meerkat-mcp`) are passed as
-//! strings; the DSL stores those as opaque string keys already.
+//! DSL-owned discriminants (turn phase, drain mode, surface phase, surface
+//! pending/staged op, auth lease phase) flow as typed enums defined here in
+//! `meerkat-core` — each maps 1-to-1 with the typed DSL state that
+//! [`meerkat-runtime::meerkat_machine`] owns. Free-form `String` values are
+//! reserved for opaque identifiers (surface ids, binding keys, error
+//! messages) and for DSL fields that are still literal-string today; those
+//! will retype in lockstep with their DSL slot.
 //!
 //! Return type is `Result<(), DslTransitionError>`. The DSL decides legality;
 //! phase/field reads happen elsewhere (direct DSL state accessors, not via
@@ -26,7 +29,65 @@ use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
     InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId,
 };
+use crate::tool_scope::{
+    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+};
+use crate::turn_execution_authority::TurnPhase;
 use crate::types::SessionId;
+
+// ---------------------------------------------------------------------------
+// Typed cross-crate enums for DSL-owned discriminants.
+//
+// Each maps 1-to-1 with the typed DSL state that meerkat-runtime's
+// MeerkatMachine / AuthMachine own. The runtime handle impls do a single
+// exhaustive `match` from DSL-typed to handle-typed — no string parsing,
+// no `_ => default` arms, no parallel adapters.
+// ---------------------------------------------------------------------------
+
+/// Mode for a comms drain task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainMode {
+    /// Legacy timed drain with idle timeout.
+    Timed,
+    /// Live session ingress while a runtime-backed session is attached.
+    AttachedSession,
+    /// Long-lived host drain (no idle timeout, respawnable on failure).
+    PersistentHost,
+}
+
+/// Reason a drain task exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainExitReason {
+    IdleTimeout,
+    Dismissed,
+    Failed,
+    Aborted,
+    SessionShutdown,
+}
+
+impl DrainExitReason {
+    /// Stable discriminant for wire logging (drain exit reason is not yet a
+    /// typed DSL field; the handle passes the discriminant through).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IdleTimeout => "IdleTimeout",
+            Self::Dismissed => "Dismissed",
+            Self::Failed => "Failed",
+            Self::Aborted => "Aborted",
+            Self::SessionShutdown => "SessionShutdown",
+        }
+    }
+}
+
+/// Auth lease lifecycle phase, projected from the per-binding AuthMachine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthLeasePhase {
+    Valid,
+    Expiring,
+    Refreshing,
+    ReauthRequired,
+    Released,
+}
 
 /// Error surfaced when a DSL transition is rejected.
 ///
@@ -59,7 +120,9 @@ impl DslTransitionError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
-    pub turn_phase: String,
+    pub turn_phase: TurnPhase,
+    /// Primitive kind recorded by the DSL. Still a DSL literal-string today;
+    /// retypes in lockstep with the DSL slot.
     pub primitive_kind: Option<String>,
     pub admitted_content_shape: Option<String>,
     pub vision_enabled: bool,
@@ -71,6 +134,8 @@ pub struct TurnStateSnapshot {
     pub barrier_satisfied: bool,
     pub boundary_count: u64,
     pub cancel_after_boundary: bool,
+    /// Terminal outcome recorded by the DSL. Still a DSL literal-string
+    /// today; retypes in lockstep with the DSL slot.
     pub terminal_outcome: Option<String>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
@@ -174,12 +239,8 @@ pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `EnsureDrainRunning` signal — lazy spawn path.
     fn ensure_drain_running(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `SpawnDrain { mode }` input — explicit spawn with mode.
-    ///
-    /// `mode` is the stringified drain-mode discriminant (e.g., `"Timed"`,
-    /// `"AttachedSession"`, `"PersistentHost"`). Trait consumers format via
-    /// their local enum's `Display`/`to_string`; the DSL stores the raw string.
-    fn spawn_drain(&self, mode: &str) -> Result<(), DslTransitionError>;
+    /// Fire the `SpawnDrain { mode }` input — explicit spawn with typed mode.
+    fn spawn_drain(&self, mode: DrainMode) -> Result<(), DslTransitionError>;
 
     /// Fire the `StopDrain` input.
     fn stop_drain(&self) -> Result<(), DslTransitionError>;
@@ -190,8 +251,8 @@ pub trait CommsDrainHandle: Send + Sync {
     /// Fire the `DrainExitedRespawnable` input (drain exited and can be respawned).
     fn drain_exited_respawnable(&self) -> Result<(), DslTransitionError>;
 
-    /// Fire the `NotifyDrainExited { reason }` input.
-    fn notify_drain_exited(&self, reason: &str) -> Result<(), DslTransitionError>;
+    /// Fire the `NotifyDrainExited { reason }` input with a typed reason.
+    fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,14 +262,20 @@ pub trait CommsDrainHandle: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
     pub surface_id: String,
+    /// Base lifecycle state recorded by the DSL. Still a DSL literal-string
+    /// today; retypes in lockstep with the DSL slot.
     pub base_state: Option<String>,
-    pub pending_op: Option<String>,
-    pub staged_op: Option<String>,
+    pub pending_op: ExternalToolSurfacePendingOp,
+    pub staged_op: ExternalToolSurfaceStagedOp,
     pub staged_intent_sequence: Option<u64>,
     pub pending_task_sequence: Option<u64>,
     pub pending_lineage_sequence: Option<u64>,
     pub inflight_calls: u64,
+    /// Last-emitted delta operation. Still a DSL literal-string today;
+    /// retypes in lockstep with the DSL slot.
     pub last_delta_operation: Option<String>,
+    /// Last-emitted delta phase. Still a DSL literal-string today; retypes
+    /// in lockstep with the DSL slot.
     pub last_delta_phase: Option<String>,
     pub removal_draining_since_ms: Option<u64>,
     pub removal_timeout_at_ms: Option<u64>,
@@ -217,7 +284,7 @@ pub struct SurfaceSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceDiagnosticSnapshot {
-    pub surface_phase: String,
+    pub surface_phase: ExternalToolSurfaceGlobalPhase,
     pub known_surfaces: BTreeSet<String>,
     pub visible_surfaces: BTreeSet<String>,
     pub snapshot_epoch: u64,
@@ -370,13 +437,11 @@ pub trait SessionAdmissionHandle: Send + Sync {
 
 /// Observable snapshot of an auth lease's DSL state for a given binding_key.
 ///
-/// Returned by [`AuthLeaseHandle::snapshot`]. The `state` field is one of the
-/// DSL-defined states: `"valid"`, `"expiring"`, `"refreshing"`,
-/// `"reauth_required"`. If the binding is not tracked at all, `state` is
-/// `None` and `expires_at` is `None`.
+/// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
+/// at all, `phase` is `None` and `expires_at` is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
-    pub state: Option<String>,
+    pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
 }
 

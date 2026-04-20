@@ -140,7 +140,7 @@ async fn e2e_auth_refresh_coordinator_inproc_dedup() {
 #[tokio::test]
 #[ignore = "lane:e2e-auth"]
 async fn e2e_auth_mid_turn_reauth_notice_surface() {
-    use meerkat_core::handles::AuthLeaseHandle;
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase};
     use meerkat_runtime::RuntimeAuthLeaseHandle;
 
     let handle = RuntimeAuthLeaseHandle::ephemeral();
@@ -149,17 +149,17 @@ async fn e2e_auth_mid_turn_reauth_notice_surface() {
     // 1. Acquire lease at state=valid.
     handle.acquire_lease(key, 9_999_999_999).unwrap();
     let snap = handle.snapshot(key);
-    assert_eq!(snap.state.as_deref(), Some("valid"));
+    assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
 
     // 2. Drive to reauth_required and assert state.
     handle.mark_reauth_required(key).unwrap();
     let snap = handle.snapshot(key);
-    assert_eq!(snap.state.as_deref(), Some("reauth_required"));
+    assert_eq!(snap.phase, Some(AuthLeasePhase::ReauthRequired));
 
     // 3. Release clears the lease.
     handle.release_lease(key).unwrap();
     let snap = handle.snapshot(key);
-    assert_eq!(snap.state, None);
+    assert_eq!(snap.phase, None);
 }
 
 /// Lane 4: Refresh-coordinator dedup invariant — BeginAuthRefresh rejected
@@ -172,7 +172,7 @@ async fn e2e_auth_mid_turn_reauth_notice_surface() {
 #[tokio::test]
 #[ignore = "lane:e2e-auth"]
 async fn e2e_auth_refresh_dedup_at_dsl_level() {
-    use meerkat_core::handles::AuthLeaseHandle;
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase};
     use meerkat_runtime::RuntimeAuthLeaseHandle;
 
     let handle = RuntimeAuthLeaseHandle::ephemeral();
@@ -181,8 +181,8 @@ async fn e2e_auth_refresh_dedup_at_dsl_level() {
     handle.acquire_lease(key, 1_000).unwrap();
     handle.begin_refresh(key).unwrap();
     assert_eq!(
-        handle.snapshot(key).state.as_deref(),
-        Some("refreshing"),
+        handle.snapshot(key).phase,
+        Some(AuthLeasePhase::Refreshing),
         "lease should be in refreshing after begin_refresh"
     );
 
@@ -197,5 +197,5 @@ async fn e2e_auth_refresh_dedup_at_dsl_level() {
 
     // Unblock refresh path: Complete transitions back to valid.
     handle.complete_refresh(key, 2_000, 1_500).unwrap();
-    assert_eq!(handle.snapshot(key).state.as_deref(), Some("valid"));
+    assert_eq!(handle.snapshot(key).phase, Some(AuthLeasePhase::Valid));
 }

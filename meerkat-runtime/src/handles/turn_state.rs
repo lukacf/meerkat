@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use meerkat_core::lifecycle::RunId;
+use meerkat_core::turn_execution_authority::TurnPhase;
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -280,7 +281,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
     fn snapshot(&self) -> TurnStateSnapshot {
         let state = self.dsl.snapshot_state();
         TurnStateSnapshot {
-            turn_phase: state.turn_phase.as_str().to_string(),
+            turn_phase: map_turn_phase(state.turn_phase),
             primitive_kind: state.primitive_kind.clone(),
             admitted_content_shape: state.admitted_content_shape.clone(),
             vision_enabled: state.vision_enabled,
@@ -296,5 +297,25 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
         }
+    }
+}
+
+/// Exhaustive 1-to-1 projection of the DSL's typed turn phase into the
+/// cross-crate [`TurnPhase`] contract. The compiler enforces that every
+/// DSL variant has a core-facing twin; any new variant in either enum
+/// must be reflected here.
+fn map_turn_phase(phase: mm_dsl::TurnPhase) -> TurnPhase {
+    match phase {
+        mm_dsl::TurnPhase::Ready => TurnPhase::Ready,
+        mm_dsl::TurnPhase::ApplyingPrimitive => TurnPhase::ApplyingPrimitive,
+        mm_dsl::TurnPhase::CallingLlm => TurnPhase::CallingLlm,
+        mm_dsl::TurnPhase::WaitingForOps => TurnPhase::WaitingForOps,
+        mm_dsl::TurnPhase::DrainingBoundary => TurnPhase::DrainingBoundary,
+        mm_dsl::TurnPhase::Extracting => TurnPhase::Extracting,
+        mm_dsl::TurnPhase::ErrorRecovery => TurnPhase::ErrorRecovery,
+        mm_dsl::TurnPhase::Cancelling => TurnPhase::Cancelling,
+        mm_dsl::TurnPhase::Completed => TurnPhase::Completed,
+        mm_dsl::TurnPhase::Failed => TurnPhase::Failed,
+        mm_dsl::TurnPhase::Cancelled => TurnPhase::Cancelled,
     }
 }

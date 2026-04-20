@@ -1829,18 +1829,36 @@ impl SessionRuntime {
                     .await
                     .map_err(session_error_to_rpc)?;
             }
-            let peer_ingress_enabled = self
-                .preserve_existing_peer_ingress(session_id, keep_alive)
-                .await;
-            // Preserve an already-active peer ingress channel for mob-owned /
-            // externally-enabled sessions even when the persisted keep_alive
-            // bit is false. Without this, ordinary turn routing can
-            // accidentally tear down the persistent comms drain that
-            // autonomous peers rely on for between-turn responses.
-            if comms_rt.is_some() || peer_ingress_enabled {
-                self.runtime_adapter
-                    .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
+            // W2-G: never reconfigure a mob-owned drain from the session-runtime
+            // turn-start path. The mob provisioner owns peer-ingress for its
+            // members; the session runtime has no visibility into the mob's
+            // comms context and must not substitute its own (this is the
+            // s71 silent-downgrade class). The DSL's
+            // `AttachSessionIngress` guard would already reject the swap,
+            // but we short-circuit here so the turn-start path doesn't emit
+            // a spurious WARN for every turn on every mob-owned member.
+            let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+            if owner.is_mob_owned() {
+                tracing::debug!(
+                    %session_id,
+                    ?owner,
+                    "start_turn_via_runtime: mob-owned peer ingress — skipping drain reconfigure"
+                );
+            } else {
+                let peer_ingress_enabled = self
+                    .preserve_existing_peer_ingress(session_id, keep_alive)
                     .await;
+                // Preserve an already-active peer ingress channel for
+                // externally-enabled sessions even when the persisted
+                // keep_alive bit is false. Without this, ordinary turn
+                // routing can accidentally tear down the persistent comms
+                // drain that autonomous peers rely on for between-turn
+                // responses.
+                if comms_rt.is_some() || peer_ingress_enabled {
+                    self.runtime_adapter
+                        .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
+                        .await;
+                }
             }
         }
 
@@ -2188,13 +2206,22 @@ impl SessionRuntime {
                     }
                     #[cfg(feature = "comms")]
                     {
-                        let comms_rt = self.service.comms_runtime(session_id).await;
-                        let peer_ingress_enabled = self
-                            .preserve_existing_peer_ingress(session_id, build_config.keep_alive)
-                            .await;
-                        self.runtime_adapter
-                            .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                            .await;
+                        // W2-G: never reconfigure a mob-owned drain during
+                        // runtime materialization. See `start_turn_via_runtime`.
+                        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+                        if !owner.is_mob_owned() {
+                            let comms_rt = self.service.comms_runtime(session_id).await;
+                            let peer_ingress_enabled = self
+                                .preserve_existing_peer_ingress(session_id, build_config.keep_alive)
+                                .await;
+                            self.runtime_adapter
+                                .update_peer_ingress_context(
+                                    session_id,
+                                    peer_ingress_enabled,
+                                    comms_rt,
+                                )
+                                .await;
+                        }
                     }
                 }
                 Err(err) => {
@@ -2274,13 +2301,18 @@ impl SessionRuntime {
             .map_err(session_error_to_rpc)?;
         #[cfg(feature = "comms")]
         {
-            let comms_rt = self.service.comms_runtime(session_id).await;
-            let peer_ingress_enabled = self
-                .preserve_existing_peer_ingress(session_id, keep_alive)
-                .await;
-            self.runtime_adapter
-                .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
-                .await;
+            // W2-G: never reconfigure a mob-owned drain during recovery
+            // materialization. See `start_turn_via_runtime`.
+            let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+            if !owner.is_mob_owned() {
+                let comms_rt = self.service.comms_runtime(session_id).await;
+                let peer_ingress_enabled = self
+                    .preserve_existing_peer_ingress(session_id, keep_alive)
+                    .await;
+                self.runtime_adapter
+                    .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
+                    .await;
+            }
         }
         let (_, output) = self
             .service
@@ -2731,10 +2763,17 @@ impl SessionRuntime {
                 .update_session_keep_alive(session_id, keep_alive)
                 .await
                 .map_err(session_error_to_rpc)?;
+            // W2-G: never reconfigure a mob-owned drain from the
+            // keep_alive-override path. See `start_turn_via_runtime`.
             #[cfg(feature = "comms")]
-            self.runtime_adapter
-                .update_peer_ingress_context(session_id, keep_alive, comms_rt)
-                .await;
+            {
+                let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+                if !owner.is_mob_owned() {
+                    self.runtime_adapter
+                        .update_peer_ingress_context(session_id, keep_alive, comms_rt)
+                        .await;
+                }
+            }
         }
 
         // Hot-swap LLM client if model/provider/provider_params changed.
@@ -7223,6 +7262,101 @@ mod tests {
                 "error message must mention '{field}': {}",
                 err.message
             );
+        }
+    }
+
+    /// W2-G regression: once a mob has claimed peer-ingress ownership on a
+    /// session, calling the session-runtime drain-reconfigure helpers with a
+    /// different comms runtime must NOT swap the mob's comms runtime out
+    /// from under it. This is the s71 silent-downgrade class referenced in
+    /// issue #264: session-runtime code used to rewire a session's comms
+    /// every turn, without checking whether a mob had already taken
+    /// ownership.
+    ///
+    /// The W2-G fix enforces this structurally at two layers:
+    ///   (a) DSL guard: `AttachSessionIngress` requires owner `== Unattached`,
+    ///       so an attempted swap from `MobOwned` is rejected at the DSL
+    ///       authority. This is the core structural guarantee.
+    ///   (b) Shell short-circuit: `start_turn_via_runtime` (and the
+    ///       materialization / recovery paths that also call
+    ///       `update_peer_ingress_context`) consult
+    ///       `peer_ingress_owner()` and skip the reconfigure branch when
+    ///       the owner is `MobOwned`. This avoids spurious warnings and
+    ///       the attendant rollback churn.
+    ///
+    /// This test exercises the runtime adapter directly (layer (a) + the
+    /// shell short-circuit inside the adapter's
+    /// `update_peer_ingress_context`). End-to-end `start_turn_via_runtime`
+    /// coverage for mob-owned drains requires the mob harness to keep the
+    /// session alive across the turn boundary, which is verified in the
+    /// mob integration lane.
+    #[tokio::test]
+    async fn update_peer_ingress_context_preserves_mob_owned_identity() {
+        use meerkat_core::agent::CommsRuntime as CommsRuntimeTrait;
+
+        struct StubCommsRuntime;
+
+        #[async_trait::async_trait]
+        impl CommsRuntimeTrait for StubCommsRuntime {
+            async fn drain_messages(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+                Arc::new(tokio::sync::Notify::new())
+            }
+            fn dismiss_received(&self) -> bool {
+                true
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("ensure_runtime_executor");
+
+        let adapter = runtime.runtime_adapter();
+
+        // Mob claims peer-ingress ownership on behalf of this session.
+        let mob_comms: Arc<dyn CommsRuntimeTrait> = Arc::new(StubCommsRuntime);
+        let expected_id =
+            meerkat_runtime::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);
+        let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from("mob-w2g-integration");
+        adapter
+            .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
+            .await;
+
+        // Simulate the s71 regression path: session-runtime code tries to
+        // reconfigure peer-ingress with a different comms runtime. Before
+        // W2-G this would silently swap the mob-owned drain. With W2-G the
+        // DSL's `AttachSessionIngress` guard rejects the transition.
+        let session_comms: Arc<dyn CommsRuntimeTrait> = Arc::new(StubCommsRuntime);
+        adapter
+            .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
+            .await;
+
+        // Assert the mob-owned drain's CommsRuntimeId is unchanged.
+        let owner_after = adapter.peer_ingress_owner(&session_id).await;
+        match owner_after {
+            meerkat_runtime::PeerIngressOwner::MobOwned {
+                comms_runtime_id,
+                mob_id: actual_mob_id,
+            } => {
+                assert_eq!(
+                    comms_runtime_id, expected_id,
+                    "update_peer_ingress_context must not swap the mob-owned comms runtime id"
+                );
+                assert_eq!(actual_mob_id, mob_id);
+            }
+            other => {
+                panic!("expected MobOwned to survive session-runtime swap attempt, got {other:?}")
+            }
         }
     }
 

@@ -49,6 +49,32 @@ pub enum DrainExitReason {
     SessionShutdown,
 }
 
+/// Typed view of the peer-ingress transport capability owner (W2-G).
+///
+/// Projected from the DSL's tagged-union state
+/// (`peer_ingress_owner_kind` + companion fields). The
+/// `peer_ingress_owner_consistency` invariant guarantees the companion
+/// fields are populated exactly for variants that name them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PeerIngressOwner {
+    Unattached,
+    SessionOwned {
+        comms_runtime_id: crate::meerkat_machine::dsl::CommsRuntimeId,
+    },
+    MobOwned {
+        comms_runtime_id: crate::meerkat_machine::dsl::CommsRuntimeId,
+        mob_id: crate::meerkat_machine::dsl::MobId,
+    },
+}
+
+impl PeerIngressOwner {
+    /// Returns `true` iff the owner is `MobOwned`.
+    pub fn is_mob_owned(&self) -> bool {
+        matches!(self, PeerIngressOwner::MobOwned { .. })
+    }
+}
+
 pub struct CommsDrainSlot {
     pub phase: CommsDrainPhase,
     pub mode: Option<CommsDrainMode>,
@@ -169,6 +195,7 @@ impl MeerkatMachine {
                     session_id: session_id.clone(),
                     keep_alive,
                     comms_runtime,
+                    mob_id: None,
                 },
             )
             .await
@@ -196,12 +223,101 @@ impl MeerkatMachine {
                     session_id: session_id.clone(),
                     keep_alive,
                     comms_runtime,
+                    mob_id: None,
                 },
             )
             .await
         {
             Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
             _ => false,
+        }
+    }
+
+    /// Mob-owned variant of [`MeerkatMachine::maybe_spawn_comms_drain`]
+    /// (W2-G / issue #264).
+    ///
+    /// Shell calls this from the mob provisioning path to claim peer-ingress
+    /// ownership as `MobOwned { comms_runtime_id, mob_id }`. The DSL
+    /// transition permits promotion from `Unattached` or `SessionOwned`, so
+    /// a mob can take over a session-owned drain at spawn; silent downgrades
+    /// back to `SessionOwned` are impossible by construction.
+    pub async fn maybe_spawn_mob_comms_drain(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
+        mob_id: crate::meerkat_machine::dsl::MobId,
+    ) -> bool {
+        match self
+            .execute_meerkat_machine_command(
+                Some(Arc::clone(self)),
+                MeerkatMachineCommand::SetPeerIngressContext {
+                    session_id: session_id.clone(),
+                    keep_alive: true,
+                    comms_runtime: Some(comms_runtime),
+                    mob_id: Some(mob_id),
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineCommandResult::Spawned(spawned)) => spawned,
+            _ => false,
+        }
+    }
+
+    /// Read the current peer-ingress owner from DSL state.
+    ///
+    /// Returns `PeerIngressOwner::Unattached` for sessions that have no
+    /// registered DSL state (unknown / destroyed sessions). Used by the
+    /// session-runtime to refuse reconfiguration of mob-owned drains at
+    /// turn-start.
+    ///
+    /// The `peer_ingress_owner_consistency` invariant guarantees that
+    /// companion fields are populated for non-`Unattached` kinds, but if
+    /// the invariant were ever violated at runtime, we gracefully degrade
+    /// to `Unattached` rather than panic.
+    pub async fn peer_ingress_owner(&self, session_id: &SessionId) -> PeerIngressOwner {
+        let sessions = self.sessions.read().await;
+        let Some(entry) = sessions.get(session_id) else {
+            return PeerIngressOwner::Unattached;
+        };
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match authority.state.peer_ingress_owner_kind {
+            crate::meerkat_machine::dsl::PeerIngressOwnerKind::Unattached => {
+                PeerIngressOwner::Unattached
+            }
+            crate::meerkat_machine::dsl::PeerIngressOwnerKind::SessionOwned => {
+                match authority.state.peer_ingress_comms_runtime_id.clone() {
+                    Some(comms_runtime_id) => PeerIngressOwner::SessionOwned { comms_runtime_id },
+                    None => {
+                        tracing::error!(
+                            %session_id,
+                            "peer_ingress_owner_consistency invariant violation: SessionOwned without comms_runtime_id"
+                        );
+                        PeerIngressOwner::Unattached
+                    }
+                }
+            }
+            crate::meerkat_machine::dsl::PeerIngressOwnerKind::MobOwned => {
+                match (
+                    authority.state.peer_ingress_comms_runtime_id.clone(),
+                    authority.state.peer_ingress_mob_id.clone(),
+                ) {
+                    (Some(comms_runtime_id), Some(mob_id)) => PeerIngressOwner::MobOwned {
+                        comms_runtime_id,
+                        mob_id,
+                    },
+                    _ => {
+                        tracing::error!(
+                            %session_id,
+                            "peer_ingress_owner_consistency invariant violation: MobOwned without companion fields"
+                        );
+                        PeerIngressOwner::Unattached
+                    }
+                }
+            }
         }
     }
 

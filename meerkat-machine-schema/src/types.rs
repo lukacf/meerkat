@@ -35,3 +35,33 @@ impl<T: Into<String>> From<T> for PeerCorrelationId {
         Self(value.into())
     }
 }
+
+/// Stable identity of a comms runtime instance.
+///
+/// Catalog-DSL identity for an `Arc<dyn CommsRuntime>` pointer so the DSL can
+/// distinguish distinct runtime instances and reject silent transport
+/// downgrades (W2-G / issue #264). The runtime derives the string from the
+/// `Arc`'s pointer address; the catalog DSL treats it as an opaque newtype.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CommsRuntimeId(pub String);
+
+impl<T: Into<String>> From<T> for CommsRuntimeId {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Mob instance identifier.
+///
+/// Catalog-DSL twin of [`meerkat_mob::ids::MobId`] carried on
+/// `AttachMobIngress` to record which mob owns a peer-ingress transport
+/// capability. The runtime mirrors the real typed ID; catalog DSL keeps it
+/// stub-grade since this crate is a leaf.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MobId(pub String);
+
+impl<T: Into<String>> From<T> for MobId {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}

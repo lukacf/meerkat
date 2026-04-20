@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use meerkat_core::comms::InputSource;
 use meerkat_core::handles::{DslTransitionError, SessionAdmissionHandle};
 use meerkat_core::lifecycle::{InputId, RunId};
 
@@ -36,13 +37,13 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         &self,
         runtime_id: &str,
         work_id: &str,
-        origin: &str,
+        origin: InputSource,
     ) -> Result<(), DslTransitionError> {
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Ingest {
                 runtime_id: mm_dsl::AgentRuntimeId::from(runtime_id.to_string()),
                 work_id: mm_dsl::WorkId::from(work_id.to_string()),
-                origin: origin.to_string(),
+                origin: mm_dsl::WorkOrigin::from(origin),
             },
             "SessionAdmissionHandle::ingest",
         )

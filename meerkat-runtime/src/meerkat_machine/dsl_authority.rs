@@ -78,7 +78,7 @@ pub(crate) fn project_state(
         active_runtime_id: runtime_id.map(mm_dsl::AgentRuntimeId::from_domain),
         active_fence_token: active_fence_token.map(mm_dsl::FenceToken::from),
         current_run_id: effective_current_run_id.map(mm_dsl::RunId::from_domain),
-        pre_run_phase: effective_pre_run_phase.map(|phase| phase.to_string()),
+        pre_run_phase: effective_pre_run_phase.and_then(pre_run_phase_from_runtime_state),
         turn_phase: super::dsl::TurnPhase::Ready,
         primitive_kind: None,
         admitted_content_shape: None,
@@ -166,6 +166,23 @@ pub(crate) fn project_state(
         peer_ingress_owner_kind: super::dsl::PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,
+    }
+}
+
+/// Map a persisted pre-run phase (as a [`RuntimeState`]) into the typed
+/// [`mm_dsl::PreRunPhase`] carried in the DSL state. Only `Idle`, `Attached`,
+/// and `Retired` are valid pre-run markers — any other [`RuntimeState`]
+/// indicates the session is not in a run-in-progress shape and the DSL
+/// treats the pre-run slot as absent.
+pub(crate) fn pre_run_phase_from_runtime_state(state: RuntimeState) -> Option<mm_dsl::PreRunPhase> {
+    match state {
+        RuntimeState::Idle => Some(mm_dsl::PreRunPhase::Idle),
+        RuntimeState::Attached => Some(mm_dsl::PreRunPhase::Attached),
+        RuntimeState::Retired => Some(mm_dsl::PreRunPhase::Retired),
+        RuntimeState::Initializing
+        | RuntimeState::Running
+        | RuntimeState::Stopped
+        | RuntimeState::Destroyed => None,
     }
 }
 

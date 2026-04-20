@@ -49,6 +49,30 @@ pub enum DrainExitReason {
     SessionShutdown,
 }
 
+impl From<DrainExitReason> for crate::meerkat_machine::dsl::DrainExitReason {
+    fn from(reason: DrainExitReason) -> Self {
+        match reason {
+            DrainExitReason::IdleTimeout => Self::IdleTimeout,
+            DrainExitReason::Dismissed => Self::Dismissed,
+            DrainExitReason::Failed => Self::Failed,
+            DrainExitReason::Aborted => Self::Aborted,
+            DrainExitReason::SessionShutdown => Self::SessionShutdown,
+        }
+    }
+}
+
+impl From<DrainExitReason> for meerkat_core::handles::DrainExitReason {
+    fn from(reason: DrainExitReason) -> Self {
+        match reason {
+            DrainExitReason::IdleTimeout => Self::IdleTimeout,
+            DrainExitReason::Dismissed => Self::Dismissed,
+            DrainExitReason::Failed => Self::Failed,
+            DrainExitReason::Aborted => Self::Aborted,
+            DrainExitReason::SessionShutdown => Self::SessionShutdown,
+        }
+    }
+}
+
 /// Typed view of the peer-ingress transport capability owner (W2-G).
 ///
 /// Projected from the DSL's tagged-union state

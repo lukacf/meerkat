@@ -72,12 +72,9 @@ impl CommsDrainHandle for RuntimeCommsDrainHandle {
     }
 
     fn notify_drain_exited(&self, reason: DrainExitReason) -> Result<(), DslTransitionError> {
-        // The DSL `reason` slot is still a literal-string today; it will retype
-        // in lockstep with the DSL input's slot. The handle contract already
-        // carries the typed enum so callers cannot misspell a discriminant.
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::NotifyDrainExited {
-                reason: reason.as_str().to_owned(),
+                reason: mm_dsl::DrainExitReason::from(reason),
             },
             "CommsDrainHandle::notify_drain_exited",
         )

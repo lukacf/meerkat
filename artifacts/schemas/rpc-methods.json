@@ -411,6 +411,10 @@
       "name": "mob/wait_kickoff"
     },
     {
+      "description": "Wait for mob startup readiness (members bound but kickoff not required)",
+      "name": "mob/wait_ready"
+    },
+    {
       "description": "Create a realm-scoped mob profile",
       "name": "mob/profile/create"
     },

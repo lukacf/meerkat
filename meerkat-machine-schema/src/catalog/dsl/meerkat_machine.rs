@@ -177,7 +177,7 @@ machine! {
             Abort { session_id: SessionId },
             AbortAll,
             Wait { session_id: SessionId },
-            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: String },
+            Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
             RuntimeRealtimeAttachmentStatus { session_id: SessionId },
@@ -2364,6 +2364,19 @@ pub enum LiveTopologyPhase {
     Detached,
     HostIdentityApplied,
     HostVisibilityApplied,
+}
+
+/// Typed work-lane origin for [`MeerkatMachineInput::Ingest`]. Structural
+/// mirror of `MobMachine.WorkOrigin` so the cross-machine composition seam
+/// binds on a single typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WorkOrigin {
+    #[default]
+    External,
+    Internal,
+    /// Canonical admission entrypoint fired by the runtime control plane
+    /// with no surface-level transport or work-lane label.
+    Ingest,
 }
 
 // =====================================================================

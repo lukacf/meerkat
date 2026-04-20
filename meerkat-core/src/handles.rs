@@ -25,14 +25,16 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::comms::InputSource;
 use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };
 use crate::tool_scope::{
+    ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
     ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
 };
-use crate::turn_execution_authority::TurnPhase;
+use crate::turn_execution_authority::{TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome};
 use crate::types::SessionId;
 
 // ---------------------------------------------------------------------------
@@ -169,9 +171,9 @@ impl DslTransitionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateSnapshot {
     pub turn_phase: TurnPhase,
-    /// Primitive kind recorded by the DSL. Still a DSL literal-string today;
-    /// retypes in lockstep with the DSL slot.
-    pub primitive_kind: Option<String>,
+    /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
+    /// discriminants). `None` means no primitive is currently in flight.
+    pub primitive_kind: Option<TurnPrimitiveKind>,
     pub admitted_content_shape: Option<String>,
     pub vision_enabled: bool,
     pub image_tool_results_enabled: bool,
@@ -182,9 +184,9 @@ pub struct TurnStateSnapshot {
     pub barrier_satisfied: bool,
     pub boundary_count: u64,
     pub cancel_after_boundary: bool,
-    /// Terminal outcome recorded by the DSL. Still a DSL literal-string
-    /// today; retypes in lockstep with the DSL slot.
-    pub terminal_outcome: Option<String>,
+    /// Typed terminal outcome recorded by the DSL (dogma #5, #19 — no stringly
+    /// discriminants). `None` means the turn has not reached a terminal phase.
+    pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
 }
@@ -194,7 +196,7 @@ pub trait TurnStateHandle: Send + Sync {
     fn start_conversation_run(
         &self,
         run_id: RunId,
-        primitive_kind: String,
+        primitive_kind: TurnPrimitiveKind,
         admitted_content_shape: String,
         vision_enabled: bool,
         image_tool_results_enabled: bool,
@@ -256,7 +258,7 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn cancellation_observed(&self) -> Result<(), DslTransitionError>;
 
-    fn acknowledge_terminal(&self, outcome: String) -> Result<(), DslTransitionError>;
+    fn acknowledge_terminal(&self, outcome: TurnTerminalOutcome) -> Result<(), DslTransitionError>;
 
     fn turn_limit_reached(&self) -> Result<(), DslTransitionError>;
 
@@ -310,21 +312,19 @@ pub trait CommsDrainHandle: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
     pub surface_id: String,
-    /// Base lifecycle state recorded by the DSL. Still a DSL literal-string
-    /// today; retypes in lockstep with the DSL slot.
-    pub base_state: Option<String>,
+    /// Typed base lifecycle state (dogma #5, #17 — no stringly discriminants
+    /// across the cross-crate handle boundary).
+    pub base_state: Option<ExternalToolSurfaceBaseState>,
     pub pending_op: ExternalToolSurfacePendingOp,
     pub staged_op: ExternalToolSurfaceStagedOp,
     pub staged_intent_sequence: Option<u64>,
     pub pending_task_sequence: Option<u64>,
     pub pending_lineage_sequence: Option<u64>,
     pub inflight_calls: u64,
-    /// Last-emitted delta operation. Still a DSL literal-string today;
-    /// retypes in lockstep with the DSL slot.
-    pub last_delta_operation: Option<String>,
-    /// Last-emitted delta phase. Still a DSL literal-string today; retypes
-    /// in lockstep with the DSL slot.
-    pub last_delta_phase: Option<String>,
+    /// Typed last-emitted delta operation (dogma #5, #17).
+    pub last_delta_operation: Option<ExternalToolSurfaceDeltaOperation>,
+    /// Typed last-emitted delta phase (dogma #5, #17).
+    pub last_delta_phase: Option<ExternalToolSurfaceDeltaPhase>,
     pub removal_draining_since_ms: Option<u64>,
     pub removal_timeout_at_ms: Option<u64>,
     pub removal_applied_at_turn: Option<u64>,
@@ -437,11 +437,13 @@ pub trait SessionAdmissionHandle: Send + Sync {
     ///
     /// `runtime_id` is the stringified logical runtime id; `work_id` the
     /// stringified work identifier (typically the same domain as `InputId`).
+    /// `origin` is the typed transport source that admitted the input
+    /// (dogma #5, #17 — no stringly discriminants across the handle boundary).
     fn ingest(
         &self,
         runtime_id: &str,
         work_id: &str,
-        origin: &str,
+        origin: InputSource,
     ) -> Result<(), DslTransitionError>;
 
     /// Fire the `AcceptWithCompletion { input_id, request_immediate_processing,

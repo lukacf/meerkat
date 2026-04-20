@@ -70,24 +70,6 @@ fn hidden_deferred_catalog_names(
         .collect()
 }
 
-fn turn_terminal_outcome_label(
-    outcome: crate::turn_execution_authority::TurnTerminalOutcome,
-) -> &'static str {
-    match outcome {
-        crate::turn_execution_authority::TurnTerminalOutcome::None => "None",
-        crate::turn_execution_authority::TurnTerminalOutcome::Completed => "Completed",
-        crate::turn_execution_authority::TurnTerminalOutcome::Failed => "Failed",
-        crate::turn_execution_authority::TurnTerminalOutcome::Cancelled => "Cancelled",
-        crate::turn_execution_authority::TurnTerminalOutcome::BudgetExhausted => "BudgetExhausted",
-        crate::turn_execution_authority::TurnTerminalOutcome::TimeBudgetExceeded => {
-            "TimeBudgetExceeded"
-        }
-        crate::turn_execution_authority::TurnTerminalOutcome::StructuredOutputValidationFailed => {
-            "StructuredOutputValidationFailed"
-        }
-    }
-}
-
 impl<C, T, S> Agent<C, T, S>
 where
     C: AgentLlmClient + ?Sized + 'static,
@@ -338,7 +320,7 @@ where
                 crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn => handle
                     .start_conversation_run(
                         run_id.clone(),
-                        "ConversationTurn".to_string(),
+                        crate::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
                         admitted_content_shape.0.clone(),
                         *vision_enabled,
                         *image_tool_results_enabled,
@@ -397,9 +379,9 @@ where
                 handle.request_cancel_after_boundary()
             }
             TurnExecutionInput::CancellationObserved { .. } => handle.cancellation_observed(),
-            TurnExecutionInput::AcknowledgeTerminal { .. } => handle.acknowledge_terminal(
-                turn_terminal_outcome_label(self.turn_state.terminal_outcome()).to_string(),
-            ),
+            TurnExecutionInput::AcknowledgeTerminal { .. } => {
+                handle.acknowledge_terminal(self.turn_state.terminal_outcome())
+            }
             TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
             TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
             TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),

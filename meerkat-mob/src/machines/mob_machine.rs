@@ -164,6 +164,118 @@ pub enum MobMemberState {
     Retiring,
 }
 
+/// Typed work-origin classification for
+/// [`MobMachineInput::SubmitWork`] / [`MobMachineEffect::RequestRuntimeIngress`].
+/// Closed mirror of [`crate::ids::WorkOrigin`] — the DSL uses this enum as
+/// guard-visible truth instead of the former `origin == "External"` /
+/// `origin == "Internal"` string compares. The `Ingest` variant is only
+/// valid on the receiving side of the admission seam
+/// (`MeerkatMachine::Ingest` fired by the runtime control plane); mob
+/// transitions never produce it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum WorkOrigin {
+    #[default]
+    External,
+    Internal,
+    Ingest,
+}
+
+impl From<crate::ids::WorkOrigin> for WorkOrigin {
+    fn from(origin: crate::ids::WorkOrigin) -> Self {
+        match origin {
+            crate::ids::WorkOrigin::External => Self::External,
+            crate::ids::WorkOrigin::Internal => Self::Internal,
+        }
+    }
+}
+
+/// Fallible reverse mapping: the `Ingest` variant has no counterpart in the
+/// shell-side [`crate::ids::WorkOrigin`] (which only classifies mob-submitted
+/// work lanes); callers on the mob-domain side assert it away and surface a
+/// domain error if the DSL ever produces it back across the seam.
+impl TryFrom<WorkOrigin> for crate::ids::WorkOrigin {
+    type Error = &'static str;
+
+    fn try_from(origin: WorkOrigin) -> Result<Self, Self::Error> {
+        match origin {
+            WorkOrigin::External => Ok(Self::External),
+            WorkOrigin::Internal => Ok(Self::Internal),
+            WorkOrigin::Ingest => Err("WorkOrigin::Ingest has no meerkat-mob domain counterpart"),
+        }
+    }
+}
+
+/// Typed member lifecycle notice kind. Replaces the former literal-string
+/// `kind` field on [`MobMachineEffect::EmitMemberLifecycleNotice`] — closed
+/// set of observed member-lifecycle transitions the orchestrator emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum MemberLifecycleKind {
+    #[default]
+    Spawned,
+    Retiring,
+    Retired,
+    Reset,
+    Respawned,
+    Completed,
+    Destroyed,
+}
+
+impl MemberLifecycleKind {
+    /// Stable discriminant for logging / wire surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Spawned => "spawned",
+            Self::Retiring => "retiring",
+            Self::Retired => "retired",
+            Self::Reset => "reset",
+            Self::Respawned => "respawned",
+            Self::Completed => "completed",
+            Self::Destroyed => "destroyed",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberLifecycleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Typed kickoff-notice intent. Replaces the former literal-string `intent`
+/// field on [`MobMachineEffect::EmitKickoffLifecycleNotice`] — closed mirror
+/// of [`KickoffPhase`] with an additional `Started` intent variant for the
+/// `KickoffResolveStarted` input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum KickoffIntent {
+    #[default]
+    Pending,
+    Starting,
+    Started,
+    CallbackPending,
+    Failed,
+    Cancelled,
+}
+
+impl KickoffIntent {
+    /// Stable discriminant for logging / wire surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Starting => "Starting",
+            Self::Started => "Started",
+            Self::CallbackPending => "CallbackPending",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl std::fmt::Display for KickoffIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Undirected wiring edge between two identities. Callers MUST normalize
 /// to `(smaller, larger)` before constructing so that edge equality is
 /// independent of insertion order.
@@ -279,7 +391,7 @@ machine! {
             Unwire,
             ExternalTurn,
             InternalTurn,
-            SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String },
+            SubmitWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             CancelWork { work_id: WorkId },
             CancelAllWork { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             Stop,
@@ -367,10 +479,10 @@ machine! {
 
         effect MobMachineEffect {
             RequestRuntimeBinding { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation },
-            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: String },
+            RequestRuntimeIngress { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, work_id: WorkId, origin: Enum<WorkOrigin> },
             RequestRuntimeRetire,
             RequestRuntimeDestroy,
-            EmitMemberLifecycleNotice { kind: String },
+            EmitMemberLifecycleNotice { kind: Enum<MemberLifecycleKind> },
             EmitRunLifecycleNotice,
             EmitFlowRunNotice,
             AppendFailureLedger,
@@ -384,7 +496,7 @@ machine! {
             EmitTaskNotice,
             PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
-            EmitKickoffLifecycleNotice { member_id: String, intent: String },
+            EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -440,7 +552,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "spawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
         transition ObserveRuntimeReady {
@@ -489,7 +601,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Pending }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Pending" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Pending }
         }
 
         transition KickoffMarkStarting {
@@ -507,7 +619,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Starting }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Starting" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Starting }
         }
 
         transition KickoffResolveStarted {
@@ -525,7 +637,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Started }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Started" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Started }
         }
 
         transition KickoffResolveCallbackPending {
@@ -543,7 +655,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::CallbackPending }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "CallbackPending" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::CallbackPending }
         }
 
         transition KickoffResolveFailedFromStarting {
@@ -565,7 +677,7 @@ machine! {
             }
             to Running
             emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: error }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Failed" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Failed }
         }
 
         transition KickoffResolveCancelled {
@@ -583,7 +695,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Cancelled" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
         }
 
         transition KickoffCancelRequested {
@@ -605,7 +717,7 @@ machine! {
             }
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
-            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Cancelled" }
+            emit EmitKickoffLifecycleNotice { member_id: member_id, intent: KickoffIntent::Cancelled }
         }
 
         transition KickoffClear {
@@ -628,7 +740,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "external_origin" { origin == "External" }
+            guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
             update {}
             to Running
@@ -640,7 +752,7 @@ machine! {
             guard { self.lifecycle_phase == Phase::Running }
             guard "active_members_present" { self.live_runtime_ids != EmptySet }
             guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
-            guard "internal_origin" { origin == "Internal" }
+            guard "internal_origin" { origin == WorkOrigin::Internal }
             update {}
             to Running
             emit RequestRuntimeIngress { agent_runtime_id: agent_runtime_id, fence_token: fence_token, work_id: work_id, origin: origin }
@@ -672,7 +784,7 @@ machine! {
                 self.active_run_count = 0;
             }
             to Stopped
-            emit EmitMemberLifecycleNotice { kind: "retired" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retired }
         }
 
         transition ResetMember {
@@ -698,7 +810,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "reset" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Reset }
         }
 
         transition RespawnMember {
@@ -721,7 +833,7 @@ machine! {
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
-            emit EmitMemberLifecycleNotice { kind: "respawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
         }
 
         transition MarkCompleted {
@@ -730,7 +842,7 @@ machine! {
             guard "no_active_runs" { self.active_run_count == 0 }
             update {}
             to Completed
-            emit EmitMemberLifecycleNotice { kind: "completed" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Completed }
         }
 
         transition DestroyMob {
@@ -773,7 +885,7 @@ machine! {
                 self.coordinator_bound = false;
             }
             to Destroyed
-            emit EmitMemberLifecycleNotice { kind: "destroyed" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Destroyed }
         }
 
         // =====================================================================
@@ -1465,7 +1577,7 @@ machine! {
                 self.runtime_fence_tokens = EmptyMap;
             }
             to Running
-            emit EmitMemberLifecycleNotice { kind: "retiring" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
 
         transition RetireAllStopped {
@@ -1476,7 +1588,7 @@ machine! {
                 self.runtime_fence_tokens = EmptyMap;
             }
             to Stopped
-            emit EmitMemberLifecycleNotice { kind: "retiring" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
         }
 
         // =====================================================================
@@ -1491,7 +1603,7 @@ machine! {
                 self.pending_spawn_count -= 1;
             }
             to Running
-            emit EmitMemberLifecycleNotice { kind: "spawned" }
+            emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Spawned }
         }
 
         // =====================================================================

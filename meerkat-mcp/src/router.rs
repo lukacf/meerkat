@@ -278,9 +278,13 @@ impl SurfaceOwner {
                             "ApplyBoundaryReload"
                         }
                         ExternalToolSurfacePendingOp::None => {
-                            if base_state_from_handle(entry.base_state.as_deref())
+                            if entry
+                                .base_state
+                                .unwrap_or(ExternalToolSurfaceBaseState::Absent)
                                 == ExternalToolSurfaceBaseState::Removing
-                                && delta_phase_from_handle(entry.last_delta_phase.as_deref())
+                                && entry
+                                    .last_delta_phase
+                                    .unwrap_or(ExternalToolSurfaceDeltaPhase::None)
                                     == ExternalToolSurfaceDeltaPhase::Draining
                             {
                                 if after.snapshot_epoch > before.snapshot_epoch {
@@ -410,11 +414,10 @@ impl SurfaceOwner {
                     .as_ref()
                     .map(|entry| entry.inflight_calls)
                     .unwrap_or(0);
-                let after_base = base_state_from_handle(
-                    after_entry
-                        .as_ref()
-                        .and_then(|entry| entry.base_state.as_deref()),
-                );
+                let after_base = after_entry
+                    .as_ref()
+                    .and_then(|entry| entry.base_state)
+                    .unwrap_or(ExternalToolSurfaceBaseState::Absent);
                 let mut effects = Vec::new();
                 let transition_name = if after_base == ExternalToolSurfaceBaseState::Active
                     && after_calls == before_calls.saturating_add(1)
@@ -777,7 +780,12 @@ fn entry_snapshot_from_handle(
     ExternalToolSurfaceEntrySnapshot {
         visible: visible_surfaces.contains(&entry.surface_id),
         surface_id: entry.surface_id,
-        base_state: base_state_from_handle(entry.base_state.as_deref()),
+        // Typed cross-crate handle contract: `None` means the DSL never
+        // recorded a value for this surface, so the projection defaults
+        // to the `Absent` / `None` variant per the contract invariants.
+        base_state: entry
+            .base_state
+            .unwrap_or(ExternalToolSurfaceBaseState::Absent),
         has_removal_timing: entry.removal_draining_since_ms.is_some()
             || entry.removal_timeout_at_ms.is_some()
             || entry.removal_applied_at_turn.is_some(),
@@ -787,37 +795,12 @@ fn entry_snapshot_from_handle(
         pending_task_sequence: entry.pending_task_sequence.unwrap_or(0),
         pending_lineage_sequence: entry.pending_lineage_sequence.unwrap_or(0),
         inflight_call_count: entry.inflight_calls,
-        last_delta_operation: delta_operation_from_handle(entry.last_delta_operation.as_deref()),
-        last_delta_phase: delta_phase_from_handle(entry.last_delta_phase.as_deref()),
-    }
-}
-
-fn base_state_from_handle(state: Option<&str>) -> ExternalToolSurfaceBaseState {
-    match state {
-        Some("Active") => ExternalToolSurfaceBaseState::Active,
-        Some("Removing") => ExternalToolSurfaceBaseState::Removing,
-        Some("Removed") => ExternalToolSurfaceBaseState::Removed,
-        _ => ExternalToolSurfaceBaseState::Absent,
-    }
-}
-
-fn delta_operation_from_handle(op: Option<&str>) -> ExternalToolSurfaceDeltaOperation {
-    match op {
-        Some("Add") => ExternalToolSurfaceDeltaOperation::Add,
-        Some("Remove") => ExternalToolSurfaceDeltaOperation::Remove,
-        Some("Reload") => ExternalToolSurfaceDeltaOperation::Reload,
-        _ => ExternalToolSurfaceDeltaOperation::None,
-    }
-}
-
-fn delta_phase_from_handle(phase: Option<&str>) -> ExternalToolSurfaceDeltaPhase {
-    match phase {
-        Some("Pending") => ExternalToolSurfaceDeltaPhase::Pending,
-        Some("Applied") => ExternalToolSurfaceDeltaPhase::Applied,
-        Some("Draining") => ExternalToolSurfaceDeltaPhase::Draining,
-        Some("Failed") => ExternalToolSurfaceDeltaPhase::Failed,
-        Some("Forced") => ExternalToolSurfaceDeltaPhase::Forced,
-        _ => ExternalToolSurfaceDeltaPhase::None,
+        last_delta_operation: entry
+            .last_delta_operation
+            .unwrap_or(ExternalToolSurfaceDeltaOperation::None),
+        last_delta_phase: entry
+            .last_delta_phase
+            .unwrap_or(ExternalToolSurfaceDeltaPhase::None),
     }
 }
 

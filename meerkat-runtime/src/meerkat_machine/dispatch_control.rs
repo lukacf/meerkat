@@ -30,7 +30,7 @@ impl MeerkatMachine {
                                 &runtime_id,
                             ),
                             work_id: crate::meerkat_machine::dsl::WorkId::from(provisional_work_id),
-                            origin: "ingest".to_string(),
+                            origin: crate::meerkat_machine::dsl::WorkOrigin::Ingest,
                         },
                         "Ingest",
                     )

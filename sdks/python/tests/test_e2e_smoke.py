@@ -534,7 +534,7 @@ if include_scenario(58):
                         "orchestrator": {"profile": "lead"},
                         "profiles": {
                             "lead": {
-                                "model": smoke_model(),
+                                "model": "gpt-realtime-1.5",
                                 "tools": {"comms": True},
                                 "peer_description": "Lead realtime worker",
                                 "external_addressable": True,
@@ -653,7 +653,7 @@ if include_scenario(64):
                     "orchestrator": {"profile": "lead"},
                     "profiles": {
                         "lead": {
-                            "model": smoke_model(),
+                            "model": "gpt-realtime-1.5",
                             "tools": {"comms": True},
                             "peer_description": "Lead realtime worker",
                             "external_addressable": True,

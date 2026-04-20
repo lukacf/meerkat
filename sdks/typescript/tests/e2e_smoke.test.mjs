@@ -546,8 +546,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         client.createSession(
         "When asked through realtime, reply with TS-REALTIME-59 and mention cedar.",
         {
-          model: anthropicModel(),
-          provider: "anthropic",
+          model: "gpt-realtime-1.5",
+          provider: "openai",
         },
         ),
       );

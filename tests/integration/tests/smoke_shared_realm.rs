@@ -5139,7 +5139,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
                 "id": "scenario-63-mob",
                 "profiles": {
                     "worker": {
-                        "model": smoke_model(),
+                        "model": "gpt-realtime-1.5",
                         "external_addressable": true,
                         "tools": { "comms": true }
                     }

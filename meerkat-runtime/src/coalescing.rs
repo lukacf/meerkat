@@ -7,7 +7,7 @@
 use chrono::Utc;
 use meerkat_core::lifecycle::InputId;
 
-use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
+use crate::identifiers::{InputKind, LogicalRuntimeId, SupersessionKey};
 use crate::input::{Input, PeerConvention};
 use crate::input_state::{
     InputLifecycleState, InputState, InputStateHistoryEntry, InputTerminalOutcome,
@@ -29,7 +29,7 @@ pub fn is_coalescing_eligible(input: &Input) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SupersessionScope {
     pub runtime_id: LogicalRuntimeId,
-    pub kind: String,
+    pub kind: InputKind,
     pub supersession_key: SupersessionKey,
 }
 
@@ -39,7 +39,7 @@ impl SupersessionScope {
         let key = input.header().supersession_key.as_ref()?;
         Some(Self {
             runtime_id: runtime_id.clone(),
-            kind: input.kind_id().0,
+            kind: input.kind(),
             supersession_key: key.clone(),
         })
     }

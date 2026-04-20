@@ -209,7 +209,10 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
 async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_operation_inputs() {
     let continuation = Input::Continuation(ContinuationInput::detached_background_op_completed());
     let continuation_policy = meerkat_runtime::DefaultPolicyTable::resolve(&continuation, true);
-    assert_eq!(continuation.kind_id().0, "continuation");
+    assert_eq!(
+        continuation.kind(),
+        meerkat_runtime::InputKind::Continuation
+    );
     assert_eq!(continuation_policy.apply_mode, ApplyMode::StageRunBoundary);
     assert_eq!(continuation_policy.wake_mode, WakeMode::WakeIfIdle);
     assert_eq!(continuation_policy.drain_policy, DrainPolicy::SteerBatch);
@@ -238,7 +241,7 @@ async fn runtime_ingress_control_closed_taxonomy_uses_explicit_continuation_and_
         },
     });
     let operation_policy = meerkat_runtime::DefaultPolicyTable::resolve(&operation, true);
-    assert_eq!(operation.kind_id().0, "operation");
+    assert_eq!(operation.kind(), meerkat_runtime::InputKind::Operation);
     assert_eq!(operation_policy.apply_mode, ApplyMode::Ignore);
     assert_eq!(operation_policy.queue_mode, QueueMode::Priority);
     assert_eq!(

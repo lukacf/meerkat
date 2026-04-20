@@ -52,7 +52,7 @@ pub fn validate_durability(input: &Input) -> Result<(), DurabilityError> {
                         | PeerConvention::ResponseTerminal { .. },
                     ) => {
                         return Err(DurabilityError::DerivedForbidden {
-                            kind: format!("peer_{}", input.kind_id().0),
+                            kind: format!("peer_{}", input.kind().as_str()),
                         });
                     }
                     // ResponseProgress CAN be Derived

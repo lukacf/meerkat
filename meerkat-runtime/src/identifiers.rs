@@ -160,19 +160,83 @@ impl std::fmt::Display for PolicyVersion {
     }
 }
 
-/// Identifier for an input kind (e.g., "prompt", "peer_message").
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct KindId(pub String);
+/// Typed input-kind taxonomy used by the runtime policy table.
+///
+/// Every variant the policy table dispatches on is enumerated here. New input
+/// kinds must be added to this enum AND wired into
+/// `DefaultPolicyTable::resolve_by_kind`; the compiler enforces exhaustive
+/// coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InputKind {
+    /// Operator/user prompt.
+    Prompt,
+    /// Peer message convention (or unconvented peer input).
+    PeerMessage,
+    /// Peer request convention.
+    PeerRequest,
+    /// Peer response progress convention.
+    PeerResponseProgress,
+    /// Peer response terminal convention.
+    PeerResponseTerminal,
+    /// Flow step input.
+    FlowStep,
+    /// External event input.
+    ExternalEvent,
+    /// Explicit continuation input.
+    Continuation,
+    /// Explicit operation/lifecycle input.
+    Operation,
+}
+
+impl InputKind {
+    /// Stable lowercase identifier. Wire formats and trace strings rely on
+    /// this exact spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InputKind::Prompt => "prompt",
+            InputKind::PeerMessage => "peer_message",
+            InputKind::PeerRequest => "peer_request",
+            InputKind::PeerResponseProgress => "peer_response_progress",
+            InputKind::PeerResponseTerminal => "peer_response_terminal",
+            InputKind::FlowStep => "flow_step",
+            InputKind::ExternalEvent => "external_event",
+            InputKind::Continuation => "continuation",
+            InputKind::Operation => "operation",
+        }
+    }
+}
+
+impl std::fmt::Display for InputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Identifier for an input kind, wrapping the typed [`InputKind`] taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KindId(pub InputKind);
 
 impl KindId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    pub const fn new(kind: InputKind) -> Self {
+        Self(kind)
+    }
+
+    pub const fn kind(self) -> InputKind {
+        self.0
+    }
+}
+
+impl From<InputKind> for KindId {
+    fn from(kind: InputKind) -> Self {
+        Self(kind)
     }
 }
 
 impl std::fmt::Display for KindId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -286,7 +350,19 @@ mod tests {
 
     #[test]
     fn kind_id_display() {
-        let id = KindId::new("prompt");
+        let id = KindId::new(InputKind::Prompt);
         assert_eq!(id.to_string(), "prompt");
+        assert_eq!(
+            KindId::new(InputKind::PeerResponseProgress).to_string(),
+            "peer_response_progress"
+        );
+    }
+
+    #[test]
+    fn kind_id_serde_roundtrips_typed_variant() {
+        let id = KindId::new(InputKind::PeerResponseTerminal);
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: KindId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
     }
 }

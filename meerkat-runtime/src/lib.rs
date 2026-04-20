@@ -71,7 +71,7 @@ pub use handles::{
     RuntimeTurnStateHandle,
 };
 pub use identifiers::{
-    CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, KindId,
+    CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,
     LogicalRuntimeId, PolicyVersion, ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
 };
 pub use ingress_types::{ContentShape, RequestId, ReservationKey};

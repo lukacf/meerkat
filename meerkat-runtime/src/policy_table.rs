@@ -2,7 +2,7 @@
 //!
 //! All input kinds × 2 idle states, exact per spec §17.
 
-use crate::identifiers::{KindId, PolicyVersion};
+use crate::identifiers::{InputKind, KindId, PolicyVersion};
 use crate::input::Input;
 use crate::policy::{
     ApplyMode, ConsumePoint, DrainPolicy, PolicyDecision, QueueMode, RoutingDisposition, WakeMode,
@@ -48,13 +48,13 @@ impl DefaultPolicyTable {
     /// for progress updates. Response terminal inputs honor handling_mode
     /// normally.
     pub fn resolve(input: &Input, runtime_idle: bool) -> PolicyDecision {
-        let kind = input.kind_id();
+        let kind = input.kind();
         // ResponseProgress must not have its policy overridden by
         // handling_mode. Admission validation rejects this combination,
         // but the policy table also refuses to honor it so the contract
         // holds for any caller of resolve(), not just the driver path.
-        let is_response_convention = matches!(kind.0.as_str(), "peer_response_progress");
-        if !is_response_convention && let Some(mode) = input.handling_mode() {
+        let is_response_progress = matches!(kind, InputKind::PeerResponseProgress);
+        if !is_response_progress && let Some(mode) = input.handling_mode() {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
                     ApplyMode::StageRunStart,
@@ -85,15 +85,14 @@ impl DefaultPolicyTable {
             };
         }
 
-        // kind already computed above for response-convention check.
-        Self::resolve_by_kind(&kind, runtime_idle)
+        Self::resolve_by_kind(KindId::new(kind), runtime_idle)
     }
 
-    /// Resolve by kind ID (for testing and extensibility).
-    pub fn resolve_by_kind(kind: &KindId, runtime_idle: bool) -> PolicyDecision {
-        match (kind.0.as_str(), runtime_idle) {
+    /// Resolve by typed kind (for testing and extensibility).
+    pub fn resolve_by_kind(kind: KindId, runtime_idle: bool) -> PolicyDecision {
+        match (kind.kind(), runtime_idle) {
             // PromptInput — StageRunStart, WakeIfIdle (idle) / None (running)
-            ("prompt", true) => pd(
+            (InputKind::Prompt, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -102,7 +101,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Queue,
                 true,
             ),
-            ("prompt", false) => pd(
+            (InputKind::Prompt, false) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::None,
                 QueueMode::Fifo,
@@ -114,7 +113,7 @@ impl DefaultPolicyTable {
 
             // PeerInput(Message) — StageRunStart, WakeIfIdle (idle) /
             // InterruptYielding (running)
-            ("peer_message", true) => pd(
+            (InputKind::PeerMessage, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -123,7 +122,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Queue,
                 true,
             ),
-            ("peer_message", false) => pd(
+            (InputKind::PeerMessage, false) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::InterruptYielding,
                 QueueMode::Fifo,
@@ -134,7 +133,7 @@ impl DefaultPolicyTable {
             ),
 
             // PeerInput(Request) — same as Message
-            ("peer_request", true) => pd(
+            (InputKind::PeerRequest, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -143,7 +142,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Queue,
                 true,
             ),
-            ("peer_request", false) => pd(
+            (InputKind::PeerRequest, false) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::InterruptYielding,
                 QueueMode::Fifo,
@@ -154,16 +153,7 @@ impl DefaultPolicyTable {
             ),
 
             // PeerInput(ResponseProgress) — StageRunBoundary, None, Coalesce
-            ("peer_response_progress", true) => pd(
-                ApplyMode::StageRunBoundary,
-                WakeMode::None,
-                QueueMode::Coalesce,
-                ConsumePoint::OnRunComplete,
-                DrainPolicy::SteerBatch,
-                RoutingDisposition::Steer,
-                true,
-            ),
-            ("peer_response_progress", false) => pd(
+            (InputKind::PeerResponseProgress, _) => pd(
                 ApplyMode::StageRunBoundary,
                 WakeMode::None,
                 QueueMode::Coalesce,
@@ -194,16 +184,7 @@ impl DefaultPolicyTable {
             // dequeues and runs a turn regardless; turn-driven members (the
             // realtime audio case) now react to the response instead of
             // sitting on the appended context forever.
-            ("peer_response_terminal", true) => pd(
-                ApplyMode::StageRunStart,
-                WakeMode::WakeIfIdle,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                DrainPolicy::QueueNextTurn,
-                RoutingDisposition::Queue,
-                true,
-            ),
-            ("peer_response_terminal", false) => pd(
+            (InputKind::PeerResponseTerminal, _) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -214,7 +195,7 @@ impl DefaultPolicyTable {
             ),
 
             // FlowStepInput — StageRunStart, WakeIfIdle/None
-            ("flow_step", true) => pd(
+            (InputKind::FlowStep, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -223,7 +204,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Queue,
                 true,
             ),
-            ("flow_step", false) => pd(
+            (InputKind::FlowStep, false) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::None,
                 QueueMode::Fifo,
@@ -234,7 +215,7 @@ impl DefaultPolicyTable {
             ),
 
             // ExternalEventInput — StageRunStart, WakeIfIdle/None
-            ("external_event", true) => pd(
+            (InputKind::ExternalEvent, true) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -243,7 +224,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Queue,
                 true,
             ),
-            ("external_event", false) => pd(
+            (InputKind::ExternalEvent, false) => pd(
                 ApplyMode::StageRunStart,
                 WakeMode::None,
                 QueueMode::Fifo,
@@ -254,7 +235,7 @@ impl DefaultPolicyTable {
             ),
 
             // Continuation work remains explicit ordinary runtime work.
-            ("continuation", true) => pd(
+            (InputKind::Continuation, true) => pd(
                 ApplyMode::StageRunBoundary,
                 WakeMode::WakeIfIdle,
                 QueueMode::Fifo,
@@ -263,7 +244,7 @@ impl DefaultPolicyTable {
                 RoutingDisposition::Steer,
                 false,
             ),
-            ("continuation", false) => pd(
+            (InputKind::Continuation, false) => pd(
                 ApplyMode::StageRunBoundary,
                 WakeMode::InterruptYielding,
                 QueueMode::Fifo,
@@ -275,7 +256,7 @@ impl DefaultPolicyTable {
 
             // Typed operation/lifecycle inputs are admitted explicitly but do
             // not inject ordinary transcript-visible work in this phase.
-            ("operation", true | false) => pd(
+            (InputKind::Operation, _) => pd(
                 ApplyMode::Ignore,
                 WakeMode::None,
                 QueueMode::Priority,
@@ -283,17 +264,6 @@ impl DefaultPolicyTable {
                 DrainPolicy::Ignore,
                 RoutingDisposition::Drop,
                 false,
-            ),
-
-            // Unknown kind — default conservative: StageRunStart, no wake
-            (_, _) => pd(
-                ApplyMode::StageRunStart,
-                WakeMode::None,
-                QueueMode::Fifo,
-                ConsumePoint::OnRunComplete,
-                DrainPolicy::QueueNextTurn,
-                RoutingDisposition::Queue,
-                true,
             ),
         }
     }
@@ -305,7 +275,7 @@ mod tests {
     use super::*;
 
     fn assert_cell(
-        kind: &str,
+        kind: InputKind,
         idle: bool,
         expected_apply: ApplyMode,
         expected_wake: WakeMode,
@@ -313,33 +283,33 @@ mod tests {
         expected_consume: ConsumePoint,
         expected_transcript: bool,
     ) {
-        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new(kind), idle);
+        let decision = DefaultPolicyTable::resolve_by_kind(KindId::new(kind), idle);
         assert_eq!(
             decision.apply_mode, expected_apply,
-            "kind={kind}, idle={idle}: apply_mode"
+            "kind={kind:?}, idle={idle}: apply_mode"
         );
         assert_eq!(
             decision.wake_mode, expected_wake,
-            "kind={kind}, idle={idle}: wake_mode"
+            "kind={kind:?}, idle={idle}: wake_mode"
         );
         assert_eq!(
             decision.queue_mode, expected_queue,
-            "kind={kind}, idle={idle}: queue_mode"
+            "kind={kind:?}, idle={idle}: queue_mode"
         );
         assert_eq!(
             decision.consume_point, expected_consume,
-            "kind={kind}, idle={idle}: consume_point"
+            "kind={kind:?}, idle={idle}: consume_point"
         );
         assert_eq!(
             decision.record_transcript, expected_transcript,
-            "kind={kind}, idle={idle}: record_transcript"
+            "kind={kind:?}, idle={idle}: record_transcript"
         );
     }
 
     #[test]
     fn prompt_idle() {
         assert_cell(
-            "prompt",
+            InputKind::Prompt,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -351,7 +321,7 @@ mod tests {
     #[test]
     fn prompt_running() {
         assert_cell(
-            "prompt",
+            InputKind::Prompt,
             false,
             ApplyMode::StageRunStart,
             WakeMode::None,
@@ -363,7 +333,7 @@ mod tests {
     #[test]
     fn peer_message_idle() {
         assert_cell(
-            "peer_message",
+            InputKind::PeerMessage,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -375,7 +345,7 @@ mod tests {
     #[test]
     fn peer_message_running() {
         assert_cell(
-            "peer_message",
+            InputKind::PeerMessage,
             false,
             ApplyMode::StageRunStart,
             WakeMode::InterruptYielding,
@@ -387,7 +357,7 @@ mod tests {
     #[test]
     fn peer_request_idle() {
         assert_cell(
-            "peer_request",
+            InputKind::PeerRequest,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -399,7 +369,7 @@ mod tests {
     #[test]
     fn peer_request_running() {
         assert_cell(
-            "peer_request",
+            InputKind::PeerRequest,
             false,
             ApplyMode::StageRunStart,
             WakeMode::InterruptYielding,
@@ -411,7 +381,7 @@ mod tests {
     #[test]
     fn peer_response_progress_idle() {
         assert_cell(
-            "peer_response_progress",
+            InputKind::PeerResponseProgress,
             true,
             ApplyMode::StageRunBoundary,
             WakeMode::None,
@@ -423,7 +393,7 @@ mod tests {
     #[test]
     fn peer_response_progress_running() {
         assert_cell(
-            "peer_response_progress",
+            InputKind::PeerResponseProgress,
             false,
             ApplyMode::StageRunBoundary,
             WakeMode::None,
@@ -435,7 +405,7 @@ mod tests {
     #[test]
     fn peer_response_terminal_idle() {
         assert_cell(
-            "peer_response_terminal",
+            InputKind::PeerResponseTerminal,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -447,7 +417,7 @@ mod tests {
     #[test]
     fn peer_response_terminal_running() {
         assert_cell(
-            "peer_response_terminal",
+            InputKind::PeerResponseTerminal,
             false,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -459,7 +429,7 @@ mod tests {
     #[test]
     fn flow_step_idle() {
         assert_cell(
-            "flow_step",
+            InputKind::FlowStep,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -471,7 +441,7 @@ mod tests {
     #[test]
     fn flow_step_running() {
         assert_cell(
-            "flow_step",
+            InputKind::FlowStep,
             false,
             ApplyMode::StageRunStart,
             WakeMode::None,
@@ -483,7 +453,7 @@ mod tests {
     #[test]
     fn external_event_idle() {
         assert_cell(
-            "external_event",
+            InputKind::ExternalEvent,
             true,
             ApplyMode::StageRunStart,
             WakeMode::WakeIfIdle,
@@ -495,7 +465,7 @@ mod tests {
     #[test]
     fn external_event_running() {
         assert_cell(
-            "external_event",
+            InputKind::ExternalEvent,
             false,
             ApplyMode::StageRunStart,
             WakeMode::None,
@@ -507,7 +477,7 @@ mod tests {
     #[test]
     fn continuation_idle() {
         assert_cell(
-            "continuation",
+            InputKind::Continuation,
             true,
             ApplyMode::StageRunBoundary,
             WakeMode::WakeIfIdle,
@@ -519,7 +489,7 @@ mod tests {
     #[test]
     fn continuation_running() {
         assert_cell(
-            "continuation",
+            InputKind::Continuation,
             false,
             ApplyMode::StageRunBoundary,
             WakeMode::InterruptYielding,
@@ -531,7 +501,7 @@ mod tests {
     #[test]
     fn operation_idle() {
         assert_cell(
-            "operation",
+            InputKind::Operation,
             true,
             ApplyMode::Ignore,
             WakeMode::None,
@@ -543,7 +513,7 @@ mod tests {
     #[test]
     fn operation_running() {
         assert_cell(
-            "operation",
+            InputKind::Operation,
             false,
             ApplyMode::Ignore,
             WakeMode::None,
@@ -613,7 +583,8 @@ mod tests {
 
     #[test]
     fn peer_message_running_stays_queued_without_wake() {
-        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_message"), false);
+        let decision =
+            DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerMessage), false);
         assert_eq!(
             decision.wake_mode,
             WakeMode::InterruptYielding,
@@ -623,7 +594,8 @@ mod tests {
 
     #[test]
     fn peer_request_running_interrupts_yielding() {
-        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_request"), false);
+        let decision =
+            DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerRequest), false);
         assert_eq!(
             decision.wake_mode,
             WakeMode::InterruptYielding,
@@ -634,7 +606,8 @@ mod tests {
     #[test]
     fn peer_message_idle_still_wakes() {
         // Peer messages while idle should still wake normally.
-        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_message"), true);
+        let decision =
+            DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerMessage), true);
         assert_eq!(
             decision.wake_mode,
             WakeMode::WakeIfIdle,
@@ -645,7 +618,8 @@ mod tests {
     #[test]
     fn peer_request_idle_still_wakes() {
         // Peer requests while idle should still wake normally.
-        let decision = DefaultPolicyTable::resolve_by_kind(&KindId::new("peer_request"), true);
+        let decision =
+            DefaultPolicyTable::resolve_by_kind(KindId::new(InputKind::PeerRequest), true);
         assert_eq!(
             decision.wake_mode,
             WakeMode::WakeIfIdle,

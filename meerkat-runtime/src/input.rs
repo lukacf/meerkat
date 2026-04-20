@@ -16,7 +16,7 @@ use meerkat_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{
-    CorrelationId, IdempotencyKey, KindId, LogicalRuntimeId, SupersessionKey,
+    CorrelationId, IdempotencyKey, InputKind, KindId, LogicalRuntimeId, SupersessionKey,
 };
 use meerkat_core::types::RenderMetadata;
 
@@ -135,26 +135,26 @@ impl Input {
         &self.header().id
     }
 
-    /// Get the kind ID for policy resolution.
-    pub fn kind_id(&self) -> KindId {
+    /// Typed kind for policy dispatch.
+    pub fn kind(&self) -> InputKind {
         match self {
-            Input::Prompt(_) => KindId::new("prompt"),
+            Input::Prompt(_) => InputKind::Prompt,
             Input::Peer(p) => match &p.convention {
-                Some(PeerConvention::Message) => KindId::new("peer_message"),
-                Some(PeerConvention::Request { .. }) => KindId::new("peer_request"),
-                Some(PeerConvention::ResponseProgress { .. }) => {
-                    KindId::new("peer_response_progress")
-                }
-                Some(PeerConvention::ResponseTerminal { .. }) => {
-                    KindId::new("peer_response_terminal")
-                }
-                None => KindId::new("peer_message"),
+                Some(PeerConvention::Message) | None => InputKind::PeerMessage,
+                Some(PeerConvention::Request { .. }) => InputKind::PeerRequest,
+                Some(PeerConvention::ResponseProgress { .. }) => InputKind::PeerResponseProgress,
+                Some(PeerConvention::ResponseTerminal { .. }) => InputKind::PeerResponseTerminal,
             },
-            Input::FlowStep(_) => KindId::new("flow_step"),
-            Input::ExternalEvent(_) => KindId::new("external_event"),
-            Input::Continuation(_) => KindId::new("continuation"),
-            Input::Operation(_) => KindId::new("operation"),
+            Input::FlowStep(_) => InputKind::FlowStep,
+            Input::ExternalEvent(_) => InputKind::ExternalEvent,
+            Input::Continuation(_) => InputKind::Continuation,
+            Input::Operation(_) => InputKind::Operation,
         }
+    }
+
+    /// Wrapped kind identifier (for newtype-discipline call sites).
+    pub fn kind_id(&self) -> KindId {
+        KindId::new(self.kind())
     }
 
     /// Handling-mode hint for ordinary work admitted through the runtime.
@@ -758,7 +758,7 @@ mod tests {
             blocks: None,
             turn_metadata: None,
         });
-        assert_eq!(prompt.kind_id().0, "prompt");
+        assert_eq!(prompt.kind(), InputKind::Prompt);
 
         let peer_msg = Input::Peer(PeerInput {
             header: make_header(),
@@ -768,7 +768,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert_eq!(peer_msg.kind_id().0, "peer_message");
+        assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
 
         let peer_req = Input::Peer(PeerInput {
             header: make_header(),
@@ -781,7 +781,7 @@ mod tests {
             blocks: None,
             handling_mode: None,
         });
-        assert_eq!(peer_req.kind_id().0, "peer_request");
+        assert_eq!(peer_req.kind(), InputKind::PeerRequest);
 
         let continuation = Input::Continuation(ContinuationInput {
             header: make_header(),
@@ -789,7 +789,7 @@ mod tests {
             handling_mode: HandlingMode::Steer,
             request_id: None,
         });
-        assert_eq!(continuation.kind_id().0, "continuation");
+        assert_eq!(continuation.kind(), InputKind::Continuation);
 
         let operation = Input::Operation(OperationInput {
             header: make_header(),
@@ -798,7 +798,7 @@ mod tests {
                 id: OperationId::new(),
             },
         });
-        assert_eq!(operation.kind_id().0, "operation");
+        assert_eq!(operation.kind(), InputKind::Operation);
     }
 
     #[test]

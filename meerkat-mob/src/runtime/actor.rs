@@ -4401,7 +4401,8 @@ impl MobActor {
     /// pipeline (policy-driven), then unconditional roster removal.
     async fn handle_retire(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_retire preflight")?;
-        self.handle_retire_inner(&agent_identity, false).await?;
+        self.handle_retire_inner(&agent_identity, false, false)
+            .await?;
         self.ensure_pending_spawn_alignment("handle_retire completion")
     }
 
@@ -4409,6 +4410,7 @@ impl MobActor {
         &mut self,
         agent_identity: &MeerkatId,
         bulk: bool,
+        preserve_realtime_binding: bool,
     ) -> Result<(), MobError> {
         // Idempotent: already retired / never existed is success.
         let entry = {
@@ -4443,19 +4445,27 @@ impl MobActor {
         // idempotent semantics of handle_retire_inner (already-retired / unknown
         // => no-op), so a guard rejection is logged but does not fail the retire.
         //
-        // W3-H: populate `agent_identity` + `releasing` from the current DSL
-        // binding state. `releasing` carries the prior bridge session id when
-        // the identity has a realtime binding; the DSL's guard-split picks
-        // RetireRunningReleasing vs RetireRunningNoBinding (and Stopped
-        // variants) accordingly, emitting MemberRealtimeBindingReleased when
-        // a binding was present.
+        // W3-H: populate `releasing` from the current DSL binding state. For
+        // a terminal retire (user-initiated), `releasing = Some(prior)` drives
+        // the `RetireRunningReleasing` path which clears the binding and emits
+        // `MemberRealtimeBindingReleased`. For the retire-half of a respawn
+        // (caller sets `preserve_realtime_binding = true`), pass
+        // `releasing = None` even though the binding is present — this drives
+        // the `RetireRunningPreservingBinding` path, which leaves the binding
+        // map alone so the replacement spawn's `SpawnRunningReplacing` can
+        // emit the atomic `MemberRealtimeBindingRotated` effect. Without this
+        // the respawn path would emit `Released → Set` instead of `Rotated`,
+        // closing MobMember WS channels mid-rotation (s58 root cause).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
-        let releasing = self
-            .dsl_authority
-            .state
-            .member_realtime_bindings
-            .get(&dsl_identity)
-            .cloned();
+        let releasing = if preserve_realtime_binding {
+            None
+        } else {
+            self.dsl_authority
+                .state
+                .member_realtime_bindings
+                .get(&dsl_identity)
+                .cloned()
+        };
         let retire_effects = self.apply_dsl_input_with_effects(
             mob_dsl::MobMachineInput::Retire {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
@@ -4593,7 +4603,13 @@ impl MobActor {
         let replacement_generation = snapshot.generation.next();
 
         // 2. Retire the existing member (archives the session, removes from roster).
-        if let Err(error) = self.handle_retire_inner(&agent_identity, false).await {
+        // W3-H: preserve the realtime binding map entry through the retire so
+        // the replacement spawn's `SpawnRunningReplacing` emits the atomic
+        // `MemberRealtimeBindingRotated` effect. Without this the binding
+        // would be cleared here, then re-set by the replacement spawn — a
+        // `Released → Set` pair that would break MobMember WS channel
+        // continuity across respawn (s58 root cause).
+        if let Err(error) = self.handle_retire_inner(&agent_identity, false, true).await {
             let roster_still_contains_member = {
                 let roster = self.roster.read().await;
                 roster.get(&agent_identity).is_some()
@@ -6150,7 +6166,10 @@ impl MobActor {
             .partition(|entry| Self::runtime_binding_for_entry(entry).is_some());
 
         for entry in local_entries {
-            if let Err(error) = self.handle_retire_inner(&entry.agent_identity, true).await {
+            if let Err(error) = self
+                .handle_retire_inner(&entry.agent_identity, true, false)
+                .await
+            {
                 report.push_error(error.to_string());
                 return Err(MobDestroyError::Incomplete { report });
             }
@@ -6670,7 +6689,7 @@ impl MobActor {
     }
 
     async fn retire_one(&mut self, id: MeerkatId) -> Result<(), (MeerkatId, MobError)> {
-        self.handle_retire_inner(&id, true)
+        self.handle_retire_inner(&id, true, false)
             .await
             .map_err(|error| (id, error))
     }

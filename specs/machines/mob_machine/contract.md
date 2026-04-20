@@ -652,6 +652,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
 - To: `Running`
 
+### `RetireRunningPreservingBinding`
+- From: `Running`
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
+- Guards:
+  - `active_members_present`
+  - `runtime_id_present`
+  - `prior_realtime_binding_present`
+  - `releasing_absent`
+- Emits: `RequestRuntimeRetire`
+- To: `Running`
+
 ### `RetireRunningNoBinding`
 - From: `Running`
 - On: `Retire`(agent_runtime_id, agent_identity, releasing)
@@ -672,6 +683,17 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `prior_realtime_binding_present`
   - `releasing_present`
 - Emits: `RequestRuntimeRetire`, `MemberRealtimeBindingReleased`
+- To: `Stopped`
+
+### `RetireStoppedPreservingBinding`
+- From: `Stopped`
+- On: `Retire`(agent_runtime_id, agent_identity, releasing)
+- Guards:
+  - `active_members_present`
+  - `runtime_id_present`
+  - `prior_realtime_binding_present`
+  - `releasing_absent`
+- Emits: `RequestRuntimeRetire`
 - To: `Stopped`
 
 ### `RetireStoppedNoBinding`

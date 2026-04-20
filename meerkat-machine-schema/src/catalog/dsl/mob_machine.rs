@@ -1067,10 +1067,24 @@ machine! {
         // Retire / RetireAll
         // =====================================================================
 
-        // W3-H: Retire splits into Releasing (identity has a realtime
-        // binding — clear it and emit MemberRealtimeBindingReleased) and
-        // NoBinding (identity has no realtime binding — no-op on the map).
-        // Guards enforce caller/state consistency in both phase variants.
+        // W3-H: Retire splits into three variants to keep caller/state
+        // consistency explicit at the DSL:
+        //   * Releasing — identity has a realtime binding AND caller
+        //     witnesses it with `releasing = Some(prior)`. Binding is
+        //     cleared; MemberRealtimeBindingReleased is emitted. This is
+        //     a terminal retire (user-initiated).
+        //   * PreservingBinding — identity has a realtime binding but
+        //     caller passes `releasing = None`. This is the retire-half
+        //     of a respawn: the binding map is intentionally left alone
+        //     so the replacement spawn's SpawnRunningReplacing path can
+        //     emit MemberRealtimeBindingRotated against the same entry.
+        //     No binding-release effect is emitted.
+        //   * NoBinding — identity has no realtime binding and caller
+        //     passes `releasing = None`. No-op on the map.
+        // All three add the Retiring state marker. Guards enforce
+        // caller/state consistency: mismatched caller fails "no
+        // transition matched" rather than silently picking the wrong
+        // branch.
         transition RetireRunningReleasing {
             on input Retire { agent_runtime_id, agent_identity, releasing }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1085,6 +1099,20 @@ machine! {
             to Running
             emit RequestRuntimeRetire
             emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+        }
+
+        transition RetireRunningPreservingBinding {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "releasing_absent" { releasing == None }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+            }
+            to Running
+            emit RequestRuntimeRetire
         }
 
         transition RetireRunningNoBinding {
@@ -1115,6 +1143,20 @@ machine! {
             to Stopped
             emit RequestRuntimeRetire
             emit MemberRealtimeBindingReleased { agent_identity: agent_identity, session_id: releasing.get("value") }
+        }
+
+        transition RetireStoppedPreservingBinding {
+            on input Retire { agent_runtime_id, agent_identity, releasing }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "active_members_present" { self.live_runtime_ids != EmptySet }
+            guard "runtime_id_present" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "prior_realtime_binding_present" { self.member_realtime_bindings.contains_key(agent_identity) == true }
+            guard "releasing_absent" { releasing == None }
+            update {
+                self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+            }
+            to Stopped
+            emit RequestRuntimeRetire
         }
 
         transition RetireStoppedNoBinding {

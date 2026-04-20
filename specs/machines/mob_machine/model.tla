@@ -743,6 +743,18 @@ RetireRunningReleasing(agent_runtime_id, agent_identity, releasing) ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
+RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
+    /\ phase = "Running"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ (releasing = None)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
+
+
 RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing) ==
     /\ phase = "Running"
     /\ (live_runtime_ids # {})
@@ -766,6 +778,18 @@ RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing) ==
     /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
     /\ member_realtime_bindings' = MapRemove(member_realtime_bindings, agent_identity)
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing) ==
+    /\ phase = "Stopped"
+    /\ (live_runtime_ids # {})
+    /\ (agent_runtime_id \in live_runtime_ids)
+    /\ ((agent_identity \in DOMAIN member_realtime_bindings) = TRUE)
+    /\ (releasing = None)
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ member_state_markers' = MapSet(member_state_markers, agent_runtime_id, "Retiring")
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids, member_realtime_bindings >>
 
 
 RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing) ==
@@ -920,8 +944,10 @@ Next ==
     \/ FinishRunRunning
     \/ FinishRunRunningZero
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningReleasing(agent_runtime_id, agent_identity, releasing)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningPreservingBinding(agent_runtime_id, agent_identity, releasing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireRunningNoBinding(agent_runtime_id, agent_identity, releasing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedReleasing(agent_runtime_id, agent_identity, releasing)
+    \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedPreservingBinding(agent_runtime_id, agent_identity, releasing)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : \E agent_identity \in AgentIdentityValues : \E releasing \in OptionSessionIdValues : RetireStoppedNoBinding(agent_runtime_id, agent_identity, releasing)
     \/ RetireAllRunning
     \/ RetireAllStopped

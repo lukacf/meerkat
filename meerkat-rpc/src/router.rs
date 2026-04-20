@@ -1094,6 +1094,7 @@ impl MethodRouter {
                         self.runtime_adapter.as_ref(),
                         self.realtime_ws_host.as_deref(),
                         self.runtime.realm_id(),
+                        #[cfg(feature = "mob")]
                         &self.mob_state,
                     )
                     .await
@@ -1124,6 +1125,7 @@ impl MethodRouter {
                         id,
                         params,
                         self.runtime_adapter.as_ref(),
+                        #[cfg(feature = "mob")]
                         &self.mob_state,
                     )
                     .await
@@ -1155,6 +1157,7 @@ impl MethodRouter {
                         params,
                         self.runtime_adapter.as_ref(),
                         self.realtime_ws_host.as_deref(),
+                        #[cfg(feature = "mob")]
                         &self.mob_state,
                     )
                     .await

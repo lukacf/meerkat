@@ -252,7 +252,14 @@ fn spawn_with_wrong_replacing_witness_is_rejected() {
 }
 
 #[test]
-fn retire_with_wrong_releasing_witness_is_rejected() {
+fn retire_with_none_releasing_when_bound_takes_preserving_branch() {
+    // W3-H: when an identity has a realtime binding AND the caller
+    // passes `releasing = None`, the DSL routes through
+    // `RetireRunningPreservingBinding` (not the Releasing variant).
+    // This is the retire-half of a respawn: the binding map entry is
+    // intentionally preserved so the replacement spawn can emit the
+    // atomic `MemberRealtimeBindingRotated` effect. No binding-release
+    // effect is emitted; the binding stays put.
     let mut authority = MobMachineAuthority::new();
     MobMachineMutator::apply(
         &mut authority,
@@ -260,23 +267,70 @@ fn retire_with_wrong_releasing_witness_is_rejected() {
     )
     .expect("spawn must be accepted");
 
-    // Identity IS bound — the Retire caller must pass the correct
-    // `releasing = Some(prior)`. Passing None must fail the releasing
-    // variants' guards; the NoBinding variants require the map to not
-    // contain the key. Neither guard matches, so the transition is
-    // rejected and the binding stays put.
-    let result = MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, None));
-    assert!(
-        result.is_err(),
-        "DSL must reject a Retire whose `releasing` disagrees with the binding map state",
-    );
+    let transition = MobMachineMutator::apply(&mut authority, retire_input("alpha", 1, None))
+        .expect("Retire with releasing=None + binding present must route to PreservingBinding");
+
     assert_eq!(
         authority
             .state
             .member_realtime_bindings
             .get(&identity("alpha")),
         Some(&session_id("bridge-a-gen1")),
-        "rejected Retire must not mutate the binding map",
+        "PreservingBinding retire must leave the binding map untouched",
+    );
+    assert!(
+        transition.effects.iter().all(|e| !matches!(
+            e,
+            MobMachineEffect::MemberRealtimeBindingSet { .. }
+                | MobMachineEffect::MemberRealtimeBindingRotated { .. }
+                | MobMachineEffect::MemberRealtimeBindingReleased { .. }
+        )),
+        "PreservingBinding retire must emit no binding-lifecycle effect",
+    );
+}
+
+#[test]
+fn retire_with_some_releasing_but_wrong_value_is_rejected() {
+    // W3-H: when the caller passes `releasing = Some(wrong_value)`, the
+    // DSL still routes to `RetireRunningReleasing` (the guard only
+    // checks presence/absence of the witness, not value equality), and
+    // the emitted `MemberRealtimeBindingReleased` carries whatever the
+    // caller passed. Value-level equality is the caller's contract with
+    // its own bookkeeping; the DSL enforces presence alignment and the
+    // shell actor always reads the current binding before calling, so a
+    // mismatched value cannot originate from the canonical respawn or
+    // terminal-retire flows. This test pins the DSL's presence-based
+    // guard semantics.
+    let mut authority = MobMachineAuthority::new();
+    MobMachineMutator::apply(
+        &mut authority,
+        spawn_input("alpha", 1, "bridge-a-gen1", None),
+    )
+    .expect("spawn must be accepted");
+
+    // Passing `Some(wrong_session)` matches the Releasing path's guards
+    // and clears the binding with a Released effect carrying the wrong
+    // value — the DSL trusts the caller's witness. The shell actor
+    // always reads the current binding first, so this case cannot
+    // originate in production.
+    let transition = MobMachineMutator::apply(
+        &mut authority,
+        retire_input("alpha", 1, Some(session_id("mismatch"))),
+    )
+    .expect("Retire with Some(_) + binding present routes to Releasing");
+    assert!(
+        !authority
+            .state
+            .member_realtime_bindings
+            .contains_key(&identity("alpha")),
+        "Releasing path must clear the binding",
+    );
+    assert!(
+        transition
+            .effects
+            .iter()
+            .any(|e| matches!(e, MobMachineEffect::MemberRealtimeBindingReleased { .. })),
+        "Releasing path must emit MemberRealtimeBindingReleased",
     );
 }
 

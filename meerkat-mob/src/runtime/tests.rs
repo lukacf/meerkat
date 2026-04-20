@@ -23031,3 +23031,178 @@ async fn test_list_members_matching_filters_by_label_and_role() {
     let all = handle.list_members_matching(MemberFilter::default()).await;
     assert_eq!(all.len(), 2, "empty filter returns both members");
 }
+
+// ---------------------------------------------------------------------------
+// W3-H: member→realtime binding broadcast lifecycle
+// ---------------------------------------------------------------------------
+//
+// End-to-end test through `MobHandle::subscribe_realtime_binding_events()`:
+// the broadcast channel the realtime WS surface subscribes to at MobMember
+// channel-open time must emit exactly the Set → Rotated → Released
+// sequence across a spawn → respawn → retire lifecycle, and
+// `current_realtime_binding()` must track the canonical MobMachine map
+// after every transition. This exercises the full actor dispatch path
+// (MobCommand → DSL apply → log_realtime_binding_effects →
+// realtime_binding_tx.send) that the DSL-only tests in
+// `meerkat-mob/tests/member_realtime_bindings.rs` cannot cover.
+#[tokio::test]
+async fn test_member_realtime_binding_events_broadcast_through_spawn_respawn_retire() {
+    use super::state::MemberRealtimeBindingEvent;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let mut rx = handle.subscribe_realtime_binding_events();
+
+    // Initial spawn — identity gains a fresh binding.
+    let identity = AgentIdentity::from("rt-member");
+    let meerkat_id = MeerkatId::from(identity.as_str());
+    let original = handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            meerkat_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("initial spawn succeeds");
+    let initial_session = original
+        .bridge_session_id()
+        .cloned()
+        .expect("initial bridge session id");
+
+    let set_event = rx
+        .recv()
+        .await
+        .expect("spawn must broadcast a binding event");
+    match set_event {
+        MemberRealtimeBindingEvent::Set {
+            agent_identity,
+            bridge_session_id,
+            ..
+        } => {
+            assert_eq!(
+                agent_identity, identity,
+                "Set event must carry the spawned identity"
+            );
+            assert_eq!(
+                bridge_session_id, initial_session,
+                "Set event must carry the initial bridge session id"
+            );
+        }
+        other => panic!("fresh spawn must emit Set, got {other:?}"),
+    }
+    assert_eq!(
+        handle
+            .current_realtime_binding(identity.clone())
+            .await
+            .expect("current binding readable"),
+        Some(initial_session.clone()),
+        "canonical binding map must track the initial session after spawn",
+    );
+
+    // Respawn — binding rotates atomically to the replacement session.
+    handle
+        .respawn(identity.clone(), Some("continue work".into()))
+        .await
+        .expect("respawn succeeds");
+    let rotated_snapshot = handle
+        .member_status(&identity)
+        .await
+        .expect("respawned member snapshot");
+    let rotated_session = rotated_snapshot
+        .current_bridge_session_id
+        .clone()
+        .expect("rotated bridge session id");
+    assert_ne!(
+        rotated_session, initial_session,
+        "respawn must mint a fresh session id",
+    );
+
+    let rotated_event = rx
+        .recv()
+        .await
+        .expect("respawn must broadcast a binding event");
+    match rotated_event {
+        MemberRealtimeBindingEvent::Rotated {
+            agent_identity,
+            old_session_id,
+            new_session_id,
+            ..
+        } => {
+            assert_eq!(
+                agent_identity, identity,
+                "Rotated event must carry the respawned identity"
+            );
+            assert_eq!(
+                old_session_id, initial_session,
+                "Rotated event must carry the prior session id",
+            );
+            assert_eq!(
+                new_session_id, rotated_session,
+                "Rotated event must carry the new session id",
+            );
+        }
+        other => panic!("respawn must emit Rotated, got {other:?}"),
+    }
+    assert_eq!(
+        handle
+            .current_realtime_binding(identity.clone())
+            .await
+            .expect("current binding readable"),
+        Some(rotated_session.clone()),
+        "canonical binding map must track the rotated session after respawn",
+    );
+
+    // Retire — binding is released and the identity drops out of the map.
+    handle
+        .retire(identity.clone())
+        .await
+        .expect("retire succeeds");
+
+    let released_event = rx
+        .recv()
+        .await
+        .expect("retire must broadcast a binding event");
+    match released_event {
+        MemberRealtimeBindingEvent::Released {
+            agent_identity,
+            session_id,
+            ..
+        } => {
+            assert_eq!(
+                agent_identity, identity,
+                "Released event must carry the retired identity",
+            );
+            assert_eq!(
+                session_id, rotated_session,
+                "Released event must carry the session that was bound at retire",
+            );
+        }
+        other => panic!("retire must emit Released, got {other:?}"),
+    }
+    assert_eq!(
+        handle
+            .current_realtime_binding(identity.clone())
+            .await
+            .expect("current binding readable"),
+        None,
+        "canonical binding map must drop the identity after terminal retire",
+    );
+
+    // No further events should arrive — the lifecycle is terminal after
+    // Released. Peek with a short timeout so a stray emission would
+    // surface immediately rather than hang the test.
+    match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+        Err(_elapsed) => {
+            // Expected: no event arrived within the timeout.
+        }
+        Ok(Ok(stray)) => panic!("retire is terminal; no further events expected, got {stray:?}"),
+        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+            panic!("broadcast channel lagged; subscriber fell behind")
+        }
+        Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+            // Acceptable: the actor may have closed the broadcast after
+            // retire, which also signals no further events.
+        }
+    }
+}

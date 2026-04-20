@@ -253,10 +253,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireRunningReleasing`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireRunningPreservingBinding`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireRunningNoBinding`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireStoppedReleasing`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RetireStoppedPreservingBinding`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
 - `RetireStoppedNoBinding`

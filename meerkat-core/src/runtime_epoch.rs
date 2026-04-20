@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
-    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
-    PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle, SessionClaimHandle,
-    SessionContextHandle, TurnStateHandle,
+    AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, InteractionStreamHandle,
+    McpServerLifecycleHandle, PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle,
+    SessionClaimHandle, SessionContextHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -201,6 +201,12 @@ pub struct SessionRuntimeBindings {
     ///
     /// [`SessionClaim`]: crate::handles::SessionClaim
     pub session_claim_handle: Arc<dyn SessionClaimHandle>,
+    /// Interaction stream lifecycle DSL handle (U6 / dogma #5).
+    ///
+    /// Optional for the same reason as [`Self::peer_interaction`]; surfaces
+    /// without a session DSL leave this `None` and the comms runtime falls
+    /// back to standalone bookkeeping seeded by an ephemeral handle.
+    pub interaction_stream: Option<Arc<dyn InteractionStreamHandle>>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -221,6 +227,7 @@ impl Clone for SessionRuntimeBindings {
             peer_interaction: self.peer_interaction.as_ref().map(Arc::clone),
             session_context: Arc::clone(&self.session_context),
             session_claim_handle: Arc::clone(&self.session_claim_handle),
+            interaction_stream: self.interaction_stream.as_ref().map(Arc::clone),
         }
     }
 }
@@ -249,6 +256,13 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             )
             .field("session_context", &"<dyn SessionContextHandle>")
             .field("session_claim_handle", &"<dyn SessionClaimHandle>")
+            .field(
+                "interaction_stream",
+                &self
+                    .interaction_stream
+                    .as_ref()
+                    .map(|_| "<dyn InteractionStreamHandle>"),
+            )
             .finish()
     }
 }

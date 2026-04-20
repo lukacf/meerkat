@@ -52,6 +52,20 @@ machine! {
             // channel.
             last_session_context_updated_at_ms: u64,
 
+            // --- Interaction stream lifecycle (U6 / dogma #5) ---
+            //
+            // Shell-side `interaction_stream_registry` becomes a pure
+            // projection of channels keyed on these sets. Reservation TTL is
+            // shell-owned mechanics; entry into / exit from each lifecycle
+            // state is DSL truth. Lifecycle is encoded as two disjoint sets
+            // (matching the same pattern used elsewhere in this DSL for
+            // tagged-union state without map value comparison) — Reserved
+            // sits in `reserved_interaction_streams`, Attached in
+            // `attached_interaction_streams`, terminal states leave both
+            // sets and emit `InteractionStreamCleanup`.
+            reserved_interaction_streams: Set<PeerCorrelationId>,
+            attached_interaction_streams: Set<PeerCorrelationId>,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport capability
@@ -86,6 +100,8 @@ machine! {
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
             last_session_context_updated_at_ms = 0,
+            reserved_interaction_streams = EmptySet,
+            attached_interaction_streams = EmptySet,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -189,6 +205,12 @@ machine! {
             PeerResponseReplied { corr_id: PeerCorrelationId },
             // Session-context advancement input (W2-E / issue #264).
             AdvanceSessionContext { updated_at_ms: u64 },
+            // Interaction stream lifecycle inputs (U6 / dogma #5).
+            InteractionStreamReserved { corr_id: PeerCorrelationId },
+            InteractionStreamAttached { corr_id: PeerCorrelationId },
+            InteractionStreamCompleted { corr_id: PeerCorrelationId },
+            InteractionStreamExpired { corr_id: PeerCorrelationId },
+            InteractionStreamClosedEarly { corr_id: PeerCorrelationId },
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -310,6 +332,9 @@ machine! {
             // observer on the session's DSL handle to drive a typed
             // `ProjectionFreshness` state.
             SessionContextAdvanced { updated_at_ms: u64 },
+            // Interaction stream lifecycle effects (U6 / dogma #5).
+            InteractionStreamStateChanged { corr_id: PeerCorrelationId, new_state: Enum<InteractionStreamState> },
+            InteractionStreamCleanup { corr_id: PeerCorrelationId },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -366,6 +391,8 @@ machine! {
         disposition PeerInteractionCleanup => external,
         disposition InboundPeerInteractionStateChanged => external,
         disposition SessionContextAdvanced => external,
+        disposition InteractionStreamStateChanged => external,
+        disposition InteractionStreamCleanup => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -1801,6 +1828,70 @@ machine! {
         }
 
         // =====================================================================
+        // Interaction stream lifecycle transitions (U6 / dogma #5)
+        // =====================================================================
+
+        transition InteractionStreamReserved {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamReserved { corr_id }
+            guard "not_reserved" { !self.reserved_interaction_streams.contains(corr_id) }
+            guard "not_attached" { !self.attached_interaction_streams.contains(corr_id) }
+            update {
+                self.reserved_interaction_streams.insert(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Reserved }
+        }
+
+        transition InteractionStreamAttached {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamAttached { corr_id }
+            guard "is_reserved" { self.reserved_interaction_streams.contains(corr_id) }
+            update {
+                self.reserved_interaction_streams.remove(corr_id);
+                self.attached_interaction_streams.insert(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Attached }
+        }
+
+        transition InteractionStreamCompleted {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamCompleted { corr_id }
+            guard "is_attached" { self.attached_interaction_streams.contains(corr_id) }
+            update {
+                self.attached_interaction_streams.remove(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Completed }
+            emit InteractionStreamCleanup { corr_id: corr_id }
+        }
+
+        transition InteractionStreamExpired {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamExpired { corr_id }
+            guard "is_reserved" { self.reserved_interaction_streams.contains(corr_id) }
+            update {
+                self.reserved_interaction_streams.remove(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::Expired }
+            emit InteractionStreamCleanup { corr_id: corr_id }
+        }
+
+        transition InteractionStreamClosedEarly {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input InteractionStreamClosedEarly { corr_id }
+            guard "is_attached" { self.attached_interaction_streams.contains(corr_id) }
+            update {
+                self.attached_interaction_streams.remove(corr_id);
+            }
+            to Idle
+            emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::ClosedEarly }
+            emit InteractionStreamCleanup { corr_id: corr_id }
+        }
+
+        // =====================================================================
         // Live-topology reconfigure transitions
         // =====================================================================
 
@@ -2036,6 +2127,23 @@ pub enum PeerTerminalDisposition {
     #[default]
     Completed,
     Failed,
+}
+
+/// Typed lifecycle state of an interaction stream reservation (catalog DSL twin).
+///
+/// Owns whether a reserved subscriber/stream channel is still claimable
+/// (`Reserved`), live with an attached consumer (`Attached`), or terminal
+/// (`Completed`, `Expired`, `ClosedEarly`). The shell-side
+/// `interaction_stream_registry` projects channels off this map; TTL is
+/// shell-owned mechanics, while every state transition is DSL truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InteractionStreamState {
+    #[default]
+    Reserved,
+    Attached,
+    Completed,
+    Expired,
+    ClosedEarly,
 }
 
 /// Per-server MCP connection lifecycle state.

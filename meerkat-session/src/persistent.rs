@@ -977,6 +977,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             session_claim_handle:
                                 meerkat_core::handles::DefaultSessionClaimRegistry::global()
                                     as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
+                            // U6 (dogma #5): same rationale as `peer_interaction`.
+                            interaction_stream: None,
                         },
                     )
                 })

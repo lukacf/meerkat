@@ -61,6 +61,16 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         // session task's `publish_summary` path, not through
         // `MeerkatMachineCommand`.
         "AdvanceSessionContext",
+        // U6 (dogma #5): interaction stream lifecycle is driven via
+        // `InteractionStreamHandle` (meerkat-core/src/handles.rs) from the
+        // comms runtime's `stream()` / `mark_interaction_complete` /
+        // `reap_expired_reservations` / `InteractionStream::finish` paths,
+        // not through `MeerkatMachineCommand`.
+        "InteractionStreamReserved",
+        "InteractionStreamAttached",
+        "InteractionStreamCompleted",
+        "InteractionStreamExpired",
+        "InteractionStreamClosedEarly",
         // W2-G (issue #264): peer-ingress transport capability ownership is
         // staged by `stage_peer_ingress_ownership_dsl` from inside the
         // `SetPeerIngressContext` command handler, not as a separately

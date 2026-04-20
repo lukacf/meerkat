@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
-    InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId,
+    InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
 };
 use crate::types::SessionId;
 
@@ -814,4 +814,81 @@ impl SessionClaimHandle for DefaultSessionClaimRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         claims.remove(session_id);
     }
+}
+
+// ---------------------------------------------------------------------------
+// InteractionStreamHandle (U6 / dogma #5)
+// ---------------------------------------------------------------------------
+
+/// Interaction stream lifecycle DSL handle.
+///
+/// Routes the reservation/attach/completion/expire/close-early lifecycle of
+/// a streamed interaction into the MeerkatMachine DSL's `interaction_streams`
+/// substate map. The shell-side `interaction_stream_registry` projects
+/// sender/receiver channels off this map; terminal transitions emit
+/// [`InteractionStreamCleanupObserver::on_interaction_stream_cleanup`], which
+/// the comms runtime uses to drop the channel projection.
+///
+/// Reservation TTL is shell-owned mechanics: the runtime holds the timestamp
+/// and decides when to fire `expired`. Every state-meaning decision (is the
+/// reservation still claimable? has the consumer attached? did a terminal
+/// event win the race?) lives in the DSL.
+pub trait InteractionStreamHandle: Send + Sync {
+    /// Fire `InteractionStreamReserved { corr_id }`.
+    ///
+    /// Guard: `corr_id` is not already in `interaction_streams`. Rejected
+    /// duplicates surface as [`DslTransitionError`] so the shell can refuse
+    /// to register two channels under the same key.
+    fn reserved(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `InteractionStreamAttached { corr_id }`.
+    ///
+    /// Guard: state is `Reserved`. Rejected if the reservation already
+    /// expired, the consumer already attached, or the entry never existed.
+    fn attached(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `InteractionStreamCompleted { corr_id }`.
+    ///
+    /// Guard: state is `Attached`. Terminal — emits the cleanup effect.
+    fn completed(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `InteractionStreamExpired { corr_id }`.
+    ///
+    /// Guard: state is `Reserved`. Terminal — emits the cleanup effect.
+    fn expired(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Fire `InteractionStreamClosedEarly { corr_id }`.
+    ///
+    /// Guard: state is `Attached`. Terminal — emits the cleanup effect.
+    fn closed_early(&self, corr_id: PeerCorrelationId) -> Result<(), DslTransitionError>;
+
+    /// Read the DSL-owned state for a given correlation id, if any.
+    ///
+    /// Returns `None` when the entry has already been removed (terminal or
+    /// never reserved). Active states (`Reserved`, `Attached`) surface as
+    /// `Some(..)`; terminal variants surface only via the
+    /// `InteractionStreamStateChanged` effect, never on the active map.
+    fn state(&self, corr_id: PeerCorrelationId) -> Option<InteractionStreamState>;
+
+    /// Install a projection-cleanup observer for the interaction stream
+    /// lifecycle. The runtime handle invokes the observer whenever a DSL
+    /// transition emits `InteractionStreamCleanup`, closing the loop
+    /// "terminal transition → effect → shell projection cleanup".
+    fn install_cleanup_observer(&self, observer: Arc<dyn InteractionStreamCleanupObserver>);
+}
+
+/// Observer invoked by [`InteractionStreamHandle`] when a DSL
+/// `InteractionStreamCleanup` effect is emitted.
+///
+/// Shell-owned projection consumers (the comms runtime's
+/// `interaction_stream_registry`) implement this to drop channel entries
+/// keyed on the terminated correlation id under the same authority lock as
+/// the transition that emitted the effect.
+pub trait InteractionStreamCleanupObserver: Send + Sync {
+    /// Called once per emitted `InteractionStreamCleanup { corr_id }` effect.
+    ///
+    /// Idempotent in the well-formed case (terminal transitions remove the
+    /// map entry so subsequent fires fail the guard), but observers should
+    /// tolerate redundant calls defensively.
+    fn on_interaction_stream_cleanup(&self, corr_id: PeerCorrelationId);
 }

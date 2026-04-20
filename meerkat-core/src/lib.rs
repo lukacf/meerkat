@@ -91,7 +91,9 @@ pub use compact::{
 };
 pub use memory::{MemoryMetadata, MemoryResult, MemoryStore, MemoryStoreError};
 pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
-pub use peer_correlation::{InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId};
+pub use peer_correlation::{
+    InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,
+};
 pub use peer_meta::PeerMeta;
 
 pub use completion_feed::{

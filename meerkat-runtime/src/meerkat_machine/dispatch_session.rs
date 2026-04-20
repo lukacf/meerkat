@@ -323,6 +323,11 @@ impl MeerkatMachine {
                             )),
                         ),
                         session_claim_handle: self.session_claim_handle(),
+                        interaction_stream: Some(Arc::new(
+                            crate::handles::RuntimeInteractionStreamHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
+                        )),
                     },
                 ))
             }

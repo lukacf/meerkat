@@ -155,6 +155,8 @@ pub(crate) fn project_state(
         pending_peer_requests: std::collections::BTreeMap::new(),
         inbound_peer_requests: std::collections::BTreeMap::new(),
         last_session_context_updated_at_ms: 0,
+        reserved_interaction_streams: std::collections::BTreeSet::new(),
+        attached_interaction_streams: std::collections::BTreeSet::new(),
         peer_ingress_owner_kind: super::dsl::PeerIngressOwnerKind::Unattached,
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,

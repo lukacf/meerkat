@@ -2253,6 +2253,17 @@ impl AgentFactory {
             {
                 runtime.install_peer_interaction_handle(Arc::clone(handle));
             }
+            // U6 (dogma #5): install the interaction-stream DSL handle so the
+            // shell-side `interaction_stream_registry` becomes a pure
+            // projection of DSL truth — `Reserved` / `Attached` / `Completed`
+            // / `Expired` / `ClosedEarly` lifecycle and the cleanup observer
+            // both flow through the DSL.
+            #[cfg(feature = "comms")]
+            if let (Some(runtime), Some(handle)) =
+                (&comms_runtime, bindings.interaction_stream.as_ref())
+            {
+                runtime.install_interaction_stream_handle(Arc::clone(handle));
+            }
         }
 
         // 7. Create session store adapter (override > factory > feature-flag default)

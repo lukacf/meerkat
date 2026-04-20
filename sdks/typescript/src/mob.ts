@@ -8,6 +8,7 @@ import type {
   MobFlowStatus,
   MobLifecycleAction,
   MobMember,
+  MobMemberRef,
   MobSpawnResult,
   MobSpawnManyResultEntry,
   MobStatus,
@@ -41,7 +42,7 @@ export interface MemberSendOptions {
 export interface MemberDeliveryReceipt {
   agentIdentity: string;
   agentRuntimeId: string;
-  fenceToken: number;
+  memberRef: MobMemberRef;
   generation?: number;
   handlingMode: MobHandlingMode;
 }
@@ -107,7 +108,7 @@ export interface MobHelperResult {
   tokensUsed: number;
   agentIdentity: string;
   agentRuntimeId: string;
-  fenceToken: number;
+  memberRef: MobMemberRef;
   generation?: number;
 }
 

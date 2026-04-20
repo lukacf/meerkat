@@ -111,11 +111,11 @@ export class Member {
     const receipt = JSON.parse(json) as Partial<MemberDeliveryReceipt>;
     const legacyIdentity = (receipt as { identity?: unknown }).identity;
     const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
-    const fenceToken =
-      typeof receipt.fence_token === 'number' && Number.isFinite(receipt.fence_token)
-        ? receipt.fence_token
+    const memberRef =
+      typeof receipt.member_ref === 'string' && receipt.member_ref.length > 0
+        ? receipt.member_ref
         : undefined;
-    if (!runtime.value || fenceToken === undefined) {
+    if (!runtime.value || !memberRef) {
       throw new Error('Invalid mob member delivery response: missing runtime identity fields');
     }
     return {
@@ -126,7 +126,7 @@ export class Member {
             ? legacyIdentity
           : this.agentIdentity,
       agent_runtime_id: runtime.value,
-      fence_token: fenceToken,
+      member_ref: memberRef,
       generation: runtime.generation,
       handling_mode: receipt.handling_mode ?? handlingMode,
     };
@@ -187,10 +187,6 @@ export class Mob {
     return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry, index) => {
       const requestedIdentity = specs[index]?.agent_identity ?? '';
       let runtime = parseAgentRuntimeId(entry.agent_runtime_id);
-      let fenceToken =
-        typeof entry.fence_token === 'number' && Number.isFinite(entry.fence_token)
-          ? entry.fence_token
-          : undefined;
       const agentIdentity =
         typeof entry.agent_identity === 'string'
           ? entry.agent_identity
@@ -198,17 +194,18 @@ export class Mob {
       if (!runtime.value && agentIdentity) {
         runtime = { value: `${agentIdentity}:0`, generation: 0 };
       }
-      if (fenceToken === undefined && agentIdentity) {
-        fenceToken = 0;
-      }
-      if (!agentIdentity || !runtime.value || fenceToken === undefined) {
+      const memberRef =
+        typeof entry.member_ref === 'string' && entry.member_ref.length > 0
+          ? entry.member_ref
+          : undefined;
+      if (!agentIdentity || !runtime.value || !memberRef) {
         throw new Error('Invalid mob spawn response: missing runtime identity fields');
       }
       return {
         mob_id: typeof entry.mob_id === 'string' ? entry.mob_id : this.mobId,
         agent_identity: agentIdentity,
         agent_runtime_id: runtime.value,
-        fence_token: fenceToken,
+        member_ref: memberRef,
         generation: runtime.generation,
       };
     });
@@ -251,18 +248,17 @@ export class Mob {
     return (JSON.parse(json) as Array<Record<string, unknown>>).map((member) => {
       const agentIdentity = String(member.agent_identity ?? member.member_id ?? '');
       let runtime = parseAgentRuntimeId(member.agent_runtime_id);
-      let fenceToken =
-        typeof member.fence_token === 'number' && Number.isFinite(member.fence_token)
-          ? member.fence_token
-          : 0;
       if (!runtime.value && agentIdentity.length > 0) {
         runtime = { value: `${agentIdentity}:0`, generation: 0 };
-        fenceToken = 0;
       }
+      const memberRef =
+        typeof member.member_ref === 'string' && member.member_ref.length > 0
+          ? member.member_ref
+          : '';
       return {
         agent_identity: agentIdentity,
         agent_runtime_id: runtime.value,
-        fence_token: fenceToken,
+        member_ref: memberRef,
         generation: runtime.generation,
         profile: String(member.profile_name ?? member.profile ?? ''),
         peer_id: member.peer_id != null ? String(member.peer_id) : undefined,

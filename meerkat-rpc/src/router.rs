@@ -4421,7 +4421,7 @@ mod tests {
         let members = members_value["members"].as_array().expect("members array");
         assert_eq!(members.len(), 1, "retiring member should remain observable");
         assert_eq!(members[0]["agent_identity"], "lead-1");
-        assert_eq!(members[0]["state"], "Retiring");
+        assert_eq!(members[0]["state"], "retiring");
 
         let send_resp = router
             .dispatch(make_request(

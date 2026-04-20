@@ -53,11 +53,14 @@ from .mob import (
     Mob,
     MobHelperResult,
     MobKickoffMemberSnapshot,
+    MobLifecycleAction,
     MobMember,
+    MobMemberRef,
     MobMemberSnapshot,
     MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
+    WorkOrigin,
 )
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
@@ -1151,8 +1154,8 @@ class MeerkatClient:
         runtime_id, generation = _parse_agent_runtime_id_wire(
             result.get("agent_runtime_id")
         )
-        fence_token = result.get("fence_token")
-        if not runtime_id or not isinstance(fence_token, int):
+        member_ref = result.get("member_ref")
+        if not runtime_id or not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
                 "INVALID_RESPONSE",
                 "Invalid mob/member_send response: missing runtime identity fields",
@@ -1170,7 +1173,7 @@ class MeerkatClient:
                 )
             ),
             "agent_runtime_id": runtime_id,
-            "fence_token": fence_token,
+            "member_ref": member_ref,
             **({"generation": generation} if generation is not None else {}),
             "handling_mode": (
                 receipt_handling_mode
@@ -1609,6 +1612,12 @@ class MeerkatClient:
         runtime_id, generation = _parse_agent_runtime_id_wire(
             result.get("agent_runtime_id")
         )
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/spawn_helper response: missing member_ref",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
@@ -1619,11 +1628,7 @@ class MeerkatClient:
                 else (agent_identity or "")
             ),
             "agent_runtime_id": runtime_id,
-            "fence_token": (
-                int(result["fence_token"])
-                if isinstance(result.get("fence_token"), int)
-                else 0
-            ),
+            "member_ref": member_ref,
             **({"generation": generation} if generation is not None else {}),
         }
 
@@ -1654,6 +1659,12 @@ class MeerkatClient:
         runtime_id, generation = _parse_agent_runtime_id_wire(
             result.get("agent_runtime_id")
         )
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/fork_helper response: missing member_ref",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
@@ -1664,11 +1675,7 @@ class MeerkatClient:
                 else (agent_identity or "")
             ),
             "agent_runtime_id": runtime_id,
-            "fence_token": (
-                int(result["fence_token"])
-                if isinstance(result.get("fence_token"), int)
-                else 0
-            ),
+            "member_ref": member_ref,
             **({"generation": generation} if generation is not None else {}),
         }
 
@@ -1727,7 +1734,13 @@ class MeerkatClient:
         )
         await self._request("mob/unwire", payload)
 
-    async def mob_lifecycle(self, mob_id: str, action: str) -> None:
+    async def mob_lifecycle(self, mob_id: str, action: MobLifecycleAction) -> None:
+        """Drive a mob through a typed lifecycle transition.
+
+        ``action`` must be one of the `MobLifecycleAction` literals
+        ("stop", "resume", "complete", "reset", "destroy"). The wire
+        contract rejects any other value.
+        """
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
     async def mob_snapshot(self, mob_id: str) -> dict[str, Any]:
@@ -1763,28 +1776,24 @@ class MeerkatClient:
 
     async def mob_submit_work(
         self,
-        mob_id: str,
-        agent_identity: str,
-        generation: int,
-        fence_token: int,
+        member_ref: MobMemberRef,
         content: Any,
         *,
         work_ref: str | None = None,
-        origin: str = "external",
+        origin: WorkOrigin = "external",
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
 
-        Wraps the ``mob/submit_work`` RPC (DELETE_ME C4). The work lane
-        was Rust-only prior to this; ``origin`` is ``"external"`` for
-        user-originated turns and ``"internal"`` for mob-orchestration
-        work. When ``work_ref`` is omitted the server generates a fresh
-        UUID.
+        ``member_ref`` is the opaque handle returned by
+        ``ensure_member``/``spawn_helper``/``fork_helper`` and member-list
+        responses. The server resolves it to the current incarnation, so
+        callers never pass raw ``generation`` / ``fence_token`` values.
+        ``origin`` is ``"external"`` for user-originated turns and
+        ``"internal"`` for mob-orchestration work. When ``work_ref`` is
+        omitted the server generates a fresh UUID.
         """
         params: dict[str, Any] = {
-            "mob_id": mob_id,
-            "agent_identity": agent_identity,
-            "generation": generation,
-            "fence_token": fence_token,
+            "member_ref": member_ref,
             "content": content,
             "origin": origin,
         }
@@ -1801,25 +1810,16 @@ class MeerkatClient:
             "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}
         )
 
-    async def mob_cancel_all_work(
-        self,
-        mob_id: str,
-        agent_identity: str,
-        generation: int,
-        fence_token: int,
-    ) -> dict[str, Any]:
+    async def mob_cancel_all_work(self, member_ref: MobMemberRef) -> dict[str, Any]:
         """Cancel all in-flight work for a specific mob member.
 
-        Wraps the ``mob/cancel_all_work`` RPC (DELETE_ME C4).
+        ``member_ref`` is the opaque handle returned by
+        ``ensure_member``/``spawn_helper``/``fork_helper`` and member-list
+        responses.
         """
         return await self._request(
             "mob/cancel_all_work",
-            {
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-                "generation": generation,
-                "fence_token": fence_token,
-            },
+            {"member_ref": member_ref},
         )
 
     async def append_mob_system_context(

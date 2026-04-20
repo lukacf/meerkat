@@ -306,6 +306,15 @@ export interface MobStatus {
 
 export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "reset";
 
+/**
+ * Server-resolved opaque handle for a mob member. Treat as an opaque token:
+ * app code never constructs or inspects these — they come back from
+ * `mob/ensure_member`, `mob/spawn_helper`, `mob/fork_helper`, and member
+ * list surfaces, and are passed back on work-lane and member-targeted
+ * calls.
+ */
+export type MobMemberRef = string;
+
 export interface MobFlowStatus {
   readonly run?: Record<string, unknown> | null;
 }

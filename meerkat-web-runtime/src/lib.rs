@@ -523,29 +523,34 @@ where
     with_runtime_state(|state| f(state.mob_state.clone()))
 }
 
-fn spawn_result_payload(result: &meerkat_mob::SpawnResult) -> serde_json::Value {
+fn spawn_result_payload(mob_id: &MobId, result: &meerkat_mob::SpawnResult) -> serde_json::Value {
+    let identity_str = result.agent_identity.to_string();
     serde_json::json!({
         "agent_identity": result.agent_identity,
         "agent_runtime_id": result.agent_runtime_id,
-        "fence_token": result.fence_token,
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
 }
 
-fn spawn_member_result_payload(result: &meerkat_mob::SpawnResult) -> serde_json::Value {
-    let mut payload = spawn_result_payload(result);
+fn spawn_member_result_payload(
+    mob_id: &MobId,
+    result: &meerkat_mob::SpawnResult,
+) -> serde_json::Value {
+    let mut payload = spawn_result_payload(mob_id, result);
     if let Some(object) = payload.as_object_mut() {
         object.insert("status".to_string(), serde_json::json!("ok"));
     }
     payload
 }
 
-fn helper_result_payload(result: &meerkat_mob::HelperResult) -> serde_json::Value {
+fn helper_result_payload(mob_id: &MobId, result: &meerkat_mob::HelperResult) -> serde_json::Value {
+    let identity_str = result.agent_identity.to_string();
     serde_json::json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity,
         "agent_runtime_id": result.agent_runtime_id,
-        "fence_token": result.fence_token,
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
 }
 
@@ -1730,7 +1735,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
     let result_json: Vec<serde_json::Value> = results
         .into_iter()
         .map(|r| match r {
-            Ok(member_ref) => spawn_member_result_payload(&member_ref),
+            Ok(spawn_result) => spawn_member_result_payload(&id, &spawn_result),
             Err(e) => serde_json::json!({
                 "status": "error",
                 "error": e.to_string(),
@@ -1854,7 +1859,28 @@ pub async fn mob_list_members(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let members = mob_state.mob_list_members(&id).await.map_err(err_mob)?;
-    let json = serde_json::to_string(&members).map_err(|e| err_str("serialize_error", e))?;
+    // Serialize through the domain shape, then splice in the server-
+    // resolved `member_ref` so app code receives a typed opaque handle
+    // instead of binding-era `fence_token`.
+    let mut array = serde_json::to_value(&members)
+        .map_err(|e| err_str("serialize_error", e))?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for (entry, member) in array.iter_mut().zip(members.iter()) {
+        if let Some(obj) = entry.as_object_mut() {
+            let identity_str = member.agent_identity.to_string();
+            obj.insert(
+                "member_ref".to_string(),
+                serde_json::to_value(meerkat_contracts::WireMemberRef::encode(
+                    id.as_str(),
+                    &identity_str,
+                ))
+                .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    let json = serde_json::to_string(&array).map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
 
@@ -2054,7 +2080,17 @@ pub async fn mob_member_send(
         )
         .await
         .map_err(err_mob)?;
-    serde_json::to_string(&receipt).map_err(|e| err_str("serialize", e))
+    let identity_str = receipt.identity.to_string();
+    let payload = serde_json::json!({
+        "agent_identity": receipt.identity,
+        "agent_runtime_id": receipt.agent_runtime_id,
+        "member_ref": meerkat_contracts::WireMemberRef::encode(id.as_str(), &identity_str),
+        "handling_mode": match receipt.handling_mode {
+            meerkat_core::HandlingMode::Queue => "queue",
+            meerkat_core::HandlingMode::Steer => "steer",
+        },
+    });
+    serde_json::to_string(&payload).map_err(|e| err_str("serialize", e))
 }
 
 /// Read the current execution snapshot for a mob member.
@@ -2141,7 +2177,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
         .mob_spawn_helper(&id, identity, request.prompt, options)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&helper_result_payload(&result))
+    let json = serde_json::to_string(&helper_result_payload(&id, &result))
         .map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2179,7 +2215,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
         )
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&helper_result_payload(&result))
+    let json = serde_json::to_string(&helper_result_payload(&id, &result))
         .map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2462,7 +2498,7 @@ mod tests {
         SessionSystemContextState,
     };
     #[cfg(not(target_arch = "wasm32"))]
-    use meerkat_mob::SpawnMemberSpec;
+    use meerkat_mob::{MobId, SpawnMemberSpec};
     use serde_json::json;
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
@@ -2688,13 +2724,15 @@ mod tests {
         let runtime_id = meerkat_mob::AgentRuntimeId::initial(identity.clone());
         let fence = meerkat_mob::FenceToken::new(1);
         let result = meerkat_mob::SpawnResult::new(identity, runtime_id, fence);
+        let mob_id = MobId::from("mob-test");
 
-        let payload = spawn_result_payload(&result);
+        let payload = spawn_result_payload(&mob_id, &result);
         assert_eq!(payload["agent_identity"], "test-member");
         assert!(!payload["agent_runtime_id"].is_null());
-        assert!(!payload["fence_token"].is_null());
+        let member_ref = payload["member_ref"].as_str().expect("member_ref");
+        assert!(!member_ref.is_empty(), "member_ref must be populated");
 
-        let spawn_payload = spawn_member_result_payload(&result);
+        let spawn_payload = spawn_member_result_payload(&mob_id, &result);
         assert_eq!(spawn_payload["status"], "ok");
         assert_eq!(spawn_payload["agent_identity"], "test-member");
     }
@@ -2738,12 +2776,13 @@ mod tests {
             .await
             .expect("spawn helper");
 
-        let payload = helper_result_payload(&result);
+        let payload = helper_result_payload(&mob_id, &result);
         assert!(payload.get("output").is_some());
         assert!(payload["tokens_used"].as_u64().is_some());
         assert_eq!(payload["agent_identity"], "helper-1");
         assert!(!payload["agent_runtime_id"].is_null());
-        assert!(!payload["fence_token"].is_null());
+        let member_ref = payload["member_ref"].as_str().expect("member_ref");
+        assert!(!member_ref.is_empty(), "member_ref must be populated");
     }
 
     #[cfg(target_arch = "wasm32")]

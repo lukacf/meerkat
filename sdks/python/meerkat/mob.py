@@ -4,6 +4,16 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from .streaming import EventSubscription
 
+MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
+
+WorkOrigin = Literal["external", "internal"]
+
+# Opaque server-resolved handle for a mob member. App code treats this as
+# a transparent token — obtained from `ensure_member`/`spawn_helper`/
+# `fork_helper`/member-list responses, passed back on work-lane and
+# member-targeted calls.
+MobMemberRef = str
+
 RenderClass = Literal[
     "user_prompt",
     "peer_message",
@@ -27,7 +37,7 @@ MemberDeliveryReceipt = TypedDict(
     {
         "agent_identity": str,
         "agent_runtime_id": str,
-        "fence_token": int,
+        "member_ref": MobMemberRef,
         "generation": NotRequired[int],
         "handling_mode": Literal["queue", "steer"],
     },
@@ -138,7 +148,7 @@ MobHelperResult = TypedDict(
         "tokens_used": int,
         "agent_identity": str,
         "agent_runtime_id": str,
-        "fence_token": int,
+        "member_ref": MobMemberRef,
         "generation": NotRequired[int],
     },
 )

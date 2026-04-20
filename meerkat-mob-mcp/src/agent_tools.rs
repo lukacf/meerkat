@@ -238,11 +238,12 @@ impl AgentMobToolSurface {
         })
     }
 
-    fn spawn_result_payload(result: &SpawnResult) -> serde_json::Value {
+    fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Value {
+        let identity_str = result.agent_identity.to_string();
         json!({
             "agent_identity": result.agent_identity,
             "agent_runtime_id": result.agent_runtime_id,
-            "fence_token": result.fence_token,
+            "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         })
     }
 
@@ -637,7 +638,7 @@ impl AgentMobToolSurface {
             .wire_delegate_helper_to_creator(&mob_id, &identity)
             .await;
 
-        let mut result = Self::spawn_result_payload(&spawn_result);
+        let mut result = Self::spawn_result_payload(&mob_id, &spawn_result);
         result["mob_id"] = json!(mob_id);
         result["agent_identity"] = json!(identity);
         result["wired"] = json!(wired);
@@ -786,7 +787,7 @@ impl AgentMobToolSurface {
         self.record_successful_operator_action(&audit_handle, call.name)
             .await;
 
-        Self::encode_result(call, Self::spawn_result_payload(&spawn_result))
+        Self::encode_result(call, Self::spawn_result_payload(&mob_id, &spawn_result))
     }
 
     async fn dispatch_mob_retire_member(

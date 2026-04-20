@@ -1847,12 +1847,13 @@ async fn mob_spawn_helper(
         .mob_spawn_helper(&mob_id, identity, req.prompt, options)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let identity_str = result.agent_identity.to_string();
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity.as_str(),
         "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
-        "fence_token": result.fence_token.get(),
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })))
 }
 
@@ -1940,12 +1941,13 @@ async fn mob_fork_helper(
         )
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let identity_str = result.agent_identity.to_string();
     Ok(Json(json!({
         "output": result.output,
         "tokens_used": result.tokens_used,
         "agent_identity": result.agent_identity.as_str(),
         "agent_runtime_id": serde_json::to_value(&result.agent_runtime_id).ok(),
-        "fence_token": result.fence_token.get(),
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })))
 }
 
@@ -6282,7 +6284,12 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["agent_identity"], "helper-rest");
         assert!(payload["agent_runtime_id"].is_object());
-        assert!(payload["fence_token"].is_u64());
+        assert!(
+            payload["member_ref"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "member_ref must be populated"
+        );
     }
 
     // -----------------------------------------------------------------------

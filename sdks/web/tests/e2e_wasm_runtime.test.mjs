@@ -450,7 +450,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
           mob_id: "mob-web-parity",
           agent_identity: "worker-1",
           agent_runtime_id: "worker-1:1",
-          fence_token: 1,
+          member_ref: "ref-worker-1",
         },
       ]);
     },
@@ -474,7 +474,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         {
           agent_identity: "worker-1",
           agent_runtime_id: "worker-1:1",
-          fence_token: 1,
+          member_ref: "ref-worker-1",
           profile: "worker",
         },
       ]);
@@ -491,7 +491,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return JSON.stringify({
         agent_identity: agentIdentity,
         agent_runtime_id: `${agentIdentity}:1`,
-        fence_token: 1,
+        member_ref: `ref-${agentIdentity}`,
         handling_mode: "queue",
       });
     },
@@ -525,7 +525,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         tokens_used: 11,
         agent_identity: "helper-1",
         agent_runtime_id: "helper-1:1",
-        fence_token: 1,
+        member_ref: "ref-helper-1",
       });
     },
     async mob_fork_helper(mobId, requestJson) {
@@ -535,7 +535,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
         tokens_used: 13,
         agent_identity: "fork-1",
         agent_runtime_id: "fork-1:1",
-        fence_token: 1,
+        member_ref: "ref-fork-1",
       });
     },
     async mob_run_flow() {
@@ -583,17 +583,17 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     ]);
     assert.equal(spawned[0].agent_identity, "worker-1");
     assert.equal(spawned[0].agent_runtime_id, "worker-1:1");
-    assert.equal(spawned[0].fence_token, 1);
+    assert.equal(spawned[0].member_ref, "ref-worker-1");
 
     const listed = await mob.listMembers();
     assert.equal(listed[0].agent_identity, "worker-1");
     assert.equal(listed[0].agent_runtime_id, "worker-1:1");
-    assert.equal(listed[0].fence_token, 1);
+    assert.equal(listed[0].member_ref, "ref-worker-1");
 
     const receipt = await mob.member("worker-1").send("hello");
     assert.equal(receipt.agent_identity, "worker-1");
     assert.equal(receipt.agent_runtime_id, "worker-1:1");
-    assert.equal(receipt.fence_token, 1);
+    assert.equal(receipt.member_ref, "ref-worker-1");
 
     const snapshot = await mob.memberStatus("worker-1");
     assert.equal(snapshot.agent_runtime_id, "worker-1:1");
@@ -620,7 +620,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     });
     assert.equal(helper.agent_identity, "helper-1");
     assert.equal(helper.agent_runtime_id, "helper-1:1");
-    assert.equal(helper.fence_token, 1);
+    assert.equal(helper.member_ref, "ref-helper-1");
 
     const fork = await mob.forkHelper("worker-1", "Review the draft.", {
       agentIdentity: "fork-1",
@@ -629,7 +629,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     });
     assert.equal(fork.agent_identity, "fork-1");
     assert.equal(fork.agent_runtime_id, "fork-1:1");
-    assert.equal(fork.fence_token, 1);
+    assert.equal(fork.member_ref, "ref-fork-1");
 
     assert.deepEqual(
       calls.filter(([name]) =>

@@ -146,7 +146,7 @@ export interface MobAppendSystemContextResult {
 export interface MemberDeliveryReceipt {
   agent_identity: string;
   agent_runtime_id: string;
-  fence_token: number;
+  member_ref: MobMemberRef;
   generation?: number;
   handling_mode: HandlingMode;
 }
@@ -329,12 +329,23 @@ export interface SpawnSpec {
   additional_instructions?: string[];
 }
 
+/**
+ * Server-resolved opaque handle for a mob member. Treat as an opaque
+ * token: app code never constructs or inspects these — they come back
+ * from mob spawn and member-list surfaces, and are passed back on
+ * work-lane and member-targeted calls.
+ */
+export type MobMemberRef = string;
+
+/** Typed lifecycle action for the `mob/lifecycle` surface. */
+export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
+
 /** Result of a spawn operation. */
 export interface SpawnResult {
   mob_id: string;
   agent_identity: string;
   agent_runtime_id: string;
-  fence_token: number;
+  member_ref: MobMemberRef;
   generation?: number;
 }
 
@@ -342,7 +353,7 @@ export interface SpawnResult {
 export interface MobMember {
   agent_identity: string;
   agent_runtime_id: string;
-  fence_token: number;
+  member_ref: MobMemberRef;
   generation?: number;
   profile: string;
   peer_id?: string;
@@ -409,9 +420,6 @@ export interface MobHelperResult {
   fence_token: number;
   generation?: number;
 }
-
-/** Mob lifecycle actions. */
-export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 

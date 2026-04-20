@@ -1711,6 +1711,10 @@
           "steer"
         ],
         "type": "string"
+      },
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1724,14 +1728,12 @@
         "$ref": "#/$defs/WireAgentRuntimeId",
         "description": "Identity-native runtime ID for this incarnation (0.6)."
       },
-      "fence_token": {
-        "description": "Fence token for the current incarnation (0.6).",
-        "format": "uint64",
-        "minimum": 0,
-        "type": "integer"
-      },
       "handling_mode": {
         "$ref": "#/$defs/WireHandlingMode"
+      },
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef",
+        "description": "Server-resolved opaque handle for subsequent member-targeted calls.\nReplaces the binding-era `fence_token` that previously leaked from\nthis surface."
       },
       "mob_id": {
         "type": "string"
@@ -1741,7 +1743,7 @@
       "mob_id",
       "agent_identity",
       "agent_runtime_id",
-      "fence_token",
+      "member_ref",
       "handling_mode"
     ],
     "title": "MobMemberSendResult",

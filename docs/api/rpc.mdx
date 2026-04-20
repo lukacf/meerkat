@@ -62,6 +62,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `blob/get` | Session | Fetch a blob payload by id |
 | `session/archive` | Session | Remove session from runtime |
 | `session/external_event` | Session | Queue a runtime-backed external event |
+| `session/peer_response_terminal` | Session | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | Append runtime-backed system context to the next turn |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
@@ -231,7 +232,7 @@ Handshake. Returns server capabilities.
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read", "session/history",
-      "session/archive", "session/external_event", "session/inject_context",
+      "session/archive", "session/external_event", "session/peer_response_terminal", "session/inject_context",
       "blob/get",
       "turn/start", "turn/interrupt",
       "config/get", "config/set", "config/patch",
@@ -622,8 +623,9 @@ Queue a runtime-backed external event for an existing session.
   "method": "session/external_event",
   "params": {
     "session_id": "01936f8a-...",
-    "payload": {"alert": "build failed", "repo": "main"},
-    "source": "ci-pipeline"
+    "kind": "generic_json",
+    "event_type": "ci-pipeline",
+    "payload": {"alert": "build failed", "repo": "main"}
   }
 }
 ```
@@ -634,6 +636,38 @@ Queue a runtime-backed external event for an existing session.
   "id": 8,
   "result": {
     "outcome_type": "accepted"
+  }
+}
+```
+</CodeGroup>
+
+### session/peer_response_terminal
+
+Admit a correlated terminal peer response through the typed runtime ingress.
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "session/peer_response_terminal",
+  "params": {
+    "session_id": "01936f8a-...",
+    "peer_name": "analyst",
+    "request_id": "req-123",
+    "status": "completed",
+    "result": {"token": "silver harbor"}
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "outcome_type": "accepted",
+    "input_id": "01936f8a-..."
   }
 }
 ```

@@ -1224,6 +1224,61 @@ describe("Mob kickoff wait wrappers", () => {
   });
 });
 
+describe("Mob ready wait wrappers", () => {
+  it("waitMobReady/wait_mob_ready/mob.waitForReady preserve canonical call shape", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {
+        members: [
+          {
+            agent_identity: "lead",
+            agent_runtime_id: "lead:1",
+            fence_token: 1,
+            status: "active",
+            tokens_used: 42,
+            is_final: false,
+          },
+        ],
+      };
+    };
+
+    const direct = await client.waitMobReady("mob-1", {
+      memberIds: ["lead", "writer"],
+      timeoutMs: 1234,
+    });
+    const legacy = await client.wait_mob_ready("mob-1", {
+      memberIds: ["lead"],
+    });
+    const mob = new Mob(client, "mob-1");
+    const fromHandle = await mob.waitForReady({ timeoutMs: 99 });
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls.map((call) => call.method), [
+      "mob/wait_ready",
+      "mob/wait_ready",
+      "mob/wait_ready",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead", "writer"],
+      timeout_ms: 1234,
+    });
+    assert.deepEqual(calls[1].params, {
+      mob_id: "mob-1",
+      member_ids: ["lead"],
+    });
+    assert.deepEqual(calls[2].params, {
+      mob_id: "mob-1",
+      timeout_ms: 99,
+    });
+    assert.equal(direct[0].agentIdentity, "lead");
+    assert.equal(legacy[0].agentIdentity, "lead");
+    assert.equal(fromHandle[0].agentIdentity, "lead");
+  });
+});
+
 describe("Mob member host ingress", () => {
   it("routes member sends through the canonical host member-send lane", async () => {
     const client = new MeerkatClient();

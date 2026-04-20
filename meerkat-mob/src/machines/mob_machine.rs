@@ -201,6 +201,9 @@ machine! {
             active_run_count: u64,
             pending_spawn_count: u64,
             coordinator_bound: bool,
+            member_startup_binding_requested: Set<AgentRuntimeId>,
+            member_startup_runtime_ready: Set<AgentRuntimeId>,
+            member_startup_ready: Set<AgentRuntimeId>,
             member_kickoff_pending: Set<String>,
             member_kickoff_starting: Set<String>,
             member_kickoff_callback_pending: Set<String>,
@@ -237,6 +240,9 @@ machine! {
             active_run_count = 0,
             pending_spawn_count = 0,
             coordinator_bound = true,
+            member_startup_binding_requested = EmptySet,
+            member_startup_runtime_ready = EmptySet,
+            member_startup_ready = EmptySet,
             member_kickoff_pending = EmptySet,
             member_kickoff_starting = EmptySet,
             member_kickoff_callback_pending = EmptySet,
@@ -303,8 +309,13 @@ machine! {
             ForceCancel,
             KickoffMarkPending { member_id: String },
             KickoffMarkStarting { member_id: String },
-            KickoffResolveOutcome { member_id: String, outcome: String },
+            StartupMarkReady { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            KickoffResolveStarted { member_id: String },
+            KickoffResolveCallbackPending { member_id: String },
+            KickoffResolveFailed { member_id: String, error: String },
+            KickoffResolveCancelled { member_id: String },
             KickoffCancelRequested { member_id: String },
+            KickoffClear { member_id: String },
         }
 
         surface_only [
@@ -423,6 +434,9 @@ machine! {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_startup_binding_requested.insert(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -432,7 +446,24 @@ machine! {
         transition ObserveRuntimeReady {
             on signal ObserveRuntimeReady { agent_runtime_id, fence_token }
             guard { self.lifecycle_phase == Phase::Running }
-            update {}
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            update {
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.insert(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
+            }
+            to Running
+        }
+
+        transition StartupMarkReady {
+            per_phase [Running, Stopped, Completed]
+            on input StartupMarkReady { agent_runtime_id, fence_token }
+            guard "current_binding_matches" { self.live_runtime_ids.contains(agent_runtime_id) }
+            update {
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.insert(agent_runtime_id);
+            }
             to Running
         }
 
@@ -481,11 +512,8 @@ machine! {
 
         transition KickoffResolveStarted {
             per_phase [Running, Stopped, Completed]
-            on input KickoffResolveOutcome { member_id, outcome }
-            guard "kickoff_starting" {
-                self.member_kickoff_starting.contains(member_id)
-                && outcome == "Started"
-            }
+            on input KickoffResolveStarted { member_id }
+            guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
@@ -502,11 +530,8 @@ machine! {
 
         transition KickoffResolveCallbackPending {
             per_phase [Running, Stopped, Completed]
-            on input KickoffResolveOutcome { member_id, outcome }
-            guard "kickoff_starting" {
-                self.member_kickoff_starting.contains(member_id)
-                && outcome == "CallbackPending"
-            }
+            on input KickoffResolveCallbackPending { member_id }
+            guard "kickoff_starting" { self.member_kickoff_starting.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
@@ -523,14 +548,11 @@ machine! {
 
         transition KickoffResolveFailedFromStarting {
             per_phase [Running, Stopped, Completed]
-            on input KickoffResolveOutcome { member_id, outcome }
+            on input KickoffResolveFailed { member_id, error }
             guard "kickoff_active_failed" {
                 (self.member_kickoff_pending.contains(member_id)
                     || self.member_kickoff_starting.contains(member_id)
                     || self.member_kickoff_callback_pending.contains(member_id))
-                && outcome != "Started"
-                && outcome != "CallbackPending"
-                && outcome != "Cancelled"
             }
             update {
                 self.member_kickoff_pending.remove(member_id);
@@ -539,20 +561,17 @@ machine! {
                 self.member_kickoff_started.remove(member_id);
                 self.member_kickoff_failed.insert(member_id);
                 self.member_kickoff_cancelled.remove(member_id);
-                self.member_kickoff_error.insert(member_id, outcome);
+                self.member_kickoff_error.insert(member_id, error);
             }
             to Running
-            emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: outcome }
+            emit PersistKickoffFailureUpdate { member_id: member_id, phase: KickoffPhase::Failed, error: error }
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Failed" }
         }
 
         transition KickoffResolveCancelled {
             per_phase [Running, Stopped, Completed]
-            on input KickoffResolveOutcome { member_id, outcome }
-            guard "kickoff_cancelled" {
-                !self.member_kickoff_started.contains(member_id)
-                && outcome == "Cancelled"
-            }
+            on input KickoffResolveCancelled { member_id }
+            guard "kickoff_cancelled" { !self.member_kickoff_started.contains(member_id) }
             update {
                 self.member_kickoff_pending.remove(member_id);
                 self.member_kickoff_starting.remove(member_id);
@@ -587,6 +606,21 @@ machine! {
             to Running
             emit PersistKickoffUpdate { member_id: member_id, phase: KickoffPhase::Cancelled }
             emit EmitKickoffLifecycleNotice { member_id: member_id, intent: "Cancelled" }
+        }
+
+        transition KickoffClear {
+            per_phase [Running, Stopped, Completed]
+            on input KickoffClear { member_id }
+            update {
+                self.member_kickoff_pending.remove(member_id);
+                self.member_kickoff_starting.remove(member_id);
+                self.member_kickoff_callback_pending.remove(member_id);
+                self.member_kickoff_started.remove(member_id);
+                self.member_kickoff_failed.remove(member_id);
+                self.member_kickoff_cancelled.remove(member_id);
+                self.member_kickoff_error.remove(member_id);
+            }
+            to Running
         }
 
         transition SubmitWorkRunningExternal {
@@ -631,6 +665,9 @@ machine! {
                 self.live_runtime_ids.remove(agent_runtime_id);
                 self.externally_addressable_runtime_ids.remove(agent_runtime_id);
                 self.runtime_fence_tokens.remove(agent_runtime_id);
+                self.member_startup_binding_requested.remove(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
                 self.member_state_markers.remove(agent_runtime_id);
                 self.active_run_count = 0;
             }
@@ -655,6 +692,9 @@ machine! {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_startup_binding_requested.insert(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -675,6 +715,9 @@ machine! {
                 }
                 self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
                 self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_startup_binding_requested.insert(agent_runtime_id);
+                self.member_startup_runtime_ready.remove(agent_runtime_id);
+                self.member_startup_ready.remove(agent_runtime_id);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation }
@@ -700,6 +743,9 @@ machine! {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_startup_binding_requested = EmptySet;
+                self.member_startup_runtime_ready = EmptySet;
+                self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;

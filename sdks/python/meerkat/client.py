@@ -55,6 +55,7 @@ from .mob import (
     MobKickoffMemberSnapshot,
     MobMember,
     MobMemberSnapshot,
+    MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
 )
@@ -1482,6 +1483,66 @@ class MeerkatClient:
         if not isinstance(members, list):
             return []
         normalized: list[MobKickoffMemberSnapshot] = []
+        for entry in members:
+            if not isinstance(entry, dict):
+                continue
+            runtime_id, generation = _parse_agent_runtime_id_wire(
+                entry.get("agent_runtime_id")
+            )
+            normalized.append(
+                {
+                    "agent_identity": str(entry.get("agent_identity", "")),
+                    "agent_runtime_id": runtime_id,
+                    "fence_token": (
+                        int(entry["fence_token"])
+                        if isinstance(entry.get("fence_token"), int)
+                        else 0
+                    ),
+                    **({"generation": generation} if generation is not None else {}),
+                    "status": str(entry.get("status", "unknown")),
+                    **(
+                        {"output_preview": str(entry["output_preview"])}
+                        if entry.get("output_preview") is not None
+                        else {}
+                    ),
+                    **(
+                        {"error": str(entry["error"])}
+                        if entry.get("error") is not None
+                        else {}
+                    ),
+                    "tokens_used": int(entry.get("tokens_used", 0)),
+                    "is_final": bool(entry.get("is_final", False)),
+                    **(
+                        {"peer_connectivity": entry["peer_connectivity"]}
+                        if isinstance(entry.get("peer_connectivity"), dict)
+                        else {}
+                    ),
+                    **(
+                        {"kickoff": entry["kickoff"]}
+                        if isinstance(entry.get("kickoff"), dict)
+                        else {}
+                    ),
+                }
+            )
+        return normalized
+
+    async def wait_mob_ready(
+        self,
+        mob_id: str,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobReadyMemberSnapshot]:
+        params: dict[str, Any] = {"mob_id": mob_id}
+        if member_ids is not None:
+            params["member_ids"] = member_ids
+        if timeout_ms is not None:
+            params["timeout_ms"] = timeout_ms
+        result = await self._request("mob/wait_ready", params)
+        members = result.get("members", [])
+        if not isinstance(members, list):
+            return []
+        normalized: list[MobReadyMemberSnapshot] = []
         for entry in members:
             if not isinstance(entry, dict):
                 continue

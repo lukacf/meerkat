@@ -1099,6 +1099,19 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                     }
                 ]
             }
+        if method == "mob/wait_ready":
+            return {
+                "members": [
+                    {
+                        "agent_identity": "agent-a",
+                        "agent_runtime_id": "agent-a:1",
+                        "fence_token": 7,
+                        "status": "active",
+                        "tokens_used": 3,
+                        "is_final": False,
+                    }
+                ]
+            }
         if method == "mob/append_system_context":
             return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "staged"}
         if method == "runtime/realtime_attachment_status":
@@ -1161,6 +1174,14 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     mob_handle = client.mob("mob-1")
     scoped_wait_members = await mob_handle.wait_for_kickoff_complete(timeout_ms=99)
     assert scoped_wait_members[0]["agent_identity"] == "agent-a"
+    ready_members = await client.wait_mob_ready(
+        "mob-1",
+        member_ids=["agent-a"],
+        timeout_ms=222,
+    )
+    assert ready_members[0]["agent_identity"] == "agent-a"
+    scoped_ready_members = await mob_handle.wait_for_ready(timeout_ms=88)
+    assert scoped_ready_members[0]["agent_identity"] == "agent-a"
 
     append_result = await client.append_mob_system_context("mob-1", "agent-a", "context")
     assert append_result == {
@@ -1188,6 +1209,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/lifecycle",
         "mob/wait_kickoff",
         "mob/wait_kickoff",
+        "mob/wait_ready",
+        "mob/wait_ready",
         "mob/append_system_context",
         "mob/flows",
         "mob/flow_run",

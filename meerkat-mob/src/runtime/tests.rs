@@ -5881,6 +5881,33 @@ async fn test_wait_for_kickoff_complete_times_out_while_runtime_backed_kickoff_p
 }
 
 #[tokio::test]
+async fn test_wait_for_members_ready_treats_turn_driven_members_as_ready() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let member = MeerkatId::from("worker-ready-td");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker");
+
+    let snapshots = handle
+        .wait_for_members_ready(
+            &[AgentIdentity::from(member.as_str())],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("turn-driven members should be ready immediately");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].0, AgentIdentity::from(member.as_str()));
+}
+
+#[tokio::test]
 async fn test_wait_for_members_kickoff_complete_excludes_later_spawns() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);
@@ -21138,6 +21165,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::WiringError(_) => "wiring_error".to_string(),
         MobError::MemberRestoreFailed { .. } => "member_restore_failed".to_string(),
         MobError::KickoffWaitTimedOut { .. } => "kickoff_wait_timed_out".to_string(),
+        MobError::ReadyWaitTimedOut { .. } => "ready_wait_timed_out".to_string(),
         MobError::DefinitionError(_) => "definition_error".to_string(),
         MobError::FlowNotFound(_) => "flow_not_found".to_string(),
         MobError::FlowFailed { .. } => "flow_failed".to_string(),

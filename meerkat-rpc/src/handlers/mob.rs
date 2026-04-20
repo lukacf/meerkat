@@ -1331,6 +1331,44 @@ pub async fn handle_wait_kickoff(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MobWaitReadyParams {
+    pub mob_id: String,
+    #[serde(default)]
+    pub member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+pub async fn handle_wait_ready(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: MobWaitReadyParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+
+    let member_ids = params.member_ids.map(|ids| {
+        ids.into_iter()
+            .map(|member_id| AgentIdentity::from(member_id.as_str()))
+            .collect::<Vec<_>>()
+    });
+
+    match state
+        .mob_wait_ready(&mob_id, member_ids, params.timeout_ms)
+        .await
+    {
+        Ok(members) => RpcResponse::success(id, serde_json::json!({ "members": members })),
+        Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // mob/profile/* — realm profile CRUD
 // ---------------------------------------------------------------------------

@@ -991,6 +991,27 @@ impl MobMcpState {
             .collect())
     }
 
+    pub async fn mob_wait_ready(
+        &self,
+        mob_id: &MobId,
+        member_ids: Option<Vec<AgentIdentity>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Vec<KickoffMemberSnapshot>, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let snapshots = match member_ids {
+            Some(ids) => handle.wait_for_members_ready(&ids, timeout).await?,
+            None => handle.wait_for_ready(timeout).await?,
+        };
+        Ok(snapshots
+            .into_iter()
+            .map(|(identity, snapshot)| KickoffMemberSnapshot {
+                agent_identity: identity,
+                snapshot,
+            })
+            .collect())
+    }
+
     pub async fn mob_spawn_helper(
         &self,
         mob_id: &MobId,
@@ -3443,6 +3464,7 @@ mod tests {
                 "mob_force_cancel",
                 "mob_member_status",
                 "mob_wait_kickoff",
+                "mob_wait_ready",
             ]
         );
     }

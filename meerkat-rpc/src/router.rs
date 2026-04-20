@@ -4216,7 +4216,7 @@ mod tests {
             .unwrap();
         assert!(
             read_resp.error.is_none(),
-            "archived session should remain readable: {read_resp:?}"
+            "archived session should remain readable"
         );
         let read = result_value(&read_resp);
         assert_eq!(read["session_id"], session_id);
@@ -5644,7 +5644,7 @@ mod tests {
                         && notif.params["event"]["payload"]["prompt"]
                             .as_str()
                             .is_some_and(|prompt| prompt.contains(injected_text))),
-                    "archived session must not emit a later run_started that replays dropped staged context: {notif:?}"
+                    "archived session must not emit a later run_started that replays dropped staged context"
                 );
             }
         }

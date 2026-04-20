@@ -1652,7 +1652,7 @@
   "RealtimeCapabilitiesParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1667,6 +1667,26 @@
             "required": [
               "type",
               "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
             ],
             "type": "object"
           }
@@ -1712,7 +1732,7 @@
         "type": "string"
       },
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1727,6 +1747,26 @@
             "required": [
               "type",
               "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
             ],
             "type": "object"
           }
@@ -1818,7 +1858,7 @@
   "RealtimeStatusParams": {
     "$defs": {
       "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nIdentity-first: callers resolve any mob membership back to the session_id\nexplicitly (via `mob/member_status` then `realtime/open_info`) — the\nchannel protocol itself only knows about sessions.",
+        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_realtime_bindings` map.\n  Respawn atomically rotates the bound session via the\n  `MemberRealtimeBindingRotated` effect; the channel survives without\n  any SDK round-trip. A terminal `MemberRealtimeBindingReleased`\n  closes the channel with `RealtimeErrorCode::BindingReleased`.",
         "oneOf": [
           {
             "properties": {
@@ -1833,6 +1873,26 @@
             "required": [
               "type",
               "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "agent_identity": {
+                "type": "string"
+              },
+              "mob_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "mob_member",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "mob_id",
+              "agent_identity"
             ],
             "type": "object"
           }

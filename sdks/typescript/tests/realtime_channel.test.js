@@ -2,15 +2,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { MeerkatClient, RealtimeChannel } from "../dist/index.js";
 
-// Phase 5G/T5i retired the `mob_member_target` wire shape; the canonical
-// contract is now that `RealtimeChannelTarget` is always `SessionTarget`.
-// See `meerkat-contracts/src/wire/realtime.rs:200-210` for the contract,
-// and `meerkat-rpc/tests/router_realtime_target.rs:108` for the server-
-// side regression that explicitly asserts `mob_member_target` is
-// rejected with `-32602 INVALID_PARAMS`. The SDK's
-// `RealtimeChannel.mobMember()` helper is retained for ergonomics but
-// resolves `mob/member_status.currentSessionId` on the first wire call
-// and opens with a `SessionTarget`.
+// W3-H: `RealtimeChannelTarget::MobMember { mob_id, agent_identity }` is
+// a first-class wire variant. The SDK builds the MobMember variant
+// directly — no pre-resolution of `mob/member_status → current_session_id`,
+// no session-id pin — so respawn-driven session rotation does not
+// require any SDK round-trip or reconnect. See
+// `meerkat-contracts/src/wire/realtime.rs:224-232` for the contract and
+// `meerkat-mob/tests/member_realtime_bindings.rs` for the machine-owned
+// binding lifecycle this relies on.
 
 describe("RealtimeChannel scaffold", () => {
   it("routes realtime wrappers through explicit client methods and request builders", async () => {
@@ -95,27 +94,19 @@ describe("RealtimeChannel scaffold", () => {
   });
 
   it(
-    "RealtimeChannel.mobMember defers target resolution to mob/member_status and opens with SessionTarget",
+    "RealtimeChannel.mobMember builds the MobMember wire target directly",
     async () => {
-      // Post-T5i identity-first contract: the SDK takes a mob-member
-      // binding, resolves it via `mob/member_status.currentSessionId`
-      // on the first wire call, and opens with a `session_target`.
-      // The `mob_member_target` wire type is gone from the contract.
+      // W3-H: identity is a first-class wire fact. The SDK emits
+      // `{type: mob_member, mob_id, agent_identity}` directly; the
+      // server resolves `(mob_id, agent_identity)` against the
+      // MobMachine's canonical binding map on every tick, so respawn
+      // rotates the bound session without any SDK round-trip or
+      // session-id pin.
       const client = new MeerkatClient();
       const calls = [];
 
       client.request = async (method, params) => {
         calls.push({ method, params });
-        if (method === "mob/member_status") {
-          return {
-            status: "active",
-            agent_runtime_id: { identity: "agent-a", generation: 1 },
-            fence_token: 1,
-            tokens_used: 0,
-            is_final: false,
-            current_session_id: "resolved-session-42",
-          };
-        }
         if (method === "realtime/open_info") {
           return {
             ws_url: "ws://localhost:9999/realtime/ws",
@@ -138,6 +129,19 @@ describe("RealtimeChannel scaffold", () => {
         if (method === "realtime/status") {
           return { status: { state: "opening", attempt_count: 0 } };
         }
+        if (method === "realtime/capabilities") {
+          return {
+            capabilities: {
+              input_kinds: ["text"],
+              output_kinds: ["text"],
+              turning_modes: ["explicit_commit"],
+              interrupt_supported: true,
+              transcript_supported: true,
+              tool_lifecycle_events_supported: false,
+              video_supported: false,
+            },
+          };
+        }
         throw new Error(`unexpected method ${method}`);
       };
 
@@ -146,75 +150,53 @@ describe("RealtimeChannel scaffold", () => {
         turningMode: "explicit_commit",
       });
 
-      // Before the first wire call the channel has no resolved target
-      // and calling `openRequest()` must refuse rather than silently
-      // emit a placeholder — the wire target is always a
-      // `SessionTarget` and it cannot be materialized without
-      // resolving the mob binding through `mob/member_status` first.
-      assert.equal(memberChannel.target, null);
-      assert.throws(
-        () => memberChannel.openRequest(),
-        (err) => err && err.code === "INVALID_REQUEST",
-        "openRequest() must refuse an unresolved mob-member binding",
-      );
+      // W3-H: target carries identity with no pre-resolve round-trip
+      // and no pinned session id. `openRequest()` returns it as-is.
+      const expectedTarget = {
+        type: "mob_member",
+        mob_id: "mob-1",
+        agent_identity: "agent-a",
+      };
+      assert.deepEqual(memberChannel.target, expectedTarget);
+      assert.deepEqual(memberChannel.openRequest().target, expectedTarget);
 
-      // openInfo() triggers the resolve-then-open path.
+      // openInfo() sends the MobMember target directly.
       const openInfo = await memberChannel.openInfo();
-
-      // The wire target that crossed the RPC boundary must be a
-      // `session_target` with the session_id surfaced by
-      // mob/member_status — never the retired `mob_member_target`
-      // shape. See server-side `router_realtime_target.rs:108`: the
-      // RPC router explicitly rejects `mob_member_target` with
-      // `-32602`, so any SDK that emitted that shape would fail at
-      // runtime.
-      assert.deepEqual(openInfo.target, {
-        type: "session_target",
-        session_id: "resolved-session-42",
-      });
-      assert.notEqual(
-        openInfo.target.type,
-        "mob_member_target",
-        "retired mob_member_target wire type must never be emitted",
-      );
+      assert.deepEqual(openInfo.target, expectedTarget);
       assert.equal(memberChannel.role, "observer");
       assert.equal(memberChannel.turningMode, "explicit_commit");
 
-      // After resolution the channel caches the session target so
-      // subsequent wire calls do not re-resolve.
-      assert.deepEqual(memberChannel.target, {
-        type: "session_target",
-        session_id: "resolved-session-42",
-      });
+      // status() and capabilities() also send the MobMember target
+      // with no `mob/member_status` pre-resolve round-trip.
       const status = await memberChannel.status();
       assert.equal(status.status.state, "opening");
+      await memberChannel.capabilities();
 
-      // Call order encodes the new contract: mob/member_status must
-      // land before any realtime/* call that targets the member.
+      // Call order encodes the new contract: only `realtime/*` calls
+      // cross the wire. Respawn rotates the bound session inside the
+      // server; the SDK is unaware.
       assert.deepEqual(calls.map((call) => call.method), [
-        "mob/member_status",
         "realtime/open_info",
         "realtime/status",
+        "realtime/capabilities",
       ]);
-      // mob/member_status fires exactly once thanks to caching.
-      const memberStatusCalls = calls.filter((call) => call.method === "mob/member_status");
-      assert.equal(memberStatusCalls.length, 1);
-      assert.deepEqual(memberStatusCalls[0].params, {
-        mob_id: "mob-1",
-        agent_identity: "agent-a",
-      });
 
-      // Negative regression guard: not a single request the SDK made
-      // to the server may carry the retired wire shape.
+      // Every outbound target carries the MobMember variant — the SDK
+      // never emits the retired `mob_member_target` shape and never
+      // emits a `session_target` synthesized from `mob/member_status`.
       for (const call of calls) {
         const target = call.params?.target;
-        if (target && typeof target === "object") {
-          assert.notEqual(
-            target.type,
-            "mob_member_target",
-            `${call.method} leaked retired mob_member_target wire shape`,
-          );
-        }
+        assert.ok(target && typeof target === "object", `${call.method} lost the target`);
+        assert.equal(
+          target.type,
+          "mob_member",
+          `${call.method} leaked non-MobMember wire shape ${JSON.stringify(target)}`,
+        );
+        assert.notEqual(
+          target.type,
+          "mob_member_target",
+          `${call.method} leaked retired mob_member_target wire shape`,
+        );
       }
     },
   );

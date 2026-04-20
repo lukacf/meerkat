@@ -711,9 +711,19 @@ WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', '
 
 # Target for a public realtime channel.
 #
-# Identity-first: callers resolve any mob membership back to the session_id
-# explicitly (via `mob/member_status` then `realtime/open_info`) — the
-# channel protocol itself only knows about sessions.
+# Two variants, one for each addressing mode:
+#
+# - `SessionTarget` — standalone sessions (no mob-member continuity). The
+#   session id is pinned for the channel's lifetime; when that session
+#   ends, the channel ends.
+#
+# - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
+#   canonical anchor, and the server resolves the current bridge session
+#   on every tick from the MobMachine's `member_realtime_bindings` map.
+#   Respawn atomically rotates the bound session via the
+#   `MemberRealtimeBindingRotated` effect; the channel survives without
+#   any SDK round-trip. A terminal `MemberRealtimeBindingReleased`
+#   closes the channel with `RealtimeErrorCode::BindingReleased`.
 RealtimeChannelTarget = dict[str, Any]
 
 # Opening role for a realtime channel.

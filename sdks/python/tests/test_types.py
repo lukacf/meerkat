@@ -1331,31 +1331,21 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
     ]
 
 
-# Phase 5G/T5i retired the `mob_member_target` wire shape; the canonical
-# contract is now that `RealtimeChannelTarget` is always
-# `RealtimeSessionTarget`. See `meerkat-contracts/src/wire/realtime.rs:200-210`
-# for the contract, and `meerkat-rpc/tests/router_realtime_target.rs:108`
-# for the server-side regression asserting `mob_member_target` is rejected
-# with `-32602 INVALID_PARAMS`. The SDK's `RealtimeChannel.mob_member()`
-# helper is retained for ergonomics but resolves
-# `mob/member_status.current_session_id` on the first wire call and opens
-# with a `SessionTarget`.
+# W3-H: `RealtimeChannelTarget::MobMember { mob_id, agent_identity }` is
+# a first-class wire variant. The SDK builds the MobMember variant
+# directly — no pre-resolution of `mob/member_status → current_session_id`,
+# no session-id pin — so respawn-driven session rotation does not
+# require any SDK round-trip or reconnect. See
+# `meerkat-contracts/src/wire/realtime.rs:224-232` for the contract and
+# `meerkat-mob/tests/member_realtime_bindings.rs` for the machine-owned
+# binding lifecycle this relies on.
 @pytest.mark.asyncio
-async def test_realtime_channel_mob_member_defers_target_to_session_target_via_member_status() -> None:
+async def test_realtime_channel_mob_member_builds_mob_member_wire_target() -> None:
     client = MeerkatClient()
     calls: list[tuple[str, dict[str, object]]] = []
 
     async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
         calls.append((method, params))
-        if method == "mob/member_status":
-            return {
-                "status": "active",
-                "agent_runtime_id": "agent-a:1",
-                "fence_token": 1,
-                "tokens_used": 0,
-                "is_final": False,
-                "current_session_id": "resolved-session-42",
-            }
         if method == "realtime/open_info":
             return {
                 "ws_url": "ws://localhost:9999/realtime/ws",
@@ -1376,6 +1366,18 @@ async def test_realtime_channel_mob_member_defers_target_to_session_target_via_m
             }
         if method == "realtime/status":
             return {"status": {"state": "opening", "attempt_count": 0}}
+        if method == "realtime/capabilities":
+            return {
+                "capabilities": {
+                    "input_kinds": ["text"],
+                    "output_kinds": ["text"],
+                    "turning_modes": ["explicit_commit"],
+                    "interrupt_supported": True,
+                    "transcript_supported": True,
+                    "tool_lifecycle_events_supported": False,
+                    "video_supported": False,
+                }
+            }
         raise AssertionError(f"unexpected method {method}")
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -1388,64 +1390,49 @@ async def test_realtime_channel_mob_member_defers_target_to_session_target_via_m
         turning_mode="explicit_commit",
     )
 
-    # Before the first wire call the channel has no resolved target
-    # and calling `open_request()` must refuse rather than silently
-    # emit a placeholder — the wire target is always a SessionTarget
-    # and it cannot be materialized without resolving the mob binding
-    # through `mob/member_status` first.
-    assert member_channel.target is None
-    with pytest.raises(MeerkatError) as excinfo:
-        member_channel.open_request()
-    assert excinfo.value.code == "INVALID_REQUEST"
+    # W3-H: the wire target carries identity — no pre-resolve round-trip,
+    # no pinned session id. `open_request()` returns the MobMember
+    # variant as-is.
+    expected_target = {
+        "type": "mob_member",
+        "mob_id": "mob-1",
+        "agent_identity": "agent-a",
+    }
+    assert member_channel.target == expected_target
+    open_request = member_channel.open_request()
+    assert open_request.target == expected_target
 
-    # open_info() triggers the resolve-then-open path.
+    # open_info() sends the MobMember target directly.
     open_info = await member_channel.open_info()
+    assert open_info.target == expected_target
 
-    # The wire target that crossed the RPC boundary must be a
-    # `session_target` with the session_id surfaced by
-    # mob/member_status — never the retired `mob_member_target`
-    # shape. Server-side `router_realtime_target.rs:108` explicitly
-    # rejects `mob_member_target` with `-32602`, so any SDK that
-    # emitted that shape would fail at runtime.
-    assert open_info.target == {
-        "type": "session_target",
-        "session_id": "resolved-session-42",
-    }
-    assert open_info.target["type"] != "mob_member_target", (
-        "retired mob_member_target wire type must never be emitted"
-    )
-
-    # After resolution the channel caches the session target so
-    # subsequent wire calls do not re-resolve.
-    assert member_channel.target == {
-        "type": "session_target",
-        "session_id": "resolved-session-42",
-    }
+    # status() and capabilities() also send the MobMember target with
+    # no `mob/member_status` pre-resolve round-trip.
     status_result = await member_channel.status()
     assert status_result.status["state"] == "opening"
+    await member_channel.capabilities()
 
-    # Call order encodes the new contract: mob/member_status must
-    # land before any realtime/* call that targets the member.
+    # Call order encodes the new contract: only `realtime/*` calls
+    # cross the wire, never `mob/member_status`. Respawn rotates the
+    # bound session inside the server; the SDK is unaware.
     assert [method for method, _ in calls] == [
-        "mob/member_status",
         "realtime/open_info",
         "realtime/status",
+        "realtime/capabilities",
     ]
-    # mob/member_status fires exactly once thanks to caching.
-    member_status_calls = [
-        params for method, params in calls if method == "mob/member_status"
-    ]
-    assert len(member_status_calls) == 1
-    assert member_status_calls[0] == {"mob_id": "mob-1", "agent_identity": "agent-a"}
 
-    # Negative regression guard: not a single request the SDK made
-    # to the server may carry the retired wire shape.
+    # Every outbound target carries the MobMember variant — the SDK
+    # never emits the retired `mob_member_target` shape and never
+    # emits a `session_target` synthesized from `mob/member_status`.
     for method, params in calls:
         target = params.get("target") if isinstance(params, dict) else None
-        if isinstance(target, dict):
-            assert target.get("type") != "mob_member_target", (
-                f"{method} leaked retired mob_member_target wire shape"
-            )
+        assert isinstance(target, dict), f"{method} lost the target"
+        assert target.get("type") == "mob_member", (
+            f"{method} leaked non-MobMember wire shape {target!r}"
+        )
+        assert target.get("type") != "mob_member_target", (
+            f"{method} leaked retired mob_member_target wire shape"
+        )
 
 
 @pytest.mark.asyncio

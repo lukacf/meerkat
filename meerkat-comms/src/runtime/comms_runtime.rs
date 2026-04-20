@@ -1593,27 +1593,19 @@ impl CommsRuntime {
 
     /// Canonical runtime trust-registration seam.
     ///
-    /// This keeps router-visible trust and inbox-owned peer-ingress authority
-    /// synchronized, and preserves any attached [`crate::PeerMeta`].
+    /// Trust truth lives in the router's `Arc<RwLock<TrustedPeers>>`, which
+    /// the classified inbox queue and ingress classifier consult directly.
+    /// There is no separate inbox-side mirror to keep in sync.
     pub async fn register_trusted_peer(&self, peer: TrustedPeer) -> Result<(), SendError> {
-        let peer_id = peer.pubkey.to_peer_id();
         self.router.add_trusted_peer(peer);
-        self.inbox.lock().await.note_trusted_peer_added(&peer_id);
         Ok(())
     }
 
     /// Canonical runtime trust-removal seam using a peer id string.
-    ///
-    /// This keeps router-visible trust and inbox-owned peer-ingress authority
-    /// synchronized.
     pub async fn unregister_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
         let public_key =
             PubKey::from_peer_id(peer_id).map_err(|err| SendError::Validation(err.to_string()))?;
-        let removed = self.router.remove_trusted_peer(&public_key);
-        if removed {
-            self.inbox.lock().await.note_trusted_peer_removed(peer_id);
-        }
-        Ok(removed)
+        Ok(self.router.remove_trusted_peer(&public_key))
     }
 
     /// Register a trust edge whose peer entry is marked private.
@@ -1629,11 +1621,9 @@ impl CommsRuntime {
     /// work but the recipient must not appear as an ordinary sendable
     /// peer on user-facing surfaces.
     pub async fn register_private_trusted_peer(&self, peer: TrustedPeer) -> Result<(), SendError> {
-        let peer_id = peer.pubkey.to_peer_id();
         let pubkey = peer.pubkey;
         self.router.add_trusted_peer(peer);
         self.router.mark_private(pubkey);
-        self.inbox.lock().await.note_trusted_peer_added(&peer_id);
         Ok(())
     }
 
@@ -1642,12 +1632,8 @@ impl CommsRuntime {
         &self,
         public_key: &PubKey,
     ) -> Result<bool, SendError> {
-        let peer_id = public_key.to_peer_id();
         let removed = self.router.remove_trusted_peer(public_key);
         self.router.unmark_private(public_key);
-        if removed {
-            self.inbox.lock().await.note_trusted_peer_removed(&peer_id);
-        }
         Ok(removed)
     }
 

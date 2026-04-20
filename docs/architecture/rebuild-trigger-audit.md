@@ -124,50 +124,12 @@ No action in this PR; field described as it exists on main.
 
 ### 2. `ClassifiedInboxQueue.trusted_peers` (inbox-local trust cache)
 
-Location: `meerkat-comms/src/inbox.rs:48` (`trusted_peers: BTreeSet<PeerId>`
-on `ClassifiedInboxQueue`). Mutators: `sync_trusted_peer_added`
-(`inbox.rs:64`), `sync_trusted_peer_removed` (`inbox.rs:68`). Initial fill:
-`Inbox::new_classified` (`inbox.rs:273`). Read site: `admit_peer_receive`
-(`inbox.rs:89`).
-
-- **Canonical source.** `IngressClassificationContext.trusted_peers`
-  (an `Arc<parking_lot::RwLock<TrustedPeers>>` shared with
-  `classify.rs`). The authoritative trust set is owned by the comms
-  runtime; this map on the queue is a local duplicate.
-- **Rebuild trigger sites.**
-  - Initial snapshot at `Inbox::new_classified`: iterates
-    `context.trusted_peers.read().peers` and seeds the local set.
-  - Mutation path: explicit `sync_trusted_peer_added` /
-    `sync_trusted_peer_removed` calls fired by callers of add/remove
-    trust operations (currently only internal sites within `inbox.rs`
-    itself, `inbox.rs:351`, `inbox.rs:357`).
-- **Staleness policy.** Push-based, not rebuilt — relies on every
-  trust-set mutation being mirrored via `sync_*`. No drift detection, no
-  periodic resync.
-- **Semantic impact of staleness.** YES. `admit_peer_receive` decides
-  whether to accept or silently drop an envelope based on this local set.
-  If the canonical trust set is mutated without a matching
-  `sync_trusted_peer_*` call, the queue either drops envelopes from
-  newly-trusted peers or accepts envelopes from revoked peers. Silent
-  security-relevant divergence.
-
-**Verdict: Shadow truth (action required).**
-
-Options:
-
-- Read the canonical `Arc<RwLock<TrustedPeers>>` on every
-  `admit_peer_receive` and delete the local `trusted_peers` set.
-- Promote to a typed DSL field (`TrustedPeerSet`) with explicit
-  `TrustPeerAdded` / `TrustPeerRevoked` transitions and project into the
-  inbox on each mutation.
-
-The first option is strictly simpler and matches the rest of the comms
-shell treating the `Arc<RwLock<TrustedPeers>>` as canonical. Concrete
-proposal: crate `meerkat-comms`, file `meerkat-comms/src/inbox.rs`,
-replace `ClassifiedInboxQueue.trusted_peers` with a reference read through
-`IngressClassificationContext`. Small follow-up PR.
-
-Not affected by any in-flight Wave 1 PR.
+**Resolved.** `ClassifiedInboxQueue` now holds the canonical
+`Arc<RwLock<TrustedPeers>>` (the same handle the router and
+`IngressClassificationContext` consult). `admit_peer_receive` reads
+trust directly off the shared set on every admission, and the
+`sync_trusted_peer_added` / `sync_trusted_peer_removed` mirror methods
+are deleted. Trust truth lives in exactly one place.
 
 ---
 
@@ -676,20 +638,12 @@ PR land here.
 
 ### Seed A — `ClassifiedInboxQueue.trusted_peers` → canonical read-through
 
-- **Crate / file:** `meerkat-comms/src/inbox.rs`
-- **Shape:** delete the local `BTreeSet<PeerId>` on `ClassifiedInboxQueue`;
-  make `admit_peer_receive` consult
-  `IngressClassificationContext.trusted_peers` directly.
-- **DSL owner:** none required — canonical `Arc<RwLock<TrustedPeers>>`
-  already exists in `IngressClassificationContext`.
-- **Why:** today the local set can drift from canonical trust decisions,
-  allowing envelopes from revoked peers or dropping envelopes from newly
-  trusted peers. Security-relevant silent divergence.
-- **Acceptance note:** `sync_trusted_peer_added` / `sync_trusted_peer_removed`
-  helpers become dead and can be removed; the `new_classified` initial
-  seeding loop at `inbox.rs:273–275` can be deleted in favor of the
-  read-through. Test: add/remove trust after queue creation and verify
-  `admit_peer_receive` picks up the change without re-initialization.
+**Resolved.** `ClassifiedInboxQueue` now stores the canonical
+`Arc<RwLock<TrustedPeers>>` (cloned from
+`IngressClassificationContext.trusted_peers`, which is in turn shared
+with the comms `Router`). `admit_peer_receive` reads through it on every
+admission. The mirror methods `sync_trusted_peer_*` and the runtime's
+`note_trusted_peer_*` plumbing have been deleted.
 
 ### Seed B — `McpRouter` / `McpRouterAdapter` projection hygiene (optional tightening)
 

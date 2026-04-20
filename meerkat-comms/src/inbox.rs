@@ -7,7 +7,7 @@
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,13 +15,13 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::classify::IngressClassificationContext;
 use crate::classify::PreparedIngressItem;
-use crate::peer_types::{PeerId, PeerIngressState};
+use crate::peer_types::PeerIngressState;
+use crate::trust::TrustedPeers;
 use crate::types::InboxItem;
 use meerkat_core::{
     InteractionId, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
     PeerInputClass,
 };
-use std::collections::BTreeSet;
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
 
@@ -118,19 +118,25 @@ struct ClassifiedInboxQueue {
     closed: bool,
     entries: VecDeque<ClassifiedInboxEntry>,
     auth_required: bool,
-    trusted_peers: BTreeSet<PeerId>,
+    /// Shared canonical trust set, owned by the comms `Router`.
+    ///
+    /// The inbox does NOT mirror trust into a local cache — it consults the
+    /// router's single source of truth. Per `IngressClassificationContext`
+    /// the same `Arc<RwLock<TrustedPeers>>` is also used at the classify
+    /// stage, so admission and classification can never disagree.
+    trusted_peers: Arc<RwLock<TrustedPeers>>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
 }
 
 impl ClassifiedInboxQueue {
-    fn new(capacity: usize, auth_required: bool) -> Self {
+    fn new(capacity: usize, auth_required: bool, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
         Self {
             capacity,
             closed: false,
             entries: VecDeque::new(),
             auth_required,
-            trusted_peers: BTreeSet::new(),
+            trusted_peers,
             phase: PeerIngressState::Absent,
             dropped_count: Arc::new(AtomicU64::new(0)),
         }
@@ -140,22 +146,15 @@ impl ClassifiedInboxQueue {
         self.dropped_count.clone()
     }
 
-    fn sync_trusted_peer_added(&mut self, peer_id: &str) {
-        self.trusted_peers.insert(PeerId(peer_id.to_string()));
-    }
-
-    fn sync_trusted_peer_removed(&mut self, peer_id: &str) {
-        self.trusted_peers.remove(&PeerId(peer_id.to_string()));
-    }
-
     /// Admit a prepared item into the peer-ingress lifecycle.
     ///
     /// Returns a typed `AdmissionDecision`:
     /// - Plain events are always admitted, with no trust snapshot.
-    /// - External envelopes consult the trust set + auth-required policy.
-    ///   Untrusted senders with auth required are `Dropped { reason:
-    ///   UntrustedSender }`; the trust snapshot still records the decision
-    ///   for queue visibility.
+    /// - External envelopes consult the canonical trust set
+    ///   (`Arc<RwLock<TrustedPeers>>` shared with the router) plus the
+    ///   auth-required policy. Untrusted senders with auth required are
+    ///   `Dropped { reason: UntrustedSender }`; the trust snapshot still
+    ///   records the decision for queue visibility.
     ///
     /// Updates `phase` to track the observable lifecycle:
     /// `Absent → Received` (admitted), `Received → Received` (more work),
@@ -168,8 +167,7 @@ impl ClassifiedInboxQueue {
                 trusted_snapshot: None,
             };
         };
-        let peer_id = PeerId(envelope.from.to_peer_id());
-        let trusted = self.trusted_peers.contains(&peer_id);
+        let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
         let admitted = trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
 
@@ -366,11 +364,11 @@ impl Inbox {
         let (tx, rx) = mpsc::channel(DEFAULT_INBOX_CAPACITY);
         let notify = Arc::new(Notify::new());
         let actionable_notify = Arc::new(Notify::new());
-        let mut queue =
-            ClassifiedInboxQueue::new(DEFAULT_INBOX_CAPACITY, context.require_peer_auth);
-        for trusted_peer in &context.trusted_peers.read().peers {
-            queue.sync_trusted_peer_added(&trusted_peer.pubkey.to_peer_id());
-        }
+        let queue = ClassifiedInboxQueue::new(
+            DEFAULT_INBOX_CAPACITY,
+            context.require_peer_auth,
+            context.trusted_peers.clone(),
+        );
         let dropped_count = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         (
@@ -461,18 +459,6 @@ impl Inbox {
             .map(|c| c.load(Ordering::Relaxed))
     }
 
-    pub(crate) fn note_trusted_peer_added(&mut self, peer_id: &str) {
-        if let Some(queue) = &self.classified_queue {
-            queue.lock().sync_trusted_peer_added(peer_id);
-        }
-    }
-
-    pub(crate) fn note_trusted_peer_removed(&mut self, peer_id: &str) {
-        if let Some(queue) = &self.classified_queue {
-            queue.lock().sync_trusted_peer_removed(peer_id);
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn peer_authority_test_snapshot(&self) -> Option<(PeerIngressState, usize)> {
         self.classified_queue.as_ref().map(|queue| {
@@ -481,14 +467,19 @@ impl Inbox {
         })
     }
 
+    /// Test-only: ask the queue's shared trust set whether `peer_id` is
+    /// currently trusted. The queue does not own a local copy — this
+    /// reads from the same `Arc<RwLock<TrustedPeers>>` that the router
+    /// mutates and that the classifier consults.
     #[cfg(test)]
     pub(crate) fn peer_authority_trusts_peer_for_test(&self, peer_id: &str) -> Option<bool> {
-        self.classified_queue.as_ref().map(|queue| {
-            queue
-                .lock()
-                .trusted_peers
-                .contains(&PeerId(peer_id.to_string()))
-        })
+        let pubkey = match crate::identity::PubKey::from_peer_id(peer_id) {
+            Ok(pk) => pk,
+            Err(_) => return Some(false),
+        };
+        self.classified_queue
+            .as_ref()
+            .map(|queue| queue.lock().trusted_peers.read().is_trusted(&pubkey))
     }
 }
 
@@ -1286,10 +1277,7 @@ mod tests {
         // directly and then driving it.
         let actionable_notify = Arc::new(Notify::new());
         let notify = Arc::new(Notify::new());
-        let mut queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth);
-        for trusted_peer in &ctx.trusted_peers.read().peers {
-            queue.sync_trusted_peer_added(&trusted_peer.pubkey.to_peer_id());
-        }
+        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
         let counter = queue.dropped_counter();
         let classified_queue = Arc::new(Mutex::new(queue));
         let (tx, _rx) = mpsc::channel::<InboxItem>(1);

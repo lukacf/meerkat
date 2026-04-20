@@ -7,10 +7,6 @@
 //! mechanics (trust set, queue order, dequeue emission) live directly on
 //! `ClassifiedInboxQueue` in `inbox.rs`.
 
-/// Opaque peer identifier (public-key-derived string).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct PeerId(pub String);
-
 /// The raw kind tag from the wire envelope, before classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RawPeerKind {

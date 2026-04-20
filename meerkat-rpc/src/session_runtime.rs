@@ -1694,6 +1694,56 @@ impl SessionRuntime {
         Ok(())
     }
 
+    /// W3-H: install the correct runtime executor for the session, picking
+    /// between `SessionRuntimeExecutor` (standalone sessions) and
+    /// `MobRpcRuntimeExecutor` (mob-owned bridge sessions). Mirrors the
+    /// `MethodRouter::ensure_runtime_session_registered` logic — used by the
+    /// realtime WS observer after a MobMember channel's binding rotates to a
+    /// new bridge session id (no RPC path crosses, so the pre-dispatch
+    /// registration gate doesn't fire; we need to register the replacement
+    /// session here so the next status poll does not see NotReady/Destroyed).
+    ///
+    /// Returns `Ok(())` if the session is already registered, newly registered,
+    /// or not found (the observer closes the channel separately on terminal
+    /// retire, so "not found after rotation" surfaces as a downstream status
+    /// error on the next poll tick).
+    #[cfg(feature = "mob")]
+    pub async fn ensure_runtime_session_for_rotation(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        if self.runtime_adapter.session_has_executor(session_id).await {
+            return Ok(());
+        }
+        let mob_state = self.mob_state();
+        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match mob_state.as_ref() {
+            Some(mob_state)
+                if mob_state.owns_live_bridge_session(session_id).await
+                    || mob_state.owns_persisted_bridge_session(session_id).await =>
+            {
+                let sink = self
+                    .notification_sink
+                    .read()
+                    .ok()
+                    .map(|slot| slot.clone())
+                    .unwrap_or_else(crate::router::NotificationSink::noop);
+                Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                    mob_state.session_service(),
+                    session_id.clone(),
+                    sink,
+                ))
+            }
+            _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                Arc::clone(self),
+                session_id.clone(),
+            )),
+        };
+        self.runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
+        Ok(())
+    }
+
     /// Start a turn by routing through the runtime input/completion waiter path.
     ///
     /// Instead of calling `SessionService::start_turn()` directly, this method:

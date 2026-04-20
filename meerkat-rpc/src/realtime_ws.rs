@@ -2029,6 +2029,59 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     new = %new_session_id,
                                                     "realtime WS: rotating current_session_id"
                                                 );
+                                                // Register the rotated bridge session with
+                                                // the runtime adapter BEFORE swapping the
+                                                // pointer. The pre-dispatch router path
+                                                // only registers the initial session id;
+                                                // rotations go through the MobMachine
+                                                // broadcast and never cross the RPC
+                                                // handler, so the new session's executor
+                                                // would be missing and the next status
+                                                // poll would hit `NotReady(Destroyed)`
+                                                // surfaced as `InvalidTarget` (s58 fix).
+                                                if let Err(err) = state
+                                                    .runtime
+                                                    .ensure_runtime_session_for_rotation(
+                                                        &new_session_id,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %event_mob_id,
+                                                        %event_identity,
+                                                        %new_session_id,
+                                                        %err,
+                                                        "realtime WS: failed to register rotated session executor; next status poll may fail"
+                                                    );
+                                                }
+                                                // Attach the new session as a live
+                                                // realtime binding so subsequent status
+                                                // polls see it. Mirrors the
+                                                // `attach_live` call on initial bind for
+                                                // MobMember primaries.
+                                                if let Err(err) = state
+                                                    .runtime
+                                                    .runtime_adapter()
+                                                    .attach_live(&new_session_id)
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        %event_mob_id,
+                                                        %event_identity,
+                                                        %new_session_id,
+                                                        ?err,
+                                                        "realtime WS: failed to attach rotated session"
+                                                    );
+                                                }
+                                                // Detach the old session so the runtime
+                                                // doesn't hold a stale live attachment
+                                                // for a bridge session that's already
+                                                // been retired.
+                                                let _ = state
+                                                    .runtime
+                                                    .runtime_adapter()
+                                                    .detach_live(current_session_id)
+                                                    .await;
                                                 *current_session_id = new_session_id;
                                                 // Reset projection baseline so the
                                                 // poll-loop's next status tick is
@@ -2285,6 +2338,30 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         .await;
                                     }
                                     Err(error) => {
+                                        // W3-H: for MobMember channels, a poll-loop
+                                        // status error against a Destroyed bridge
+                                        // session is a legitimate transient — the
+                                        // MobMachine's MemberRealtimeBindingRotated
+                                        // event may arrive microseconds later,
+                                        // pointing at the replacement session. Don't
+                                        // hard-close; skip this tick and let the
+                                        // observer select! arm handle the rotation.
+                                        // A SessionTarget (pinned) in the same state
+                                        // is terminal because there is no rotation
+                                        // path to wait for.
+                                        if binding_is_mob_member(binding.as_ref())
+                                            && matches!(
+                                                error.code,
+                                                RealtimeErrorCode::InvalidTarget
+                                                    | RealtimeErrorCode::RuntimeNotReady
+                                            )
+                                        {
+                                            tracing::debug!(
+                                                ?error,
+                                                "realtime WS: tolerating transient status error on MobMember channel while waiting for binding rotation"
+                                            );
+                                            continue;
+                                        }
                                         let _ = send_server_frame(
                                             &mut socket,
                                             &RealtimeServerFrame::ChannelError(error),
@@ -2398,6 +2475,24 @@ fn validate_input_chunk_audio_format(
             },
         )),
     })
+}
+
+/// W3-H: true when the binding is a MobMember primary — used by the poll
+/// loop's status-error branch to distinguish transient rotation-window
+/// failures (tolerable) from pinned-session SessionTarget failures (terminal).
+/// Gated so the `MobMemberPrimary` variant is not referenced on non-mob
+/// builds where it doesn't exist.
+#[cfg(feature = "mob")]
+fn binding_is_mob_member(binding: Option<&RealtimeSocketBinding>) -> bool {
+    matches!(
+        binding,
+        Some(RealtimeSocketBinding::MobMemberPrimary { .. })
+    )
+}
+
+#[cfg(not(feature = "mob"))]
+fn binding_is_mob_member(_binding: Option<&RealtimeSocketBinding>) -> bool {
+    false
 }
 
 async fn send_protocol_error(

@@ -510,22 +510,112 @@ impl MethodRouter {
                 "missing target.type",
             ));
         };
-        if target_type == "session_target" {
-            let Some(session_id) = target.get("session_id").and_then(|value| value.as_str()) else {
-                return Err(RpcResponse::error(
+        match target_type {
+            "session_target" => {
+                let Some(session_id) = target.get("session_id").and_then(|value| value.as_str())
+                else {
+                    return Err(RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        "missing target.session_id",
+                    ));
+                };
+                SessionId::parse(session_id)
+                    .map(Some)
+                    .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+            }
+            // W3-H: `mob_member` targets are resolved by the async
+            // `resolve_realtime_target_session_id` path instead; the pre-dispatch
+            // sync helper is only used on SessionTarget branches.
+            "mob_member" => Ok(None),
+            other => Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("unsupported target.type '{other}'"),
+            )),
+        }
+    }
+
+    /// W3-H: async variant of [`session_id_from_realtime_target_params`] that
+    /// resolves `mob_member` targets against the MobMachine's canonical
+    /// `member_realtime_bindings` map via [`MobMcpState::resolve_realtime_target_session`].
+    ///
+    /// Returns `Ok(Some(session_id))` for both `session_target` (parsed from
+    /// the wire) and `mob_member` (resolved from the mob state). The caller
+    /// drives `ensure_runtime_session_registered` with the concrete session
+    /// id so the runtime executor is installed for both addressing modes.
+    ///
+    /// Without the `mob` feature `MobMember` targets are rejected with
+    /// `INVALID_PARAMS` — the same error the WS handler would emit downstream,
+    /// just lifted to the pre-dispatch gate.
+    #[allow(clippy::result_large_err)]
+    #[cfg(not(feature = "mini-surface"))]
+    async fn resolve_realtime_target_session_id(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<Option<SessionId>, RpcResponse> {
+        // First reuse the sync helper for SessionTarget (which returns Some)
+        // and structural errors. For MobMember it returns Ok(None) so the
+        // async resolution path below runs.
+        if let Some(session_id) = self.session_id_from_realtime_target_params(id.clone(), params)? {
+            return Ok(Some(session_id));
+        }
+        // At this point the sync helper returned Ok(None) — meaning the
+        // target is `mob_member` (the only non-SessionTarget branch it
+        // accepts). Resolve it via MobMcpState.
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let request: meerkat_contracts::RealtimeOpenRequest =
+            match serde_json::from_str(params.get()) {
+                Ok(request) => request,
+                Err(_) => match serde_json::from_str::<meerkat_contracts::RealtimeStatusParams>(
+                    params.get(),
+                ) {
+                    Ok(status) => meerkat_contracts::RealtimeOpenRequest {
+                        target: status.target,
+                        role: meerkat_contracts::RealtimeChannelRole::Primary,
+                        turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                        reconnect_policy: None,
+                        channel_config: None,
+                    },
+                    Err(err) => {
+                        return Err(RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("invalid params: {err}"),
+                        ));
+                    }
+                },
+            };
+        #[cfg(feature = "mob")]
+        {
+            match self
+                .mob_state
+                .resolve_realtime_target_session(&request.target)
+                .await
+            {
+                Ok(session_id) => Ok(Some(session_id)),
+                Err(err) => Err(RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
-                    "missing target.session_id",
-                ));
-            };
-            SessionId::parse(session_id)
-                .map(Some)
-                .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
-        } else {
+                    err.to_string(),
+                )),
+            }
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            let _ = request;
             Err(RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
-                format!("unsupported target.type '{target_type}'"),
+                "mob-member realtime targets require this host to be built with the `mob` feature"
+                    .to_string(),
             ))
         }
     }
@@ -1077,11 +1167,13 @@ impl MethodRouter {
                         "Method not found: realtime/open_info",
                     )
                 } else {
-                    let maybe_session_id =
-                        match self.session_id_from_realtime_target_params(id.clone(), params) {
-                            Ok(session_id) => session_id,
-                            Err(response) => return Some(response),
-                        };
+                    let maybe_session_id = match self
+                        .resolve_realtime_target_session_id(id.clone(), params)
+                        .await
+                    {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
                     if let Some(session_id) = maybe_session_id
                         && let Err(response) =
                             self.ensure_runtime_session_registered(&session_id).await
@@ -1110,11 +1202,13 @@ impl MethodRouter {
                         "Method not found: realtime/status",
                     )
                 } else {
-                    let maybe_session_id =
-                        match self.session_id_from_realtime_target_params(id.clone(), params) {
-                            Ok(session_id) => session_id,
-                            Err(response) => return Some(response),
-                        };
+                    let maybe_session_id = match self
+                        .resolve_realtime_target_session_id(id.clone(), params)
+                        .await
+                    {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
                     if let Some(session_id) = maybe_session_id
                         && let Err(response) =
                             self.ensure_runtime_session_registered(&session_id).await
@@ -1141,11 +1235,13 @@ impl MethodRouter {
                         "Method not found: realtime/capabilities",
                     )
                 } else {
-                    let maybe_session_id =
-                        match self.session_id_from_realtime_target_params(id.clone(), params) {
-                            Ok(session_id) => session_id,
-                            Err(response) => return Some(response),
-                        };
+                    let maybe_session_id = match self
+                        .resolve_realtime_target_session_id(id.clone(), params)
+                        .await
+                    {
+                        Ok(session_id) => session_id,
+                        Err(response) => return Some(response),
+                    };
                     if let Some(session_id) = maybe_session_id
                         && let Err(response) =
                             self.ensure_runtime_session_registered(&session_id).await

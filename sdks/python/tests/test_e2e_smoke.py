@@ -584,18 +584,25 @@ if include_scenario(58):
                 "reconnecting",
             }
 
+            pre_respawn_state = await mob.member_status("lead-rt")
+            pre_respawn_session_id = pre_respawn_state.get("current_session_id")
+
             respawn = await mob.respawn(
                 "lead-rt",
                 "Come back online and say PY-RESPAWN-58.",
             )
             receipt = respawn["receipt"]
             assert receipt["agent_identity"] == "lead-rt"
-
+            # Dogma #10 retired `agent_runtime_id` from app-facing receipts;
+            # callers wait on the canonical `member_realtime_bindings` map
+            # instead — the rotated `current_session_id` is the wire-level
+            # signal that the respawn completed and the MobMachine emitted
+            # MemberRealtimeBindingRotated.
             await wait_for(
                 "respawned member status",
                 lambda: mob.member_status("lead-rt"),
-                lambda state: state.get("agent_runtime_id")
-                == receipt["agent_runtime_id"],
+                lambda state: isinstance(state.get("current_session_id"), str)
+                and state["current_session_id"] != pre_respawn_session_id,
                 timeout_secs=60.0,
             )
 

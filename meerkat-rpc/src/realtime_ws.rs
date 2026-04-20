@@ -1059,6 +1059,20 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         realtime_handles.as_ref().map(|(ctx, _)| Arc::clone(ctx));
                     let product_turn_handle =
                         realtime_handles.as_ref().map(|(_, turn)| Arc::clone(turn));
+                    // Keep strong `Arc`s for both observers alive for the
+                    // socket's lifetime. The DSL handles store them as
+                    // `Weak` to avoid keeping the socket alive past its
+                    // natural teardown, but the caller MUST keep a matching
+                    // strong reference until the socket exits the select
+                    // loop — otherwise every `Weak::upgrade()` in the
+                    // effect-dispatch path returns `None` and the DSL
+                    // observer chain silently no-ops.
+                    let _wake_observer: Option<
+                        Arc<dyn meerkat_core::handles::RealtimeProjectionFreshnessObserver>,
+                    >;
+                    let _bridge_observer: Option<
+                        Arc<dyn meerkat_core::handles::SessionContextAdvancedObserver>,
+                    >;
                     if let (Some(session_context), Some(product_turn)) = (
                         session_context_handle.as_ref(),
                         product_turn_handle.as_ref(),
@@ -1072,7 +1086,9 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         > = Arc::new(RealtimeSocketFreshnessWake {
                             wake_tx: wake_tx.clone(),
                         });
-                        product_turn.install_projection_freshness_observer(wake_observer);
+                        product_turn
+                            .install_projection_freshness_observer(Arc::clone(&wake_observer));
+                        _wake_observer = Some(wake_observer);
 
                         // Install the session-context → product-turn bridge.
                         // The atomic baseline is used to seed the DSL frontier
@@ -1084,14 +1100,18 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         > = Arc::new(BridgeProjectionToProductTurn {
                             product_turn: Arc::clone(product_turn),
                         });
-                        let initial_baseline_ms =
-                            session_context.install_observer_with_baseline(bridge_observer);
+                        let initial_baseline_ms = session_context
+                            .install_observer_with_baseline(Arc::clone(&bridge_observer));
+                        _bridge_observer = Some(bridge_observer);
                         // Re-seed the DSL freshness to `Clean { baseline }` at
                         // the sampled watermark. Any concurrent advance visible
                         // through the bridge arrives as an observer call, which
                         // routes to `projection_advance_observed` and re-enters
                         // the DSL under its authority lock — safe.
                         let _ = product_turn.projection_reset(initial_baseline_ms);
+                    } else {
+                        _wake_observer = None;
+                        _bridge_observer = None;
                     }
 
                     loop {
@@ -2468,10 +2488,16 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     if !cleanup_performed {
                         let _ = cleanup_realtime_binding(&state.runtime, binding.as_ref()).await;
                     }
-                    // W2-E: observer lifetime is bound to `session_context_handle`
-                    // which drops here. The DSL-side `install_observer` stores a
-                    // `Weak`, so downgraded references become no-ops after this
-                    // drop — no separate task to abort.
+                    // Dogma round 2 U-C: observer lifetime is bound to the
+                    // strong `Arc`s the socket holds
+                    // (`_wake_observer`, `_bridge_observer`) plus the handle
+                    // `Arc`s themselves. The DSL-side observer slots store
+                    // `Weak`s, so once these strong refs drop here the
+                    // effect-dispatch `Weak::upgrade()` returns `None` and
+                    // the observer chain goes silent — no separate task to
+                    // abort.
+                    drop(_bridge_observer);
+                    drop(_wake_observer);
                     drop(session_context_handle);
                     state.host.release_open(&registered).await;
                 }

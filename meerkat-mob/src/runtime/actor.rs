@@ -1699,9 +1699,22 @@ impl MobActor {
 
             if let Some(adapter) = self.runtime_adapter.clone() {
                 let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
-                let spawned = adapter
-                    .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
-                    .await;
+                // W2-G: mob provisioning claims peer-ingress ownership as
+                // `MobOwned { comms_runtime_id, mob_id }`. The DSL transition
+                // permits promotion from `Unattached` or `SessionOwned`, so
+                // an earlier session-standalone drain is absorbed cleanly;
+                // silent downgrades back to `SessionOwned` become impossible.
+                let spawned = match comms_runtime {
+                    Some(comms_runtime) => {
+                        let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                            self.definition.id.as_ref(),
+                        );
+                        adapter
+                            .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
+                            .await
+                    }
+                    None => false,
+                };
                 if spawned {
                     tracing::debug!(
                         agent_identity = %agent_identity,
@@ -4008,9 +4021,14 @@ impl MobActor {
                         "mob turn-driven spawn binding comms drain"
                     );
                 }
-                if comms_runtime.is_some() {
+                // W2-G: route through the mob-owned spawn seam so peer-ingress
+                // ownership transitions to `MobOwned { comms_runtime_id, mob_id }`.
+                if let Some(comms_runtime) = comms_runtime {
+                    let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        self.definition.id.as_ref(),
+                    );
                     let _ = adapter
-                        .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
+                        .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
                         .await;
                 }
             }

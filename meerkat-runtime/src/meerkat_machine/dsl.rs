@@ -433,6 +433,75 @@ pub enum McpServerState {
     Disconnected,
 }
 
+/// Stable identity of a comms runtime instance (W2-G / issue #264).
+///
+/// The runtime derives this string from the `Arc<dyn CommsRuntime>` pointer
+/// address via `CommsRuntimeId::from_runtime()`. The DSL treats it as an
+/// opaque newtype; two distinct `Arc`s produce distinct ids so the owner
+/// invariant can catch silent transport swaps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CommsRuntimeId(pub String);
+
+impl<T: Into<String>> From<T> for CommsRuntimeId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+impl CommsRuntimeId {
+    /// Derive a stable id from an `Arc<dyn CommsRuntime>`'s pointer address.
+    ///
+    /// Two `Arc` instances with the same pointee produce the same id; two
+    /// distinct `Arc` instances produce distinct ids even if their contents
+    /// are equivalent. This is sufficient for detecting silent transport
+    /// swaps at the DSL boundary.
+    pub fn from_runtime(runtime: &std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>) -> Self {
+        let ptr = std::sync::Arc::as_ptr(runtime).cast::<()>() as usize;
+        Self(format!("comms-runtime-0x{ptr:x}"))
+    }
+}
+
+/// Mob instance identifier for peer-ingress ownership (W2-G / issue #264).
+///
+/// Bridging newtype mirroring `meerkat_mob::ids::MobId`. The DSL layer keeps
+/// this opaque because `meerkat-runtime` does not depend on `meerkat-mob`;
+/// the shell stringifies the real `MobId` before firing `AttachMobIngress`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct MobId(pub String);
+
+impl<T: Into<String>> From<T> for MobId {
+    fn from(s: T) -> Self {
+        Self(s.into())
+    }
+}
+
+/// Peer-ingress transport capability ownership kind (W2-G / issue #264).
+///
+/// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in
+/// DSL state; `peer_ingress_owner_consistency` enforces pairing. Silent
+/// downgrade `MobOwned` → `SessionOwned` is structurally impossible:
+/// `AttachSessionIngress` requires `Unattached`; `AttachMobIngress` permits
+/// `Unattached` or `SessionOwned` but never `MobOwned` → `SessionOwned`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressOwnerKind {
+    #[default]
+    Unattached,
+    SessionOwned,
+    MobOwned,
+}
+
 // Ensure we keep the exact generated schema DSL body from the catalog source.
 machine! {
     machine MeerkatMachine {
@@ -562,6 +631,22 @@ machine! {
             // responses we owe back to remote peers. Receiver-side guard
             // prevents duplicate replies on the same correlation id.
             inbound_peer_requests: Map<PeerCorrelationId, InboundPeerRequestState>,
+
+            // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
+            //
+            // Tracks which subsystem owns the peer-ingress transport
+            // capability for this session. `Unattached` is the initial state;
+            // session-standalone paths move to `SessionOwned`; mob
+            // provisioners move to `MobOwned` (promotion from `SessionOwned`
+            // is allowed, but silent downgrade from `MobOwned` →
+            // `SessionOwned` is rejected by the `AttachSessionIngress`
+            // guard — the s71 regression class closed structurally).
+            // `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` are
+            // populated iff the kind variant names them; the
+            // `peer_ingress_owner_consistency` invariant enforces pairing.
+            peer_ingress_owner_kind: Enum<PeerIngressOwnerKind>,
+            peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
+            peer_ingress_mob_id: Option<MobId>,
         }
 
         init(Initializing) {
@@ -652,6 +737,9 @@ machine! {
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
+            peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
+            peer_ingress_comms_runtime_id = None,
+            peer_ingress_mob_id = None,
         }
 
         terminal [Destroyed]
@@ -852,6 +940,17 @@ machine! {
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
             PeerRequestReceived { corr_id: PeerCorrelationId },
             PeerResponseReplied { corr_id: PeerCorrelationId },
+            // Peer-ingress transport capability ownership (W2-G).
+            //
+            // `AttachSessionIngress` only succeeds from `Unattached`:
+            // transitioning from `MobOwned` back to `SessionOwned` would be a
+            // silent transport downgrade and is rejected structurally.
+            // `AttachMobIngress` allows promotion from `Unattached` or
+            // `SessionOwned` (mob provisioning takes over a session-attached
+            // drain). `DetachIngress` clears any active ownership.
+            AttachSessionIngress { comms_runtime_id: CommsRuntimeId },
+            AttachMobIngress { comms_runtime_id: CommsRuntimeId, mob_id: MobId },
+            DetachIngress,
         }
 
         surface_only [
@@ -1031,6 +1130,24 @@ machine! {
         invariant realtime_binding_epoch_consistency {
             (self.realtime_binding_state == RealtimeBindingState::Unbound)
             == (self.realtime_binding_authority_epoch == None)
+        }
+
+        // Peer-ingress owner companion fields must stay in lockstep with the
+        // kind variant. `Unattached` carries no companions; `SessionOwned`
+        // carries only a comms runtime id; `MobOwned` carries both. The DSL
+        // encodes the tagged-union discipline across three fields so silent
+        // transitions that leave the comms runtime id behind (the s71
+        // regression class) cannot serialize.
+        invariant peer_ingress_owner_consistency {
+            (self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                && self.peer_ingress_comms_runtime_id == None
+                && self.peer_ingress_mob_id == None)
+            || (self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+                && self.peer_ingress_comms_runtime_id != None
+                && self.peer_ingress_mob_id == None)
+            || (self.peer_ingress_owner_kind == PeerIngressOwnerKind::MobOwned
+                && self.peer_ingress_comms_runtime_id != None
+                && self.peer_ingress_mob_id != None)
         }
 
 
@@ -3804,6 +3921,62 @@ machine! {
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }
+        }
+
+        // =====================================================================
+        // Peer-ingress transport capability ownership (W2-G / issue #264)
+        // =====================================================================
+
+        // AttachSessionIngress: only valid from `Unattached`. Rejects
+        // `MobOwned` → `SessionOwned` silent downgrades by construction.
+        transition AttachSessionIngress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AttachSessionIngress { comms_runtime_id }
+            guard "session_registered" { self.session_id != None }
+            guard "owner_is_unattached" {
+                self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::SessionOwned;
+                self.peer_ingress_comms_runtime_id = Some(comms_runtime_id);
+                self.peer_ingress_mob_id = None;
+            }
+            to Idle
+        }
+
+        // AttachMobIngress: valid from `Unattached` or `SessionOwned`.
+        // Mob provisioning is allowed to take over a session-owned drain
+        // (the spec's promotion case).
+        transition AttachMobIngress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AttachMobIngress { comms_runtime_id, mob_id }
+            guard "session_registered" { self.session_id != None }
+            guard "owner_allows_mob_attach" {
+                self.peer_ingress_owner_kind == PeerIngressOwnerKind::Unattached
+                || self.peer_ingress_owner_kind == PeerIngressOwnerKind::SessionOwned
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::MobOwned;
+                self.peer_ingress_comms_runtime_id = Some(comms_runtime_id);
+                self.peer_ingress_mob_id = Some(mob_id);
+            }
+            to Idle
+        }
+
+        // DetachIngress: clear any active ownership back to `Unattached`.
+        transition DetachIngress {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input DetachIngress
+            guard "session_registered" { self.session_id != None }
+            guard "owner_is_attached" {
+                self.peer_ingress_owner_kind != PeerIngressOwnerKind::Unattached
+            }
+            update {
+                self.peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached;
+                self.peer_ingress_comms_runtime_id = None;
+                self.peer_ingress_mob_id = None;
+            }
+            to Idle
         }
     }
 }

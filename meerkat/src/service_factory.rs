@@ -771,6 +771,9 @@ mod tests {
             )),
             session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
             session_claim_handle: runtime_adapter.session_claim_handle(),
+            interaction_stream: Some(Arc::new(
+                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
+            )),
         };
 
         let req = CreateSessionRequest {
@@ -963,6 +966,9 @@ mod tests {
             )),
             session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
             session_claim_handle: runtime_adapter.session_claim_handle(),
+            interaction_stream: Some(Arc::new(
+                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
+            )),
         };
 
         let req = CreateSessionRequest {

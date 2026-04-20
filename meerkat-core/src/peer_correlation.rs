@@ -143,6 +143,45 @@ impl InboundPeerRequestState {
     }
 }
 
+/// Typed lifecycle state of an interaction stream reservation (U6 / dogma #5).
+///
+/// Authoritative truth for whether a reserved stream channel is still
+/// claimable (`Reserved`), live with an attached consumer (`Attached`), or
+/// terminal (`Completed`, `Expired`, `ClosedEarly`). Lives in the
+/// MeerkatMachine DSL's `interaction_streams` substate; the comms runtime's
+/// `interaction_stream_registry` projects sender/receiver channels off it,
+/// with the invariant "channel live iff `corr_id ∈ interaction_streams`"
+/// enforced by the cleanup effect on every terminal transition.
+///
+/// Unit-variant on purpose — the reason for closing (terminal event,
+/// consumer drop, TTL expiry) travels on the typed DSL input that drove the
+/// transition, not on the state enum.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[non_exhaustive]
+pub enum InteractionStreamState {
+    /// Stream reserved at registration; consumer has not attached yet.
+    #[default]
+    Reserved,
+    /// Consumer has attached and is reading events from the channel.
+    Attached,
+    /// Terminal: a terminal event was delivered through the channel.
+    Completed,
+    /// Terminal: TTL elapsed without an attach; reservation reaped.
+    Expired,
+    /// Terminal: consumer dropped the stream before a terminal event.
+    ClosedEarly,
+}
+
+impl InteractionStreamState {
+    /// Is this a terminal state — i.e., the stream lifecycle is done and the
+    /// shell should drop the associated channel projection?
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Expired | Self::ClosedEarly)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

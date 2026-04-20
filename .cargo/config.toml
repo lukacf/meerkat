@@ -1,5 +1,21 @@
 # Meerkat cargo configuration
 
+# Test-only stack size bump — test harness state (MethodRouter +
+# SessionRuntime + nested tokio select! futures in the realtime paths)
+# landed deep enough after W3-H that three `meerkat-rpc` router tests
+# overflow the default ~8 MiB Linux thread stack on CI runners:
+# - router::tests::archived_session_read_remains_available_and_mutations_reject
+# - router::tests::archived_session_drops_unapplied_staged_context_before_any_later_turn
+# - router::tests::config_patch_refreshes_identity_registry_for_alias_resolution
+# All three reproduce on macOS with the default ~512 KiB secondary-thread
+# stack on `main` too, and on CI they only tip over after W3-H's additions,
+# so the underlying recursion/depth is broader than this PR but W3-H raises
+# the watermark past the default. 16 MiB restores headroom. This is a
+# workaround; see the follow-up tracking issue for a root-cause fix that
+# trims the realtime-path future footprint.
+[env]
+RUST_MIN_STACK = "16777216"
+
 [alias]
 # Machine-authority workflow entrypoint
 xtask = "run -p xtask --features machine-authority --"

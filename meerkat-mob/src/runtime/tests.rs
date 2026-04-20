@@ -18103,6 +18103,136 @@ async fn test_supervisor_private_trust_preserves_send_resolution() {
 }
 
 #[tokio::test]
+async fn test_rotate_supervisor_reinstalls_private_trust_on_session_backed_member() {
+    // W2-F integration test: after a supervisor rotation, session-backed
+    // members must privately trust the NEW supervisor peer id and must no
+    // longer trust the previous one. Without the re-install step, the old
+    // peer id sticks in the member's private-trust set and new-supervisor
+    // lifecycle notifications (`mob.peer_added`, `mob.peer_retired`, …) are
+    // dropped at the classified inbox's admission gate.
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(sample_definition(), "rotate-private-trust");
+    let mob_id = definition.id.clone();
+    let (handle, service) = create_test_mob_with_real_comms(definition).await;
+    let receipt = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-rotate"),
+            None,
+        )
+        .await
+        .expect("spawn session-backed member");
+    let session_id = receipt
+        .bridge_session_id()
+        .cloned()
+        .expect("session-backed member has bridge session id");
+    let member_comms = service
+        .real_comms(&session_id)
+        .await
+        .expect("member comms runtime");
+
+    // Capture the pre-rotation supervisor pubkey. This is what the member's
+    // private trust set must no longer trust after the rotation.
+    let previous_supervisor_pubkey = {
+        let trusted = member_comms.trusted_peers_shared();
+        let guard = trusted.read();
+        let entry = guard
+            .peers
+            .iter()
+            .find(|p| p.name.contains("__mob_supervisor__"))
+            .expect("spawn bootstraps supervisor private trust");
+        entry.pubkey
+    };
+    assert!(
+        member_comms
+            .router()
+            .is_private(&previous_supervisor_pubkey),
+        "pre-rotation supervisor must start as a private-trust entry"
+    );
+
+    let previous_name = {
+        let trusted = member_comms.trusted_peers_shared();
+        let guard = trusted.read();
+        guard
+            .peers
+            .iter()
+            .find(|p| p.name.contains("__mob_supervisor__"))
+            .expect("supervisor trust entry")
+            .name
+            .clone()
+    };
+
+    let report = handle.rotate_supervisor().await.expect("rotate supervisor");
+    assert_eq!(
+        report.previous_epoch + 1,
+        report.current_epoch,
+        "rotation must bump epoch by exactly one"
+    );
+    assert_ne!(
+        report.public_peer_id,
+        previous_supervisor_pubkey.to_peer_id(),
+        "rotation must replace the supervisor keypair"
+    );
+
+    // Post-rotation: the old supervisor pubkey must no longer be trusted,
+    // and the rotated supervisor pubkey must be present and marked private
+    // so the directory still hides it while the admission gate still
+    // accepts lifecycle notifications.
+    let (new_supervisor_pubkey_opt, old_still_present) = {
+        let trusted = member_comms.trusted_peers_shared();
+        let guard = trusted.read();
+        let new_entry = guard
+            .peers
+            .iter()
+            .find(|p| p.name.contains("__mob_supervisor__"));
+        let old_still_present = guard
+            .peers
+            .iter()
+            .any(|p| p.pubkey == previous_supervisor_pubkey);
+        (new_entry.map(|entry| entry.pubkey), old_still_present)
+    };
+    assert!(
+        !old_still_present,
+        "previous supervisor private trust must be revoked by the rotation \
+         trust re-install; leaving it in would accept lifecycle notifications \
+         from the superseded authority"
+    );
+    let new_supervisor_pubkey = new_supervisor_pubkey_opt
+        .expect("rotated supervisor private trust must be installed on the session-backed member");
+    assert_ne!(
+        new_supervisor_pubkey, previous_supervisor_pubkey,
+        "rotation must change the trusted supervisor pubkey"
+    );
+    assert!(
+        member_comms.router().is_private(&new_supervisor_pubkey),
+        "rotated supervisor must stay on the private-trust edge — it is a \
+         control-plane peer and must not leak into `comms.peers`"
+    );
+    assert_eq!(
+        new_supervisor_pubkey.to_peer_id(),
+        report.public_peer_id,
+        "member-side private trust must agree with the rotation report"
+    );
+
+    // And the directory must still hide the (rotated) supervisor, matching
+    // the invariant from `test_supervisor_trust_does_not_leak_into_member_peer_directory`.
+    let directory = member_comms.peers().await;
+    assert!(
+        directory
+            .iter()
+            .all(|entry| !entry.name.as_str().contains("__mob_supervisor__")),
+        "rotated supervisor must remain absent from the public peer directory; got: {directory:?}"
+    );
+
+    // Sanity check: we really did spawn a session-backed member of the
+    // expected mob (the trust-entry name embeds the mob id).
+    assert!(
+        previous_name.starts_with(mob_id.as_str()),
+        "private-trust entry name must be scoped to this mob; got: {previous_name}"
+    );
+}
+
+#[tokio::test]
 async fn test_external_tools_provider_called_per_spawn() {
     let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let counter_clone = counter.clone();

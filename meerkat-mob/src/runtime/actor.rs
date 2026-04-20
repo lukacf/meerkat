@@ -1704,9 +1704,22 @@ impl MobActor {
 
             if let Some(adapter) = self.runtime_adapter.clone() {
                 let comms_runtime = self.provisioner.comms_runtime(member_ref).await;
-                let spawned = adapter
-                    .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
-                    .await;
+                // W2-G: mob provisioning claims peer-ingress ownership as
+                // `MobOwned { comms_runtime_id, mob_id }`. The DSL transition
+                // permits promotion from `Unattached` or `SessionOwned`, so
+                // an earlier session-standalone drain is absorbed cleanly;
+                // silent downgrades back to `SessionOwned` become impossible.
+                let spawned = match comms_runtime {
+                    Some(comms_runtime) => {
+                        let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                            self.definition.id.as_ref(),
+                        );
+                        adapter
+                            .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
+                            .await
+                    }
+                    None => false,
+                };
                 if spawned {
                     tracing::debug!(
                         agent_identity = %agent_identity,
@@ -4013,9 +4026,14 @@ impl MobActor {
                         "mob turn-driven spawn binding comms drain"
                     );
                 }
-                if comms_runtime.is_some() {
+                // W2-G: route through the mob-owned spawn seam so peer-ingress
+                // ownership transitions to `MobOwned { comms_runtime_id, mob_id }`.
+                if let Some(comms_runtime) = comms_runtime {
+                    let mob_id = meerkat_runtime::meerkat_machine::dsl::MobId::from(
+                        self.definition.id.as_ref(),
+                    );
                     let _ = adapter
-                        .maybe_spawn_comms_drain(bridge_session_id, true, comms_runtime)
+                        .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
                         .await;
                 }
             }
@@ -6128,6 +6146,8 @@ impl MobActor {
                             .put_supervisor_authority(&self.definition.id, &next)
                             .await?;
                         self.supervisor_bridge.rotate(next.clone()).await?;
+                        self.reinstall_session_backed_supervisor_trust(&current, &next)
+                            .await;
                         message.push_str(
                             "; local supervisor authority advanced to the partially applied next authority to preserve deterministic recovery",
                         );
@@ -6142,11 +6162,97 @@ impl MobActor {
             .put_supervisor_authority(&self.definition.id, &next)
             .await?;
         self.supervisor_bridge.rotate(next.clone()).await?;
+        self.reinstall_session_backed_supervisor_trust(&current, &next)
+            .await;
         Ok(super::handle::SupervisorRotationReport {
             previous_epoch: current.epoch,
             current_epoch: next.epoch,
             public_peer_id,
         })
+    }
+
+    /// Re-install supervisor private trust on every session-backed member
+    /// after a supervisor rotation.
+    ///
+    /// External (peer-only) members receive the new authority through the
+    /// `AuthorizeSupervisor` bridge command that runs earlier in
+    /// `handle_rotate_supervisor`. Session-backed members have no bridge
+    /// channel — they trust the supervisor via the private-trust seam
+    /// installed during `finalize_spawn_from_pending`. Without this step,
+    /// after a rotation the old supervisor peer id is still in the member's
+    /// private-trust set and the new supervisor's lifecycle notifications
+    /// (`mob.peer_added`, `mob.peer_retired`, …) get dropped at the
+    /// classified inbox's admission gate.
+    ///
+    /// Best-effort: a failure on one member is logged but does not abort
+    /// the rotation — the local authority is already advanced at this
+    /// point, so recovery is a per-member reconciliation problem, not a
+    /// "reject rotation" problem.
+    async fn reinstall_session_backed_supervisor_trust(
+        &self,
+        previous: &crate::store::SupervisorAuthorityRecord,
+        next: &crate::store::SupervisorAuthorityRecord,
+    ) {
+        let next_spec = match self.supervisor_bridge.supervisor_spec().await {
+            Ok(spec) => spec,
+            Err(error) => {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    %error,
+                    "supervisor_spec unavailable after rotation; \
+                     session-backed members will not receive rotated lifecycle notifications"
+                );
+                return;
+            }
+        };
+
+        let session_backed: Vec<RosterEntry> = {
+            let roster = self.roster.read().await;
+            roster
+                .list_all()
+                .filter(|entry| entry.member_ref.bridge_session_id().is_some())
+                .cloned()
+                .collect()
+        };
+
+        for entry in session_backed {
+            let Some(member_comms) = self.provisioner_comms(&entry.member_ref).await else {
+                tracing::debug!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    "no provisioner comms for session-backed member during rotation trust re-install"
+                );
+                continue;
+            };
+
+            if let Err(error) = member_comms
+                .remove_private_trusted_peer(&previous.public_peer_id)
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    previous_peer_id = %previous.public_peer_id,
+                    %error,
+                    "failed to revoke previous supervisor private-trust during rotation; \
+                     old supervisor may still be accepted by the member's inbox"
+                );
+            }
+
+            if let Err(error) = member_comms
+                .add_private_trusted_peer(next_spec.clone())
+                .await
+            {
+                tracing::warn!(
+                    mob_id = %self.definition.id,
+                    agent_identity = %entry.agent_identity,
+                    next_peer_id = %next.public_peer_id,
+                    %error,
+                    "failed to install rotated supervisor private-trust on session-backed member; \
+                     lifecycle notifications from the new supervisor will be dropped at admission"
+                );
+            }
+        }
     }
 
     /// Cancel checkpointers and transition to Stopped. Used by `handle_reset`

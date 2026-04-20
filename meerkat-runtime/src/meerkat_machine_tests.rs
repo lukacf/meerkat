@@ -14006,6 +14006,7 @@ fn runtime_parity_probe_command(
                 session_id: fixture.session_id.clone(),
                 keep_alive: true,
                 comms_runtime: Some(comms_runtime),
+                mob_id: None,
             }
         }
         RuntimeParityProbeInput::NotifyDrainExited => MeerkatMachineCommand::NotifyDrainExited {
@@ -15176,4 +15177,193 @@ async fn mutation_gate_is_per_session() {
         result_b.is_ok(),
         "Retire on session B should succeed: {result_b:?}"
     );
+}
+
+// =====================================================================
+// W2-G: Peer-ingress transport capability ownership
+// =====================================================================
+
+#[tokio::test]
+async fn peer_ingress_owner_starts_unattached() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(owner, crate::meerkat_machine::PeerIngressOwner::Unattached),
+        "freshly registered session should have Unattached peer-ingress owner, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn peer_ingress_owner_unknown_session_is_unattached() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(owner, crate::meerkat_machine::PeerIngressOwner::Unattached),
+        "unknown session should read as Unattached, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_session_ingress_transitions_owner() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    adapter
+        .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
+        .await;
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    match owner {
+        crate::meerkat_machine::PeerIngressOwner::SessionOwned { comms_runtime_id } => {
+            assert_eq!(
+                comms_runtime_id, expected_id,
+                "session-owned drain should carry the exact comms runtime id"
+            );
+        }
+        other => panic!("expected SessionOwned, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn attach_mob_ingress_transitions_owner() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-test");
+    adapter
+        .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&comms_runtime), mob_id.clone())
+        .await;
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&comms_runtime);
+    match owner {
+        crate::meerkat_machine::PeerIngressOwner::MobOwned {
+            comms_runtime_id,
+            mob_id: actual_mob_id,
+        } => {
+            assert_eq!(comms_runtime_id, expected_id);
+            assert_eq!(actual_mob_id, mob_id);
+        }
+        other => panic!("expected MobOwned, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mob_owned_drain_rejects_silent_session_downgrade() {
+    // The spec's regression class: once a mob has claimed peer-ingress
+    // ownership, a later session-runtime `update_peer_ingress_context`
+    // call must not silently swap the comms runtime out from under the
+    // mob. At the DSL level, the `AttachSessionIngress` guard rejects the
+    // transition from `MobOwned`. At the shell level, the session runtime
+    // calls `peer_ingress_owner()` and skips the reconfigure path.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    // Mob claims ownership with a specific comms runtime instance.
+    let mob_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-nodowngrade");
+    adapter
+        .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
+        .await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);
+
+    // Session runtime attempts to swap in a different comms runtime (the
+    // s71 regression path). The shell helper stages
+    // `AttachSessionIngress { comms_runtime_id }` into the DSL; the guard
+    // rejects because owner is `MobOwned`, so DSL state is unchanged. A
+    // typical surface would additionally short-circuit before staging by
+    // consulting `peer_ingress_owner`.
+    let session_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    adapter
+        .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
+        .await;
+
+    // Owner must remain `MobOwned` with the original comms runtime id.
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    match owner {
+        crate::meerkat_machine::PeerIngressOwner::MobOwned {
+            comms_runtime_id,
+            mob_id: actual_mob_id,
+        } => {
+            assert_eq!(
+                comms_runtime_id, expected_id,
+                "mob-owned comms runtime id must be unchanged after session swap attempt"
+            );
+            assert_eq!(actual_mob_id, mob_id);
+        }
+        other => panic!("expected MobOwned to survive downgrade attempt, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn detach_ingress_clears_owner() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    // Attach a session-owned drain first.
+    let comms_runtime: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    adapter
+        .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&comms_runtime)))
+        .await;
+
+    // Now request detach (keep_alive=false). The shell stages
+    // `DetachIngress` into the DSL.
+    adapter
+        .update_peer_ingress_context(&session_id, false, None)
+        .await;
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    assert!(
+        matches!(owner, crate::meerkat_machine::PeerIngressOwner::Unattached),
+        "keep_alive=false should detach peer-ingress owner, got {owner:?}"
+    );
+}
+
+#[tokio::test]
+async fn attach_mob_ingress_promotes_from_session_owned() {
+    // Mob provisioning is allowed to take over a session-owned drain
+    // (the spec's promotion case). Silent downgrade is blocked; promotion
+    // is not.
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    // Step 1: session attach.
+    let session_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    adapter
+        .update_peer_ingress_context(&session_id, true, Some(Arc::clone(&session_comms)))
+        .await;
+
+    // Step 2: mob provisioning promotes to MobOwned with (possibly) a
+    // different comms runtime.
+    let mob_comms: Arc<dyn CommsRuntime> = Arc::new(FakeDrainRuntime::idle());
+    let mob_id = crate::meerkat_machine::dsl::MobId::from("mob-w2g-promotion");
+    adapter
+        .maybe_spawn_mob_comms_drain(&session_id, Arc::clone(&mob_comms), mob_id.clone())
+        .await;
+
+    let owner = adapter.peer_ingress_owner(&session_id).await;
+    let expected_id = crate::meerkat_machine::dsl::CommsRuntimeId::from_runtime(&mob_comms);
+    match owner {
+        crate::meerkat_machine::PeerIngressOwner::MobOwned {
+            comms_runtime_id,
+            mob_id: actual_mob_id,
+        } => {
+            assert_eq!(comms_runtime_id, expected_id);
+            assert_eq!(actual_mob_id, mob_id);
+        }
+        other => panic!("expected MobOwned after promotion, got {other:?}"),
+    }
 }

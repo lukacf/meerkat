@@ -269,6 +269,10 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
         keep_alive: bool,
         comms_runtime: Option<Arc<dyn CommsRuntime>>,
+        /// Mob-owned path sets this to the spawning mob's id so the DSL
+        /// transitions to `PeerIngressOwnerKind::MobOwned` rather than
+        /// `SessionOwned`. Session-owned and detach paths leave it `None`.
+        mob_id: Option<crate::meerkat_machine::dsl::MobId>,
     },
     NotifyDrainExited {
         session_id: SessionId,

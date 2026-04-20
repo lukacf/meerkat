@@ -36,6 +36,9 @@ jobs:
       - name: Legacy surface gate
         run: make legacy-surface-gate
 
+      - name: Bridge-classifier gate (W2-F)
+        run: make bridge-no-responsestatus-gate
+
       - name: Verify version parity
         run: make verify-version-parity
 

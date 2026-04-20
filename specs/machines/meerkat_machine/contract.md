@@ -23,6 +23,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
 - `last_session_context_updated_at_ms`: `u64`
+- `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
+- `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
+- `peer_ingress_mob_id`: `Option<MobId>`
 
 ## Inputs
 - `RegisterSession`(session_id: SessionId)
@@ -88,6 +91,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CompleteLiveTopology`
 - `AbortLiveTopologyBeforeDetach`
 - `FailLiveTopologyAfterDetach`
+- `AttachSessionIngress`(comms_runtime_id: CommsRuntimeId)
+- `AttachMobIngress`(comms_runtime_id: CommsRuntimeId, mob_id: MobId)
+- `DetachIngress`
 
 ## Surface-only Inputs
 - `ContainsSession`
@@ -179,6 +185,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `running_has_current_run`
 - `current_run_only_while_running_or_retired`
 - `realtime_binding_epoch_consistency`
+- `peer_ingress_owner_consistency`
 
 ## Transitions
 ### `Initialize`
@@ -2338,6 +2345,126 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `topology_past_detach`
 - Emits: `LiveTopologyPhaseChanged`
+- To: `Stopped`
+
+### `AttachSessionIngressIdle`
+- From: `Idle`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `owner_is_unattached`
+- To: `Idle`
+
+### `AttachSessionIngressAttached`
+- From: `Attached`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `owner_is_unattached`
+- To: `Attached`
+
+### `AttachSessionIngressRunning`
+- From: `Running`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `owner_is_unattached`
+- To: `Running`
+
+### `AttachSessionIngressRetired`
+- From: `Retired`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `owner_is_unattached`
+- To: `Retired`
+
+### `AttachSessionIngressStopped`
+- From: `Stopped`
+- On: `AttachSessionIngress`(comms_runtime_id)
+- Guards:
+  - `session_registered`
+  - `owner_is_unattached`
+- To: `Stopped`
+
+### `AttachMobIngressIdle`
+- From: `Idle`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `owner_allows_mob_attach`
+- To: `Idle`
+
+### `AttachMobIngressAttached`
+- From: `Attached`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `owner_allows_mob_attach`
+- To: `Attached`
+
+### `AttachMobIngressRunning`
+- From: `Running`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `owner_allows_mob_attach`
+- To: `Running`
+
+### `AttachMobIngressRetired`
+- From: `Retired`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `owner_allows_mob_attach`
+- To: `Retired`
+
+### `AttachMobIngressStopped`
+- From: `Stopped`
+- On: `AttachMobIngress`(comms_runtime_id, mob_id)
+- Guards:
+  - `session_registered`
+  - `owner_allows_mob_attach`
+- To: `Stopped`
+
+### `DetachIngressIdle`
+- From: `Idle`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `owner_is_attached`
+- To: `Idle`
+
+### `DetachIngressAttached`
+- From: `Attached`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `owner_is_attached`
+- To: `Attached`
+
+### `DetachIngressRunning`
+- From: `Running`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `owner_is_attached`
+- To: `Running`
+
+### `DetachIngressRetired`
+- From: `Retired`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `owner_is_attached`
+- To: `Retired`
+
+### `DetachIngressStopped`
+- From: `Stopped`
+- On: `DetachIngress`()
+- Guards:
+  - `session_registered`
+  - `owner_is_attached`
 - To: `Stopped`
 
 ## Coverage

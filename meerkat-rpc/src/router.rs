@@ -4179,8 +4179,7 @@ mod tests {
     }
 
     #[cfg(not(feature = "mini-surface"))]
-    #[tokio::test]
-    async fn archived_session_read_remains_available_and_mutations_reject() {
+    async fn archived_session_read_remains_available_and_mutations_reject_inner() {
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -5648,6 +5647,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(not(feature = "mini-surface"))]
+    #[tokio::test]
+    async fn archived_session_read_remains_available_and_mutations_reject() {
+        Box::pin(archived_session_read_remains_available_and_mutations_reject_inner()).await;
     }
 
     /// 7. `turn/start` returns a result for an existing session.

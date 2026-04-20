@@ -419,6 +419,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "mob/wait_kickoff",
                 "Wait for kickoff completion for a member",
             ),
+            RpcMethodDescriptor::basic(
+                "mob/wait_ready",
+                "Wait for mob startup readiness (members bound but kickoff not required)",
+            ),
             RpcMethodDescriptor::basic("mob/profile/create", "Create a realm-scoped mob profile"),
             RpcMethodDescriptor::basic("mob/profile/get", "Read a realm-scoped mob profile"),
             RpcMethodDescriptor::basic("mob/profile/list", "List realm-scoped mob profiles"),

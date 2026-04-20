@@ -3365,6 +3365,7 @@ dependencies = [
  "futures",
  "meerkat",
  "meerkat-client",
+ "meerkat-comms",
  "meerkat-core",
  "meerkat-machine-kernels",
  "meerkat-mob",

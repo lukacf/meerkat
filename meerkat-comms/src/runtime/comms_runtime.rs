@@ -1169,6 +1169,46 @@ impl CommsRuntime {
         Ok(runtime)
     }
 
+    /// Construct two inproc-only `CommsRuntime` instances with mutual trust
+    /// already seeded, so each can send to the other without the caller
+    /// touching `TrustedPeers` directly.
+    ///
+    /// Trust is seeded through the canonical `CommsRuntime::add_trusted_peer`
+    /// path so both the `TrustedPeers` RwLock and the classified inbox's
+    /// sibling `trusted_peers` BTreeSet stay in sync — the receive-side
+    /// admission gate drops untrusted envelopes with `UntrustedSender`
+    /// (W1-B), so seeding must touch both stores, not just the RwLock.
+    ///
+    /// This is a test-infrastructure helper intended for integration-scope
+    /// reservation / correlation tests. Production code should establish
+    /// trust through the normal identity-exchange flows.
+    pub async fn inproc_pair_with_mutual_trust(
+        name_a: &str,
+        name_b: &str,
+    ) -> Result<(Arc<Self>, Arc<Self>), CommsRuntimeError> {
+        let a = Arc::new(Self::inproc_only(name_a)?);
+        let b = Arc::new(Self::inproc_only(name_b)?);
+        let spec_for_a = meerkat_core::comms::TrustedPeerSpec::new(
+            name_b,
+            b.public_key().to_peer_id(),
+            format!("inproc://{name_b}"),
+        )
+        .map_err(CommsRuntimeError::TrustLoadError)?;
+        let spec_for_b = meerkat_core::comms::TrustedPeerSpec::new(
+            name_a,
+            a.public_key().to_peer_id(),
+            format!("inproc://{name_a}"),
+        )
+        .map_err(CommsRuntimeError::TrustLoadError)?;
+        meerkat_core::agent::CommsRuntime::add_trusted_peer(a.as_ref(), spec_for_a)
+            .await
+            .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
+        meerkat_core::agent::CommsRuntime::add_trusted_peer(b.as_ref(), spec_for_b)
+            .await
+            .map_err(|err| CommsRuntimeError::TrustLoadError(err.to_string()))?;
+        Ok((a, b))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn inproc_only_session_scoped_with_silent_intents(
         name: &str,

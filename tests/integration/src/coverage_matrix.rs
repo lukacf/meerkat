@@ -202,8 +202,10 @@ pub fn cells() -> &'static [CellEntry] {
             },
         },
         // Peer-request + reserve-interaction: subscriber must be registered
-        // and correlate via the request envelope id carried in `in_reply_to`.
-        // Covered by an in-crate test in meerkat-comms.
+        // on the requester, the response must route back from the responder,
+        // and the reservation correlates via the request envelope id carried
+        // in the response's `in_reply_to`. Covered at integration scope by
+        // a two-runtime end-to-end test.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
@@ -213,9 +215,9 @@ pub fn cells() -> &'static [CellEntry] {
                 assertion_surface: AssertionSurface::SubscriberStream,
             },
             coverage: Coverage::Covered {
-                test_name: "meerkat_comms::runtime::comms_runtime::tests::\
-                            test_peer_request_reserved_stream_correlates_via_request_envelope_id",
-                scope: CoverageScope::InCrateUnit,
+                test_name: "reserve_interaction_subscriber_fires::\
+                            reserve_interaction_subscriber_fires_on_matching_response",
+                scope: CoverageScope::Integration,
             },
         },
         // --- Explicitly empty cells ---------------------------------------------

@@ -531,6 +531,7 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
     inproc_namespace: Option<String>,
     session_id: &meerkat_core::SessionId,
     silent_intents: std::sync::Arc<std::collections::HashSet<String>>,
+    session_claim_handle: std::sync::Arc<dyn meerkat_core::handles::SessionClaimHandle>,
 ) -> Result<CommsRuntime, String> {
     let event_listen_tcp = config
         .comms
@@ -549,6 +550,7 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
             canonical_session_comms_identity_root(user_config_root)?,
             session_id,
             silent_intents.clone(),
+            session_claim_handle,
         )
         .await
         .map_err(|e| format!("Failed to create inproc comms runtime: {e}"))?,

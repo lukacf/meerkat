@@ -322,6 +322,7 @@ impl MeerkatMachine {
                                 &shared_handle_authority,
                             )),
                         ),
+                        session_claim_handle: self.session_claim_handle(),
                     },
                 ))
             }

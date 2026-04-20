@@ -2064,6 +2064,21 @@ impl AgentFactory {
                     .cloned()
                     .collect::<std::collections::HashSet<String>>(),
             );
+            // Source the canonical session-claim handle from the build's
+            // runtime bindings when present; otherwise fall back to the
+            // process-global default registry so bare facade callers still
+            // hit a typed canonical owner (dogma #2 — "this session id is
+            // in use" never lives in process-global shell statics).
+            let session_claim_handle: Arc<dyn meerkat_core::handles::SessionClaimHandle> =
+                match &build_config.runtime_build_mode {
+                    meerkat_core::RuntimeBuildMode::SessionOwned(bindings) => {
+                        Arc::clone(&bindings.session_claim_handle)
+                    }
+                    meerkat_core::RuntimeBuildMode::StandaloneEphemeral => {
+                        meerkat_core::handles::DefaultSessionClaimRegistry::global()
+                            as Arc<dyn meerkat_core::handles::SessionClaimHandle>
+                    }
+                };
             let mut runtime =
                 crate::build_session_scoped_comms_runtime_from_config_scoped_with_silent_intents(
                     config,
@@ -2075,6 +2090,7 @@ impl AgentFactory {
                     build_config.realm_id.clone(),
                     session.id(),
                     silent_intents,
+                    session_claim_handle,
                 )
                 .await
                 .map_err(BuildAgentError::Comms)?;

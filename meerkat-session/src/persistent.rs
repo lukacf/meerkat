@@ -969,6 +969,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             session_context: Arc::new(
                                 meerkat_runtime::RuntimeSessionContextHandle::ephemeral(),
                             ),
+                            // Recovery path: same rationale as `peer_interaction`
+                            // above — until the runtime epoch rebinds via
+                            // `prepare_bindings`, fall back to the process-global
+                            // default registry so bare comms paths still hit a
+                            // canonical owner (dogma #2).
+                            session_claim_handle:
+                                meerkat_core::handles::DefaultSessionClaimRegistry::global()
+                                    as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
                         },
                     )
                 })

@@ -362,6 +362,13 @@ pub struct MeerkatMachine {
     comms_drain_slots: RwLock<HashMap<SessionId, CommsDrainSlot>>,
     /// Runtime-owned shell seam for live session LLM reconfiguration I/O.
     llm_reconfigure_host: StdRwLock<Option<Arc<dyn SessionLlmReconfigureHost>>>,
+    /// Canonical owner of "this session id is currently active" — replaces
+    /// the deleted process-global `SESSION_IDENTITY_CLAIMS` static in the
+    /// comms shell (dogma #2). Comms runtimes acquire a typed
+    /// [`meerkat_core::handles::SessionClaim`] through this handle and hold
+    /// it for their lifetime; the registry is scoped to this `MeerkatMachine`
+    /// instance, so tests / multi-runtime processes get clean isolation.
+    session_claims: Arc<crate::handles::RuntimeSessionClaimRegistry>,
 }
 
 impl MeerkatMachine {
@@ -383,6 +390,7 @@ impl MeerkatMachine {
             blob_store: None,
             comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
+            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }
     }
 
@@ -395,6 +403,7 @@ impl MeerkatMachine {
             blob_store: Some(blob_store),
             comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
+            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }
     }
 
@@ -412,7 +421,16 @@ impl MeerkatMachine {
             blob_store: None,
             comms_drain_slots: RwLock::new(HashMap::new()),
             llm_reconfigure_host: StdRwLock::new(None),
+            session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
         }
+    }
+
+    /// The canonical session-identity claim handle owned by this
+    /// `MeerkatMachine`. Comms runtimes wired through this machine acquire
+    /// their session-id claim through it; the registry is scoped to this
+    /// machine instance so tests / parallel runtimes do not collide.
+    pub fn session_claim_handle(&self) -> Arc<dyn meerkat_core::handles::SessionClaimHandle> {
+        Arc::clone(&self.session_claims) as Arc<dyn meerkat_core::handles::SessionClaimHandle>
     }
 
     /// Create a driver entry for a session.

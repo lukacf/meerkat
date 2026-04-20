@@ -23,6 +23,8 @@ use meerkat_core::comms::{
     TrustedPeerSpec,
 };
 use meerkat_core::config::PlainEventSource;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::handles::{SessionClaim, SessionClaimError, SessionClaimHandle};
 use meerkat_core::hydrate_content_blocks;
 use meerkat_core::time_compat::Instant;
 use meerkat_core::{BlobStore, MissingBlobBehavior};
@@ -33,8 +35,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,58 +106,6 @@ impl StreamRegistryEntry {
 }
 
 type InteractionStreamRegistry = Arc<Mutex<HashMap<Uuid, StreamRegistryEntry>>>;
-
-#[cfg(not(target_arch = "wasm32"))]
-static SESSION_IDENTITY_CLAIMS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-
-#[cfg(not(target_arch = "wasm32"))]
-struct SessionIdentityClaim {
-    session_id: String,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl SessionIdentityClaim {
-    fn acquire(session_id: &meerkat_core::SessionId) -> Result<Self, CommsRuntimeError> {
-        let session_id = session_id.to_string();
-        let mut claims = SESSION_IDENTITY_CLAIMS.lock();
-        if !claims.insert(session_id.clone()) {
-            return Err(CommsRuntimeError::SessionIdentityInUse(session_id));
-        }
-        Ok(Self { session_id })
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for SessionIdentityClaim {
-    fn drop(&mut self) {
-        SESSION_IDENTITY_CLAIMS.lock().remove(&self.session_id);
-    }
-}
-
-/// Forcibly release a session identity claim that was not cleaned up by Drop.
-///
-/// This is needed when the task holding a [`SessionIdentityClaim`] is not
-/// joined on shutdown — the Drop never fires and the claim persists in the
-/// process-global set, preventing the same session_id from being reused
-/// after an in-process restart.
-///
-/// Returns `true` if the claim was present and removed.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn release_session_claim(session_id: &meerkat_core::SessionId) -> bool {
-    SESSION_IDENTITY_CLAIMS
-        .lock()
-        .remove(&session_id.to_string())
-}
-
-/// Remove all session identity claims.
-///
-/// Intended for in-process restart / test teardown where the previous
-/// runtime's tasks may not have been joined and their claims linger.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn clear_all_session_claims() {
-    SESSION_IDENTITY_CLAIMS.lock().clear();
-}
 
 struct InteractionStream {
     id: Uuid,
@@ -998,6 +946,17 @@ pub enum CommsRuntimeError {
     UnsafeBinding(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl From<SessionClaimError> for CommsRuntimeError {
+    fn from(err: SessionClaimError) -> Self {
+        match err {
+            SessionClaimError::SessionIdentityInUse(sid) => {
+                Self::SessionIdentityInUse(sid.to_string())
+            }
+        }
+    }
+}
+
 /// Material needed by the facade's comms tool composition helper.
 ///
 /// Bundles the concrete router/trust/key access so the facade doesn't
@@ -1053,7 +1012,7 @@ pub struct CommsRuntime {
     #[cfg(not(target_arch = "wasm32"))]
     listeners_started: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    _session_identity_claim: Option<SessionIdentityClaim>,
+    _session_identity_claim: Option<SessionClaim>,
     keypair: Arc<Keypair>,
     bridge_bootstrap_token: String,
     require_peer_auth: bool,
@@ -1320,8 +1279,11 @@ impl CommsRuntime {
         identity_root: std::path::PathBuf,
         session_id: &meerkat_core::SessionId,
         silent_intents: Arc<HashSet<String>>,
+        session_claim_handle: Arc<dyn SessionClaimHandle>,
     ) -> Result<Self, CommsRuntimeError> {
-        let claim = SessionIdentityClaim::acquire(session_id)?;
+        let claim = session_claim_handle
+            .try_acquire(session_id)
+            .map_err(CommsRuntimeError::from)?;
         let identity_dir = identity_root.join(session_id.to_string());
         let keypair = Keypair::load_or_generate(&identity_dir)
             .await
@@ -3900,16 +3862,25 @@ mod tests {
         );
     }
 
+    /// Build a fresh per-test session-claim handle. Each test gets its own
+    /// registry instance so suite-scoped identity claims do not leak across
+    /// tests run in parallel.
+    fn test_claim_handle() -> Arc<dyn SessionClaimHandle> {
+        Arc::new(meerkat_core::handles::DefaultSessionClaimRegistry::new())
+    }
+
     #[tokio::test]
     async fn test_session_scoped_inproc_identity_preserves_peer_id_for_same_session() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session_id = SessionId::new();
+        let claim_handle = test_claim_handle();
         let runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
             "session-scoped-peer",
             None,
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            Arc::clone(&claim_handle),
         )
         .await
         .expect("create first session-scoped runtime");
@@ -3922,6 +3893,7 @@ mod tests {
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            claim_handle,
         )
         .await
         .expect("recreate session-scoped runtime");
@@ -3937,12 +3909,14 @@ mod tests {
     async fn test_session_scoped_inproc_identity_rejects_second_live_activation() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session_id = SessionId::new();
+        let claim_handle = test_claim_handle();
         let _runtime = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
             "session-scoped-lock",
             None,
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            Arc::clone(&claim_handle),
         )
         .await
         .expect("create first session-scoped runtime");
@@ -3953,6 +3927,7 @@ mod tests {
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            claim_handle,
         )
         .await
         {
@@ -3970,12 +3945,14 @@ mod tests {
     async fn test_session_scoped_inproc_identity_does_not_restore_trust_from_disk() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session_id = SessionId::new();
+        let claim_handle = test_claim_handle();
         let sender = CommsRuntime::inproc_only_session_scoped_with_silent_intents(
             "session-scoped-trust",
             None,
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            Arc::clone(&claim_handle),
         )
         .await
         .expect("create session-scoped runtime");
@@ -4004,6 +3981,7 @@ mod tests {
             tmp.path().join("session-identities"),
             &session_id,
             Arc::new(HashSet::new()),
+            claim_handle,
         )
         .await
         .expect("recreate session-scoped runtime");
@@ -4693,45 +4671,5 @@ mod tests {
             !removed,
             "remove should return false for peer that was never trusted"
         );
-    }
-
-    /// Regression: SESSION_IDENTITY_CLAIMS is process-global. If a task
-    /// holding a SessionIdentityClaim is not joined on shutdown, the claim
-    /// lingers and prevents re-acquiring the same session_id after an
-    /// in-process restart.
-    #[test]
-    fn test_release_session_claim_allows_reacquire() {
-        let sid = meerkat_core::SessionId::new();
-        // Acquire the claim
-        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
-        // Simulate leaked claim (forget Drop)
-        std::mem::forget(claim);
-
-        // Without release, re-acquiring fails
-        assert!(
-            SessionIdentityClaim::acquire(&sid).is_err(),
-            "second acquire should fail while claim is leaked"
-        );
-
-        // Force-release the leaked claim
-        assert!(release_session_claim(&sid));
-
-        // Now re-acquiring succeeds
-        let claim2 = SessionIdentityClaim::acquire(&sid)
-            .expect("acquire should succeed after force-release");
-        drop(claim2);
-    }
-
-    #[test]
-    fn test_clear_all_session_claims_allows_reacquire() {
-        let sid = meerkat_core::SessionId::new();
-        let claim = SessionIdentityClaim::acquire(&sid).unwrap();
-        std::mem::forget(claim);
-
-        clear_all_session_claims();
-
-        let claim2 =
-            SessionIdentityClaim::acquire(&sid).expect("acquire should succeed after clear_all");
-        drop(claim2);
     }
 }

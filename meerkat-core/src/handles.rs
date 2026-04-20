@@ -26,6 +26,7 @@ use crate::lifecycle::{InputId, RunId};
 use crate::peer_correlation::{
     InboundPeerRequestState, OutboundPeerRequestState, PeerCorrelationId,
 };
+use crate::types::SessionId;
 
 /// Error surfaced when a DSL transition is rejected.
 ///
@@ -675,4 +676,142 @@ pub trait SessionContextAdvancedObserver: Send + Sync {
     /// effect. `updated_at_ms` is the monotonic millisecond watermark of
     /// the canonical session-context mutation that produced this tick.
     fn on_session_context_advanced(&self, updated_at_ms: u64);
+}
+
+// ---------------------------------------------------------------------------
+// SessionClaimHandle (dogma #2 — canonical session-identity owner)
+// ---------------------------------------------------------------------------
+
+/// Error surfaced by [`SessionClaimHandle::try_acquire`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionClaimError {
+    /// Another live claim already exists for this session id.
+    #[error("session identity already claimed: {0}")]
+    SessionIdentityInUse(SessionId),
+}
+
+/// RAII token returned by [`SessionClaimHandle::try_acquire`].
+///
+/// While alive, the underlying registry guarantees no other caller can
+/// acquire a claim for the same `session_id`. Drop releases the claim back
+/// through the owning handle.
+pub struct SessionClaim {
+    session_id: SessionId,
+    handle: Arc<dyn SessionClaimHandle>,
+}
+
+impl SessionClaim {
+    /// Construct a new claim — only [`SessionClaimHandle`] impls should call
+    /// this, immediately after they have inserted `session_id` into their
+    /// canonical registry under a single critical section.
+    pub fn new(session_id: SessionId, handle: Arc<dyn SessionClaimHandle>) -> Self {
+        Self { session_id, handle }
+    }
+
+    /// The session id this claim covers.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+}
+
+impl Drop for SessionClaim {
+    fn drop(&mut self) {
+        self.handle.release(&self.session_id);
+    }
+}
+
+impl std::fmt::Debug for SessionClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionClaim")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Process-scope canonical owner of "this session id is currently active."
+///
+/// One canonical owner per process: `MeerkatMachine` exposes its registry
+/// when a runtime is wired (so every live runtime-registered session also
+/// owns its identity claim), and a default in-process registry covers bare
+/// `AgentFactory` callers without a runtime. Either way, "this session id
+/// is in use" lives in a typed owner — never in process-global shell
+/// bookkeeping.
+pub trait SessionClaimHandle: Send + Sync {
+    /// Atomically reserve `session_id`. Returns a [`SessionClaim`] whose
+    /// `Drop` releases the slot. Returns
+    /// [`SessionClaimError::SessionIdentityInUse`] if another live claim
+    /// already covers this session.
+    ///
+    /// Implementations MUST insert under a single critical section so two
+    /// concurrent callers cannot both succeed.
+    fn try_acquire(
+        self: Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<SessionClaim, SessionClaimError>;
+
+    /// Release a claim previously created by [`Self::try_acquire`].
+    ///
+    /// Called from [`SessionClaim`]'s `Drop`. Idempotent: releasing an
+    /// unknown id is a no-op (the registry was already cleared, e.g. via
+    /// runtime teardown).
+    fn release(&self, session_id: &SessionId);
+}
+
+/// In-process default [`SessionClaimHandle`] for bare-usage paths that have
+/// no `MeerkatMachine` available (standalone `AgentFactory` callers, doc
+/// examples, simple SDK consumers). One process-global instance keeps the
+/// "one active claim per session id" invariant intact even when no runtime
+/// is wired.
+pub struct DefaultSessionClaimRegistry {
+    claims: std::sync::Mutex<std::collections::HashSet<SessionId>>,
+}
+
+impl DefaultSessionClaimRegistry {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self {
+            claims: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// Process-global instance — used by bare-usage facade builders.
+    pub fn global() -> Arc<Self> {
+        use std::sync::OnceLock;
+        static GLOBAL: OnceLock<Arc<DefaultSessionClaimRegistry>> = OnceLock::new();
+        Arc::clone(GLOBAL.get_or_init(|| Arc::new(DefaultSessionClaimRegistry::new())))
+    }
+}
+
+impl Default for DefaultSessionClaimRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionClaimHandle for DefaultSessionClaimRegistry {
+    fn try_acquire(
+        self: Arc<Self>,
+        session_id: &SessionId,
+    ) -> Result<SessionClaim, SessionClaimError> {
+        let mut claims = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !claims.insert(session_id.clone()) {
+            return Err(SessionClaimError::SessionIdentityInUse(session_id.clone()));
+        }
+        drop(claims);
+        Ok(SessionClaim::new(
+            session_id.clone(),
+            self as Arc<dyn SessionClaimHandle>,
+        ))
+    }
+
+    fn release(&self, session_id: &SessionId) {
+        let mut claims = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        claims.remove(session_id);
+    }
 }

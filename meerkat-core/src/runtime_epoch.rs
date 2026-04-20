@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::completion_feed::CompletionSeq;
 use crate::handles::{
     AuthLeaseHandle, CommsDrainHandle, ExternalToolSurfaceHandle, McpServerLifecycleHandle,
-    PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle, SessionContextHandle,
-    TurnStateHandle,
+    PeerCommsHandle, PeerInteractionHandle, SessionAdmissionHandle, SessionClaimHandle,
+    SessionContextHandle, TurnStateHandle,
 };
 use crate::ops_lifecycle::OpsLifecycleRegistry;
 use crate::tool_scope::ToolVisibilityOwner;
@@ -192,6 +192,15 @@ pub struct SessionRuntimeBindings {
     /// a typed `SessionContextAdvanced` effect instead of polling a watch
     /// channel. Shares the same `HandleDslAuthority` as the other handles.
     pub session_context: Arc<dyn SessionContextHandle>,
+    /// Session-identity claim handle owned by the runtime (dogma #2).
+    ///
+    /// Comms runtimes built for this session acquire their typed
+    /// [`SessionClaim`] through this handle. The canonical owner lives on
+    /// `MeerkatMachine` so per-process uniqueness is enforced by the
+    /// runtime, not by process-global shell statics.
+    ///
+    /// [`SessionClaim`]: crate::handles::SessionClaim
+    pub session_claim_handle: Arc<dyn SessionClaimHandle>,
 }
 
 impl Clone for SessionRuntimeBindings {
@@ -211,6 +220,7 @@ impl Clone for SessionRuntimeBindings {
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
             peer_interaction: self.peer_interaction.as_ref().map(Arc::clone),
             session_context: Arc::clone(&self.session_context),
+            session_claim_handle: Arc::clone(&self.session_claim_handle),
         }
     }
 }
@@ -238,6 +248,7 @@ impl std::fmt::Debug for SessionRuntimeBindings {
                     .map(|_| "<dyn PeerInteractionHandle>"),
             )
             .field("session_context", &"<dyn SessionContextHandle>")
+            .field("session_claim_handle", &"<dyn SessionClaimHandle>")
             .finish()
     }
 }
@@ -250,10 +261,10 @@ impl std::fmt::Debug for SessionRuntimeBindings {
 ///   epoch owner. Never creates a competing registry.
 ///
 /// The `SessionOwned` variant is intentionally large — it carries the full
-/// bundle of Arc-wrapped DSL handles and registries. Since `SessionOwned`
-/// is the common case on every runtime-backed surface (RPC, REST, MCP),
-/// boxing it to shrink the enum would regress the hot path. The
-/// `StandaloneEphemeral` path only appears in WASM, tests, and
+/// bundle of Arc-wrapped DSL handles and registries. Every value passes
+/// through the factory exactly once, never lands in a collection, so paying
+/// for an extra heap indirection on every construction would regress the hot
+/// path. The `StandaloneEphemeral` path only appears in WASM, tests, and
 /// standalone embedded runs.
 #[allow(clippy::large_enum_variant)]
 pub enum RuntimeBuildMode {

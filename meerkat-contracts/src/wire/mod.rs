@@ -71,12 +71,14 @@ pub use realtime::{
 };
 pub use result::WireRunResult;
 pub use runtime::{
-    InputListParams, InputListResult, InputStateParams, InputStateResult, RuntimeAcceptOutcomeType,
-    RuntimeAcceptParams, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusEntry,
+    InputListParams, InputListResult, InputStateParams, InputStateResult,
+    PeerResponseTerminalStatusWire, RuntimeAcceptOutcomeType, RuntimeAcceptParams,
+    RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusEntry,
     RuntimeRealtimeAttachmentStatusParams, RuntimeRealtimeAttachmentStatusResult,
     RuntimeRealtimeAttachmentStatusesParams, RuntimeRealtimeAttachmentStatusesResult,
     RuntimeResetParams, RuntimeResetResult, RuntimeRetireParams, RuntimeRetireResult,
-    RuntimeStateParams, RuntimeStateResult, WireInputLifecycleState, WireInputState,
+    RuntimeStateParams, RuntimeStateResult, SessionExternalEventEnvelope,
+    SessionPeerResponseTerminalParams, WireInputLifecycleState, WireInputState,
     WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, WireRuntimeState,
 };
 pub use schedule::{

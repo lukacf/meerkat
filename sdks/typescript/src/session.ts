@@ -119,6 +119,29 @@ export class Session {
     return this._client.injectContext(this._id, text, options);
   }
 
+  async sendExternalEvent(
+    eventType: string,
+    payload: unknown,
+    options?: { blocks?: ContentBlock[] },
+  ): Promise<Record<string, unknown>> {
+    return this._client.sendExternalEvent(this._id, eventType, payload, options);
+  }
+
+  async sendPeerResponseTerminal(
+    peerName: string,
+    requestId: string,
+    status: "completed" | "failed" | "cancelled",
+    result: unknown,
+  ): Promise<Record<string, unknown>> {
+    return this._client.sendPeerResponseTerminal(
+      this._id,
+      peerName,
+      requestId,
+      status,
+      result,
+    );
+  }
+
   async subscribeEvents(): Promise<EventSubscription<AgentEventEnvelope>> {
     return this._client.subscribeSessionEvents(this._id);
   }
@@ -228,6 +251,29 @@ export class DeferredSession {
     options?: SessionIngressOptions,
   ): Promise<{ status: string }> {
     return this._client.injectContext(this._id, text, options);
+  }
+
+  async sendExternalEvent(
+    eventType: string,
+    payload: unknown,
+    options?: { blocks?: ContentBlock[] },
+  ): Promise<Record<string, unknown>> {
+    return this._client.sendExternalEvent(this._id, eventType, payload, options);
+  }
+
+  async sendPeerResponseTerminal(
+    peerName: string,
+    requestId: string,
+    status: "completed" | "failed" | "cancelled",
+    result: unknown,
+  ): Promise<Record<string, unknown>> {
+    return this._client.sendPeerResponseTerminal(
+      this._id,
+      peerName,
+      requestId,
+      status,
+      result,
+    );
   }
 
   toString(): string {

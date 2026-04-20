@@ -495,14 +495,36 @@ export class MeerkatClient {
 
   async sendExternalEvent(
     sessionId: string,
+    eventType: string,
     payload: unknown,
-    options?: { source?: string },
+    options?: { blocks?: ContentBlock[] },
   ): Promise<Record<string, unknown>> {
-    const params: Record<string, unknown> = { session_id: sessionId, payload };
-    if (options?.source !== undefined) {
-      params.source = options.source;
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      kind: "generic_json",
+      event_type: eventType,
+      payload,
+    };
+    if (options?.blocks !== undefined) {
+      params.blocks = options.blocks;
     }
     return this.request("session/external_event", params);
+  }
+
+  async sendPeerResponseTerminal(
+    sessionId: string,
+    peerName: string,
+    requestId: string,
+    status: "completed" | "failed" | "cancelled",
+    result: unknown,
+  ): Promise<Record<string, unknown>> {
+    return this.request("session/peer_response_terminal", {
+      session_id: sessionId,
+      peer_name: peerName,
+      request_id: requestId,
+      status,
+      result,
+    });
   }
 
   async injectContext(

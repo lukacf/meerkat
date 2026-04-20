@@ -1219,6 +1219,18 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     continue;
                                                 }
                                                 if let Some(product_session) = product_session.as_mut() {
+                                                    let turn_in_flight = product_turn_handle
+                                                        .as_ref()
+                                                        .is_some_and(|h| h.is_in_flight());
+                                                    while let Ok(notified_at) =
+                                                        projection_refresh_rx.try_recv()
+                                                    {
+                                                        projection_freshness = projection_freshness
+                                                            .on_context_advanced(
+                                                                notified_at,
+                                                                turn_in_flight,
+                                                            );
+                                                    }
                                                     let preempt = product_turn_handle
                                                         .as_ref()
                                                         .is_some_and(|h| h.should_preempt_on_input());
@@ -1327,6 +1339,60 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         // freshness state to `Clean { baseline }`
                                                         // using the current DSL watermark. No
                                                         // hand-maintained dirty flag.
+                                                        let watermark_ms = session_context_handle
+                                                            .as_ref()
+                                                            .map(|h| h.current_watermark_ms())
+                                                            .unwrap_or(0);
+                                                        projection_freshness =
+                                                            projection_freshness.on_refreshed(watermark_ms);
+                                                    }
+                                                    if !preempt && turn_was_idle {
+                                                        let session_id = match resolve_primary_session_id(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                            "realtime frame routing is not wired to the substrate yet",
+                                                        )
+                                                        .await {
+                                                            Ok(session_id) => session_id,
+                                                            Err(error) => {
+                                                                let _ = send_server_frame(
+                                                                    &mut socket,
+                                                                    &RealtimeServerFrame::ChannelError(error),
+                                                                )
+                                                                .await;
+                                                                continue;
+                                                            }
+                                                        };
+                                                        if let Err(error) = wait_for_runtime_turn_quiescence(
+                                                            &state.runtime,
+                                                            &session_id,
+                                                            Duration::from_secs(2),
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = send_server_frame(
+                                                                &mut socket,
+                                                                &RealtimeServerFrame::ChannelError(error),
+                                                            )
+                                                            .await;
+                                                            continue;
+                                                        }
+                                                        if let Err(error) = refresh_product_session_projection(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                            turning_mode,
+                                                            state.host.session_factory.clone(),
+                                                            product_session,
+                                                        )
+                                                        .await
+                                                        {
+                                                            let _ = send_server_frame(
+                                                                &mut socket,
+                                                                &RealtimeServerFrame::ChannelError(error),
+                                                            )
+                                                            .await;
+                                                            continue;
+                                                        }
                                                         let watermark_ms = session_context_handle
                                                             .as_ref()
                                                             .map(|h| h.current_watermark_ms())
@@ -1637,15 +1703,22 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 .as_ref()
                                                 .map(|h| h.current_watermark_ms())
                                                 .unwrap_or(0);
+                                            let turn_in_flight = product_turn_handle
+                                                .as_ref()
+                                                .is_some_and(|h| h.is_in_flight());
+                                            let mut max_notified_at = None;
                                             // Drain any queued observer notifies so they don't
                                             // land in the wrong phase. Pass `false` so they
                                             // don't transition into `StaleDeferred` — the DSL
                                             // already recorded this advance, and we're about to
                                             // consume it via `on_refreshed` below.
-                                            while projection_refresh_rx.try_recv().is_ok() {
-                                                // Intentionally discarded. The canonical DSL
-                                                // watermark is authoritative; the observer just
-                                                // signalled us to look.
+                                            while let Ok(notified_at) =
+                                                projection_refresh_rx.try_recv()
+                                            {
+                                                max_notified_at = Some(max_notified_at.map_or(
+                                                    notified_at,
+                                                    |current: u64| current.max(notified_at),
+                                                ));
                                             }
                                             // Reset to `Clean` at the current DSL watermark. This
                                             // supersedes any `StaleDeferred { new_at_ms }` that
@@ -1653,6 +1726,21 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             // arrived before this `update` arm ran.
                                             projection_freshness =
                                                 projection_freshness.on_refreshed(watermark_ms);
+                                            if let Some(notified_at) = max_notified_at
+                                                && notified_at > watermark_ms
+                                            {
+                                                // Preserve a newer concurrent external session
+                                                // advance (for example, a peer_response_terminal
+                                                // landing while our own turn was still
+                                                // committing). Treat it as stale work instead of
+                                                // discarding the observer tick as if it were part
+                                                // of the own-turn baseline.
+                                                projection_freshness = projection_freshness
+                                                    .on_context_advanced(
+                                                        notified_at,
+                                                        turn_in_flight,
+                                                    );
+                                            }
                                         }
                                         if let Some(handle) = product_turn_handle.as_ref() {
                                             // U9: fire typed lifecycle inputs in the order the
@@ -3023,6 +3111,41 @@ async fn resolve_primary_session_id(
             message: not_bound_message.to_string(),
             details: None,
         }),
+    }
+}
+
+async fn wait_for_runtime_turn_quiescence(
+    runtime: &SessionRuntime,
+    session_id: &SessionId,
+    timeout: Duration,
+) -> Result<(), RealtimeChannelErrorFrame> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let state = match runtime.runtime_adapter().runtime_state(session_id).await {
+            Ok(state) => state,
+            Err(error) => return Err(runtime_error_frame(error, "input")),
+        };
+        let active_inputs = match runtime
+            .runtime_adapter()
+            .list_active_inputs(session_id)
+            .await
+        {
+            Ok(active_inputs) => active_inputs,
+            Err(error) => return Err(runtime_error_frame(error, "input")),
+        };
+        if matches!(state, meerkat_runtime::RuntimeState::Running) || !active_inputs.is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(RealtimeChannelErrorFrame {
+                    code: RealtimeErrorCode::InvalidTarget,
+                    message: "realtime runtime work did not quiesce before accepting new input"
+                        .to_string(),
+                    details: None,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        } else {
+            return Ok(());
+        }
     }
 }
 

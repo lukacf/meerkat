@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::wire::session::WireContentBlock;
+use meerkat_core::comms::PeerName;
+
 /// Request payload for `runtime/state`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -35,6 +38,52 @@ pub struct RuntimeRealtimeAttachmentStatusesParams {
 pub struct RuntimeAcceptParams {
     pub session_id: String,
     pub input: serde_json::Value,
+}
+
+/// Terminal status for dedicated correlated peer-response ingress.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PeerResponseTerminalStatusWire {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// Dedicated request payload for `session/peer_response_terminal`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionPeerResponseTerminalParams {
+    pub session_id: String,
+    pub peer_name: PeerName,
+    pub request_id: String,
+    pub status: PeerResponseTerminalStatusWire,
+    pub result: serde_json::Value,
+}
+
+/// Typed event envelope for the generic `session/external_event` and
+/// `/sessions/{id}/external-events` surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionExternalEventEnvelope {
+    /// Generic external JSON event admitted as `Input::ExternalEvent`.
+    GenericJson {
+        event_type: String,
+        payload: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<WireContentBlock>>,
+    },
+    /// Reserved typed semantic. Callers must use the dedicated
+    /// `session/peer_response_terminal` / `/peer-response-terminal` surface
+    /// instead of routing terminal peer responses through the generic event
+    /// ingress.
+    PeerResponseTerminal {
+        peer_name: PeerName,
+        request_id: String,
+        status: PeerResponseTerminalStatusWire,
+        result: serde_json::Value,
+    },
 }
 
 /// Request payload for `runtime/retire`.

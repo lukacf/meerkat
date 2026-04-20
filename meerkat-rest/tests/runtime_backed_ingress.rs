@@ -197,8 +197,9 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         .header("content-type", "application/json")
         .body(Body::from(
             serde_json::to_vec(&json!({
-                "source": "phase8",
-                "body": "runtime-backed external event"
+                "kind": "generic_json",
+                "event_type": "phase8",
+                "payload": { "body": "runtime-backed external event" }
             }))
             .expect("serialize event payload"),
         ))

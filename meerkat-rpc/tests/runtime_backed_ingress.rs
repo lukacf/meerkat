@@ -136,8 +136,9 @@ async fn runtime_backed_ingress_red_ok_rpc_session_create_and_turn_start_roundtr
             "method": "session/external_event",
             "params": {
                 "session_id": session_id,
-                "payload": { "alert": "runtime-backed rpc external event" },
-                "source": "phase8"
+                "kind": "generic_json",
+                "event_type": "phase8",
+                "payload": { "alert": "runtime-backed rpc external event" }
             }
         }),
     )

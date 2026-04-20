@@ -814,6 +814,7 @@ async fn initialize_methods_list_complete() {
         "session/history",
         "session/archive",
         "session/external_event",
+        "session/peer_response_terminal",
         "session/inject_context",
         "session/stream_open",
         "session/stream_close",

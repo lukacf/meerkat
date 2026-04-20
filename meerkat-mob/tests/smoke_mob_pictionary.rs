@@ -261,11 +261,13 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
             .map_err(|e| format!("spawn {name}: {e}"))?;
     }
 
-    // Wait for kickoff completion (initial autonomous turns)
+    // Wait for startup readiness, not kickoff completion. Four-model kickoff
+    // latency is not the same contract as "members are bound and ready to
+    // orchestrate the round".
     handle
-        .wait_for_kickoff_complete(Some(Duration::from_secs(60)))
+        .wait_for_ready(Some(Duration::from_secs(60)))
         .await
-        .map_err(|e| format!("kickoff wait: {e}"))?;
+        .map_err(|e| format!("ready wait: {e}"))?;
     Ok(())
 }
 

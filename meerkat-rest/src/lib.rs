@@ -1088,6 +1088,10 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/external-events", post(post_external_event))
+        .route(
+            "/sessions/{id}/peer-response-terminal",
+            post(post_peer_response_terminal),
+        )
         .route("/sessions/{id}/events", get(session_events))
         .route("/schedule/tools", get(schedule_tools))
         .route("/schedule/call", post(schedule_call))
@@ -2248,29 +2252,55 @@ async fn comms_peers(
 }
 
 fn make_runtime_external_event_input(
-    source_name: &str,
     event_type: &str,
     payload: Value,
-) -> meerkat_runtime::Input {
-    meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-        header: meerkat_runtime::InputHeader {
-            id: meerkat_core::lifecycle::InputId::new(),
-            timestamp: chrono::Utc::now(),
-            source: meerkat_runtime::InputOrigin::External {
-                source_name: source_name.to_string(),
+    blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
+) -> Result<meerkat_runtime::Input, ApiError> {
+    if event_type.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "event_type cannot be empty".to_string(),
+        ));
+    }
+
+    let blocks = blocks
+        .map(|blocks| {
+            blocks
+                .into_iter()
+                .map(meerkat_core::types::ContentBlock::try_from)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|message| ApiError::BadRequest(message.to_string()))?;
+
+    Ok(meerkat_runtime::Input::ExternalEvent(
+        meerkat_runtime::ExternalEventInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::External {
+                    source_name: event_type.to_string(),
+                },
+                durability: meerkat_runtime::InputDurability::Durable,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
             },
-            durability: meerkat_runtime::InputDurability::Durable,
-            visibility: meerkat_runtime::InputVisibility::default(),
-            idempotency_key: None,
-            supersession_key: None,
-            correlation_id: None,
+            event_type: event_type.to_string(),
+            payload,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            blocks,
         },
-        event_type: event_type.to_string(),
-        payload,
-        handling_mode: meerkat_core::types::HandlingMode::Queue,
-        render_metadata: None,
-        blocks: None,
-    })
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RestPeerResponseTerminalBody {
+    peer_name: meerkat_core::comms::PeerName,
+    request_id: String,
+    status: meerkat_contracts::PeerResponseTerminalStatusWire,
+    result: Value,
 }
 
 /// Queue an external event into the runtime without waking an idle session.
@@ -2282,7 +2312,7 @@ async fn post_external_event(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<Value>,
+    Json(event): Json<meerkat_contracts::SessionExternalEventEnvelope>,
 ) -> Result<(StatusCode, Json<Value>), Response> {
     // Webhook auth resolved once at startup, stored in AppState.
     webhook::verify_webhook(&headers, &state.webhook_auth)
@@ -2292,13 +2322,112 @@ async fn post_external_event(
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
     ensure_runtime_session_registered(&state, &session_id).await?;
 
-    let input = make_runtime_external_event_input("webhook", "webhook", payload);
+    let input = match event {
+        meerkat_contracts::SessionExternalEventEnvelope::GenericJson {
+            event_type,
+            payload,
+            blocks,
+        } => make_runtime_external_event_input(&event_type, payload, blocks),
+        meerkat_contracts::SessionExternalEventEnvelope::PeerResponseTerminal { .. } => Err(
+            ApiError::BadRequest(
+                "peer_response_terminal is reserved on /external-events; use /peer-response-terminal"
+                    .to_string(),
+            ),
+        ),
+    }
+    .map_err(IntoResponse::into_response)?;
 
     match state
         .runtime_adapter
         .accept_input_without_wake(&session_id, input)
         .await
     {
+        Ok(
+            meerkat_runtime::AcceptOutcome::Accepted { .. }
+            | meerkat_runtime::AcceptOutcome::Deduplicated { .. },
+        ) => Ok((StatusCode::ACCEPTED, Json(json!({"queued": true})))),
+        Ok(meerkat_runtime::AcceptOutcome::Rejected { reason }) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": reason.to_string()})),
+        )
+            .into_response()),
+        Ok(outcome) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": format!("unexpected runtime accept outcome: {outcome:?}"),
+            })),
+        )
+            .into_response()),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("runtime not accepting input while in state: {state}")})),
+        )
+            .into_response()),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+/// Admit a correlated terminal peer response through the typed runtime ingress.
+async fn post_peer_response_terminal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<RestPeerResponseTerminalBody>,
+) -> Result<(StatusCode, Json<Value>), Response> {
+    webhook::verify_webhook(&headers, &state.webhook_auth)
+        .map_err(|msg| ApiError::Unauthorized(msg.to_string()).into_response())?;
+
+    let peer_name = meerkat_core::comms::PeerName::new(body.peer_name.as_str().to_string())
+        .map_err(ApiError::BadRequest)
+        .map_err(IntoResponse::into_response)?;
+
+    if body.request_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("request_id cannot be empty".to_string()).into_response());
+    }
+
+    let session_id =
+        resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
+    ensure_runtime_session_registered(&state, &session_id).await?;
+
+    let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+        header: meerkat_runtime::InputHeader {
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::Peer {
+                peer_id: peer_name.as_string(),
+                runtime_id: None,
+            },
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
+            request_id: body.request_id,
+            status: match body.status {
+                meerkat_contracts::PeerResponseTerminalStatusWire::Completed => {
+                    meerkat_runtime::ResponseTerminalStatus::Completed
+                }
+                meerkat_contracts::PeerResponseTerminalStatusWire::Failed => {
+                    meerkat_runtime::ResponseTerminalStatus::Failed
+                }
+                meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled => {
+                    meerkat_runtime::ResponseTerminalStatus::Cancelled
+                }
+            },
+        }),
+        body: String::new(),
+        payload: Some(body.result),
+        blocks: None,
+        handling_mode: None,
+    });
+
+    match state.runtime_adapter.accept_input(&session_id, input).await {
         Ok(
             meerkat_runtime::AcceptOutcome::Accepted { .. }
             | meerkat_runtime::AcceptOutcome::Deduplicated { .. },

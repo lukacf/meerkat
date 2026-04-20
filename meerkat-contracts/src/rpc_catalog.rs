@@ -156,9 +156,17 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.session_events_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic(
+            RpcMethodDescriptor::typed(
                 "session/external_event",
                 "Queue a runtime-backed external event",
+                "SessionExternalEventEnvelope",
+                "RuntimeAcceptResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "session/peer_response_terminal",
+                "Admit a correlated terminal peer response through the typed runtime ingress",
+                "SessionPeerResponseTerminalParams",
+                "RuntimeAcceptResult",
             ),
             RpcMethodDescriptor::basic(
                 "session/inject_context",
@@ -538,6 +546,11 @@ mod tests {
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
         let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
         assert!(methods.iter().any(|m| m == "session/inject_context"));
+        assert!(
+            methods
+                .iter()
+                .any(|m| m == "session/peer_response_terminal")
+        );
         assert!(methods.iter().any(|m| m == "mob/events"));
         assert!(methods.iter().any(|m| m == "mob/member_send"));
         assert!(methods.iter().any(|m| m == "mob/wait_kickoff"));

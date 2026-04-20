@@ -950,7 +950,7 @@ describe("Parity wrappers", () => {
       return { status: "accepted" };
     };
 
-    const external = await client.sendExternalEvent("s1", { type: "webhook" }, { source: "test" });
+    const external = await client.sendExternalEvent("s1", "test", { type: "webhook" });
     const catalog = await client.getModelsCatalog();
 
     assert.equal(external.status, "accepted");
@@ -958,6 +958,8 @@ describe("Parity wrappers", () => {
     assert.deepEqual(catalog.contractVersion, { major: 0, minor: 5, patch: 1 });
     assert.deepEqual(calls.map((c) => c.method), ["session/external_event", "models/catalog"]);
     assert.equal(calls[0].params.session_id, "s1");
+    assert.equal(calls[0].params.kind, "generic_json");
+    assert.equal(calls[0].params.event_type, "test");
   });
 
   it("adds wrappers for schedule APIs", async () => {

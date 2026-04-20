@@ -245,6 +245,7 @@ async fn initialize_roundtrip() {
     let method_names: Vec<&str> = methods.iter().map(|m| m.as_str().unwrap()).collect();
     assert!(method_names.contains(&"session/create"));
     assert!(method_names.contains(&"session/external_event"));
+    assert!(method_names.contains(&"session/peer_response_terminal"));
     assert!(method_names.contains(&"session/inject_context"));
     assert!(method_names.contains(&"turn/start"));
     assert!(method_names.contains(&"runtime/state"));

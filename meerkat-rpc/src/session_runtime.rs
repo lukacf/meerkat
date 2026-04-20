@@ -1895,8 +1895,9 @@ impl SessionRuntime {
     pub async fn accept_external_event_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
+        event_type: String,
         payload: serde_json::Value,
-        source_name: String,
+        blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
     ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
         use meerkat_runtime::input::{
             ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
@@ -1909,12 +1910,22 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
+        if event_type.trim().is_empty() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "event_type cannot be empty".to_string(),
+                data: None,
+            });
+        }
+
+        let blocks = decode_wire_content_blocks(blocks)?;
+
         let input = Input::ExternalEvent(ExternalEventInput {
             header: InputHeader {
                 id: meerkat_core::lifecycle::InputId::new(),
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::External {
-                    source_name: source_name.clone(),
+                    source_name: event_type.clone(),
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
@@ -1922,15 +1933,96 @@ impl SessionRuntime {
                 supersession_key: None,
                 correlation_id: None,
             },
-            event_type: source_name,
+            event_type,
             payload,
-            blocks: None,
+            blocks,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         });
 
         self.runtime_adapter
             .accept_input_without_wake(session_id, input)
+            .await
+            .map_err(|e| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("runtime accept failed: {e}"),
+                data: None,
+            })
+    }
+
+    /// Admit a typed correlated terminal peer response through the
+    /// runtime-backed path.
+    pub async fn accept_peer_response_terminal_via_runtime(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        peer_name: meerkat_core::comms::PeerName,
+        request_id: String,
+        status: meerkat_contracts::PeerResponseTerminalStatusWire,
+        result: serde_json::Value,
+    ) -> Result<meerkat_runtime::AcceptOutcome, RpcError> {
+        use meerkat_runtime::input::{
+            Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
+            PeerInput, ResponseTerminalStatus,
+        };
+
+        if self.live_session_is_stale(session_id).await? {
+            let _ = self.service.discard_live_session(session_id).await;
+            self.runtime_adapter.unregister_session(session_id).await;
+        }
+
+        self.ensure_runtime_executor(session_id).await?;
+
+        let peer_name = meerkat_core::comms::PeerName::new(peer_name.as_str().to_string())
+            .map_err(|message| RpcError {
+                code: error::INVALID_PARAMS,
+                message,
+                data: None,
+            })?;
+
+        if request_id.trim().is_empty() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "request_id cannot be empty".to_string(),
+                data: None,
+            });
+        }
+
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: peer_name.as_string(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id,
+                status: match status {
+                    meerkat_contracts::PeerResponseTerminalStatusWire::Completed => {
+                        ResponseTerminalStatus::Completed
+                    }
+                    meerkat_contracts::PeerResponseTerminalStatusWire::Failed => {
+                        ResponseTerminalStatus::Failed
+                    }
+                    meerkat_contracts::PeerResponseTerminalStatusWire::Cancelled => {
+                        ResponseTerminalStatus::Cancelled
+                    }
+                },
+            }),
+            body: String::new(),
+            payload: Some(result),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        self.runtime_adapter
+            .accept_input(session_id, input)
             .await
             .map_err(|e| RpcError {
                 code: error::INTERNAL_ERROR,
@@ -3697,6 +3789,25 @@ impl SessionRuntime {
         )
         .await;
     }
+}
+
+fn decode_wire_content_blocks(
+    blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
+) -> Result<Option<Vec<meerkat_core::types::ContentBlock>>, RpcError> {
+    let Some(blocks) = blocks else {
+        return Ok(None);
+    };
+
+    blocks
+        .into_iter()
+        .map(meerkat_core::types::ContentBlock::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+        .map_err(|message| RpcError {
+            code: error::INVALID_PARAMS,
+            message: message.to_string(),
+            data: None,
+        })
 }
 
 fn stored_has_unapplied_system_context(stored: &Session, live: &Session) -> bool {

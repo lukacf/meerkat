@@ -94,6 +94,13 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/sessions/{id}/peer-response-terminal",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Admit a correlated terminal peer response through the typed runtime ingress",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/sessions/{id}/events",
             vec![RestOperationDescriptor::new("get", "SSE event stream")],
         ),

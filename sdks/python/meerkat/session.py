@@ -244,15 +244,33 @@ class Session:
 
     async def send_external_event(
         self,
+        event_type: str,
         payload: Any,
         *,
-        source: str | None = None,
+        blocks: list[ContentBlock] | None = None,
     ) -> dict[str, Any]:
         """Append a durable external event input into this session runtime."""
         return await self._client.send_external_event(
             self._id,
+            event_type,
             payload,
-            source=source,
+            blocks=blocks,
+        )
+
+    async def send_peer_response_terminal(
+        self,
+        peer_name: str,
+        request_id: str,
+        status: str,
+        result: Any,
+    ) -> dict[str, Any]:
+        """Admit a correlated terminal peer response into this session runtime."""
+        return await self._client.send_peer_response_terminal(
+            self._id,
+            peer_name,
+            request_id,
+            status,
+            result,
         )
 
     async def history(
@@ -413,15 +431,33 @@ class DeferredSession:
 
     async def send_external_event(
         self,
+        event_type: str,
         payload: Any,
         *,
-        source: str | None = None,
+        blocks: list[ContentBlock] | None = None,
     ) -> dict[str, Any]:
         """Append a durable external event input into this deferred session."""
         return await self._client.send_external_event(
             self._id,
+            event_type,
             payload,
-            source=source,
+            blocks=blocks,
+        )
+
+    async def send_peer_response_terminal(
+        self,
+        peer_name: str,
+        request_id: str,
+        status: str,
+        result: Any,
+    ) -> dict[str, Any]:
+        """Admit a correlated terminal peer response into this deferred session."""
+        return await self._client.send_peer_response_terminal(
+            self._id,
+            peer_name,
+            request_id,
+            status,
+            result,
         )
 
     async def history(

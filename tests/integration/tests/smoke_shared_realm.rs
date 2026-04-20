@@ -6279,6 +6279,7 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
 
         eprintln!("[scenario 71] send turn 7 haiku request");
         let analyst_event_count_before_turn7 = pump.mob_stream_events(&analyst_stream).len();
+        let operator_event_count_after_turn7 = pump.mob_stream_events(&operator_stream).len();
         let turn7_commit = send_realtime_audio_and_wait_for_commit(
             &mut sender,
             &mut receiver,
@@ -6395,6 +6396,63 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             )
             .into());
         }
+        let _operator_async_haiku_run = pump
+            .wait_for_mob_stream_event_after(
+                &mut rpc,
+                &operator_stream,
+                operator_event_count_after_turn7,
+                120,
+                |event| {
+                    mob_stream_event_type(event) == Some("run_completed")
+                },
+            )
+            .await
+            .map_err(|error| {
+                let operator_events = pump.mob_stream_events(&operator_stream);
+                format!(
+                    "operator never completed the post-turn async wake run after analyst haiku send_response completed: {error}; operator_events={operator_events:?}"
+                )
+            })?;
+        eprintln!("[scenario 71] reopen realtime channel after haiku async wake");
+        sender.close().await?;
+        drop(receiver);
+        let _haiku_mid_detached_status =
+            wait_for_pump_member_status(&mut pump, &mut rpc, mob_id, operator, 30, |status| {
+                status["realtime_attachment_status"].as_str() == Some("unattached")
+            })
+            .await?;
+        let haiku_reopen_info_value = pump
+            .call(
+                &mut rpc,
+                "realtime/open_info",
+                json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": current_session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+                30,
+            )
+            .await?;
+        let haiku_reopen_info: meerkat::contracts::RealtimeOpenInfo =
+            serde_json::from_value(haiku_reopen_info_value)?;
+        let haiku_reconnect = channel.connect(&haiku_reopen_info).await?;
+        let (new_sender, new_receiver) = haiku_reconnect.split();
+        sender = new_sender;
+        receiver = new_receiver;
+        let _haiku_reopen_ready_capture =
+            collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await?;
+        let _haiku_rebound_ready = wait_for_pump_member_status(
+            &mut pump,
+            &mut rpc,
+            mob_id,
+            operator,
+            30,
+            |status| status["realtime_attachment_status"].as_str() == Some("binding_ready"),
+        )
+        .await?;
         let _turn7_quiesced =
             ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn7_capture, 5)
                 .await?;

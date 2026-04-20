@@ -730,15 +730,39 @@ class MeerkatClient:
     async def send_external_event(
         self,
         session_id: str,
+        event_type: str,
         payload: Any,
         *,
-        source: str | None = None,
+        blocks: list[ContentBlock] | None = None,
     ) -> ExternalEventOutcome:
         """Append a durable external event input to a session runtime."""
-        params: dict[str, Any] = {"session_id": session_id, "payload": payload}
-        if source is not None:
-            params["source"] = source
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "kind": "generic_json",
+            "event_type": event_type,
+            "payload": payload,
+        }
+        if blocks is not None:
+            params["blocks"] = blocks
         return await self._request("session/external_event", params)
+
+    async def send_peer_response_terminal(
+        self,
+        session_id: str,
+        peer_name: str,
+        request_id: str,
+        status: Literal["completed", "failed", "cancelled"],
+        result: Any,
+    ) -> ExternalEventOutcome:
+        """Admit a correlated terminal peer response through the typed ingress."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "peer_name": peer_name,
+            "request_id": request_id,
+            "status": status,
+            "result": result,
+        }
+        return await self._request("session/peer_response_terminal", params)
 
 
     async def inject_context(

@@ -788,6 +788,11 @@ impl MethodRouter {
                 handlers::event::handle_external_event(id, params, self.runtime.clone()).await
             }
             #[cfg(not(feature = "mini-surface"))]
+            "session/peer_response_terminal" => {
+                handlers::event::handle_peer_response_terminal(id, params, self.runtime.clone())
+                    .await
+            }
+            #[cfg(not(feature = "mini-surface"))]
             "session/inject_context" => self.handle_session_inject_context(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
             "session/stream_open" => self.handle_session_stream_open(id, params).await,
@@ -2882,6 +2887,7 @@ mod tests {
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
         assert!(method_names.contains(&"session/external_event"));
+        assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
         assert!(method_names.contains(&"turn/start"));
         assert!(

@@ -5908,6 +5908,34 @@ async fn test_wait_for_members_ready_treats_turn_driven_members_as_ready() {
 }
 
 #[tokio::test]
+async fn test_wait_for_members_ready_returns_for_autonomous_members_after_startup_readiness() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_start_turn_delay_ms(250);
+
+    let member = MeerkatId::from("lead-ready-autonomous");
+    handle
+        .spawn(ProfileName::from("lead"), member.clone(), None)
+        .await
+        .expect("spawn autonomous lead");
+
+    let snapshots = handle
+        .wait_for_members_ready(
+            &[AgentIdentity::from(member.as_str())],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("autonomous member should become startup-ready without waiting for kickoff");
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].0, AgentIdentity::from(member.as_str()));
+    assert_eq!(
+        snapshots[0].1.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "startup-ready barrier should return the live autonomous snapshot"
+    );
+}
+
+#[tokio::test]
 async fn test_wait_for_members_kickoff_complete_excludes_later_spawns() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     service.set_keep_alive_turns_complete_immediately(true);

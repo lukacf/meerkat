@@ -1612,13 +1612,45 @@ impl MobActor {
     ///   in a spawned task with yield-check for immediate failure detection.
     #[cfg(feature = "runtime-adapter")]
     async fn start_autonomous_member(
-        &self,
+        &mut self,
         agent_identity: &MeerkatId,
         member_ref: &MemberRef,
         prompt: meerkat_core::types::ContentInput,
     ) -> Result<(), MobError> {
         self.ensure_autonomous_runtime_ready(agent_identity, member_ref)
             .await?;
+
+        let startup_marker = {
+            let roster = self.roster.read().await;
+            roster
+                .get_by_identity(&AgentIdentity::from(agent_identity.as_str()))
+                .map(|entry| {
+                    (
+                        mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+                        mob_dsl::FenceToken::from_domain(entry.fence_token),
+                    )
+                })
+        }
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "autonomous member '{agent_identity}' missing roster entry for startup readiness"
+            ))
+        })?;
+
+        if !self
+            .dsl_authority
+            .state
+            .member_startup_ready
+            .contains(&startup_marker.0)
+        {
+            self.apply_dsl_input(
+                mob_dsl::MobMachineInput::StartupMarkReady {
+                    agent_runtime_id: startup_marker.0,
+                    fence_token: startup_marker.1,
+                },
+                "start_autonomous_member/startup_mark_ready",
+            )?;
+        }
 
         let bridge_session_id = member_ref.bridge_session_id().ok_or_else(|| {
             MobError::Internal(format!(

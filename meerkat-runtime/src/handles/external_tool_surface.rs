@@ -6,6 +6,9 @@ use std::sync::Arc;
 use meerkat_core::handles::{
     DslTransitionError, ExternalToolSurfaceHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
 };
+use meerkat_core::tool_scope::{
+    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+};
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -47,11 +50,15 @@ impl RuntimeExternalToolSurfaceHandle {
             pending_op: state
                 .surface_pending_op
                 .get(&key)
-                .map(|op| op.as_str().to_string()),
+                .copied()
+                .map(map_pending_op)
+                .unwrap_or(ExternalToolSurfacePendingOp::None),
             staged_op: state
                 .surface_staged_op
                 .get(&key)
-                .map(|op| op.as_str().to_string()),
+                .copied()
+                .map(map_staged_op)
+                .unwrap_or(ExternalToolSurfaceStagedOp::None),
             staged_intent_sequence: state.surface_staged_intent_sequence.get(&key).copied(),
             pending_task_sequence: state.surface_pending_task_sequence.get(&key).copied(),
             pending_lineage_sequence: state.surface_pending_lineage_sequence.get(&key).copied(),
@@ -193,14 +200,14 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
             .collect();
         entries.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         SurfaceDiagnosticSnapshot {
-            surface_phase: state.surface_phase.as_str().to_string(),
+            surface_phase: map_surface_phase(state.surface_phase),
             known_surfaces: state.known_surfaces.clone(),
             visible_surfaces: state.visible_surfaces.clone(),
             snapshot_epoch: state.snapshot_epoch,
             snapshot_aligned_epoch: state.snapshot_aligned_epoch,
             has_pending_or_staged: entries.iter().any(|entry| {
-                entry.pending_op.as_deref().is_some_and(|op| op != "None")
-                    || entry.staged_op.as_deref().is_some_and(|op| op != "None")
+                entry.pending_op != ExternalToolSurfacePendingOp::None
+                    || entry.staged_op != ExternalToolSurfaceStagedOp::None
             }),
             entries,
         }
@@ -258,5 +265,31 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
 
     fn snapshot_aligned_epoch(&self) -> u64 {
         self.dsl.snapshot_state().snapshot_aligned_epoch
+    }
+}
+
+/// Exhaustive 1-to-1 projection of the DSL's typed surface phase into the
+/// cross-crate contract. Compiler enforces completeness.
+fn map_surface_phase(phase: mm_dsl::SurfacePhase) -> ExternalToolSurfaceGlobalPhase {
+    match phase {
+        mm_dsl::SurfacePhase::Operating => ExternalToolSurfaceGlobalPhase::Operating,
+        mm_dsl::SurfacePhase::Shutdown => ExternalToolSurfaceGlobalPhase::Shutdown,
+    }
+}
+
+fn map_pending_op(op: mm_dsl::SurfacePendingOp) -> ExternalToolSurfacePendingOp {
+    match op {
+        mm_dsl::SurfacePendingOp::None => ExternalToolSurfacePendingOp::None,
+        mm_dsl::SurfacePendingOp::Add => ExternalToolSurfacePendingOp::Add,
+        mm_dsl::SurfacePendingOp::Reload => ExternalToolSurfacePendingOp::Reload,
+    }
+}
+
+fn map_staged_op(op: mm_dsl::SurfaceStagedOp) -> ExternalToolSurfaceStagedOp {
+    match op {
+        mm_dsl::SurfaceStagedOp::None => ExternalToolSurfaceStagedOp::None,
+        mm_dsl::SurfaceStagedOp::Add => ExternalToolSurfaceStagedOp::Add,
+        mm_dsl::SurfaceStagedOp::Remove => ExternalToolSurfaceStagedOp::Remove,
+        mm_dsl::SurfaceStagedOp::Reload => ExternalToolSurfaceStagedOp::Reload,
     }
 }

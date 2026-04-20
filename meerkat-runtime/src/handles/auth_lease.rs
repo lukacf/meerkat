@@ -18,7 +18,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionError};
+use meerkat_core::handles::{
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError,
+};
 
 use crate::auth_machine::dsl as auth_dsl;
 
@@ -36,8 +38,8 @@ use crate::auth_machine::dsl as auth_dsl;
 fn emit_audit(
     binding_key: &str,
     action: &'static str,
-    from_phase: Option<&str>,
-    to_phase: Option<&str>,
+    from_phase: AuthLeasePhase,
+    to_phase: AuthLeasePhase,
 ) {
     tracing::info!(
         target: "meerkat::auth::audit",
@@ -113,11 +115,11 @@ impl RuntimeAuthLeaseHandle {
                 }
             }
         };
-        let from_phase = Self::phase_str(&entry.state.lifecycle_phase);
+        let from_phase = map_phase(entry.state.lifecycle_phase);
         auth_dsl::AuthMachineMutator::apply(entry, input)
             .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
-        let to_phase = Self::phase_str(&entry.state.lifecycle_phase);
-        emit_audit(binding_key, action, Some(from_phase), Some(to_phase));
+        let to_phase = map_phase(entry.state.lifecycle_phase);
+        emit_audit(binding_key, action, from_phase, to_phase);
         Ok(())
     }
 
@@ -133,15 +135,18 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::Release => "release_lease",
         }
     }
+}
 
-    fn phase_str(phase: &auth_dsl::AuthLifecyclePhase) -> &'static str {
-        match phase {
-            auth_dsl::AuthLifecyclePhase::Valid => "valid",
-            auth_dsl::AuthLifecyclePhase::Expiring => "expiring",
-            auth_dsl::AuthLifecyclePhase::Refreshing => "refreshing",
-            auth_dsl::AuthLifecyclePhase::ReauthRequired => "reauth_required",
-            auth_dsl::AuthLifecyclePhase::Released => "released",
-        }
+/// Exhaustive 1-to-1 projection of the AuthMachine DSL's typed lifecycle
+/// phase into the cross-crate [`AuthLeasePhase`] contract. Compiler enforces
+/// completeness.
+fn map_phase(phase: auth_dsl::AuthLifecyclePhase) -> AuthLeasePhase {
+    match phase {
+        auth_dsl::AuthLifecyclePhase::Valid => AuthLeasePhase::Valid,
+        auth_dsl::AuthLifecyclePhase::Expiring => AuthLeasePhase::Expiring,
+        auth_dsl::AuthLifecyclePhase::Refreshing => AuthLeasePhase::Refreshing,
+        auth_dsl::AuthLifecyclePhase::ReauthRequired => AuthLeasePhase::ReauthRequired,
+        auth_dsl::AuthLifecyclePhase::Released => AuthLeasePhase::Released,
     }
 }
 
@@ -249,24 +254,12 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.get(binding_key) {
-            Some(machine) => {
-                let state = &machine.state;
-                let phase_str = match state.lifecycle_phase {
-                    auth_dsl::AuthLifecyclePhase::Valid => Some("valid".to_string()),
-                    auth_dsl::AuthLifecyclePhase::Expiring => Some("expiring".to_string()),
-                    auth_dsl::AuthLifecyclePhase::Refreshing => Some("refreshing".to_string()),
-                    auth_dsl::AuthLifecyclePhase::ReauthRequired => {
-                        Some("reauth_required".to_string())
-                    }
-                    auth_dsl::AuthLifecyclePhase::Released => Some("released".to_string()),
-                };
-                AuthLeaseSnapshot {
-                    state: phase_str,
-                    expires_at: state.expires_at,
-                }
-            }
+            Some(machine) => AuthLeaseSnapshot {
+                phase: Some(map_phase(machine.state.lifecycle_phase)),
+                expires_at: machine.state.expires_at,
+            },
             None => AuthLeaseSnapshot {
-                state: None,
+                phase: None,
                 expires_at: None,
             },
         }
@@ -284,7 +277,7 @@ mod tests {
         h.acquire_lease("dev:default_openai", 1_800_000_000)
             .unwrap();
         let snap = h.snapshot("dev:default_openai");
-        assert_eq!(snap.state.as_deref(), Some("valid"));
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_000));
     }
 
@@ -294,17 +287,17 @@ mod tests {
         let k = "dev:default_anthropic";
 
         h.acquire_lease(k, 1_800_000_000).unwrap();
-        assert_eq!(h.snapshot(k).state.as_deref(), Some("valid"));
+        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Valid));
 
         h.mark_expiring(k).unwrap();
-        assert_eq!(h.snapshot(k).state.as_deref(), Some("expiring"));
+        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Expiring));
 
         h.begin_refresh(k).unwrap();
-        assert_eq!(h.snapshot(k).state.as_deref(), Some("refreshing"));
+        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Refreshing));
 
         h.complete_refresh(k, 1_800_000_900, 1_800_000_000).unwrap();
         let snap = h.snapshot(k);
-        assert_eq!(snap.state.as_deref(), Some("valid"));
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
         assert_eq!(snap.expires_at, Some(1_800_000_900));
     }
 
@@ -317,7 +310,7 @@ mod tests {
         h.begin_refresh(k).unwrap();
         h.refresh_failed(k, true).unwrap();
 
-        assert_eq!(h.snapshot(k).state.as_deref(), Some("reauth_required"));
+        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::ReauthRequired));
     }
 
     #[test]
@@ -329,14 +322,14 @@ mod tests {
         h.begin_refresh(k).unwrap();
         h.refresh_failed(k, false).unwrap();
 
-        assert_eq!(h.snapshot(k).state.as_deref(), Some("expiring"));
+        assert_eq!(h.snapshot(k).phase, Some(AuthLeasePhase::Expiring));
     }
 
     #[test]
     fn snapshot_for_unknown_binding_is_none() {
         let h = RuntimeAuthLeaseHandle::new();
         let snap = h.snapshot("dev:never_registered");
-        assert!(snap.state.is_none());
+        assert!(snap.phase.is_none());
         assert!(snap.expires_at.is_none());
     }
 
@@ -354,8 +347,14 @@ mod tests {
         h.acquire_lease("dev:anthropic", 1_900_000_000).unwrap();
         h.mark_expiring("dev:openai").unwrap();
 
-        assert_eq!(h.snapshot("dev:openai").state.as_deref(), Some("expiring"));
-        assert_eq!(h.snapshot("dev:anthropic").state.as_deref(), Some("valid"));
+        assert_eq!(
+            h.snapshot("dev:openai").phase,
+            Some(AuthLeasePhase::Expiring)
+        );
+        assert_eq!(
+            h.snapshot("dev:anthropic").phase,
+            Some(AuthLeasePhase::Valid)
+        );
         assert_eq!(h.snapshot("dev:anthropic").expires_at, Some(1_900_000_000));
     }
 }

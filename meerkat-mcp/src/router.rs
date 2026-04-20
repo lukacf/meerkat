@@ -242,7 +242,7 @@ impl SurfaceOwner {
                 let after_entry = find_handle_entry(&after, &surface_id.0);
                 let mut effects = Vec::new();
                 let transition_name = if let Some(entry) = after_entry {
-                    match pending_op_from_handle(entry.pending_op.as_deref()) {
+                    match entry.pending_op {
                         ExternalToolSurfacePendingOp::Add => {
                             effects.push(ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
                                 surface_id: surface_id.clone(),
@@ -763,7 +763,7 @@ fn snapshot_from_handle(snapshot: SurfaceDiagnosticSnapshot) -> ExternalToolSurf
         .collect();
 
     ExternalToolSurfaceSnapshot {
-        phase: global_phase_from_handle(surface_phase.as_str()),
+        phase: surface_phase,
         snapshot_epoch,
         snapshot_aligned_epoch,
         entries,
@@ -781,8 +781,8 @@ fn entry_snapshot_from_handle(
         has_removal_timing: entry.removal_draining_since_ms.is_some()
             || entry.removal_timeout_at_ms.is_some()
             || entry.removal_applied_at_turn.is_some(),
-        pending_op: pending_op_from_handle(entry.pending_op.as_deref()),
-        staged_op: staged_op_from_handle(entry.staged_op.as_deref()),
+        pending_op: entry.pending_op,
+        staged_op: entry.staged_op,
         staged_intent_sequence: entry.staged_intent_sequence.unwrap_or(0),
         pending_task_sequence: entry.pending_task_sequence.unwrap_or(0),
         pending_lineage_sequence: entry.pending_lineage_sequence.unwrap_or(0),
@@ -792,36 +792,12 @@ fn entry_snapshot_from_handle(
     }
 }
 
-fn global_phase_from_handle(phase: &str) -> ExternalToolSurfaceGlobalPhase {
-    match phase {
-        "Shutdown" => ExternalToolSurfaceGlobalPhase::Shutdown,
-        _ => ExternalToolSurfaceGlobalPhase::Operating,
-    }
-}
-
 fn base_state_from_handle(state: Option<&str>) -> ExternalToolSurfaceBaseState {
     match state {
         Some("Active") => ExternalToolSurfaceBaseState::Active,
         Some("Removing") => ExternalToolSurfaceBaseState::Removing,
         Some("Removed") => ExternalToolSurfaceBaseState::Removed,
         _ => ExternalToolSurfaceBaseState::Absent,
-    }
-}
-
-fn pending_op_from_handle(op: Option<&str>) -> ExternalToolSurfacePendingOp {
-    match op {
-        Some("Add") => ExternalToolSurfacePendingOp::Add,
-        Some("Reload") => ExternalToolSurfacePendingOp::Reload,
-        _ => ExternalToolSurfacePendingOp::None,
-    }
-}
-
-fn staged_op_from_handle(op: Option<&str>) -> ExternalToolSurfaceStagedOp {
-    match op {
-        Some("Add") => ExternalToolSurfaceStagedOp::Add,
-        Some("Remove") => ExternalToolSurfaceStagedOp::Remove,
-        Some("Reload") => ExternalToolSurfaceStagedOp::Reload,
-        _ => ExternalToolSurfaceStagedOp::None,
     }
 }
 

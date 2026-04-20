@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from .errors import MeerkatError
@@ -22,13 +22,14 @@ class RealtimeSessionTarget(TypedDict):
     session_id: str
 
 
-class RealtimeMobMemberTarget(TypedDict):
-    type: Literal["mob_member_target"]
-    mob_id: str
-    agent_identity: str
-
-
-RealtimeChannelTarget = RealtimeSessionTarget | RealtimeMobMemberTarget
+# Phase 5G/T5i: `mob_member_target` was removed from the realtime wire
+# contract. Callers navigate `mob/member_status → current_session_id →
+# realtime/open_info` with a `session_target` instead. The Python SDK's
+# `RealtimeChannel.mob_member(...)` constructor is kept for ergonomics
+# and performs that resolution internally the first time a wire call is
+# made. `RealtimeChannelTarget` is the single wire-level shape that
+# crosses the RPC boundary.
+RealtimeChannelTarget = RealtimeSessionTarget
 
 
 def _reconnect_policy_to_wire(
@@ -136,14 +137,35 @@ class RealtimeConnection:
 
 
 @dataclass(frozen=True, slots=True)
+class _MobMemberBinding:
+    """Deferred mob-member → session resolution for RealtimeChannel.
+
+    Phase 5G/T5i removed `mob_member_target` from the realtime wire
+    contract. The SDK stores this binding when callers construct a
+    channel via :meth:`RealtimeChannel.mob_member` and resolves it to
+    a concrete session id lazily on the first wire call by reading
+    `mob/member_status.current_session_id`.
+    """
+
+    mob_id: str
+    agent_identity: str
+
+
+@dataclass(slots=True)
 class RealtimeChannel:
     """High-level realtime channel scaffold for public SDK callers."""
 
     _client: "MeerkatClient"
-    target: RealtimeChannelTarget
+    # Either a resolved `session_target` dict (for direct session
+    # channels and for mob-member channels after the first resolve) or
+    # None when a pending mob binding must be resolved first.
+    target: RealtimeSessionTarget | None = None
     role: Literal["primary", "observer"] = "primary"
     turning_mode: Literal["provider_managed", "explicit_commit"] = "provider_managed"
     reconnect_policy: RealtimeReconnectPolicy | dict[str, Any] | None = None
+    # Internal: set when the channel was built via
+    # :meth:`mob_member`; resolved into a `session_target` on first use.
+    _mob_binding: _MobMemberBinding | None = field(default=None, repr=False)
 
     @classmethod
     def session(
@@ -174,19 +196,57 @@ class RealtimeChannel:
         turning_mode: Literal["provider_managed", "explicit_commit"] = "provider_managed",
         reconnect_policy: RealtimeReconnectPolicy | dict[str, Any] | None = None,
     ) -> "RealtimeChannel":
+        # Defer the mob-member → session resolve until the first wire
+        # call (open_info / status / capabilities). The channel target
+        # that crosses the RPC boundary is always `session_target`
+        # (Phase 5G/T5i).
         return cls(
             _client=client,
-            target={
-                "type": "mob_member_target",
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-            },
+            target=None,
             role=role,
             turning_mode=turning_mode,
             reconnect_policy=reconnect_policy,
+            _mob_binding=_MobMemberBinding(
+                mob_id=mob_id, agent_identity=agent_identity
+            ),
         )
 
+    async def _resolved_target(self) -> RealtimeSessionTarget:
+        if self.target is not None:
+            return self.target
+        binding = self._mob_binding
+        if binding is None:
+            raise MeerkatError(
+                "INVALID_REQUEST",
+                "RealtimeChannel has no target or mob binding to resolve",
+            )
+        status = await self._client.mob_member_status(
+            mob_id=binding.mob_id, agent_identity=binding.agent_identity
+        )
+        session_id = status.get("current_session_id") if isinstance(status, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "mob/member_status did not surface current_session_id for "
+                f"mob {binding.mob_id!r} agent {binding.agent_identity!r}; "
+                "the member may not yet be bound to a session",
+            )
+        resolved: RealtimeSessionTarget = {
+            "type": "session_target",
+            "session_id": session_id,
+        }
+        # Cache the resolved target so subsequent calls do not re-resolve.
+        self.target = resolved
+        return resolved
+
     def open_request(self) -> RealtimeOpenRequest:
+        if self.target is None:
+            raise MeerkatError(
+                "INVALID_REQUEST",
+                "RealtimeChannel.open_request() requires a resolved target; "
+                "call await channel.open_info()/status()/capabilities()/connect() "
+                "first so the mob-member binding resolves to a session_target.",
+            )
         return RealtimeOpenRequest(
             target=dict(self.target),
             role=self.role,
@@ -195,16 +255,26 @@ class RealtimeChannel:
         )
 
     async def open_info(self) -> RealtimeOpenInfo:
-        return await self._client.realtime_open_info(self.open_request())
+        target = await self._resolved_target()
+        request = RealtimeOpenRequest(
+            target=dict(target),
+            role=self.role,
+            turning_mode=self.turning_mode,
+            reconnect_policy=_reconnect_policy_to_wire(self.reconnect_policy),
+        )
+        return await self._client.realtime_open_info(request)
 
     async def status(self) -> RealtimeStatusResult:
-        return await self._client.realtime_status({"target": dict(self.target)})
+        target = await self._resolved_target()
+        return await self._client.realtime_status({"target": dict(target)})
 
     async def capabilities(self) -> RealtimeCapabilitiesResult:
-        return await self._client.realtime_capabilities({"target": dict(self.target)})
+        target = await self._resolved_target()
+        return await self._client.realtime_capabilities({"target": dict(target)})
 
     async def connect_with_open_info(self, open_info: RealtimeOpenInfo) -> RealtimeConnection:
-        if dict(self.target) != dict(open_info.target):
+        target = await self._resolved_target()
+        if dict(target) != dict(open_info.target):
             raise MeerkatError(
                 "INVALID_RESPONSE",
                 "realtime/open_info returned a target that does not match the requested channel target",

@@ -17,15 +17,18 @@ export interface RealtimeSessionTarget {
   readonly session_id: string;
 }
 
-export interface RealtimeMobMemberTarget {
-  readonly type: "mob_member_target";
+// Phase 5G/T5i: `mob_member_target` was removed from the realtime wire
+// contract. SDK callers can still construct channels via
+// `RealtimeChannel.mobMember(...)` for ergonomics; the helper resolves
+// `mob/member_status → current_session_id` internally and opens a
+// `session_target`. `RealtimeChannelTarget` is the single wire-level
+// shape that crosses the RPC boundary.
+export type RealtimeChannelTarget = RealtimeSessionTarget;
+
+interface MobMemberBinding {
   readonly mob_id: string;
   readonly agent_identity: string;
 }
-
-export type RealtimeChannelTarget =
-  | RealtimeSessionTarget
-  | RealtimeMobMemberTarget;
 
 export interface RealtimeChannelOptions {
   readonly role?: "primary" | "observer";
@@ -133,21 +136,41 @@ export class RealtimeConnection {
 
 export class RealtimeChannel {
   readonly client: MeerkatClient;
-  readonly target: RealtimeChannelTarget;
+  // `null` until a pending mob-member binding resolves into a concrete
+  // `session_target` on the first wire call.
+  private resolvedTarget: RealtimeSessionTarget | null;
+  private readonly mobBinding: MobMemberBinding | null;
   readonly role: "primary" | "observer";
   readonly turningMode: "provider_managed" | "explicit_commit";
   readonly reconnectPolicy?: RealtimeReconnectPolicy;
 
   private constructor(
     client: MeerkatClient,
-    target: RealtimeChannelTarget,
+    init:
+      | { kind: "session"; target: RealtimeSessionTarget }
+      | { kind: "mob_member"; binding: MobMemberBinding },
     options?: RealtimeChannelOptions,
   ) {
     this.client = client;
-    this.target = target;
+    if (init.kind === "session") {
+      this.resolvedTarget = init.target;
+      this.mobBinding = null;
+    } else {
+      this.resolvedTarget = null;
+      this.mobBinding = init.binding;
+    }
     this.role = options?.role ?? "primary";
     this.turningMode = options?.turningMode ?? "provider_managed";
     this.reconnectPolicy = options?.reconnectPolicy;
+  }
+
+  /**
+   * The wire target for this channel. Only available after a mob-member
+   * binding has been resolved — use {@link openInfo}, {@link status},
+   * {@link capabilities}, or {@link connect} to trigger resolution.
+   */
+  get target(): RealtimeSessionTarget | null {
+    return this.resolvedTarget;
   }
 
   static session(
@@ -158,8 +181,8 @@ export class RealtimeChannel {
     return new RealtimeChannel(
       client,
       {
-        type: "session_target",
-        session_id: sessionId,
+        kind: "session",
+        target: { type: "session_target", session_id: sessionId },
       },
       options,
     );
@@ -171,19 +194,53 @@ export class RealtimeChannel {
     agentIdentity: string,
     options?: RealtimeChannelOptions,
   ): RealtimeChannel {
+    // Phase 5G/T5i: defer mob-member → session resolution until the
+    // first wire call. The channel target that crosses the RPC
+    // boundary is always `session_target`.
     return new RealtimeChannel(
       client,
       {
-        type: "mob_member_target",
-        mob_id: mobId,
-        agent_identity: agentIdentity,
+        kind: "mob_member",
+        binding: { mob_id: mobId, agent_identity: agentIdentity },
       },
       options,
     );
   }
 
-  private wireTarget(): Record<string, unknown> {
-    return { ...this.target };
+  private async resolveTarget(): Promise<RealtimeSessionTarget> {
+    if (this.resolvedTarget !== null) {
+      return this.resolvedTarget;
+    }
+    const binding = this.mobBinding;
+    if (binding === null) {
+      throw new MeerkatError(
+        "INVALID_REQUEST",
+        "RealtimeChannel has no target or mob binding to resolve",
+      );
+    }
+    const status = await this.client.mobMemberStatus(
+      binding.mob_id,
+      binding.agent_identity,
+    );
+    const sessionId = status.currentSessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `mob/member_status did not surface current_session_id for mob ` +
+          `'${binding.mob_id}' agent '${binding.agent_identity}'; ` +
+          `the member may not yet be bound to a session`,
+      );
+    }
+    const resolved: RealtimeSessionTarget = {
+      type: "session_target",
+      session_id: sessionId,
+    };
+    this.resolvedTarget = resolved;
+    return resolved;
+  }
+
+  private wireTargetFrom(target: RealtimeSessionTarget): Record<string, unknown> {
+    return { ...target };
   }
 
   private wireReconnectPolicy(): Record<string, unknown> | undefined {
@@ -194,8 +251,16 @@ export class RealtimeChannel {
   }
 
   openRequest(): RealtimeOpenRequest {
+    if (this.resolvedTarget === null) {
+      throw new MeerkatError(
+        "INVALID_REQUEST",
+        "RealtimeChannel.openRequest() requires a resolved target; " +
+          "await openInfo() / status() / capabilities() / connect() first " +
+          "so the mob-member binding resolves to a session_target.",
+      );
+    }
     return {
-      target: this.wireTarget(),
+      target: this.wireTargetFrom(this.resolvedTarget),
       role: this.role,
       turning_mode: this.turningMode,
       reconnect_policy: this.wireReconnectPolicy(),
@@ -203,19 +268,28 @@ export class RealtimeChannel {
   }
 
   async openInfo(): Promise<RealtimeOpenInfo> {
-    return this.client.realtimeOpenInfo(this.openRequest());
+    const target = await this.resolveTarget();
+    return this.client.realtimeOpenInfo({
+      target: this.wireTargetFrom(target),
+      role: this.role,
+      turning_mode: this.turningMode,
+      reconnect_policy: this.wireReconnectPolicy(),
+    });
   }
 
   async status(): Promise<RealtimeStatusResult> {
-    return this.client.realtimeStatus({ target: this.wireTarget() });
+    const target = await this.resolveTarget();
+    return this.client.realtimeStatus({ target: this.wireTargetFrom(target) });
   }
 
   async capabilities(): Promise<RealtimeCapabilitiesResult> {
-    return this.client.realtimeCapabilities({ target: this.wireTarget() });
+    const target = await this.resolveTarget();
+    return this.client.realtimeCapabilities({ target: this.wireTargetFrom(target) });
   }
 
   async connectWithOpenInfo(openInfo: RealtimeOpenInfo): Promise<RealtimeConnection> {
-    if (JSON.stringify(openInfo.target) !== JSON.stringify(this.wireTarget())) {
+    const target = await this.resolveTarget();
+    if (JSON.stringify(openInfo.target) !== JSON.stringify(this.wireTargetFrom(target))) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         "realtime/open_info returned a target that does not match the requested channel target",

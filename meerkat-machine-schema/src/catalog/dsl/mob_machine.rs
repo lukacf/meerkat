@@ -967,6 +967,13 @@ machine! {
         // =====================================================================
         // CompleteFlow / FinishRun
         // =====================================================================
+        //
+        // The *Zero transitions accept `active_run_count == 0` as a
+        // legitimate terminal convergence (see `cancel_all_flow_tasks`
+        // in meerkat-mob::runtime::actor for why both destroy-driven
+        // cancel and natural FlowFinished cleanup can race each other
+        // to the same terminal state). Modeling convergence in the
+        // authority keeps signal semantics machine-owned.
 
         transition CompleteFlowRunning {
             on signal CompleteFlow
@@ -979,6 +986,15 @@ machine! {
             emit FlowTerminalized
         }
 
+        transition CompleteFlowRunningZero {
+            on signal CompleteFlow
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Completed }
+            guard "no_active_runs" { self.active_run_count == 0 }
+            update {}
+            to Running
+            emit NotifyCoordinator
+        }
+
         transition FinishRunRunning {
             on signal FinishRun
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
@@ -988,6 +1004,15 @@ machine! {
             }
             to Running
             emit EmitRunLifecycleNotice
+        }
+
+        transition FinishRunRunningZero {
+            on signal FinishRun
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard "no_active_runs" { self.active_run_count == 0 }
+            update {}
+            to Running
+            emit NotifyCoordinator
         }
 
         // =====================================================================

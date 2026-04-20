@@ -1269,21 +1269,6 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
     assert session_channel.open_request().role == "primary"
     assert session_channel.open_request().turning_mode == "provider_managed"
 
-    member_channel = RealtimeChannel.mob_member(
-        client,
-        "mob-1",
-        "agent-a",
-        role="observer",
-        turning_mode="explicit_commit",
-    )
-    assert member_channel.open_request().target == {
-        "type": "mob_member_target",
-        "mob_id": "mob-1",
-        "agent_identity": "agent-a",
-    }
-    assert member_channel.open_request().role == "observer"
-    assert member_channel.open_request().turning_mode == "explicit_commit"
-
     open_info = await client.realtime_open_info(session_channel.open_request())
     status = await client.realtime_status({"target": session_channel.target})
     capabilities = await client.realtime_capabilities({"target": session_channel.target})
@@ -1306,6 +1291,123 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
         "realtime/status",
         "realtime/capabilities",
     ]
+
+
+# Phase 5G/T5i retired the `mob_member_target` wire shape; the canonical
+# contract is now that `RealtimeChannelTarget` is always
+# `RealtimeSessionTarget`. See `meerkat-contracts/src/wire/realtime.rs:200-210`
+# for the contract, and `meerkat-rpc/tests/router_realtime_target.rs:108`
+# for the server-side regression asserting `mob_member_target` is rejected
+# with `-32602 INVALID_PARAMS`. The SDK's `RealtimeChannel.mob_member()`
+# helper is retained for ergonomics but resolves
+# `mob/member_status.current_session_id` on the first wire call and opens
+# with a `SessionTarget`.
+@pytest.mark.asyncio
+async def test_realtime_channel_mob_member_defers_target_to_session_target_via_member_status() -> None:
+    client = MeerkatClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        if method == "mob/member_status":
+            return {
+                "status": "active",
+                "agent_runtime_id": "agent-a:1",
+                "fence_token": 1,
+                "tokens_used": 0,
+                "is_final": False,
+                "current_session_id": "resolved-session-42",
+            }
+        if method == "realtime/open_info":
+            return {
+                "ws_url": "ws://localhost:9999/realtime/ws",
+                "open_token": "token-mob",
+                "expires_at": "2026-04-15T12:00:00Z",
+                "target": params["target"],
+                "supported_protocol_versions": ["1"],
+                "default_protocol_version": "1",
+                "capabilities": {
+                    "input_kinds": ["text"],
+                    "output_kinds": ["text"],
+                    "turning_modes": ["explicit_commit"],
+                    "interrupt_supported": True,
+                    "transcript_supported": True,
+                    "tool_lifecycle_events_supported": False,
+                    "video_supported": False,
+                },
+            }
+        if method == "realtime/status":
+            return {"status": {"state": "opening", "attempt_count": 0}}
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    member_channel = RealtimeChannel.mob_member(
+        client,
+        "mob-1",
+        "agent-a",
+        role="observer",
+        turning_mode="explicit_commit",
+    )
+
+    # Before the first wire call the channel has no resolved target
+    # and calling `open_request()` must refuse rather than silently
+    # emit a placeholder — the wire target is always a SessionTarget
+    # and it cannot be materialized without resolving the mob binding
+    # through `mob/member_status` first.
+    assert member_channel.target is None
+    with pytest.raises(MeerkatError) as excinfo:
+        member_channel.open_request()
+    assert excinfo.value.code == "INVALID_REQUEST"
+
+    # open_info() triggers the resolve-then-open path.
+    open_info = await member_channel.open_info()
+
+    # The wire target that crossed the RPC boundary must be a
+    # `session_target` with the session_id surfaced by
+    # mob/member_status — never the retired `mob_member_target`
+    # shape. Server-side `router_realtime_target.rs:108` explicitly
+    # rejects `mob_member_target` with `-32602`, so any SDK that
+    # emitted that shape would fail at runtime.
+    assert open_info.target == {
+        "type": "session_target",
+        "session_id": "resolved-session-42",
+    }
+    assert open_info.target["type"] != "mob_member_target", (
+        "retired mob_member_target wire type must never be emitted"
+    )
+
+    # After resolution the channel caches the session target so
+    # subsequent wire calls do not re-resolve.
+    assert member_channel.target == {
+        "type": "session_target",
+        "session_id": "resolved-session-42",
+    }
+    status_result = await member_channel.status()
+    assert status_result.status["state"] == "opening"
+
+    # Call order encodes the new contract: mob/member_status must
+    # land before any realtime/* call that targets the member.
+    assert [method for method, _ in calls] == [
+        "mob/member_status",
+        "realtime/open_info",
+        "realtime/status",
+    ]
+    # mob/member_status fires exactly once thanks to caching.
+    member_status_calls = [
+        params for method, params in calls if method == "mob/member_status"
+    ]
+    assert len(member_status_calls) == 1
+    assert member_status_calls[0] == {"mob_id": "mob-1", "agent_identity": "agent-a"}
+
+    # Negative regression guard: not a single request the SDK made
+    # to the server may carry the retired wire shape.
+    for method, params in calls:
+        target = params.get("target") if isinstance(params, dict) else None
+        if isinstance(target, dict):
+            assert target.get("type") != "mob_member_target", (
+                f"{method} leaked retired mob_member_target wire shape"
+            )
 
 
 @pytest.mark.asyncio

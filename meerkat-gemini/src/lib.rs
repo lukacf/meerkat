@@ -10,9 +10,7 @@ pub mod tokio {
 }
 
 pub mod client;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
 
 pub use client::GeminiClient;
-#[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{GoogleAuthMethod, GoogleBackendKind, GoogleProviderRuntime};

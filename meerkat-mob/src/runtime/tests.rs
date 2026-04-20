@@ -17405,6 +17405,44 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
 }
 
 #[tokio::test]
+async fn test_member_status_surface_exposes_current_session_id_for_realtime_routing() {
+    // Identity-first realtime routing (Phase 5G/T5i) requires callers to
+    // resolve `mob/member_status → current_session_id → realtime/open_info
+    // (session_target)`. The session id MUST survive serialization to
+    // JSON — it is the sole bridge from mob membership to a realtime
+    // session handle since `mob_member_target` was removed.
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let receipt = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member status");
+    let expected_session_id = receipt
+        .bridge_session_id()
+        .expect("session-backed receipt")
+        .clone();
+
+    let json_value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    assert_eq!(
+        json_value
+            .get("current_session_id")
+            .and_then(|v| v.as_str()),
+        Some(expected_session_id.to_string().as_str()),
+        "mob/member_status response must surface current_session_id for realtime routing: {json_value}"
+    );
+    // The bridge-internal alias stays hidden — it is not part of the
+    // public identity contract.
+    assert!(
+        json_value.get("current_bridge_session_id").is_none(),
+        "current_bridge_session_id is bridge-internal and must not leak over the wire: {json_value}"
+    );
+}
+
+#[tokio::test]
 async fn test_member_handle_bridge_session_helper_round_trips_through_machine_projection_surface() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let receipt = handle

@@ -7005,6 +7005,12 @@ impl MobActor {
                 .terminalize_canceled(run_id.clone(), flow_id.clone())
                 .await?;
 
+            // CompleteFlow / FinishRun accept `active_run_count == 0` as
+            // a legitimate terminal convergence (see
+            // `CompleteFlowRunningZero` and `FinishRunRunningZero` in
+            // the mob_machine DSL). The natural `FlowFinished` cleanup
+            // races with this destroy-driven cancel; both paths drive
+            // the authority toward the same terminal state.
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_all_flow")?;
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::FinishRun, "cancel_all_flow")?;
 

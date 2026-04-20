@@ -684,6 +684,14 @@ CompleteFlowRunning ==
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
+CompleteFlowRunningZero ==
+    /\ phase = "Running" \/ phase = "Completed"
+    /\ (active_run_count = 0)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
 FinishRunRunning ==
     /\ phase = "Running" \/ phase = "Stopped"
     /\ (active_run_count > 0)
@@ -691,6 +699,14 @@ FinishRunRunning ==
     /\ model_step_count' = model_step_count + 1
     /\ active_run_count' = (active_run_count) - 1
     /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
+
+
+FinishRunRunningZero ==
+    /\ phase = "Running" \/ phase = "Stopped"
+    /\ (active_run_count = 0)
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UNCHANGED << live_runtime_ids, externally_addressable_runtime_ids, runtime_fence_tokens, active_run_count, pending_spawn_count, coordinator_bound, member_state_markers, wiring_edges, identity_to_runtime, tasks, in_progress_task_ids, completed_task_ids >>
 
 
 RetireRunning(agent_runtime_id) ==
@@ -848,7 +864,9 @@ Next ==
     \/ StartRunRunning
     \/ UnwireRunning
     \/ CompleteFlowRunning
+    \/ CompleteFlowRunningZero
     \/ FinishRunRunning
+    \/ FinishRunRunningZero
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireRunning(agent_runtime_id)
     \/ \E agent_runtime_id \in AgentRuntimeIdValues : RetireStopped(agent_runtime_id)
     \/ RetireAllRunning

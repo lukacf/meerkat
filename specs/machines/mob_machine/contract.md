@@ -614,12 +614,28 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `FlowTerminalized`
 - To: `Running`
 
+### `CompleteFlowRunningZero`
+- From: `Running`, `Completed`
+- On: `CompleteFlow`()
+- Guards:
+  - `no_active_runs`
+- Emits: `NotifyCoordinator`
+- To: `Running`
+
 ### `FinishRunRunning`
 - From: `Running`, `Stopped`
 - On: `FinishRun`()
 - Guards:
   - `active_runs_present`
 - Emits: `EmitRunLifecycleNotice`
+- To: `Running`
+
+### `FinishRunRunningZero`
+- From: `Running`, `Stopped`
+- On: `FinishRun`()
+- Guards:
+  - `no_active_runs`
+- Emits: `NotifyCoordinator`
 - To: `Running`
 
 ### `RetireRunning`

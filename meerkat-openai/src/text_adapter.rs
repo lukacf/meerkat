@@ -37,6 +37,22 @@ use oai_rt_rs::protocol::models::{
 };
 use oai_rt_rs::{ClientEvent, RealtimeClient, ServerEvent};
 
+/// OpenAI's Realtime API caps `response.max_output_tokens` at 4096 for
+/// integer values; larger values fail with `integer above maximum value`.
+/// Callers may request a higher per-turn cap because the same session-level
+/// `max_tokens_per_turn` flows through the Responses-API path (which allows
+/// 128K). Clamp at the realtime boundary so the API ceiling is honored
+/// regardless of caller intent.
+const REALTIME_MAX_OUTPUT_TOKENS: u32 = 4096;
+
+/// Translate an agent-level `max_tokens` budget into the optional
+/// `response.max_output_tokens` the Realtime API accepts, clamping to the
+/// protocol ceiling. Returns `None` when the caller did not request a
+/// finite budget so the provider default (`inf`) applies.
+fn realtime_max_output_tokens(max_tokens: u32) -> Option<MaxTokens> {
+    (max_tokens > 0).then(|| MaxTokens::Count(max_tokens.min(REALTIME_MAX_OUTPUT_TOKENS)))
+}
+
 /// LlmClient implementation that serves text turns via OpenAI Realtime WS.
 #[derive(Debug, Clone)]
 pub struct OpenAiRealtimeTextAdapter {
@@ -111,8 +127,7 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
             // protocol's accepted [0.0, 2.0] range are dropped rather than
             // rejected — the upstream constructor returns a typed error we
             // do not want to elevate mid-stream.
-            let max_output_tokens =
-                (request.max_tokens > 0).then_some(MaxTokens::Count(request.max_tokens));
+            let max_output_tokens = realtime_max_output_tokens(request.max_tokens);
             let temperature = request
                 .temperature
                 .and_then(|t| Temperature::new(t).ok());
@@ -603,6 +618,39 @@ mod tests {
                 assert_eq!(description.as_deref(), Some("read a file"));
             }
             other => panic!("expected Tool::Function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn realtime_max_output_tokens_drops_zero_budget() {
+        assert!(realtime_max_output_tokens(0).is_none());
+    }
+
+    #[test]
+    fn realtime_max_output_tokens_passes_values_at_or_below_ceiling() {
+        match realtime_max_output_tokens(1) {
+            Some(MaxTokens::Count(n)) => assert_eq!(n, 1),
+            other => panic!("expected Count(1), got {other:?}"),
+        }
+        match realtime_max_output_tokens(REALTIME_MAX_OUTPUT_TOKENS) {
+            Some(MaxTokens::Count(n)) => assert_eq!(n, REALTIME_MAX_OUTPUT_TOKENS),
+            other => panic!("expected Count(4096), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn realtime_max_output_tokens_clamps_above_ceiling() {
+        // Default agent.max_tokens_per_turn is 16384 — above the realtime API's
+        // 4096 integer ceiling. Exercise the two specific values that triggered
+        // the s71/s72 smoke failures.
+        for requested in [4097_u32, 8_192, 16_384, u32::MAX] {
+            match realtime_max_output_tokens(requested) {
+                Some(MaxTokens::Count(n)) => assert_eq!(
+                    n, REALTIME_MAX_OUTPUT_TOKENS,
+                    "requested={requested} should clamp to {REALTIME_MAX_OUTPUT_TOKENS}"
+                ),
+                other => panic!("expected clamped Count, got {other:?}"),
+            }
         }
     }
 

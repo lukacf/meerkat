@@ -11,9 +11,7 @@ pub mod tokio {
 }
 
 pub mod client;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
 
 pub use client::AnthropicClient;
-#[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{AnthropicAuthMethod, AnthropicBackendKind, AnthropicProviderRuntime};

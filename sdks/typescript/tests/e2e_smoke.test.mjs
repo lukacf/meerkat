@@ -64,7 +64,30 @@ function anthropicModel() {
 }
 
 function openaiModel() {
-  return process.env.SMOKE_MODEL_OPENAI || "gpt-4.1-mini";
+  // Default to the current approved OpenAI smoke model per CLAUDE.md;
+  // the previous default `gpt-4.1-mini` is obsolete and was silently
+  // degrading instruction-following (s44 reviewer failing to repeat
+  // the literal `[TS-SWARM]` marker it was told to remember).
+  return process.env.SMOKE_MODEL_OPENAI || "gpt-5.4-mini";
+}
+
+// s44 reviewer-specific model. gpt-5.4-mini consistently fails the
+// staged-system-context retrieval assertion on this scenario: when the
+// reviewer's system prompt contains both the appended `[TS-SWARM]`
+// marker AND identifier-like strings (mob_id, peer_name, peer_id),
+// the model picks one of the identifier-like strings as "the swarm
+// marker". Renaming the mob_id away from "swarm" did not fix it —
+// the model picked the renamed id too. gpt-5.4 (approved standard
+// tier per CLAUDE.md) handles this referential retrieval with ~60%
+// first-pass success; the `retries = 2` entry in `.config/nextest.toml`
+// for s44 absorbs the residual model-variance (matches the
+// `realtime_ws_protocol` precedent from W1-A).
+function reviewerModel() {
+  return (
+    process.env.SMOKE_MODEL_OPENAI_REVIEWER ||
+    process.env.SMOKE_MODEL_OPENAI ||
+    "gpt-5.4"
+  );
 }
 
 function includeScenario(id) {
@@ -328,7 +351,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
               external_addressable: true,
             },
             reviewer: {
-              model: openaiModel(),
+              model: reviewerModel(),
               tools: { comms: true },
               peer_description: "Review worker",
               external_addressable: true,
@@ -383,7 +406,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           scenario,
           "send reviewer ready turn",
           mob.member("reviewer-1").send(
-          "Repeat the swarm marker and say reviewer ready.",
+            "Repeat the swarm marker and say reviewer ready.",
           ),
         );
         assert.equal(reviewerReceipt.agentIdentity, "reviewer-1");
@@ -415,6 +438,18 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         { timeoutMs: 120000, intervalMs: 500 },
       );
       const reviewerText = (reviewerState.outputPreview || "").toLowerCase();
+      // Test-support instrumentation: surface the raw reviewer output
+      // when the `ts-swarm` assertion would fail, so post-hoc log
+      // inspection does not require a re-run. The assertions below
+      // remain untouched (test semantics unchanged).
+      if (!reviewerText.includes("ts-swarm") || !reviewerText.includes("reviewer ready")) {
+        console.error(
+          `[${scenario}] reviewer output_preview (raw): ${JSON.stringify(reviewerState.outputPreview)}`,
+        );
+        console.error(
+          `[${scenario}] reviewer output_preview (lowercased): ${JSON.stringify(reviewerText)}`,
+        );
+      }
       assert.ok(reviewerText.includes("reviewer ready"));
       assert.ok(reviewerText.includes("ts-swarm"));
 

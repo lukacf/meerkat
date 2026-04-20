@@ -1325,6 +1325,23 @@ machine! {
         // =====================================================================
         // CompleteFlow / FinishRun
         // =====================================================================
+        //
+        // Two independent flow-terminalization paths drive the authority to
+        // the same state:
+        //   1. Natural completion: a run's task finishes and
+        //      `handle_flow_cleanup` fires `CompleteFlow` + `FinishRun`
+        //      (decrementing `active_run_count`, clearing the run-tracker).
+        //   2. Destroy-driven cancel: `cancel_all_flow_tasks` iterates the
+        //      run-tracker and fires the same signals for any run that has
+        //      not already been cleaned up.
+        // Because actor-command ordering is unordered between these two
+        // paths, they race. Whichever lands first drives
+        // `active_run_count` from 1 → 0; the other arrives with the counter
+        // already at 0. The *Zero transitions below model "CompleteFlow /
+        // FinishRun at count 0" as a legitimate terminal convergence
+        // (no-op update, same target phase) rather than as an error the
+        // caller must paper over — dogma requires that convergence
+        // semantics live in the machine authority.
 
         transition CompleteFlowRunning {
             on signal CompleteFlow
@@ -1337,6 +1354,15 @@ machine! {
             emit FlowTerminalized
         }
 
+        transition CompleteFlowRunningZero {
+            on signal CompleteFlow
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Completed }
+            guard "no_active_runs" { self.active_run_count == 0 }
+            update {}
+            to Running
+            emit NotifyCoordinator
+        }
+
         transition FinishRunRunning {
             on signal FinishRun
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
@@ -1346,6 +1372,15 @@ machine! {
             }
             to Running
             emit EmitRunLifecycleNotice
+        }
+
+        transition FinishRunRunningZero {
+            on signal FinishRun
+            guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
+            guard "no_active_runs" { self.active_run_count == 0 }
+            update {}
+            to Running
+            emit NotifyCoordinator
         }
 
         // =====================================================================

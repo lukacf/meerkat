@@ -36,7 +36,6 @@ export { RealtimeChannel, RealtimeConnection } from "./realtime.js";
 export type {
   RealtimeChannelOptions,
   RealtimeChannelTarget,
-  RealtimeMobMemberTarget,
   RealtimeSessionTarget,
 } from "./realtime.js";
 

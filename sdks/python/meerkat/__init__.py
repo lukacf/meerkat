@@ -38,7 +38,6 @@ from .realtime import (
     RealtimeChannel,
     RealtimeConnection,
     RealtimeChannelTarget,
-    RealtimeMobMemberTarget,
     RealtimeSessionTarget,
 )
 from .session import DeferredSession, Session
@@ -189,7 +188,6 @@ __all__ = [
     "RealtimeConnection",
     "RealtimeChannelTarget",
     "RealtimeSessionTarget",
-    "RealtimeMobMemberTarget",
     "MobHelperResult",
     "MobMemberSnapshot",
     "MobKickoffMemberSnapshot",

@@ -19,7 +19,16 @@ pub mod auth_oauth;
 pub mod auth_store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod authorizers;
-#[cfg(not(target_arch = "wasm32"))]
+// `resolver` contains per-source-spec arms that are individually cfg-split
+// for filesystem/command/managed-store sources. The InlineSecret, Env
+// (host env_lookup), ExternalResolver, and authorizer-stub arms compile
+// on wasm32 — that path is what browser WASM callers need when their
+// bootstrap populates `config.realm` with
+// `CredentialSourceSpec::InlineSecret` via
+// `populate_realm_from_api_keys`. Exposing the module on wasm32 is what
+// lets `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini`
+// register their runtimes on wasm32 so `build_agent` can resolve
+// provider credentials in the browser.
 pub mod resolver;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "keyring"))]
@@ -36,5 +45,4 @@ pub use auth_store::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use meerkat_core::auth::{RefreshCoordinator, RefreshError, TokenStore};
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use resolver::{resolve_external_authorizer, resolve_simple_secret};

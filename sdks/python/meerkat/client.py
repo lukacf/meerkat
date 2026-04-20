@@ -1454,6 +1454,15 @@ class MeerkatClient:
                 if isinstance(result.get("kickoff"), dict)
                 else {}
             ),
+            # Phase 5G/T5i identity-first realtime routing: preserve
+            # `current_session_id` so callers (including
+            # `RealtimeChannel.mob_member`) can resolve a mob member
+            # into a `session_target` for `realtime/open_info`.
+            **(
+                {"current_session_id": str(result["current_session_id"])}
+                if isinstance(result.get("current_session_id"), str)
+                else {}
+            ),
         }
 
     async def wait_mob_kickoff(

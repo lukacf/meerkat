@@ -26,3 +26,20 @@ retries = 2
 # from the session's DSL-owned `SessionContextHandle` (the same authority
 # the DSL emits `SessionContextAdvanced` from), so the consumer and the
 # effect stream agree on the frontier by construction.
+
+[[profile.default.overrides]]
+# smoke-fixes Cluster F: s44 reviewer retrieval of the staged `[TS-SWARM]`
+# system-context marker is subject to gpt-5.4 referential variance when
+# the reviewer's system prompt also contains identifier-like strings
+# (mob_id, peer_name, peer_id). Diagnostic `tracing::debug!` instrumentation
+# on `take_pending_system_context_boundary` proved the production plumbing
+# delivers the marker end-to-end; 3 unit tests in
+# `meerkat-session/tests/ephemeral_contract.rs` + s40 Python smoke on the
+# same code path confirm the mechanism. The reviewer model was upgraded
+# from gpt-5.4-mini to gpt-5.4 (see `reviewerModel()` helper in
+# `sdks/typescript/tests/e2e_smoke.test.mjs`) which lifted the first-pass
+# rate from 0% to ~60%; retries absorb the residual model-variance so CI
+# stays deterministic. Precedent: the two retry=2 overrides above for
+# `provider_tool_use_boundary` and `test_concurrent_spawns_parallelize_provisioning`.
+filter = 'test(e2e_smoke_s44_typescript_sdk_mixed_provider_swarm_probe)'
+retries = 2

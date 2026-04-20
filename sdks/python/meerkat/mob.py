@@ -104,6 +104,11 @@ MobMemberSnapshot = TypedDict(
         ],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
         "kickoff": NotRequired[dict[str, Any]],
+        # Phase 5G/T5i identity-first realtime routing: session id of
+        # the member's current bridge session. Consumers navigate
+        # `mob/member_status.current_session_id → realtime/open_info
+        # (session_target)`. Absent when the member is not yet bound.
+        "current_session_id": NotRequired[str],
     },
 )
 

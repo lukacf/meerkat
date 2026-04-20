@@ -100,9 +100,16 @@ pub struct MobMemberSnapshot {
     /// unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_attachment_status: Option<MobRealtimeAttachmentStatus>,
-    /// Bridge-internal session binding — compatibility alias for the current bridge session.
-    #[serde(skip)]
-    pub(crate) current_session_id: Option<SessionId>,
+    /// Identity-first session id for the member's current bridge session.
+    ///
+    /// Exposed over the wire so realtime routing can do the canonical
+    /// `mob/member_status → current_session_id → realtime/open_info`
+    /// navigation. Phase 5G/T5i removed the `mob_member_target`
+    /// shortcut; `RealtimeChannelTarget` only accepts `session_target`
+    /// now, and this field is the only path from mob membership to a
+    /// realtime session handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_session_id: Option<SessionId>,
     /// Bridge-internal session binding — not part of the public identity contract.
     #[serde(skip)]
     pub(crate) current_bridge_session_id: Option<SessionId>,
@@ -160,6 +167,11 @@ pub struct MobMemberListEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
     // --- Bridge internals (pub(crate)) ---
+    // `list_members` stays the lightweight roster view: no session_id
+    // in the wire shape (see `tests.rs::test_identity_first_list_members_returns_identity_native_entries`
+    // which regression-asserts that). Callers that need to bridge a
+    // member to a realtime session use `mob/member_status`, which
+    // surfaces `current_session_id` explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

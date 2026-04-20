@@ -1047,6 +1047,14 @@ export class MeerkatClient {
       unknownPeerCount: number;
       unreachablePeers: Array<{ peer: string; reason?: string }>;
     };
+    /**
+     * Phase 5G/T5i identity-first realtime routing: session id of the
+     * member's current bridge session. Consumers navigate
+     * `mob/member_status.currentSessionId → realtime/open_info
+     * (session_target)`. Absent when the member is not yet bound to a
+     * session.
+     */
+    currentSessionId?: string;
   }> {
     const result = await this.request("mob/member_status", {
       mob_id: mobId,
@@ -1102,6 +1110,10 @@ export class MeerkatClient {
               : [],
           }
         : undefined,
+      currentSessionId:
+        typeof result.current_session_id === "string" && result.current_session_id.length > 0
+          ? result.current_session_id
+          : undefined,
     };
   }
 

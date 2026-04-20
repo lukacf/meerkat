@@ -513,7 +513,7 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
                     turn_detection,
                     transcription: Some(Nullable::Value(InputAudioTranscription {
                         model: Some(openai_realtime_transcription_model()),
-                        language: None,
+                        language: openai_realtime_input_language(),
                         prompt: None,
                     })),
                     noise_reduction: None,
@@ -549,6 +549,101 @@ fn openai_realtime_voice() -> Voice {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "marin".to_string()),
     )
+}
+
+/// Default ISO-639 language code for realtime input transcription.
+///
+/// OpenAI's realtime transcription model auto-detects input language when
+/// unset, which lets short or noisy English audio drift into other
+/// languages (s71/s72 observed Japanese/Chinese drift). Pin the
+/// transcription language up front; callers who run multilingual
+/// deployments can opt out via `RKAT_REALTIME_INPUT_LANGUAGE` (set to a
+/// different ISO code) or `RKAT_REALTIME_INPUT_LANGUAGE=auto` to restore
+/// auto-detection.
+const OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE: &str = "en";
+/// Default ISO-639 language code for realtime output (text + audio
+/// transcript). Shares the default with input so the two modalities
+/// stay coherent under drift. `RKAT_REALTIME_OUTPUT_LANGUAGE=none`
+/// skips the instruction entirely.
+const OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE: &str = "en";
+
+fn openai_realtime_input_language() -> Option<String> {
+    let raw = std::env::var("RKAT_REALTIME_INPUT_LANGUAGE")
+        .ok()
+        .or_else(|| std::env::var("OPENAI_REALTIME_INPUT_LANGUAGE").ok());
+    resolve_realtime_input_language(raw.as_deref())
+}
+
+/// Pure-function core of [`openai_realtime_input_language`] — takes the
+/// raw env value (or `None` when unset) and applies the "blank →
+/// default, `auto` → None, otherwise pass through" policy. Split so
+/// unit tests can exercise the policy without touching process env.
+fn resolve_realtime_input_language(raw: Option<&str>) -> Option<String> {
+    let value = raw
+        .map(str::trim)
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE.to_string());
+    if value.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Instruction block that pins the realtime model's output language.
+///
+/// Realtime models produce two parallel outputs (`output_text` and
+/// `output_audio_transcript`). Without an explicit directive they can
+/// drift to a different language if input transcription loses
+/// confidence. Pinning output language at session init keeps the two
+/// outputs coherent (both English by default). Callers who want a
+/// different default can set `RKAT_REALTIME_OUTPUT_LANGUAGE` to a
+/// different ISO code or `none` to skip the directive.
+fn openai_realtime_output_language_instruction() -> Option<String> {
+    let raw = std::env::var("RKAT_REALTIME_OUTPUT_LANGUAGE")
+        .ok()
+        .or_else(|| std::env::var("OPENAI_REALTIME_OUTPUT_LANGUAGE").ok());
+    resolve_realtime_output_language_instruction(raw.as_deref())
+}
+
+/// Pure-function core of [`openai_realtime_output_language_instruction`] —
+/// takes the raw env value (or `None` when unset) and applies the
+/// "blank → default, `none` → None, otherwise render directive" policy.
+fn resolve_realtime_output_language_instruction(raw: Option<&str>) -> Option<String> {
+    let value = raw
+        .map(str::trim)
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE.to_string());
+    if value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let label = openai_realtime_language_label(&value);
+    // Anchor the exception clause to *these* instructions rather than
+    // to the user message: a seed instruction written in a different
+    // language (e.g. Japanese system prompt) is what the model should
+    // key off of, not whether the user inside a given turn asks
+    // politely in English for a Japanese answer.
+    Some(format!(
+        "Respond in {label} for both the spoken audio and the written transcript \
+         unless explicitly instructed otherwise in these instructions."
+    ))
+}
+
+fn openai_realtime_language_label(code: &str) -> String {
+    match code.to_ascii_lowercase().as_str() {
+        "en" | "en-us" | "en-gb" => "English".to_string(),
+        "es" => "Spanish".to_string(),
+        "fr" => "French".to_string(),
+        "de" => "German".to_string(),
+        "it" => "Italian".to_string(),
+        "pt" | "pt-br" | "pt-pt" => "Portuguese".to_string(),
+        "ja" => "Japanese".to_string(),
+        "zh" | "zh-cn" | "zh-tw" => "Chinese".to_string(),
+        "ko" => "Korean".to_string(),
+        other => format!("ISO code '{other}'"),
+    }
 }
 
 fn openai_audio_response_config() -> ResponseConfig {
@@ -606,13 +701,23 @@ fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {
 }
 
 fn openai_realtime_instructions(seed_messages: &[Message]) -> Option<String> {
+    // Language pin goes first so output_text and output_audio_transcript
+    // stay coherent with the caller's expected language even when
+    // transcription confidence on input dips. Callers opt out via
+    // `RKAT_REALTIME_OUTPUT_LANGUAGE=none`.
+    let language_pin = openai_realtime_output_language_instruction();
+
     if let Some(authoritative_context) = openai_realtime_authoritative_system_context(seed_messages)
     {
         // Put the freshest runtime-owned facts first. These are the pieces most
         // likely to change between reconnects/reconstructions, and they must
         // override older transcript scaffolding when the provider rebuilds an
         // otherwise stateful live session from text projection.
-        let mut instructions = vec![authoritative_context];
+        let mut instructions = Vec::new();
+        if let Some(pin) = language_pin {
+            instructions.push(pin);
+        }
+        instructions.push(authoritative_context);
         if let Some(history) = openai_realtime_history_context(seed_messages) {
             instructions.push(history);
         }
@@ -630,16 +735,21 @@ fn openai_realtime_instructions(seed_messages: &[Message]) -> Option<String> {
         return Some(instructions.join("\n\n"));
     }
 
-    let mut instructions = seed_messages
-        .iter()
-        .take(1)
-        .filter_map(|message| match message {
-            Message::System(system) => Some(system.content.trim().to_string()),
-            Message::SystemNotice(notice) => Some(notice.rendered_text()),
-            _ => None,
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>();
+    let mut instructions = Vec::new();
+    if let Some(pin) = language_pin {
+        instructions.push(pin);
+    }
+    instructions.extend(
+        seed_messages
+            .iter()
+            .take(1)
+            .filter_map(|message| match message {
+                Message::System(system) => Some(system.content.trim().to_string()),
+                Message::SystemNotice(notice) => Some(notice.rendered_text()),
+                _ => None,
+            })
+            .filter(|text| !text.is_empty()),
+    );
     if let Some(history) = openai_realtime_history_context(seed_messages) {
         instructions.push(history);
     }
@@ -2073,6 +2183,116 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, LlmError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn resolve_realtime_input_language_defaults_to_english_when_env_unset() {
+        // Unset or blank env falls through to the s71/s72-gate default
+        // (pin English to prevent Whisper drift into CJK).
+        assert_eq!(resolve_realtime_input_language(None).as_deref(), Some("en"));
+        assert_eq!(
+            resolve_realtime_input_language(Some("")).as_deref(),
+            Some("en")
+        );
+        assert_eq!(
+            resolve_realtime_input_language(Some("   ")).as_deref(),
+            Some("en")
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_input_language_honors_explicit_override() {
+        assert_eq!(
+            resolve_realtime_input_language(Some("ja")).as_deref(),
+            Some("ja")
+        );
+        assert_eq!(
+            resolve_realtime_input_language(Some("  fr  ")).as_deref(),
+            Some("fr")
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_input_language_auto_opts_out() {
+        // `auto` restores OpenAI's native language auto-detection for
+        // callers who intentionally run multilingual sessions.
+        assert_eq!(resolve_realtime_input_language(Some("auto")), None);
+        assert_eq!(resolve_realtime_input_language(Some("AUTO")), None);
+        assert_eq!(resolve_realtime_input_language(Some("  Auto  ")), None);
+    }
+
+    #[test]
+    fn resolve_realtime_output_language_instruction_defaults_pin_english() {
+        let instruction = resolve_realtime_output_language_instruction(None)
+            .expect("default must emit an English pin");
+        assert!(
+            instruction.contains("English"),
+            "default instruction must name English: {instruction}"
+        );
+        assert!(
+            instruction.contains("spoken audio") && instruction.contains("written transcript"),
+            "instruction must cover both output modalities: {instruction}"
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_output_language_instruction_honors_other_codes() {
+        let fr = resolve_realtime_output_language_instruction(Some("fr"))
+            .expect("fr override must emit a pin");
+        assert!(fr.contains("French"), "fr must map to French: {fr}");
+        let ja = resolve_realtime_output_language_instruction(Some("ja"))
+            .expect("ja override must emit a pin");
+        assert!(ja.contains("Japanese"), "ja must map to Japanese: {ja}");
+        let unknown = resolve_realtime_output_language_instruction(Some("xx"))
+            .expect("unknown codes still emit an instruction");
+        assert!(
+            unknown.contains("ISO code 'xx'"),
+            "unknown codes must fall back to the ISO label: {unknown}"
+        );
+    }
+
+    #[test]
+    fn resolve_realtime_output_language_instruction_none_skips_pin() {
+        // `none` lets multilingual callers fully opt out of the pin.
+        assert_eq!(
+            resolve_realtime_output_language_instruction(Some("none")),
+            None
+        );
+        assert_eq!(
+            resolve_realtime_output_language_instruction(Some("NONE")),
+            None
+        );
+        assert_eq!(
+            resolve_realtime_output_language_instruction(Some("  None  ")),
+            None
+        );
+    }
+
+    #[test]
+    fn openai_realtime_instructions_prepend_language_pin_when_seed_has_system_only() {
+        let seed_messages = vec![Message::System(meerkat_core::SystemMessage {
+            content: "You are a helpful realtime operator.".to_string(),
+        })];
+
+        let instructions = openai_realtime_instructions(&seed_messages)
+            .expect("system seed must yield instructions");
+
+        // Language pin surfaces ahead of the system prompt so the
+        // realtime model's two output streams (text + audio) share a
+        // single language bias even under transcription drift. The
+        // default is English unless RKAT_REALTIME_OUTPUT_LANGUAGE
+        // opts out; tests run without that env set on CI.
+        let language_pin_idx = instructions.find("Respond in English");
+        let system_prompt_idx = instructions.find("You are a helpful realtime operator");
+        match (language_pin_idx, system_prompt_idx) {
+            (Some(pin_idx), Some(system_idx)) => assert!(
+                pin_idx < system_idx,
+                "language pin must precede the system prompt: {instructions}"
+            ),
+            other => panic!(
+                "expected both language pin and system prompt in instructions, got {other:?}: {instructions}"
+            ),
+        }
     }
 
     #[test]

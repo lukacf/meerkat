@@ -61,7 +61,12 @@ def smoke_model() -> str:
 
 
 def openai_model() -> str:
-    return os.environ.get("SMOKE_MODEL_OPENAI", "gpt-4.1-mini")
+    # Default to the current approved OpenAI smoke model per CLAUDE.md;
+    # the previous default `gpt-4.1-mini` is obsolete and was silently
+    # degrading instruction-following (showed up in s44 as the reviewer
+    # failing to repeat the literal `[TS-SWARM]` marker it was told
+    # to remember).
+    return os.environ.get("SMOKE_MODEL_OPENAI", "gpt-5.4-mini")
 
 
 @asynccontextmanager

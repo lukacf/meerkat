@@ -632,6 +632,18 @@ machine! {
             // prevents duplicate replies on the same correlation id.
             inbound_peer_requests: Map<PeerCorrelationId, InboundPeerRequestState>,
 
+            // --- Session-context advancement (W2-E / issue #264) ---
+            //
+            // Monotonic watermark in milliseconds of the last canonical
+            // session-context mutation the shell reported via
+            // `AdvanceSessionContext`. Advancing transitions emit
+            // `SessionContextAdvanced { updated_at_ms }` which the shell's
+            // realtime projection consumer uses to drive a typed
+            // `ProjectionFreshness` state machine instead of polling a
+            // watch channel. Initialized to 0 so the first mutation always
+            // advances.
+            last_session_context_updated_at_ms: u64,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport
@@ -737,6 +749,7 @@ machine! {
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
+            last_session_context_updated_at_ms = 0,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -940,6 +953,16 @@ machine! {
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
             PeerRequestReceived { corr_id: PeerCorrelationId },
             PeerResponseReplied { corr_id: PeerCorrelationId },
+            // Session-context advancement input (W2-E). Shell fires this at every
+            // site that mutates canonical session truth (prompt append, external
+            // content injection, tool-result append, external assistant output,
+            // runtime-system-context append). The transition records
+            // `last_session_context_updated_at_ms` and emits
+            // `SessionContextAdvanced` so external projection consumers (realtime
+            // provider session) refresh from a typed effect instead of polling a
+            // watch channel. Monotonic: rejected when `updated_at_ms` is not
+            // strictly greater than the last advance we recorded.
+            AdvanceSessionContext { updated_at_ms: u64 },
             // Peer-ingress transport capability ownership (W2-G).
             //
             // `AttachSessionIngress` only succeeds from `Unattached`:
@@ -1043,6 +1066,15 @@ machine! {
             PeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: OutboundPeerRequestState },
             PeerInteractionCleanup { corr_id: PeerCorrelationId },
             InboundPeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: InboundPeerRequestState },
+            // Session-context advancement effect (W2-E / issue #264). Emitted
+            // on every transition that advances canonical session-context
+            // truth. Replaces the hand-wired `projection_refresh_rx` polling
+            // channel in the realtime projection consumer — consumers
+            // subscribe to this typed effect via an observer installed on the
+            // session's DSL handle. `updated_at_ms` is monotonic; observers
+            // use it as the freshness baseline for their typed
+            // `ProjectionFreshness` state.
+            SessionContextAdvanced { updated_at_ms: u64 },
         }
 
         // =====================================================================
@@ -1103,6 +1135,7 @@ machine! {
         disposition PeerInteractionStateChanged => external,
         disposition PeerInteractionCleanup => external,
         disposition InboundPeerInteractionStateChanged => external,
+        disposition SessionContextAdvanced => external,
 
         // =====================================================================
         // Invariants
@@ -3921,6 +3954,34 @@ machine! {
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }
+        }
+
+        // Session-context advancement transition (W2-E / issue #264).
+        //
+        // Fires at every shell site that mutates canonical session truth —
+        // prompt append, external content injection, tool-result append,
+        // external assistant output, runtime-system-context append, and the
+        // tail of any turn that advances the session's `updated_at`
+        // watermark. Monotonic: the guard rejects any advance whose
+        // `updated_at_ms` is not strictly greater than the last recorded
+        // watermark. This lets the shell apply the transition
+        // unconditionally post-mutation; duplicate or out-of-order ticks are
+        // filtered by the DSL, not by the caller.
+        //
+        // Advancing transitions emit `SessionContextAdvanced { updated_at_ms }`
+        // which the realtime projection consumer reads via an installed
+        // `SessionContextAdvancedObserver` to drive its typed
+        // `ProjectionFreshness` state. No polling, no watch channel, no
+        // hand-maintained `projection_refresh_dirty` flag.
+        transition AdvanceSessionContext {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceSessionContext { updated_at_ms }
+            guard "monotonic" { updated_at_ms > self.last_session_context_updated_at_ms }
+            update {
+                self.last_session_context_updated_at_ms = updated_at_ms;
+            }
+            to Idle
+            emit SessionContextAdvanced { updated_at_ms: updated_at_ms }
         }
 
         // =====================================================================

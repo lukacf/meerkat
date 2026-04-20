@@ -809,6 +809,11 @@ impl MobActor {
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
             phase_watch_rx: self.phase_watch_tx.subscribe(),
+            // W2-E: the actor's internal handle-for-tools does not carry the
+            // realtime factory — that seam lives on the caller-facing
+            // `MobHandle` returned from `MobBuilder`. Tools built from the
+            // actor do not dial realtime endpoints.
+            realtime_session_factory: None,
         }
     }
 

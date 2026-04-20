@@ -152,9 +152,17 @@ pub fn cells() -> &'static [CellEntry] {
     &[
         // --- W1-C populated cells ------------------------------------------------
         //
-        // The s71 shape: turn-driven + realtime-attached, peer-response terminal
-        // triggers the next turn. Blocked on the mob-side realtime factory
-        // injection seam (task #10, W2-E).
+        // The s71 shape: turn-driven + realtime-attached, peer-response
+        // terminal triggers the next turn. The canonical W2-E fix lives in
+        // the `ProjectionFreshness` typed state machine — a mid-turn
+        // context-advancement effect lands as `StaleDeferred`, promotes
+        // to `StaleImmediate` on turn completion, and drains at the
+        // turn-end refresh site. The in-crate unit tests exercise every
+        // transition in that state machine (positive + negative pairs
+        // per W1-B's test-discipline lesson). A full mob+realtime+peer
+        // e2e test arrives in follow-up work when the mob-side factory
+        // wiring plumbs through to a real `RealtimeWsHost` (the seam on
+        // `MobBuilder::with_realtime_session_factory` lands here).
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
@@ -163,9 +171,10 @@ pub fn cells() -> &'static [CellEntry] {
                 stream_mode: StreamMode::None,
                 assertion_surface: AssertionSurface::RuntimeLoopStaged,
             },
-            coverage: Coverage::PendingFix {
-                blocked_by: "W2-E (mob-side RealtimeSessionFactory injection seam, \
-                             see task #10) + typed projection-refresh effect emission",
+            coverage: Coverage::Covered {
+                test_name: "meerkat_rpc::realtime_ws::tests::\
+                            projection_freshness_turn_completed_promotes_deferred_to_immediate",
+                scope: CoverageScope::InCrateUnit,
             },
         },
         // Non-realtime analogue: peer-response terminal is turned into an
@@ -346,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn the_s71_shape_is_enumerated() {
+    fn the_s71_shape_is_enumerated_and_covered() {
         let s71 = Cell {
             runtime_mode: RuntimeMode::TurnDriven,
             transport: Transport::RealtimeAttached,
@@ -356,9 +365,15 @@ mod tests {
         };
         let found = cells().iter().find(|e| e.cell == s71);
         assert!(found.is_some(), "s71 shape must be in the matrix");
+        // W2-E: the s71 shape is now Covered via the `ProjectionFreshness`
+        // state-machine tests in `meerkat-rpc`. The prior PendingFix
+        // status (blocked on the mob-side RealtimeSessionFactory
+        // injection seam) is resolved — the seam lands in this PR and
+        // the canonical fix (deferred-to-immediate promotion on turn
+        // end) is proven by deterministic unit tests.
         assert!(
-            matches!(found.unwrap().coverage, Coverage::PendingFix { .. }),
-            "s71 shape must be marked PendingFix until the W2-E seam lands",
+            matches!(found.unwrap().coverage, Coverage::Covered { .. }),
+            "s71 shape must be Covered after W2-E lands",
         );
     }
 

@@ -21,6 +21,17 @@ pub struct MobBuilder {
     tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_external_tools_provider: Option<crate::ExternalToolsProvider>,
+    /// Optional realtime session factory injected for mob-provisioned
+    /// members that open a realtime channel (W2-E / issue #264).
+    ///
+    /// Today this field is a carrier: tests can set it via
+    /// [`MobBuilder::with_realtime_session_factory`] and retrieve it from
+    /// [`MobHandle::realtime_session_factory`] to wire into a
+    /// `RealtimeWsHost` bound to the same runtime. Follow-up work lands a
+    /// direct mob→host plumbing path so `RealtimeAttached` cells in the
+    /// W1-C coverage matrix can be exercised end-to-end without per-test
+    /// TCP orchestration.
+    realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
 }
 
 enum BuilderMode {
@@ -83,6 +94,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            realtime_session_factory: None,
         }
     }
 
@@ -126,6 +138,7 @@ impl MobBuilder {
             tool_bundles: BTreeMap::new(),
             default_llm_client: None,
             default_external_tools_provider: None,
+            realtime_session_factory: None,
         }
     }
 
@@ -198,6 +211,22 @@ impl MobBuilder {
         self
     }
 
+    /// Inject a [`meerkat_client::RealtimeSessionFactory`] for mob-provisioned
+    /// members that open a realtime channel (W2-E / issue #264).
+    ///
+    /// Tests use this to point mob members at a deterministic in-process
+    /// mock (`mock_realtime_ws::RealtimeMockServer`) instead of a live
+    /// OpenAI endpoint. The factory is carried through to [`MobHandle`]
+    /// so test harnesses can wire it into a `RealtimeWsHost` bound to the
+    /// same runtime.
+    pub fn with_realtime_session_factory(
+        mut self,
+        factory: Arc<dyn meerkat_client::RealtimeSessionFactory>,
+    ) -> Self {
+        self.realtime_session_factory = Some(factory);
+        self
+    }
+
     /// Create the mob: emit MobCreated event, start the actor, return handle.
     #[cfg(feature = "runtime-adapter")]
     pub async fn create(self) -> Result<MobHandle, MobError> {
@@ -212,6 +241,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            realtime_session_factory,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter: RuntimeAdapterOption = None;
@@ -318,6 +348,7 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
             storage.realm_profiles.clone(),
+            realtime_session_factory,
         ))
     }
 
@@ -340,6 +371,7 @@ impl MobBuilder {
             tool_bundles,
             default_llm_client,
             default_external_tools_provider,
+            realtime_session_factory,
         } = self;
         #[cfg(not(feature = "runtime-adapter"))]
         let runtime_adapter: RuntimeAdapterOption = None;
@@ -515,6 +547,7 @@ impl MobBuilder {
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics,
             phase_watch_rx: preview_phase_rx,
+            realtime_session_factory: realtime_session_factory.clone(),
         };
         // session_service is still live here (not consumed until start_runtime_with_components)
 
@@ -549,6 +582,7 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
             storage.realm_profiles.clone(),
+            realtime_session_factory,
         ))
     }
 
@@ -1159,6 +1193,7 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+        realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
@@ -1203,6 +1238,7 @@ impl MobBuilder {
             default_llm_client,
             default_external_tools_provider,
             realm_profile_store,
+            realtime_session_factory,
         )
     }
 
@@ -1219,6 +1255,7 @@ impl MobBuilder {
         default_llm_client: Option<Arc<dyn LlmClient>>,
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
+        realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
@@ -1247,6 +1284,7 @@ impl MobBuilder {
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
             phase_watch_rx,
+            realtime_session_factory,
         };
         let provisioner: Arc<dyn MobProvisioner> = Arc::new(
             MultiBackendProvisioner::new(

@@ -598,3 +598,81 @@ pub trait PeerInteractionCleanupObserver: Send + Sync {
     /// but observers should tolerate a redundant call defensively.
     fn on_peer_interaction_cleanup(&self, corr_id: PeerCorrelationId);
 }
+
+/// Session-context advancement DSL handle (W2-E / issue #264).
+///
+/// Shell callers fire `context_advanced(updated_at_ms)` at every site that
+/// mutates canonical session truth (prompt append, external content
+/// injection, tool-result append, external assistant output,
+/// runtime-system-context append, any `summary_tx.send_replace`). The
+/// transition is monotonic: the DSL guard drops ticks whose `updated_at_ms`
+/// isn't strictly greater than the last recorded watermark, so callers can
+/// fire unconditionally post-mutation.
+///
+/// Every successful transition emits `SessionContextAdvanced` which is
+/// dispatched to the installed [`SessionContextAdvancedObserver`] — the
+/// realtime projection consumer uses the observer to drive a typed
+/// `ProjectionFreshness` state instead of polling a watch channel.
+pub trait SessionContextHandle: Send + Sync {
+    /// Fire `AdvanceSessionContext { updated_at_ms }`.
+    ///
+    /// Guard: `updated_at_ms` is strictly greater than the last recorded
+    /// watermark. Returns `Ok(false)` when the guard rejects the tick as
+    /// non-advancing (duplicate or out-of-order); returns `Ok(true)` when
+    /// the transition lands and the effect is emitted. Transition errors
+    /// (lock poisoning, unexpected DSL state) surface as `Err`.
+    fn context_advanced(&self, updated_at_ms: u64) -> Result<bool, DslTransitionError>;
+
+    /// The monotonic watermark in milliseconds of the last successful
+    /// `AdvanceSessionContext` transition recorded on this handle.
+    ///
+    /// Returns `0` before any advance has been recorded. The realtime
+    /// projection consumer reads this once at install time to seed its
+    /// `ProjectionFreshness` baseline, so the consumer and the DSL agree
+    /// on the initial frontier by construction (no two-read race).
+    fn current_watermark_ms(&self) -> u64;
+
+    /// Install a typed observer for `SessionContextAdvanced` effect
+    /// emission. Implementations without an installed observer drop the
+    /// effect on the floor (standalone / WASM paths).
+    fn install_observer(&self, observer: Arc<dyn SessionContextAdvancedObserver>);
+
+    /// Atomically install a typed observer and return the current watermark
+    /// as a single critical section. Implementations MUST hold the same
+    /// authority lock that `context_advanced` uses for both the watermark
+    /// read and the observer installation, so no `SessionContextAdvanced`
+    /// effect can slip between "sampled baseline" and "observer visible".
+    ///
+    /// Callers use the returned `u64` as their `ProjectionFreshness`
+    /// baseline; any subsequent `context_advanced` tick is guaranteed to
+    /// either (a) have already been included in the returned watermark, or
+    /// (b) be visible to the observer. The `current_watermark_ms` +
+    /// `install_observer` pair is NOT a substitute: a transition can land
+    /// between those two non-atomic steps and be lost to both the baseline
+    /// and the observer.
+    fn install_observer_with_baseline(
+        &self,
+        observer: Arc<dyn SessionContextAdvancedObserver>,
+    ) -> u64 {
+        // Default combines the two primitives for backwards compatibility
+        // with any external impls that do not yet override this method.
+        // Runtime impls override to provide the atomic guarantee.
+        self.install_observer(observer);
+        self.current_watermark_ms()
+    }
+}
+
+/// Observer invoked by [`SessionContextHandle`] when a DSL
+/// `SessionContextAdvanced` effect is emitted (W2-E / issue #264).
+///
+/// The realtime projection consumer implements this to advance its typed
+/// `ProjectionFreshness` state. The observer is invoked under the same
+/// authority lock as the transition that emitted the effect, so the
+/// "mutation → transition → observer" chain is causal, not lexically
+/// adjacent.
+pub trait SessionContextAdvancedObserver: Send + Sync {
+    /// Called once per emitted `SessionContextAdvanced { updated_at_ms }`
+    /// effect. `updated_at_ms` is the monotonic millisecond watermark of
+    /// the canonical session-context mutation that produced this tick.
+    fn on_session_context_advanced(&self, updated_at_ms: u64);
+}

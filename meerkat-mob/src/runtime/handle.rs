@@ -570,6 +570,25 @@ pub struct MobHandle {
     /// authority inside the actor; this seam is rebuildable (replay) and
     /// read-only on the handle side.
     pub(super) phase_watch_rx: tokio::sync::watch::Receiver<MobState>,
+    /// Optional realtime session factory injected via
+    /// [`super::MobBuilder::with_realtime_session_factory`] (W2-E / issue
+    /// #264). Test harnesses retrieve it via
+    /// [`MobHandle::realtime_session_factory`] so a `RealtimeWsHost`
+    /// bound to the same runtime can be configured against a
+    /// deterministic in-process mock. `None` when no factory was
+    /// provided (production mob paths typically wire the factory at the
+    /// surface layer directly).
+    pub(super) realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
+}
+
+impl MobHandle {
+    /// Accessor for the realtime session factory carried from
+    /// [`super::MobBuilder::with_realtime_session_factory`] (W2-E).
+    pub fn realtime_session_factory(
+        &self,
+    ) -> Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> {
+        self.realtime_session_factory.as_ref().map(Arc::clone)
+    }
 }
 
 #[derive(Debug, Clone)]

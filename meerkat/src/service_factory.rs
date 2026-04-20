@@ -31,6 +31,11 @@ use meerkat_client::LlmClient;
 /// Wrapper around [`DynAgent`] implementing [`SessionAgent`].
 pub struct FactoryAgent {
     agent: DynAgent,
+    /// Session-context DSL handle, carried through from `SessionRuntimeBindings`
+    /// when the factory runs in `SessionOwned` mode. The session task uses it
+    /// to fire `AdvanceSessionContext` on every canonical session-truth
+    /// mutation (W2-E / issue #264). `None` on `StandaloneEphemeral` builds.
+    session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
 }
 
 impl FactoryAgent {
@@ -255,6 +260,12 @@ impl SessionAgent for FactoryAgent {
 
     fn cancel_after_boundary_handle(&self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
         Some(self.agent.cancel_after_boundary_handle())
+    }
+
+    fn session_context_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
+        self.session_context.as_ref().map(Arc::clone)
     }
 
     fn session_id(&self) -> SessionId {
@@ -505,6 +516,16 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
 
         let config = self.resolve_config().await;
 
+        // Capture the session_context handle before build_agent consumes the
+        // RuntimeBuildMode. Needed so the session task can fire
+        // `AdvanceSessionContext` on every session-truth mutation (W2-E).
+        let session_context = match req.build.as_ref().map(|opts| &opts.runtime_build_mode) {
+            Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)) => {
+                Some(Arc::clone(&bindings.session_context))
+            }
+            _ => None,
+        };
+
         let agent = self
             .factory
             .build_agent(build_config, &config)
@@ -513,7 +534,10 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
                 SessionError::Agent(meerkat_core::error::AgentError::BuildError(e.to_string()))
             })?;
 
-        Ok(FactoryAgent { agent })
+        Ok(FactoryAgent {
+            agent,
+            session_context,
+        })
     }
 }
 
@@ -698,7 +722,10 @@ mod tests {
             .build_agent(build_config, &Config::default())
             .await
             .map_err(|err| format!("{err}"))?;
-        Ok(FactoryAgent { agent })
+        Ok(FactoryAgent {
+            agent,
+            session_context: None,
+        })
     }
 
     #[tokio::test]
@@ -742,6 +769,7 @@ mod tests {
             peer_interaction: Some(Arc::new(
                 meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
             )),
+            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {
@@ -932,6 +960,7 @@ mod tests {
             peer_interaction: Some(Arc::new(
                 meerkat_runtime::RuntimePeerInteractionHandle::ephemeral(),
             )),
+            session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
         };
 
         let req = CreateSessionRequest {

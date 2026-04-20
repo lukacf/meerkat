@@ -210,6 +210,49 @@ struct SessionTaskControl {
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     interrupt_notify: Arc<tokio::sync::Notify>,
     session_event_tx: tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>,
+    /// Session-context DSL handle (W2-E / issue #264). `None` on standalone
+    /// / ephemeral builds that have no runtime-backed DSL authority. The
+    /// session task's `publish_summary` helper fires
+    /// `AdvanceSessionContext` through this handle after every canonical
+    /// session-truth mutation so the realtime projection consumer observes
+    /// a typed `SessionContextAdvanced` effect.
+    session_context: Option<Arc<dyn meerkat_core::handles::SessionContextHandle>>,
+}
+
+impl SessionTaskControl {
+    /// Update the summary watch channel and fire the DSL
+    /// `AdvanceSessionContext` input so the realtime projection consumer
+    /// receives a typed `SessionContextAdvanced` effect (W2-E).
+    ///
+    /// Monotonic: the DSL guard filters out non-advancing ticks, so a
+    /// single call site at every mutation is correct even if two sites
+    /// fire back-to-back without an intervening advance.
+    fn publish_summary(&self, snapshot: SessionSummaryCache) {
+        let updated_at_ms = summary_updated_at_ms(snapshot.updated_at);
+        self.summary_tx.send_replace(snapshot);
+        if let Some(handle) = self.session_context.as_ref()
+            && let Err(err) = handle.context_advanced(updated_at_ms)
+        {
+            tracing::debug!(
+                error = %err,
+                "AdvanceSessionContext rejected by DSL; projection refresh will rely on later ticks"
+            );
+        }
+    }
+}
+
+/// Convert a `SystemTime` summary timestamp into monotonic milliseconds
+/// for the DSL's `AdvanceSessionContext` input. `UNIX_EPOCH`-relative.
+/// Saturates to `u64::MAX` on dates far in the future (unreachable under
+/// any realistic clock).
+///
+/// Uses [`meerkat_core::time_compat::UNIX_EPOCH`] so the same `SystemTime`
+/// alias applies on both native and wasm32 (which uses `web_time`).
+fn summary_updated_at_ms(updated_at: SystemTime) -> u64 {
+    updated_at
+        .duration_since(meerkat_core::time_compat::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +398,23 @@ pub trait SessionAgent: Send {
 
     /// Shared live control flag for cancel-after-boundary requests.
     fn cancel_after_boundary_handle(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
+    /// Session-context advancement handle (W2-E / issue #264).
+    ///
+    /// Runtime-backed agents expose the session's DSL handle here. The
+    /// session task fires `context_advanced(updated_at_ms)` on every
+    /// `summary_tx.send_replace` so the realtime projection consumer
+    /// observes canonical session-truth advancement as a typed effect
+    /// instead of polling a watch channel.
+    ///
+    /// Standalone agents (WASM, ephemeral tests) return `None`; the task
+    /// then skips the emit and the typed effect simply never fires —
+    /// which is correct, there is nothing to refresh on those paths.
+    fn session_context_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
         None
     }
 
@@ -1408,6 +1468,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let comms_runtime = agent.comms_runtime();
         let cancel_after_boundary_handle = agent.cancel_after_boundary_handle();
         let system_context_state = agent.system_context_state();
+        // W2-E: capture the session-context DSL handle so the session task
+        // can fire `AdvanceSessionContext` on every summary-publish site.
+        let session_context = agent.session_context_handle();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
         let (state_tx, state_rx) = watch::channel(SessionState::Idle);
@@ -1440,6 +1503,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 session_event_tx: session_event_tx.clone(),
+                session_context: session_context.clone(),
             },
         ));
         #[cfg(target_arch = "wasm32")]
@@ -1456,6 +1520,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 turn_admission: Arc::clone(&turn_admission),
                 interrupt_notify: interrupt_notify.clone(),
                 session_event_tx: session_event_tx.clone(),
+                session_context: session_context.clone(),
             },
         ));
 
@@ -2560,7 +2625,7 @@ async fn session_task<A: SessionAgent>(
 
                 // Update cached summary
                 let snap = agent.snapshot();
-                control.summary_tx.send_replace(SessionSummaryCache {
+                control.publish_summary(SessionSummaryCache {
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
@@ -2621,7 +2686,7 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
                 agent.apply_runtime_system_context(&appends);
                 let snap = agent.snapshot();
-                control.summary_tx.send_replace(SessionSummaryCache {
+                control.publish_summary(SessionSummaryCache {
                     updated_at: snap.updated_at,
                     message_count: snap.message_count,
                     total_tokens: snap.total_tokens,
@@ -2657,7 +2722,7 @@ async fn session_task<A: SessionAgent>(
                 let result = agent.append_external_user_content(content);
                 if result.is_ok() {
                     let snap = agent.snapshot();
-                    control.summary_tx.send_replace(SessionSummaryCache {
+                    control.publish_summary(SessionSummaryCache {
                         updated_at: snap.updated_at,
                         message_count: snap.message_count,
                         total_tokens: snap.total_tokens,
@@ -2686,7 +2751,7 @@ async fn session_task<A: SessionAgent>(
                 let result = agent.append_external_assistant_output(blocks, stop_reason, usage);
                 if result.is_ok() {
                     let snap = agent.snapshot();
-                    control.summary_tx.send_replace(SessionSummaryCache {
+                    control.publish_summary(SessionSummaryCache {
                         updated_at: snap.updated_at,
                         message_count: snap.message_count,
                         total_tokens: snap.total_tokens,
@@ -2719,7 +2784,7 @@ async fn session_task<A: SessionAgent>(
                 let result = agent.dispatch_external_tool_call(call).await;
                 if result.is_ok() {
                     let snap = agent.snapshot();
-                    control.summary_tx.send_replace(SessionSummaryCache {
+                    control.publish_summary(SessionSummaryCache {
                         updated_at: snap.updated_at,
                         message_count: snap.message_count,
                         total_tokens: snap.total_tokens,

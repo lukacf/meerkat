@@ -962,6 +962,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             // normal `prepare_bindings`, a properly-initialized handle
                             // replaces this `None` via the ordinary install path.
                             peer_interaction: None,
+                            // W2-E (#264): recovery path uses an ephemeral session
+                            // context handle. `AdvanceSessionContext` is per_phase and
+                            // survives the `Initializing` phase, so this path does
+                            // not have the same phase-guard issue as peer-interaction.
+                            session_context: Arc::new(
+                                meerkat_runtime::RuntimeSessionContextHandle::ephemeral(),
+                            ),
                         },
                     )
                 })

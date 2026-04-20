@@ -22,6 +22,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `mcp_server_states`: `Map<McpServerId, McpServerState>`
 - `pending_peer_requests`: `Map<PeerCorrelationId, OutboundPeerRequestState>`
 - `inbound_peer_requests`: `Map<PeerCorrelationId, InboundPeerRequestState>`
+- `last_session_context_updated_at_ms`: `u64`
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
 - `peer_ingress_mob_id`: `Option<MobId>`
@@ -82,6 +83,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerRequestTimedOut`(corr_id: PeerCorrelationId)
 - `PeerRequestReceived`(corr_id: PeerCorrelationId)
 - `PeerResponseReplied`(corr_id: PeerCorrelationId)
+- `AdvanceSessionContext`(updated_at_ms: u64)
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
 - `ApplyLiveTopologyIdentity`
@@ -175,6 +177,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `PeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: OutboundPeerRequestState)
 - `PeerInteractionCleanup`(corr_id: PeerCorrelationId)
 - `InboundPeerInteractionStateChanged`(corr_id: PeerCorrelationId, new_state: InboundPeerRequestState)
+- `SessionContextAdvanced`(updated_at_ms: u64)
 - `LiveTopologyPhaseChanged`
 
 ## Invariants
@@ -1977,6 +1980,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `inbound_exists`
 - Emits: `InboundPeerInteractionStateChanged`
+- To: `Stopped`
+
+### `AdvanceSessionContextIdle`
+- From: `Idle`
+- On: `AdvanceSessionContext`(updated_at_ms)
+- Guards:
+  - `monotonic`
+- Emits: `SessionContextAdvanced`
+- To: `Idle`
+
+### `AdvanceSessionContextAttached`
+- From: `Attached`
+- On: `AdvanceSessionContext`(updated_at_ms)
+- Guards:
+  - `monotonic`
+- Emits: `SessionContextAdvanced`
+- To: `Attached`
+
+### `AdvanceSessionContextRunning`
+- From: `Running`
+- On: `AdvanceSessionContext`(updated_at_ms)
+- Guards:
+  - `monotonic`
+- Emits: `SessionContextAdvanced`
+- To: `Running`
+
+### `AdvanceSessionContextRetired`
+- From: `Retired`
+- On: `AdvanceSessionContext`(updated_at_ms)
+- Guards:
+  - `monotonic`
+- Emits: `SessionContextAdvanced`
+- To: `Retired`
+
+### `AdvanceSessionContextStopped`
+- From: `Stopped`
+- On: `AdvanceSessionContext`(updated_at_ms)
+- Guards:
+  - `monotonic`
+- Emits: `SessionContextAdvanced`
 - To: `Stopped`
 
 ### `BeginLiveTopologyReconfigureIdle`

@@ -31,6 +31,7 @@ mod mcp_server_lifecycle;
 mod peer_comms;
 mod peer_interaction;
 mod session_admission;
+mod session_context;
 mod turn_state;
 
 pub use auth_lease::RuntimeAuthLeaseHandle;
@@ -40,6 +41,7 @@ pub use mcp_server_lifecycle::RuntimeMcpServerLifecycleHandle;
 pub use peer_comms::RuntimePeerCommsHandle;
 pub use peer_interaction::RuntimePeerInteractionHandle;
 pub use session_admission::RuntimeSessionAdmissionHandle;
+pub use session_context::RuntimeSessionContextHandle;
 pub use turn_state::RuntimeTurnStateHandle;
 
 /// Shared handle over a session's real `MeerkatMachineAuthority`.
@@ -135,6 +137,20 @@ impl HandleDslAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.state.clone()
+    }
+
+    /// Run `body` under the shared authority's mutex. The closure observes
+    /// the DSL state atomically with any side effects it performs on the
+    /// handle's external state (e.g. installing an observer before any
+    /// further `apply_input_with_effects` can run). Locking order must
+    /// match the order used by `apply_input_with_effects` (DSL first) so
+    /// callers can safely acquire additional locks inside the closure.
+    pub fn with_state_lock<R>(&self, body: impl FnOnce(&mm_dsl::MeerkatMachineState) -> R) -> R {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        body(&guard.state)
     }
 }
 

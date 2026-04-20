@@ -317,6 +317,11 @@ impl MeerkatMachine {
                                 &shared_handle_authority,
                             )),
                         )),
+                        session_context: Arc::new(
+                            crate::handles::RuntimeSessionContextHandle::new(Arc::clone(
+                                &shared_handle_authority,
+                            )),
+                        ),
                     },
                 ))
             }

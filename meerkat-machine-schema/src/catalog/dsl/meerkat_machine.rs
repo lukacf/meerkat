@@ -42,6 +42,16 @@ machine! {
             // Inbound mirror for requests we owe a reply to.
             inbound_peer_requests: Map<PeerCorrelationId, Enum<InboundPeerRequestState>>,
 
+            // --- Session-context advancement (W2-E / issue #264) ---
+            //
+            // Monotonic watermark in milliseconds of the last canonical
+            // session-context mutation the shell reported via
+            // `AdvanceSessionContext`. Advancing transitions emit
+            // `SessionContextAdvanced` so the realtime projection consumer
+            // refreshes from a typed effect instead of polling a watch
+            // channel.
+            last_session_context_updated_at_ms: u64,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport capability
@@ -75,6 +85,7 @@ machine! {
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
+            last_session_context_updated_at_ms = 0,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -176,6 +187,8 @@ machine! {
             PeerRequestTimedOut { corr_id: PeerCorrelationId },
             PeerRequestReceived { corr_id: PeerCorrelationId },
             PeerResponseReplied { corr_id: PeerCorrelationId },
+            // Session-context advancement input (W2-E / issue #264).
+            AdvanceSessionContext { updated_at_ms: u64 },
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -291,6 +304,12 @@ machine! {
             PeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: Enum<OutboundPeerRequestState> },
             PeerInteractionCleanup { corr_id: PeerCorrelationId },
             InboundPeerInteractionStateChanged { corr_id: PeerCorrelationId, new_state: Enum<InboundPeerRequestState> },
+            // Session-context advancement effect (W2-E / issue #264). Emitted
+            // on every transition that advances canonical session-context
+            // truth. The realtime projection consumer installs a typed
+            // observer on the session's DSL handle to drive a typed
+            // `ProjectionFreshness` state.
+            SessionContextAdvanced { updated_at_ms: u64 },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -346,6 +365,7 @@ machine! {
         disposition PeerInteractionStateChanged => external,
         disposition PeerInteractionCleanup => external,
         disposition InboundPeerInteractionStateChanged => external,
+        disposition SessionContextAdvanced => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -1764,6 +1784,20 @@ machine! {
             }
             to Idle
             emit InboundPeerInteractionStateChanged { corr_id: corr_id, new_state: InboundPeerRequestState::Replied }
+        }
+
+        // Session-context advancement (W2-E / issue #264). Monotonic guard
+        // filters out duplicate or out-of-order ticks at the DSL layer so
+        // callers fire unconditionally after any mutation.
+        transition AdvanceSessionContext {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input AdvanceSessionContext { updated_at_ms }
+            guard "monotonic" { updated_at_ms > self.last_session_context_updated_at_ms }
+            update {
+                self.last_session_context_updated_at_ms = updated_at_ms;
+            }
+            to Idle
+            emit SessionContextAdvanced { updated_at_ms: updated_at_ms }
         }
 
         // =====================================================================

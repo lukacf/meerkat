@@ -56,6 +56,11 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "PeerRequestTimedOut",
         "PeerRequestReceived",
         "PeerResponseReplied",
+        // W2-E (issue #264): session-context advancement is driven via
+        // `SessionContextHandle` (meerkat-core/src/handles.rs) from the
+        // session task's `publish_summary` path, not through
+        // `MeerkatMachineCommand`.
+        "AdvanceSessionContext",
         // W2-G (issue #264): peer-ingress transport capability ownership is
         // staged by `stage_peer_ingress_ownership_dsl` from inside the
         // `SetPeerIngressContext` command handler, not as a separately

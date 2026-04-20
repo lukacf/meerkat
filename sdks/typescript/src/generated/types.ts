@@ -262,6 +262,8 @@ export type WireToolResultContent = string | Record<string, unknown>[];
 
 export type WireModelTier = string;
 
+export type CommsCommandRequest = Record<string, unknown>;
+
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
   salience?: "background" | "normal" | "important" | "urgent";

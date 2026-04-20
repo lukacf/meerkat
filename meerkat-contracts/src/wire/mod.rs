@@ -1,5 +1,6 @@
 //! Canonical wire response types.
 
+mod comms;
 mod connection;
 mod event;
 mod mcp_live;
@@ -15,6 +16,11 @@ pub mod skills;
 pub mod supervisor_bridge;
 mod usage;
 
+pub use comms::{
+    CommsCommandError, CommsCommandRequest, HandlingMode as WireCommsHandlingMode,
+    InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode,
+    PeerName as WireCommsPeerName, ResponseStatus as WireCommsResponseStatus,
+};
 pub use connection::{
     WireAuthError, WireAuthProfile, WireAuthStatus, WireBackendProfile, WireConnectionRef,
     WireProviderBinding, WireRealmConnectionSet,

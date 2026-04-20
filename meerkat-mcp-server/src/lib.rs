@@ -971,29 +971,11 @@ pub struct MeerkatCommsPeersInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatCommsSendInput {
     pub session_id: String,
-    pub kind: String,
-    #[serde(default)]
-    pub to: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    #[serde(default)]
-    pub intent: Option<String>,
-    #[serde(default)]
-    pub params: Option<serde_json::Value>,
-    #[serde(default)]
-    pub in_reply_to: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub result: Option<serde_json::Value>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub stream: Option<String>,
-    #[serde(default)]
-    pub allow_self_session: Option<bool>,
-    #[serde(default)]
-    pub handling_mode: Option<String>,
+    /// Typed comms command — serde-tagged on `kind`. Invalid discriminators
+    /// (`source`, `stream`, `handling_mode`, `status`) become deserialization
+    /// errors here, never reach runtime.
+    #[serde(flatten)]
+    pub command: meerkat_core::comms::CommsCommandRequest,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -2321,36 +2303,26 @@ async fn handle_meerkat_comms_send(
                 })),
             )
         })?;
-    let request = meerkat_core::comms::CommsCommandRequest {
-        kind: input.kind,
-        to: input.to,
-        body: input.body,
-        blocks: None,
-        intent: input.intent,
-        params: input.params,
-        in_reply_to: input.in_reply_to,
-        status: input.status,
-        result: input.result,
-        source: input.source,
-        stream: input.stream,
-        allow_self_session: input.allow_self_session,
-        handling_mode: input.handling_mode,
+    let peer_name = match &input.command {
+        meerkat_core::comms::CommsCommandRequest::PeerMessage { to, .. }
+        | meerkat_core::comms::CommsCommandRequest::PeerRequest { to, .. }
+        | meerkat_core::comms::CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_string()),
+        meerkat_core::comms::CommsCommandRequest::Input { .. } => None,
     };
-    let cmd = request.parse(&session_id).map_err(|errors| {
-        let details = meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
+    let cmd = input.command.into_command(&session_id).map_err(|err| {
         ToolCallError::new(
             -32602,
             "Invalid comms command",
             Some(json!({
                 "code": "invalid_comms_command",
-                "validation_errors": details,
+                "message": err.to_string(),
             })),
         )
     })?;
     let receipt = comms
         .send(cmd)
         .await
-        .map_err(|e| normalize_mcp_comms_send_error(request.to.as_deref(), &e))?;
+        .map_err(|e| normalize_mcp_comms_send_error(peer_name.as_deref(), &e))?;
     Ok(wrap_tool_payload(
         json!({ "receipt": build_comms_receipt_json(receipt) }),
     ))
@@ -3145,7 +3117,7 @@ impl AgentToolDispatcher for MpcToolDispatcher {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use futures::stream;
@@ -4550,18 +4522,10 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_comms_send_schema_includes_handling_mode() {
-        let schema = meerkat_tools::schema_for::<MeerkatCommsSendInput>();
-        let props = schema["properties"].as_object().expect("properties map");
-        assert!(
-            props.contains_key("handling_mode"),
-            "MeerkatCommsSendInput schema must expose handling_mode"
-        );
-    }
+    fn test_comms_send_input_threads_typed_handling_mode() {
+        use meerkat_core::comms::CommsCommandRequest;
+        use meerkat_core::types::HandlingMode;
 
-    #[cfg(feature = "comms")]
-    #[test]
-    fn test_comms_send_input_threads_handling_mode() {
         let input: MeerkatCommsSendInput = serde_json::from_value(json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef",
             "kind": "peer_message",
@@ -4570,23 +4534,33 @@ mod tests {
             "handling_mode": "steer"
         }))
         .unwrap();
-        assert_eq!(input.handling_mode.as_deref(), Some("steer"));
+        match input.command {
+            CommsCommandRequest::PeerMessage {
+                ref to,
+                handling_mode,
+                ..
+            } => {
+                assert_eq!(to.as_str(), "alice");
+                assert_eq!(handling_mode, Some(HandlingMode::Steer));
+            }
+            other => panic!("expected peer_message, got {other:?}"),
+        }
+    }
 
-        let request = meerkat_core::comms::CommsCommandRequest {
-            kind: input.kind,
-            to: input.to,
-            body: input.body,
-            blocks: None,
-            intent: input.intent,
-            params: input.params,
-            in_reply_to: input.in_reply_to,
-            status: input.status,
-            result: input.result,
-            source: input.source,
-            stream: input.stream,
-            allow_self_session: input.allow_self_session,
-            handling_mode: input.handling_mode,
-        };
-        assert_eq!(request.handling_mode.as_deref(), Some("steer"));
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_send_input_invalid_handling_mode_rejected_at_serde_boundary() {
+        let err = serde_json::from_value::<MeerkatCommsSendInput>(json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "peer_message",
+            "to": "alice",
+            "body": "hi",
+            "handling_mode": "invalid"
+        }))
+        .expect_err("invalid handling_mode must fail deserialization");
+        assert!(
+            err.to_string().contains("handling_mode") || err.to_string().contains("invalid"),
+            "expected serde error mentioning handling_mode, got: {err}"
+        );
     }
 }

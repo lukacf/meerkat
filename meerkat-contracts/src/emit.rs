@@ -103,6 +103,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireRealmConnectionSet": schema_for!(crate::wire::WireRealmConnectionSet),
         "WireAuthStatus": schema_for!(crate::wire::WireAuthStatus),
         "WireAuthError": schema_for!(crate::wire::WireAuthError),
+        "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
     });
     fs::write(
         output_dir.join("wire-types.json"),

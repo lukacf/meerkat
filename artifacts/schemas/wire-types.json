@@ -1,4 +1,375 @@
 {
+  "CommsCommandRequest": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
+      "InputSource": {
+        "description": "Source for an input event posted to an agent.",
+        "enum": [
+          "tcp",
+          "uds",
+          "stdin",
+          "webhook",
+          "rpc"
+        ],
+        "type": "string"
+      },
+      "InputStreamMode": {
+        "description": "Whether this input/peer command should reserve a local interaction stream.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "Do not reserve any stream.",
+            "type": "string"
+          },
+          {
+            "const": "reserve_interaction",
+            "description": "Reserve an interaction stream for the command.",
+            "type": "string"
+          }
+        ]
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "PeerName": {
+        "type": "string"
+      },
+      "ResponseStatus": {
+        "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
+        "enum": [
+          "accepted",
+          "completed",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed wire request for `comms/send`.\n\nVariants are serde-tagged on `kind` and validated structurally at the\ndeserialization boundary. Required fields per kind are enforced by the\ntype system; invalid discriminators (`source`, `stream`, `handling_mode`,\n`status`) become serde deserialization errors rather than runtime\nstring-match failures.\n\nCross-field invariants that cannot be expressed structurally (e.g.\n`handling_mode` is forbidden on `Accepted` peer responses) are checked\nin [`CommsCommandRequest::into_command`].",
+    "oneOf": [
+      {
+        "description": "Inject input into the local session.",
+        "properties": {
+          "allow_self_session": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "input",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stream": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputStreamMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "body"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a one-way peer message.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "peer_message",
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a request to a peer.",
+        "properties": {
+          "body": {
+            "description": "Legacy promotion: if `params` is absent, `body` is wrapped as\n`{\"body\": <body>}` for backwards-compatibility with single-string\nrequesters. Prefer `params`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "intent": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_request",
+            "type": "string"
+          },
+          "params": true,
+          "stream": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputStreamMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "intent"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Send a response to a prior peer request.",
+        "properties": {
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_reply_to": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "kind": {
+            "const": "peer_response",
+            "type": "string"
+          },
+          "result": true,
+          "status": {
+            "$ref": "#/$defs/ResponseStatus"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerName"
+          }
+        },
+        "required": [
+          "kind",
+          "to",
+          "in_reply_to",
+          "status"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CommsCommandRequest"
+  },
   "ContractVersion": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Semantic version for the Meerkat wire contract.\n\nStart at 0.1.0 — allow breaking changes during Phase 1-3 development.\nBump to 1.0.0 when the SDK Builder ships (Phase 5) and external\nconsumers exist. Before 1.0.0, minor bumps can be breaking.",

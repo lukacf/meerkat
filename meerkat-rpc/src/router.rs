@@ -1640,19 +1640,18 @@ impl MethodRouter {
                 format!("Session not found or comms not enabled: {session_id}"),
             );
         };
-        let cmd = match handlers::comms::build_comms_command(&params, &session_id) {
+        let peer_name = params.peer_name().map(str::to_string);
+        let cmd = match params.command.into_command(&session_id) {
             Ok(cmd) => cmd,
-            Err(details) => {
-                let normalized = serde_json::json!({
-                    "code": "invalid_command",
-                    "message": "Command validation failed",
-                    "details": meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&details),
-                });
+            Err(err) => {
                 return RpcResponse::error_with_data(
                     id,
                     error::INVALID_PARAMS,
                     "Command validation failed",
-                    normalized,
+                    json!({
+                        "code": "invalid_command",
+                        "message": err.to_string(),
+                    }),
                 );
             }
         };
@@ -1666,7 +1665,7 @@ impl MethodRouter {
                         "message": format!("peer '{peer}' is not found or not trusted"),
                     }),
                     meerkat_core::comms::SendError::PeerOffline => {
-                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        let peer = peer_name.as_deref().unwrap_or("<unknown>");
                         json!({
                             "code": "peer_unreachable",
                             "peer": peer,
@@ -1675,9 +1674,9 @@ impl MethodRouter {
                         })
                     }
                     meerkat_core::comms::SendError::Internal(details)
-                        if params.to.is_some() && is_transport_internal(details) =>
+                        if peer_name.is_some() && is_transport_internal(details) =>
                     {
-                        let peer = params.to.as_deref().unwrap_or("<unknown>");
+                        let peer = peer_name.as_deref().unwrap_or("<unknown>");
                         json!({
                             "code": "peer_unreachable",
                             "peer": peer,

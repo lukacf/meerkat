@@ -2068,9 +2068,60 @@ class MeerkatClient:
     async def _peers(self, session_id: str) -> dict[str, Any]:
         return await self.peers(session_id)
 
-    async def send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
-        params: dict[str, Any] = {"session_id": session_id, **kwargs}
-        return await self._request("comms/send", params)
+    # Typed literal aliases mirror the Rust `CommsCommandRequest` enum
+    # (`meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
+    # at the server's typed-serde boundary — these aliases document the
+    # closed-world shape for callers.
+    _CommsKind = Literal["input", "peer_message", "peer_request", "peer_response"]
+    _HandlingMode = Literal["queue", "steer"]
+    _InputSource = Literal["tcp", "uds", "stdin", "webhook", "rpc"]
+    _InputStreamMode = Literal["none", "reserve_interaction"]
+    _ResponseStatus = Literal["accepted", "completed", "failed"]
+
+    async def send(
+        self,
+        session_id: str,
+        *,
+        kind: "MeerkatClient._CommsKind",
+        to: str | None = None,
+        body: str | None = None,
+        intent: str | None = None,
+        params: dict[str, Any] | None = None,
+        in_reply_to: str | None = None,
+        status: "MeerkatClient._ResponseStatus | None" = None,
+        result: Any = None,
+        source: "MeerkatClient._InputSource | None" = None,
+        stream: "MeerkatClient._InputStreamMode | None" = None,
+        allow_self_session: bool | None = None,
+        handling_mode: "MeerkatClient._HandlingMode | None" = None,
+    ) -> dict[str, Any]:
+        """Send a typed comms command.
+
+        Mirrors the Rust `CommsCommandRequest` variants:
+        - ``kind="input"`` — inject input into the local session.
+        - ``kind="peer_message"`` — fire-and-forget peer message.
+        - ``kind="peer_request"`` — request/response with correlated reply.
+        - ``kind="peer_response"`` — reply to a prior peer request.
+
+        Invalid discriminator values (``source``, ``stream``, ``handling_mode``,
+        ``status``) are rejected at the server's typed-serde boundary.
+        """
+        fields: dict[str, Any] = {
+            "to": to,
+            "body": body,
+            "intent": intent,
+            "params": params,
+            "in_reply_to": in_reply_to,
+            "status": status,
+            "result": result,
+            "source": source,
+            "stream": stream,
+            "allow_self_session": allow_self_session,
+            "handling_mode": handling_mode,
+        }
+        payload: dict[str, Any] = {"session_id": session_id, "kind": kind}
+        payload.update({k: v for k, v in fields.items() if v is not None})
+        return await self._request("comms/send", payload)
 
     async def peers(self, session_id: str) -> dict[str, Any]:
         return await self._request("comms/peers", {"session_id": session_id})

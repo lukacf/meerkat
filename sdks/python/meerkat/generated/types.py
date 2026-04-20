@@ -761,5 +761,18 @@ WireToolResultContent = str | list[dict[str, Any]]
 # Model recommendation tier.
 WireModelTier = str
 
+# Typed wire request for `comms/send`.
+#
+# Variants are serde-tagged on `kind` and validated structurally at the
+# deserialization boundary. Required fields per kind are enforced by the
+# type system; invalid discriminators (`source`, `stream`, `handling_mode`,
+# `status`) become serde deserialization errors rather than runtime
+# string-match failures.
+#
+# Cross-field invariants that cannot be expressed structurally (e.g.
+# `handling_mode` is forbidden on `Accepted` peer responses) are checked
+# in [`CommsCommandRequest::into_command`].
+CommsCommandRequest = dict[str, Any]
+
 # Response payload for `input/state`.
 InputStateResult = Optional[WireInputState]

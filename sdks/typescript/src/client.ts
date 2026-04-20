@@ -78,6 +78,7 @@ import type {
   AttributedMobEvent,
   BlobPayload,
   Capability,
+  CommsCommand,
   CommsSendReceipt,
   ConfigEnvelope,
   ContentInput,
@@ -1794,10 +1795,7 @@ export class MeerkatClient {
   }
 
   /** @internal */
-  async _send(
-    sessionId: string,
-    command: Record<string, unknown>,
-  ): Promise<CommsSendReceipt> {
+  async _send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
     return this.send(sessionId, command);
   }
 
@@ -1808,10 +1806,12 @@ export class MeerkatClient {
     return this.peers(sessionId);
   }
 
-  async send(
-    sessionId: string,
-    command: Record<string, unknown>,
-  ): Promise<CommsSendReceipt> {
+  /**
+   * Send a typed comms command. Invalid discriminators (`source`, `stream`,
+   * `handling_mode`, `status`) are rejected at the server's typed-serde
+   * boundary.
+   */
+  async send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
     const result = await this.request("comms/send", { session_id: sessionId, ...command });
     return MeerkatClient.parseCommsSendReceipt(result);
   }

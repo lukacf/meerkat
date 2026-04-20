@@ -2043,32 +2043,28 @@ async fn mob_member_respawn(
 }
 
 /// Canonical comms send request body.
+///
+/// `command` carries the typed [`meerkat_core::comms::CommsCommandRequest`]
+/// enum (serde-tagged on `kind`). Wire shape is flat:
+/// `{"session_id": "...", "kind": "...", ...}`.
 #[derive(Debug, Deserialize)]
 pub struct CommsSendRequest {
     pub session_id: String,
-    pub kind: String,
-    #[serde(default)]
-    pub to: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    #[serde(default)]
-    pub intent: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub in_reply_to: Option<String>,
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub result: Option<Value>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub stream: Option<String>,
-    #[serde(default)]
-    pub allow_self_session: Option<bool>,
-    #[serde(default)]
-    pub handling_mode: Option<String>,
+    #[serde(flatten)]
+    pub command: meerkat_core::comms::CommsCommandRequest,
+}
+
+impl CommsSendRequest {
+    /// Recipient peer name for error normalization, if the command targets one.
+    fn peer_name(&self) -> Option<&str> {
+        use meerkat_core::comms::CommsCommandRequest;
+        match &self.command {
+            CommsCommandRequest::PeerMessage { to, .. }
+            | CommsCommandRequest::PeerRequest { to, .. }
+            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.as_str()),
+            CommsCommandRequest::Input { .. } => None,
+        }
+    }
 }
 
 /// Canonical comms peers request body.
@@ -2104,11 +2100,15 @@ async fn comms_send(
             ))
         })?;
 
-    let cmd = build_comms_command(&req, &session_id)?;
+    let peer_name = req.peer_name().map(str::to_string);
+    let cmd = req
+        .command
+        .into_command(&session_id)
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     match comms.send(cmd).await {
         Ok(receipt) => Ok(Json(comms_send_receipt_json(receipt))),
-        Err(e) => Err(normalize_rest_comms_send_error(req.to.as_deref(), &e)),
+        Err(e) => Err(normalize_rest_comms_send_error(peer_name.as_deref(), &e)),
     }
 }
 
@@ -2207,73 +2207,6 @@ fn normalize_rest_comms_send_error(
             }),
         },
     }
-}
-
-fn build_comms_command(
-    req: &CommsSendRequest,
-    session_id: &SessionId,
-) -> Result<meerkat_core::comms::CommsCommand, ApiError> {
-    let request = meerkat_core::comms::CommsCommandRequest {
-        kind: req.kind.clone(),
-        to: req.to.clone(),
-        body: req.body.clone(),
-        blocks: None,
-        intent: req.intent.clone(),
-        params: req.params.clone(),
-        in_reply_to: req.in_reply_to.clone(),
-        status: req.status.clone(),
-        result: req.result.clone(),
-        source: req.source.clone(),
-        stream: req.stream.clone(),
-        allow_self_session: req.allow_self_session,
-        handling_mode: req.handling_mode.clone(),
-    };
-
-    request.parse(session_id).map_err(|errors| {
-        let json_errors =
-            meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
-        let msg = if let Some(first) = json_errors.first() {
-            let field = first["field"].as_str().unwrap_or("command");
-            let issue = first["issue"].as_str().unwrap_or("invalid");
-            let got = first["got"].as_str();
-            match (field, issue) {
-                ("source", "invalid_value") => got.map_or_else(
-                    || "invalid source".to_string(),
-                    |got| format!("invalid source: {got}"),
-                ),
-                ("stream", "invalid_value") => got.map_or_else(
-                    || "invalid stream".to_string(),
-                    |got| format!("invalid stream: {got}"),
-                ),
-                ("status", "invalid_value") => got.map_or_else(
-                    || "invalid status".to_string(),
-                    |got| format!("invalid status: {got}"),
-                ),
-                ("kind", "unknown_kind") => got.map_or_else(
-                    || "unknown kind".to_string(),
-                    |got| format!("unknown kind: {got}"),
-                ),
-                ("body", "required_field") => "input requires 'body'".to_string(),
-                ("to", "required_field") => "to is required".to_string(),
-                ("intent", "required_field") => "peer_request requires 'intent'".to_string(),
-                ("in_reply_to", "required_field") => {
-                    "peer_response requires 'in_reply_to'".to_string()
-                }
-                ("in_reply_to", "invalid_uuid") => got.map_or_else(
-                    || "invalid UUID".to_string(),
-                    |got| format!("invalid UUID: {got}"),
-                ),
-                ("to", "invalid_value") => got.map_or_else(
-                    || "invalid peer name".to_string(),
-                    |got| format!("invalid to: {got}"),
-                ),
-                _ => issue.to_string(),
-            }
-        } else {
-            "invalid command".to_string()
-        };
-        ApiError::BadRequest(msg)
-    })
 }
 
 /// GET /comms/peers — list peers visible to a session's comms runtime.
@@ -5717,78 +5650,39 @@ mod tests {
     }
 
     #[test]
-    fn test_build_comms_command_peer_request_invalid_stream() {
-        let req = CommsSendRequest {
-            session_id: "sid_123".to_string(),
-            kind: "peer_request".to_string(),
-            to: Some("alice".to_string()),
-            body: None,
-            intent: Some("ask".to_string()),
-            params: None,
-            in_reply_to: None,
-            status: None,
-            result: None,
-            source: None,
-            stream: Some("invalid".to_string()),
-            allow_self_session: None,
-            handling_mode: None,
-        };
-        let session_id = meerkat_core::SessionId::new();
-        let err = build_comms_command(&req, &session_id).expect_err("invalid stream should fail");
-        let ApiError::BadRequest(msg) = err else {
-            unreachable!("expected bad request");
-        };
-        assert_eq!(msg, "invalid stream: invalid");
+    fn test_comms_send_request_peer_request_invalid_stream_rejected_at_serde() {
+        let json = r#"{"session_id":"sid_123","kind":"peer_request","to":"alice","intent":"ask","stream":"invalid"}"#;
+        let err = serde_json::from_str::<CommsSendRequest>(json)
+            .expect_err("invalid stream must fail deserialization");
+        assert!(
+            err.to_string().contains("stream") || err.to_string().contains("invalid"),
+            "expected serde error mentioning stream, got: {err}"
+        );
     }
 
     #[test]
-    fn test_build_comms_command_peer_response_invalid_status() {
-        let req = CommsSendRequest {
-            session_id: "sid_123".to_string(),
-            kind: "peer_response".to_string(),
-            to: Some("alice".to_string()),
-            body: None,
-            intent: None,
-            params: None,
-            in_reply_to: Some(uuid::Uuid::new_v4().to_string()),
-            status: Some("almost-done".to_string()),
-            result: None,
-            source: None,
-            stream: None,
-            allow_self_session: None,
-            handling_mode: None,
-        };
-        let session_id = meerkat_core::SessionId::new();
-        let err = build_comms_command(&req, &session_id).expect_err("invalid status should fail");
-        let ApiError::BadRequest(msg) = err else {
-            unreachable!("expected bad request");
-        };
-        assert_eq!(msg, "invalid status: almost-done");
+    fn test_comms_send_request_peer_response_invalid_status_rejected_at_serde() {
+        let json = format!(
+            r#"{{"session_id":"sid_123","kind":"peer_response","to":"alice","in_reply_to":"{}","status":"almost-done"}}"#,
+            uuid::Uuid::new_v4()
+        );
+        let err = serde_json::from_str::<CommsSendRequest>(&json)
+            .expect_err("invalid status must fail deserialization");
+        assert!(
+            err.to_string().contains("status") || err.to_string().contains("almost-done"),
+            "expected serde error mentioning status, got: {err}"
+        );
     }
 
     #[test]
-    fn test_build_comms_command_invalid_source() {
-        let req = CommsSendRequest {
-            session_id: "sid_123".to_string(),
-            kind: "input".to_string(),
-            to: None,
-            body: Some("hi".to_string()),
-            intent: None,
-            params: None,
-            in_reply_to: None,
-            status: None,
-            result: None,
-            source: Some("webhookd".to_string()),
-            stream: None,
-            allow_self_session: None,
-            handling_mode: None,
-        };
-        let session_id = meerkat_core::SessionId::new();
-        let err = build_comms_command(&req, &session_id).expect_err("invalid source should fail");
-        let ApiError::BadRequest(msg) = err else {
-            unreachable!("expected bad request");
-        };
-        assert_eq!(msg, "invalid source: webhookd");
+    fn test_comms_send_request_invalid_source_rejected_at_serde() {
+        let json = r#"{"session_id":"sid_123","kind":"input","body":"hi","source":"webhookd"}"#;
+        let err = serde_json::from_str::<CommsSendRequest>(json)
+            .expect_err("invalid source must fail deserialization");
+        assert!(
+            err.to_string().contains("source") || err.to_string().contains("webhookd"),
+            "expected serde error mentioning source, got: {err}"
+        );
     }
 
     #[cfg(not(feature = "comms"))]

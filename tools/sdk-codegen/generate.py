@@ -488,6 +488,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
     append_python_alias("WireModelTier", schemas.get("models", {}), "Wire-level model recommendation tier.")
+    append_python_alias(
+        "CommsCommandRequest",
+        wire_schema,
+        "Typed comms/send command (serde-tagged on `kind`).",
+    )
     types_content += "\n# Response payload for `input/state`.\nInputStateResult = Optional[WireInputState]\n"
 
     (output_dir / "types.py").write_text(types_content)
@@ -705,6 +710,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireStopReason", wire_schema)
     append_typescript_alias("WireToolResultContent", wire_schema)
     append_typescript_alias("WireModelTier", schemas.get("models", {}))
+    append_typescript_alias("CommsCommandRequest", wire_schema)
     append_typescript_interface("WireRenderMetadata", wire_schema)
     append_typescript_interface("WireTrustedPeerSpec", wire_schema)
     append_typescript_interface("MobWireResult", wire_schema)

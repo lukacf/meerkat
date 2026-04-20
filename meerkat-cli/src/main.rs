@@ -7083,64 +7083,15 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
 }
 
 #[cfg(all(feature = "comms", test))]
-#[derive(Debug, serde::Deserialize)]
-struct CliCommsSendRequest {
-    kind: String,
-    #[serde(default)]
-    to: Option<String>,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    intent: Option<String>,
-    #[serde(default)]
-    params: Option<serde_json::Value>,
-    #[serde(default)]
-    in_reply_to: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    result: Option<serde_json::Value>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    stream: Option<String>,
-    #[serde(default)]
-    allow_self_session: Option<bool>,
-    #[serde(default)]
-    handling_mode: Option<String>,
-}
-
-#[cfg(all(feature = "comms", test))]
 fn parse_comms_send_payload(
     payload_json: &str,
     session_id: &SessionId,
 ) -> anyhow::Result<meerkat_core::comms::CommsCommand> {
-    let req: CliCommsSendRequest = serde_json::from_str(payload_json)
+    let request: meerkat_core::comms::CommsCommandRequest = serde_json::from_str(payload_json)
         .map_err(|e| anyhow::anyhow!("Invalid comms JSON payload: {e}"))?;
-    let request = meerkat_core::comms::CommsCommandRequest {
-        kind: req.kind,
-        to: req.to,
-        body: req.body,
-        blocks: None,
-        intent: req.intent,
-        params: req.params,
-        in_reply_to: req.in_reply_to,
-        status: req.status,
-        result: req.result,
-        source: req.source,
-        stream: req.stream,
-        allow_self_session: req.allow_self_session,
-        handling_mode: req.handling_mode,
-    };
-
-    request.parse(session_id).map_err(|errors| {
-        let json_errors =
-            meerkat_core::comms::CommsCommandRequest::validation_errors_to_json(&errors);
-        anyhow::anyhow!(
-            "Invalid comms command: {}",
-            serde_json::to_string(&json_errors).unwrap_or_else(|_| "[]".to_string())
-        )
-    })
+    request
+        .into_command(session_id)
+        .map_err(|err| anyhow::anyhow!("Invalid comms command: {err}"))
 }
 
 #[cfg(test)]
@@ -10708,7 +10659,9 @@ mod tests {
         let err =
             parse_comms_send_payload(r#"{"kind":"peer_request","to":"agent-b"}"#, &session_id)
                 .expect_err("missing intent should be rejected");
-        assert!(err.to_string().contains("Invalid comms command"));
+        // Missing required `intent` field is rejected at the typed-serde
+        // boundary, not a runtime string match.
+        assert!(err.to_string().contains("Invalid comms JSON payload"));
         assert!(err.to_string().contains("intent"));
     }
 

@@ -21,6 +21,7 @@
 
 import type {
   AgentEventEnvelope,
+  CommsCommand,
   CommsSendReceipt,
   ContentBlock,
   RunResult,
@@ -127,9 +128,8 @@ export class Session {
     return this.turn(prompt, { skillRefs: [skillRef] });
   }
 
-  async send(command: Record<string, unknown>): Promise<CommsSendReceipt> {
-    const { session_id: _ignored, ...rest } = command;
-    return this._client._send(this._id, rest);
+  async send(command: CommsCommand): Promise<CommsSendReceipt> {
+    return this._client._send(this._id, command);
   }
 
   async peers(): Promise<Array<Record<string, unknown>>> {

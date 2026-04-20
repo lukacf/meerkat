@@ -338,6 +338,7 @@ impl From<&str> for ContentInput {
 /// `Steer` means inner-loop handling and requests injection at the earliest
 /// admissible cooperative boundary, while remaining ordinary work rather than
 /// an out-of-band control-plane command.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HandlingMode {

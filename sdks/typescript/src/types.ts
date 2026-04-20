@@ -372,6 +372,61 @@ export interface CommsSendReceipt extends Record<string, unknown> {
   readonly inputId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// comms/send typed command surface.
+//
+// Mirrors the Rust `CommsCommandRequest` enum (`meerkat-core/src/comms.rs`).
+// Invalid discriminator values are rejected at the server's typed-serde
+// boundary — these aliases document the closed-world shape for callers.
+// ---------------------------------------------------------------------------
+
+export type CommsHandlingMode = "queue" | "steer";
+export type CommsInputSource = "tcp" | "uds" | "stdin" | "webhook" | "rpc";
+export type CommsInputStreamMode = "none" | "reserve_interaction";
+export type CommsResponseStatus = "accepted" | "completed" | "failed";
+
+export interface CommsInputCommand {
+  kind: "input";
+  body: string;
+  source?: CommsInputSource;
+  stream?: CommsInputStreamMode;
+  handling_mode?: CommsHandlingMode;
+  allow_self_session?: boolean;
+}
+
+export interface CommsPeerMessageCommand {
+  kind: "peer_message";
+  to: string;
+  body?: string;
+  handling_mode?: CommsHandlingMode;
+}
+
+export interface CommsPeerRequestCommand {
+  kind: "peer_request";
+  to: string;
+  intent: string;
+  params?: Record<string, unknown>;
+  body?: string;
+  handling_mode?: CommsHandlingMode;
+  stream?: CommsInputStreamMode;
+}
+
+export interface CommsPeerResponseCommand {
+  kind: "peer_response";
+  to: string;
+  in_reply_to: string;
+  status: CommsResponseStatus;
+  result?: unknown;
+  handling_mode?: CommsHandlingMode;
+}
+
+/** Typed comms/send command — serde-tagged on `kind`. */
+export type CommsCommand =
+  | CommsInputCommand
+  | CommsPeerMessageCommand
+  | CommsPeerRequestCommand
+  | CommsPeerResponseCommand;
+
 export type ModelTier = "recommended" | "supported";
 
 export interface ModelProfile {

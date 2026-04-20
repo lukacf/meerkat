@@ -25,6 +25,7 @@ impl std::fmt::Display for InteractionId {
 /// Typed status for response interactions.
 ///
 /// Mirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {

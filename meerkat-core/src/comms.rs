@@ -9,9 +9,9 @@ use crate::interaction::{InteractionId, ResponseStatus};
 use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::pin::Pin;
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerName(String);
 
@@ -55,327 +55,174 @@ impl From<PeerName> for String {
     }
 }
 
-/// Build inputs for canonical comms command parsing.
-#[derive(Debug, Clone, Default)]
-pub struct CommsCommandRequest {
-    pub kind: String,
-    pub to: Option<String>,
-    pub body: Option<String>,
-    pub blocks: Option<Vec<ContentBlock>>,
-    pub intent: Option<String>,
-    pub params: Option<serde_json::Value>,
-    pub in_reply_to: Option<String>,
-    pub status: Option<String>,
-    pub result: Option<serde_json::Value>,
-    pub source: Option<String>,
-    pub stream: Option<String>,
-    pub allow_self_session: Option<bool>,
-    pub handling_mode: Option<String>,
+/// Typed wire request for `comms/send`.
+///
+/// Variants are serde-tagged on `kind` and validated structurally at the
+/// deserialization boundary. Required fields per kind are enforced by the
+/// type system; invalid discriminators (`source`, `stream`, `handling_mode`,
+/// `status`) become serde deserialization errors rather than runtime
+/// string-match failures.
+///
+/// Cross-field invariants that cannot be expressed structurally (e.g.
+/// `handling_mode` is forbidden on `Accepted` peer responses) are checked
+/// in [`CommsCommandRequest::into_command`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommsCommandRequest {
+    /// Inject input into the local session.
+    Input {
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<InputSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<InputStreamMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_self_session: Option<bool>,
+    },
+    /// Send a one-way peer message.
+    PeerMessage {
+        to: PeerName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+    },
+    /// Send a request to a peer.
+    PeerRequest {
+        to: PeerName,
+        intent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<serde_json::Value>,
+        /// Legacy promotion: if `params` is absent, `body` is wrapped as
+        /// `{"body": <body>}` for backwards-compatibility with single-string
+        /// requesters. Prefer `params`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<InputStreamMode>,
+    },
+    /// Send a response to a prior peer request.
+    PeerResponse {
+        to: PeerName,
+        in_reply_to: InteractionId,
+        status: ResponseStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handling_mode: Option<HandlingMode>,
+    },
 }
 
-/// Validation failure for one command field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommsCommandValidationError {
-    pub field: String,
-    pub issue: String,
-    pub got: Option<String>,
-}
-
-impl CommsCommandValidationError {
-    fn new(field: impl Into<String>, issue: impl Into<String>, got: Option<String>) -> Self {
-        Self {
-            field: field.into(),
-            issue: issue.into(),
-            got,
-        }
-    }
-
-    pub fn to_json_value(&self) -> serde_json::Value {
-        match &self.got {
-            Some(got) => json!({
-                "field": self.field,
-                "issue": self.issue,
-                "got": got,
-            }),
-            None => json!({
-                "field": self.field,
-                "issue": self.issue,
-            }),
-        }
-    }
+/// Cross-field validation failure for [`CommsCommandRequest::into_command`].
+///
+/// Per-field discriminator validation is enforced by serde at deserialization
+/// — only invariants that span multiple fields surface here.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CommsCommandError {
+    /// `handling_mode` is set on a `peer_response` whose `status` is
+    /// `Accepted`. Progress responses cannot carry a handling mode — the
+    /// receiver's admission gate would drop them, so reject at parse time.
+    #[error("handling_mode is forbidden on accepted peer responses")]
+    HandlingModeForbiddenForAcceptedResponse,
 }
 
 impl CommsCommandRequest {
-    pub fn parse(
-        &self,
+    /// Convert the typed wire request into a [`CommsCommand`] domain envelope.
+    ///
+    /// `session_id` is supplied separately because it is owned by the
+    /// surface that received the request, not the wire payload.
+    pub fn into_command(
+        self,
         session_id: &crate::types::SessionId,
-    ) -> Result<CommsCommand, Vec<CommsCommandValidationError>> {
-        let mut errors = Vec::new();
-
-        let kind = self.kind.as_str();
-        match kind {
-            "input" => {
-                let Some(body) = self.body.clone() else {
-                    errors.push(CommsCommandValidationError::new(
-                        "body",
-                        "required_field",
-                        None,
-                    ));
-                    return Err(errors);
-                };
-
-                let source = match self.source.as_deref() {
-                    Some("tcp") => InputSource::Tcp,
-                    Some("uds") => InputSource::Uds,
-                    Some("stdin") => InputSource::Stdin,
-                    Some("webhook") => InputSource::Webhook,
-                    Some("rpc") | None => InputSource::Rpc,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "source",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-
-                let stream = match self.stream.as_deref() {
-                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                    Some("none") | None => InputStreamMode::None,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "stream",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-
-                Ok(CommsCommand::Input {
-                    session_id: session_id.clone(),
-                    body,
-                    blocks: self.blocks.clone(),
-                    handling_mode: match self.handling_mode.as_deref() {
-                        Some("steer") => HandlingMode::Steer,
-                        Some("queue") | None => HandlingMode::Queue,
-                        Some(other) => {
-                            errors.push(CommsCommandValidationError::new(
-                                "handling_mode",
-                                "invalid_value",
-                                Some(other.to_string()),
-                            ));
-                            return Err(errors);
-                        }
-                    },
-                    source,
-                    stream,
-                    allow_self_session: self.allow_self_session.unwrap_or(false),
-                })
-            }
-            "peer_message" => {
-                let to = to_peer_name(self.to.as_ref(), &mut errors);
-                let handling_mode = match self.handling_mode.as_deref() {
-                    Some("steer") => HandlingMode::Steer,
-                    Some("queue") | None => HandlingMode::Queue,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "handling_mode",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-                if let Some(to) = to {
-                    Ok(CommsCommand::PeerMessage {
-                        to,
-                        body: self.body.clone().unwrap_or_default(),
-                        blocks: self.blocks.clone(),
-                        handling_mode,
-                    })
-                } else {
-                    Err(errors)
+    ) -> Result<CommsCommand, CommsCommandError> {
+        Ok(match self {
+            CommsCommandRequest::Input {
+                body,
+                blocks,
+                source,
+                stream,
+                handling_mode,
+                allow_self_session,
+            } => CommsCommand::Input {
+                session_id: session_id.clone(),
+                body,
+                blocks,
+                handling_mode: handling_mode.unwrap_or_default(),
+                source: source.unwrap_or(InputSource::Rpc),
+                stream: stream.unwrap_or(InputStreamMode::None),
+                allow_self_session: allow_self_session.unwrap_or(false),
+            },
+            CommsCommandRequest::PeerMessage {
+                to,
+                body,
+                blocks,
+                handling_mode,
+            } => CommsCommand::PeerMessage {
+                to,
+                body: body.unwrap_or_default(),
+                blocks,
+                handling_mode: handling_mode.unwrap_or_default(),
+            },
+            CommsCommandRequest::PeerRequest {
+                to,
+                intent,
+                params,
+                body,
+                handling_mode,
+                stream,
+            } => CommsCommand::PeerRequest {
+                to,
+                intent,
+                params: match (params, body) {
+                    (Some(p), _) => p,
+                    (None, Some(body)) => serde_json::json!({ "body": body }),
+                    (None, None) => serde_json::Value::Object(Default::default()),
+                },
+                handling_mode: handling_mode.unwrap_or_default(),
+                stream: stream.unwrap_or(InputStreamMode::None),
+            },
+            CommsCommandRequest::PeerResponse {
+                to,
+                in_reply_to,
+                status,
+                result,
+                handling_mode,
+            } => {
+                if status == ResponseStatus::Accepted && handling_mode.is_some() {
+                    return Err(CommsCommandError::HandlingModeForbiddenForAcceptedResponse);
+                }
+                CommsCommand::PeerResponse {
+                    to,
+                    in_reply_to,
+                    status,
+                    result: result.unwrap_or(serde_json::Value::Null),
+                    handling_mode,
                 }
             }
-            "peer_request" => {
-                let to = to_peer_name(self.to.as_ref(), &mut errors);
-                let Some(intent) = self.intent.clone() else {
-                    errors.push(CommsCommandValidationError::new(
-                        "intent",
-                        "required_field",
-                        None,
-                    ));
-                    return Err(errors);
-                };
-                let stream = match self.stream.as_deref() {
-                    Some("reserve_interaction") => InputStreamMode::ReserveInteraction,
-                    Some("none") | None => InputStreamMode::None,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "stream",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-                let handling_mode = match self.handling_mode.as_deref() {
-                    Some("steer") => HandlingMode::Steer,
-                    Some("queue") | None => HandlingMode::Queue,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "handling_mode",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-                if errors.is_empty() {
-                    let Some(to) = to else {
-                        return Err(errors);
-                    };
-                    Ok(CommsCommand::PeerRequest {
-                        to,
-                        intent,
-                        params: match (&self.params, &self.body) {
-                            (Some(p), _) => p.clone(),
-                            (None, Some(body)) => serde_json::json!({ "body": body }),
-                            (None, None) => serde_json::Value::Object(Default::default()),
-                        },
-                        handling_mode,
-                        stream,
-                    })
-                } else {
-                    Err(errors)
-                }
-            }
-            "peer_response" => {
-                let to = to_peer_name(self.to.as_ref(), &mut errors);
-                let in_reply_to = match &self.in_reply_to {
-                    Some(in_reply_to) => match uuid::Uuid::parse_str(in_reply_to) {
-                        Ok(id) => crate::interaction::InteractionId(id),
-                        Err(_) => {
-                            errors.push(CommsCommandValidationError::new(
-                                "in_reply_to",
-                                "invalid_uuid",
-                                Some(in_reply_to.clone()),
-                            ));
-                            return Err(errors);
-                        }
-                    },
-                    None => {
-                        errors.push(CommsCommandValidationError::new(
-                            "in_reply_to",
-                            "required_field",
-                            None,
-                        ));
-                        return Err(errors);
-                    }
-                };
-                let status = match self.status.as_deref() {
-                    Some("accepted") => crate::ResponseStatus::Accepted,
-                    Some("completed") | None => crate::ResponseStatus::Completed,
-                    Some("failed") => crate::ResponseStatus::Failed,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "status",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-                let handling_mode = match self.handling_mode.as_deref() {
-                    Some("steer") => Some(HandlingMode::Steer),
-                    Some("queue") => Some(HandlingMode::Queue),
-                    None => None,
-                    Some(other) => {
-                        errors.push(CommsCommandValidationError::new(
-                            "handling_mode",
-                            "invalid_value",
-                            Some(other.to_string()),
-                        ));
-                        return Err(errors);
-                    }
-                };
-                // handling_mode is forbidden on "accepted" (progress) responses.
-                // Runtime admission rejects PeerInput(ResponseProgress) with
-                // handling_mode, so reject at parse time to avoid a sender-side
-                // success path for a combination the receiver will drop.
-                if status == crate::ResponseStatus::Accepted && handling_mode.is_some() {
-                    errors.push(CommsCommandValidationError::new(
-                        "handling_mode",
-                        "forbidden_for_accepted_response",
-                        self.handling_mode.clone(),
-                    ));
-                    return Err(errors);
-                }
-                if errors.is_empty() {
-                    let Some(to) = to else {
-                        return Err(errors);
-                    };
-                    Ok(CommsCommand::PeerResponse {
-                        to,
-                        in_reply_to,
-                        status,
-                        result: self.result.clone().unwrap_or(serde_json::Value::Null),
-                        handling_mode,
-                    })
-                } else {
-                    Err(errors)
-                }
-            }
-            other => {
-                errors.push(CommsCommandValidationError::new(
-                    "kind",
-                    "unknown_kind",
-                    Some(other.to_string()),
-                ));
-                Err(errors)
-            }
-        }
+        })
     }
 
-    pub fn validation_errors_to_json(
-        errors: &[CommsCommandValidationError],
-    ) -> Vec<serde_json::Value> {
-        errors
-            .iter()
-            .map(CommsCommandValidationError::to_json_value)
-            .collect()
-    }
-}
-
-fn to_peer_name(
-    value: Option<&String>,
-    errors: &mut Vec<CommsCommandValidationError>,
-) -> Option<PeerName> {
-    match value {
-        Some(name) => match PeerName::new(name) {
-            Ok(peer) => Some(peer),
-            Err(_) => {
-                errors.push(CommsCommandValidationError::new(
-                    "to",
-                    "invalid_value",
-                    Some(name.clone()),
-                ));
-                None
-            }
-        },
-        None => {
-            errors.push(CommsCommandValidationError::new(
-                "to",
-                "required_field",
-                None,
-            ));
-            None
+    /// Stable wire discriminant for telemetry / logging.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Input { .. } => "input",
+            Self::PeerMessage { .. } => "peer_message",
+            Self::PeerRequest { .. } => "peer_request",
+            Self::PeerResponse { .. } => "peer_response",
         }
     }
 }
 /// Source for an input event posted to an agent.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputSource {
@@ -411,6 +258,7 @@ impl From<InputSource> for crate::config::PlainEventSource {
 }
 
 /// Whether this input/peer command should reserve a local interaction stream.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputStreamMode {
@@ -708,23 +556,16 @@ mod tests {
     fn peer_request_cmd(
         params: Option<Value>,
         body: Option<String>,
-    ) -> Result<CommsCommand, Vec<CommsCommandValidationError>> {
-        let req = CommsCommandRequest {
-            kind: "peer_request".to_string(),
-            to: Some("bob".to_string()),
-            body,
-            blocks: None,
-            intent: Some("greet".to_string()),
+    ) -> Result<CommsCommand, CommsCommandError> {
+        let req = CommsCommandRequest::PeerRequest {
+            to: PeerName::new("bob").expect("peer name"),
+            intent: "greet".to_string(),
             params,
-            in_reply_to: None,
-            status: None,
-            result: None,
-            source: None,
-            stream: None,
-            allow_self_session: None,
+            body,
             handling_mode: None,
+            stream: None,
         };
-        req.parse(&crate::types::SessionId::new())
+        req.into_command(&crate::types::SessionId::new())
     }
 
     #[test]
@@ -797,42 +638,79 @@ mod tests {
 
     #[test]
     fn peer_response_accepted_with_handling_mode_rejected() {
-        let req = CommsCommandRequest {
-            kind: "peer_response".to_string(),
-            to: Some("peer-1".to_string()),
-            in_reply_to: Some(uuid::Uuid::now_v7().to_string()),
-            status: Some("accepted".to_string()),
-            handling_mode: Some("steer".to_string()),
-            ..Default::default()
+        let req = CommsCommandRequest::PeerResponse {
+            to: PeerName::new("peer-1").expect("peer"),
+            in_reply_to: InteractionId(uuid::Uuid::now_v7()),
+            status: ResponseStatus::Accepted,
+            result: None,
+            handling_mode: Some(HandlingMode::Steer),
         };
-        let result = req.parse(&crate::SessionId::new());
-        assert!(
-            result.is_err(),
-            "accepted response with handling_mode must be rejected"
-        );
-        let errors = result.unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.issue == "forbidden_for_accepted_response"),
-            "should have forbidden_for_accepted_response error, got: {errors:?}"
+        let err = req
+            .into_command(&crate::SessionId::new())
+            .expect_err("accepted response with handling_mode must be rejected");
+        assert_eq!(
+            err,
+            CommsCommandError::HandlingModeForbiddenForAcceptedResponse
         );
     }
 
     #[test]
     fn peer_response_completed_with_handling_mode_accepted() {
-        let req = CommsCommandRequest {
-            kind: "peer_response".to_string(),
-            to: Some("peer-1".to_string()),
-            in_reply_to: Some(uuid::Uuid::now_v7().to_string()),
-            status: Some("completed".to_string()),
-            handling_mode: Some("steer".to_string()),
-            ..Default::default()
+        let req = CommsCommandRequest::PeerResponse {
+            to: PeerName::new("peer-1").expect("peer"),
+            in_reply_to: InteractionId(uuid::Uuid::now_v7()),
+            status: ResponseStatus::Completed,
+            result: None,
+            handling_mode: Some(HandlingMode::Steer),
         };
-        let result = req.parse(&crate::SessionId::new());
         assert!(
-            result.is_ok(),
+            req.into_command(&crate::SessionId::new()).is_ok(),
             "completed response with handling_mode=steer should be accepted"
+        );
+    }
+
+    #[test]
+    fn deserialize_input_with_typed_source() -> Result<(), serde_json::Error> {
+        let json = r#"{"kind":"input","body":"hello","source":"webhook","handling_mode":"steer"}"#;
+        let req: CommsCommandRequest = serde_json::from_str(json)?;
+        match req {
+            CommsCommandRequest::Input {
+                body,
+                source,
+                handling_mode,
+                ..
+            } => {
+                assert_eq!(body, "hello");
+                assert_eq!(source, Some(InputSource::Webhook));
+                assert_eq!(handling_mode, Some(HandlingMode::Steer));
+            }
+            other => panic!("expected Input, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_input_invalid_source_rejects_at_serde_boundary() {
+        let json = r#"{"kind":"input","body":"hello","source":"webhookd"}"#;
+        let err = serde_json::from_str::<CommsCommandRequest>(json)
+            .expect_err("invalid source must fail deserialization");
+        let msg = err.to_string();
+        // serde reports "unknown variant `webhookd`, expected one of ...".
+        assert!(
+            msg.contains("webhookd"),
+            "error should name the rejected value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn deserialize_unknown_kind_rejects_at_serde_boundary() {
+        let json = r#"{"kind":"foobar","body":"hello"}"#;
+        let err = serde_json::from_str::<CommsCommandRequest>(json)
+            .expect_err("unknown kind must fail deserialization");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("foobar") || msg.contains("variant"),
+            "error should mention unknown variant, got: {msg}"
         );
     }
 }

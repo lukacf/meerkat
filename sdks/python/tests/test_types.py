@@ -1,9 +1,24 @@
 import asyncio
 """Conformance tests for Meerkat Python SDK types and events."""
 
+import base64
+import json
 from pathlib import Path
 
 import pytest
+
+
+def _make_member_ref(mob_id: str, agent_identity: str) -> str:
+    """Build an opaque wire `member_ref` token using the same shape the
+    server emits (``base64url({"m": mob_id, "a": agent_identity})``).
+
+    The Python SDK only forwards `member_ref` opaquely — it never decodes
+    it — so any non-empty string would satisfy the parser. We still mirror
+    the server-side encoding here so test fixtures stay realistic and a
+    future round-trip decode assertion would succeed without churn.
+    """
+    payload = json.dumps({"m": mob_id, "a": agent_identity}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 try:
     import tomllib
@@ -1048,8 +1063,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "members": [
                     {
                         "agent_identity": "agent-a",
-                        "agent_runtime_id": "agent-a:1",
-                        "fence_token": 7,
+                        "member_ref": _make_member_ref("mob-1", "agent-a"),
                         "profile": "planner",
                     }
                 ]
@@ -1058,10 +1072,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {
                 "mob_id": "mob-1",
                 "agent_identity": "agent-a",
-                "agent_runtime_id": "agent-a:1",
-                "fence_token": 7,
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
             }
         if method == "mob/member_status":
+            # `mob/member_status` is a diagnostic snapshot endpoint, not an
+            # app-routing surface — binding-era `agent_runtime_id` /
+            # `fence_token` intentionally pass through for observability.
             return {
                 "status": "active",
                 "tokens_used": 5,
@@ -1075,9 +1091,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "status": "completed",
                 "receipt": {
                     "agent_identity": "agent-a",
-                    "agent_runtime_id": "agent-a:2",
-                    "previous_fence_token": 7,
-                    "fence_token": 8,
+                    "member_ref": _make_member_ref("mob-1", "agent-a"),
                 },
             }
         if method == "mob/flows":
@@ -1125,11 +1139,11 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert mob.id == "mob-1"
     assert await client.list_mobs() == [{"mob_id": "mob-1"}]
     assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}
+    expected_agent_a_ref = _make_member_ref("mob-1", "agent-a")
     assert await client.list_mob_members("mob-1") == [
         {
             "agent_identity": "agent-a",
-            "agent_runtime_id": "agent-a:1",
-            "fence_token": 7,
+            "member_ref": expected_agent_a_ref,
             "profile": "planner",
         }
     ]
@@ -1141,11 +1155,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert spawn_receipt == {
         "mob_id": "mob-1",
         "agent_identity": "agent-a",
-        "agent_runtime_id": "agent-a:1",
-        "fence_token": 7,
+        "member_ref": expected_agent_a_ref,
     }
     await client.retire_mob_member("mob-1", "agent-a")
     status = await client.mob_member_status("mob-1", "agent-a")
+    # mob/member_status is a diagnostic snapshot; binding-era fields
+    # intentionally pass through.
     assert status["agent_runtime_id"] == "agent-a:1"
     assert status["fence_token"] == 7
     assert status["realtime_attachment_status"] == "binding_ready"
@@ -1445,25 +1460,21 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
                 "output": "ok",
                 "tokens_used": 1,
                 "agent_identity": "helper-a",
-                "agent_runtime_id": "helper-a:1",
-                "fence_token": 9,
+                "member_ref": _make_member_ref("mob-1", "helper-a"),
             }
         if method == "mob/fork_helper":
             return {
                 "output": "forked",
                 "tokens_used": 2,
                 "agent_identity": "fork-a",
-                "agent_runtime_id": "fork-a:1",
-                "fence_token": 11,
+                "member_ref": _make_member_ref("mob-1", "fork-a"),
             }
         if method == "mob/respawn":
             return {
                 "status": "completed",
                 "receipt": {
                     "agent_identity": "agent-a",
-                    "agent_runtime_id": "agent-a:2",
-                    "previous_fence_token": 7,
-                    "fence_token": 8,
+                    "member_ref": _make_member_ref("mob-1", "agent-a"),
                 },
             }
         raise AssertionError(f"unexpected method {method}")
@@ -1474,14 +1485,22 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
     forked = await client.fork_mob_helper("mob-1", "agent-a", "help", profile_name="legacy")
     respawned = await client.respawn_mob_member("mob-1", "agent-a")
 
-    assert helper["agent_runtime_id"] == "helper-a:1"
-    assert helper["fence_token"] == 9
-    assert forked["agent_runtime_id"] == "fork-a:1"
-    assert forked["fence_token"] == 11
+    # App-facing receipts expose only `member_ref`; binding-era
+    # `agent_runtime_id` / `fence_token` / `previous_fence_token` are
+    # retired per dogma #10.
+    assert helper["agent_identity"] == "helper-a"
+    assert helper["member_ref"] == _make_member_ref("mob-1", "helper-a")
+    assert "agent_runtime_id" not in helper
+    assert "fence_token" not in helper
+    assert forked["agent_identity"] == "fork-a"
+    assert forked["member_ref"] == _make_member_ref("mob-1", "fork-a")
+    assert "agent_runtime_id" not in forked
+    assert "fence_token" not in forked
     assert respawned["receipt"]["agent_identity"] == "agent-a"
-    assert respawned["receipt"]["agent_runtime_id"] == "agent-a:2"
-    assert respawned["receipt"]["previous_fence_token"] == 7
-    assert respawned["receipt"]["fence_token"] == 8
+    assert respawned["receipt"]["member_ref"] == _make_member_ref("mob-1", "agent-a")
+    assert "agent_runtime_id" not in respawned["receipt"]
+    assert "fence_token" not in respawned["receipt"]
+    assert "previous_fence_token" not in respawned["receipt"]
     assert [method for method, _ in calls] == [
         "mob/spawn_helper",
         "mob/fork_helper",
@@ -1498,11 +1517,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
         calls.append((method, params))
         return {
             "agent_identity": "agent-a",
-            "agent_runtime_id": {
-                "identity": "agent-a",
-                "generation": 1,
-            },
-            "fence_token": 13,
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
             "handling_mode": "steer",
         }
 
@@ -1518,9 +1533,7 @@ async def test_send_mob_member_content_uses_canonical_host_member_send_lane() ->
 
     assert receipt == {
         "agent_identity": "agent-a",
-        "agent_runtime_id": "agent-a:1",
-        "generation": 1,
-        "fence_token": 13,
+        "member_ref": _make_member_ref("mob-1", "agent-a"),
         "handling_mode": "steer",
     }
     assert calls == [
@@ -1546,5 +1559,5 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    with pytest.raises(MeerkatError, match="missing runtime identity fields"):
+    with pytest.raises(MeerkatError, match="missing member_ref"):
         await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")

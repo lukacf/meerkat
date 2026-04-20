@@ -2053,6 +2053,21 @@ impl MobMcpDispatcher {
                     "required":["mob_id"]
                 }),
             ),
+            tool(
+                "mob_wait_ready",
+                &format!(
+                    "Wait until mob startup readiness (members bound but kickoff not required). Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
+                ),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "member_ids":{"type":"array","items":{"type":"string"}},
+                        "timeout_ms":{"type":"integer","minimum":1}
+                    },
+                    "required":["mob_id"]
+                }),
+            ),
         ]
         .into();
         Self { state, tools }
@@ -2226,6 +2241,14 @@ struct MeerkatStatusArgs {
 }
 #[derive(Deserialize)]
 struct WaitKickoffArgs {
+    mob_id: String,
+    #[serde(default)]
+    member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+#[derive(Deserialize)]
+struct WaitReadyArgs {
     mob_id: String,
     #[serde(default)]
     member_ids: Option<Vec<String>>,
@@ -2580,6 +2603,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let members = self
                     .state
                     .mob_wait_kickoff(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"members": members}))
+            }
+            "mob_wait_ready" => {
+                let args: WaitReadyArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let member_ids = args.member_ids.map(|ids| {
+                    ids.into_iter()
+                        .map(|id| AgentIdentity::from(id.as_str()))
+                        .collect::<Vec<_>>()
+                });
+                let members = self
+                    .state
+                    .mob_wait_ready(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"members": members}))

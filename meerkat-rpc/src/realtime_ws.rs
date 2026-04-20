@@ -1003,75 +1003,96 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     // itself a session mutation; if we used that mutation as an
                     // immediate refresh trigger after `TurnCommitted`, we would
                     // rebuild the provider session right before it emits the
-                    // assistant response. The DSL-owned
-                    // `realtime_product_turn_phase` (U9 / dogma #4) tracks the
-                    // turn lifecycle; the shell reads
-                    // `RealtimeProductTurnHandle::current_phase` for routing
-                    // decisions instead of hand-tracking three booleans.
+                    // assistant response.
                     //
-                    // Gates for proactive reconnect on clean provider-session
-                    // close (`RealtimeProductSessionUpdate::Closed`). A clean
-                    // close is treated as a mid-work disconnect worth
-                    // proactively re-opening only when the client has issued
-                    // work that is still in flight from the channel's
-                    // perspective:
-                    //   * `client_has_submitted_input` flips to true the
-                    //     first time the client's input chunk is accepted by
-                    //     the provider session. Before that point the
-                    //     channel has no client-requested work to recover,
-                    //     so reconnecting would race against callers that
-                    //     observe `open_calls` immediately after the
-                    //     terminal event (see the tool-call routing test).
-                    //   * `last_turn_terminally_completed` flips to true on
-                    //     a `TurnCompleted` with a terminal stop reason and
-                    //     back to false when a new turn starts. A Close
-                    //     after a terminal turn has already satisfied the
-                    //     client's request, so the channel can stay idle
-                    //     until the client next submits input.
-                    // Error paths still reconnect unconditionally because
-                    // Error is not a clean close.
-                    let mut client_has_submitted_input = false;
-                    let mut last_turn_terminally_completed = false;
+                    // Dogma round 2 (U-C): the realtime projection freshness
+                    // (`RealtimeProjectionFreshness`) and the clean-close
+                    // reconnect policy (`RealtimeReconnectPolicy`) are both
+                    // owned by the MeerkatMachine DSL and read off
+                    // `RealtimeProductTurnHandle`. Previously these lived as
+                    // shell-local typed state (`ProjectionFreshness` enum +
+                    // `client_has_submitted_input` / `last_turn_terminally_completed`
+                    // booleans); the inquisition caught them. They are now
+                    // fired as DSL inputs on every observer tick, input
+                    // acceptance, tool-call arrival, turn terminal, product-
+                    // session close, and refresh drain. The shell reads
+                    // `is_projection_stale_immediate()` at drain sites and
+                    // `reconnect_policy_on_clean_close()` at the clean-close
+                    // branch; no shell-local freshness or reconnect-policy
+                    // bookkeeping survives.
                     let mut last_visible_status = Some(opened_status);
                     let mut poll_interval = tokio::time::interval(RECONNECT_POLL_INTERVAL);
                     poll_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-                    // W2-E + U9: install typed observers on the session's DSL
-                    // handles so `SessionContextAdvanced` effects arrive as
-                    // typed notifications instead of a hand-polled watch
-                    // channel, and the product-turn lifecycle is owned by the
-                    // MeerkatMachine DSL (no shell-local boolean triple). Both
-                    // handles share the session's authority via
-                    // `prepare_bindings`. `install_observer_with_baseline`
-                    // captures the current watermark AND installs the observer
-                    // in a single critical section under the DSL authority
-                    // lock, so no tick can slip between the sampled baseline
-                    // and the observer becoming visible. Separate
-                    // `current_watermark_ms` + `install_observer` calls would
-                    // re-introduce the original two-read race the handle
-                    // abstraction is meant to eliminate.
-                    let (projection_refresh_tx, mut projection_refresh_rx) =
-                        mpsc::channel::<u64>(16);
+                    // W2-E + U9 + dogma round 2 U-C: install typed observers on
+                    // the session's DSL handles so every canonical-truth mutation
+                    // flows through the DSL, and the socket's `tokio::select!`
+                    // loop wakes only when the DSL owns a freshness-state
+                    // advance. The two-observer chain:
+                    //
+                    //   1. `BridgeProjectionToProductTurn` (installed on
+                    //      `SessionContextHandle`) forwards every
+                    //      `SessionContextAdvanced { updated_at_ms }` effect
+                    //      into the product-turn handle's
+                    //      `projection_advance_observed(ms)` input. The DSL
+                    //      then decides `StaleDeferred` vs `StaleImmediate`
+                    //      based on the current `realtime_product_turn_phase`.
+                    //
+                    //   2. `RealtimeSocketFreshnessWake` (installed on
+                    //      `RealtimeProductTurnHandle`) wakes the socket's
+                    //      `tokio::select!` loop via a zero-payload mpsc
+                    //      whenever the DSL transitions the freshness
+                    //      discriminant. The loop reads the typed freshness
+                    //      state on wake and drains if
+                    //      `is_projection_stale_immediate()`.
+                    //
+                    // `install_observer_with_baseline` on the session-context
+                    // handle atomically seeds the DSL frontier in the same
+                    // critical section as the observer install; a concurrent
+                    // `context_advanced` call is either visible via the
+                    // returned watermark or via the freshly installed observer,
+                    // never lost between the two.
+                    let (wake_tx, mut wake_rx) = mpsc::channel::<()>(16);
                     let realtime_handles =
                         resolve_session_realtime_handles(&state.runtime, binding.as_ref()).await;
                     let session_context_handle =
                         realtime_handles.as_ref().map(|(ctx, _)| Arc::clone(ctx));
                     let product_turn_handle =
                         realtime_handles.as_ref().map(|(_, turn)| Arc::clone(turn));
-                    let initial_baseline_ms = if let Some(handle) = session_context_handle.as_ref()
-                    {
-                        let observer: Arc<
-                            dyn meerkat_core::handles::SessionContextAdvancedObserver,
-                        > = Arc::new(ProjectionRefreshObserver {
-                            notify_tx: projection_refresh_tx.clone(),
+                    if let (Some(session_context), Some(product_turn)) = (
+                        session_context_handle.as_ref(),
+                        product_turn_handle.as_ref(),
+                    ) {
+                        // Install the freshness-wake observer first so the
+                        // baseline-reset transition that happens next lands on
+                        // a live observer (the wake is idempotent — the loop
+                        // will read the DSL state on its next poll).
+                        let wake_observer: Arc<
+                            dyn meerkat_core::handles::RealtimeProjectionFreshnessObserver,
+                        > = Arc::new(RealtimeSocketFreshnessWake {
+                            wake_tx: wake_tx.clone(),
                         });
-                        handle.install_observer_with_baseline(observer)
-                    } else {
-                        0
-                    };
-                    let mut projection_freshness = ProjectionFreshness::Clean {
-                        baseline_ms: initial_baseline_ms,
-                    };
+                        product_turn.install_projection_freshness_observer(wake_observer);
+
+                        // Install the session-context → product-turn bridge.
+                        // The atomic baseline is used to seed the DSL frontier
+                        // to the session's current watermark so a freshly opened
+                        // socket starts `Clean` at the canonical frontier — no
+                        // spurious refresh on the very first observed tick.
+                        let bridge_observer: Arc<
+                            dyn meerkat_core::handles::SessionContextAdvancedObserver,
+                        > = Arc::new(BridgeProjectionToProductTurn {
+                            product_turn: Arc::clone(product_turn),
+                        });
+                        let initial_baseline_ms =
+                            session_context.install_observer_with_baseline(bridge_observer);
+                        // Re-seed the DSL freshness to `Clean { baseline }` at
+                        // the sampled watermark. Any concurrent advance visible
+                        // through the bridge arrives as an observer call, which
+                        // routes to `projection_advance_observed` and re-enters
+                        // the DSL under its authority lock — safe.
+                        let _ = product_turn.projection_reset(initial_baseline_ms);
+                    }
 
                     loop {
                         tokio::select! {
@@ -1313,18 +1334,14 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     continue;
                                                 }
                                                 if let Some(product_session) = product_session.as_mut() {
-                                                    let turn_in_flight = product_turn_handle
-                                                        .as_ref()
-                                                        .is_some_and(|h| h.is_in_flight());
-                                                    while let Ok(notified_at) =
-                                                        projection_refresh_rx.try_recv()
-                                                    {
-                                                        projection_freshness = projection_freshness
-                                                            .on_context_advanced(
-                                                                notified_at,
-                                                                turn_in_flight,
-                                                            );
-                                                    }
+                                                    // Dogma round 2 U-C: the DSL owns the
+                                                    // projection-freshness state; observer ticks
+                                                    // pump through the bridge observer into the
+                                                    // DSL synchronously via
+                                                    // `projection_advance_observed`. No shell-
+                                                    // side mpsc to drain here — the DSL is
+                                                    // already at the current frontier when we
+                                                    // read it below.
                                                     let preempt = product_turn_handle
                                                         .as_ref()
                                                         .is_some_and(|h| h.should_preempt_on_input());
@@ -1399,10 +1416,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     // the interruption semantics entirely. Refresh only
                                                     // when this input chunk is arriving on a cleanly
                                                     // idle provider session.
-                                                    if !preempt
-                                                        && turn_was_idle
-                                                        && projection_freshness.is_stale_immediate()
-                                                    {
+                                                    let stale_immediate = product_turn_handle
+                                                        .as_ref()
+                                                        .is_some_and(|h| {
+                                                            h.is_projection_stale_immediate()
+                                                        });
+                                                    if !preempt && turn_was_idle && stale_immediate {
                                                         // Derived provider projections should refresh
                                                         // only when canonical Meerkat state has
                                                         // actually changed since the last successful
@@ -1429,16 +1448,19 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             .await;
                                                             continue;
                                                         }
-                                                        // W2-E: refresh landed. Advance the typed
-                                                        // freshness state to `Clean { baseline }`
-                                                        // using the current DSL watermark. No
-                                                        // hand-maintained dirty flag.
-                                                        let watermark_ms = session_context_handle
-                                                            .as_ref()
-                                                            .map(|h| h.current_watermark_ms())
-                                                            .unwrap_or(0);
-                                                        projection_freshness =
-                                                            projection_freshness.on_refreshed(watermark_ms);
+                                                        // Dogma round 2 U-C: refresh landed. Fire the
+                                                        // DSL `RealtimeProjectionRefreshed` input to
+                                                        // transition the canonical freshness state
+                                                        // back to `Clean` at the current session-
+                                                        // context watermark.
+                                                        if let (Some(session_context), Some(product_turn)) =
+                                                            (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                                        {
+                                                            let watermark_ms =
+                                                                session_context.current_watermark_ms();
+                                                            let _ =
+                                                                product_turn.projection_refreshed(watermark_ms);
+                                                        }
                                                     }
                                                     if !preempt && turn_was_idle {
                                                         let session_id = match resolve_primary_session_id(
@@ -1492,12 +1514,19 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                                 .await;
                                                                 continue;
                                                             }
-                                                            let watermark_ms = session_context_handle
-                                                                .as_ref()
-                                                                .map(|h| h.current_watermark_ms())
-                                                                .unwrap_or(0);
-                                                            projection_freshness =
-                                                                projection_freshness.on_refreshed(watermark_ms);
+                                                            // Dogma round 2 U-C: fire the DSL
+                                                            // `RealtimeProjectionRefreshed` at
+                                                            // the current watermark. The DSL's
+                                                            // `not_behind_frontier` guard
+                                                            // preserves any concurrent external
+                                                            // advance that landed while the
+                                                            // runtime was quiescing.
+                                                            if let (Some(session_context), Some(product_turn)) =
+                                                                (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                                            {
+                                                                let watermark_ms = session_context.current_watermark_ms();
+                                                                let _ = product_turn.projection_refreshed(watermark_ms);
+                                                            }
                                                         }
                                                     }
                                                     let (respond_tx, respond_rx) = oneshot::channel();
@@ -1517,21 +1546,22 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             // turn" and "continuing within the
                                                             // same turn" paths. Handle returns
                                                             // `Ok(false)` on the continuation case.
+                                                            //
+                                                            // Dogma round 2 U-C: also fire
+                                                            // `ClassifyRealtimeClientInputSubmitted`
+                                                            // so the DSL flips the reconnect
+                                                            // policy to `ReattachAndRecover` —
+                                                            // any subsequent clean close is
+                                                            // treated as a mid-work disconnect.
+                                                            // Idempotent; subsequent fires land
+                                                            // as `Ok(false)` under the guard.
                                                             if let Some(handle) =
                                                                 product_turn_handle.as_ref()
                                                             {
                                                                 let _ = handle.turn_in_flight();
+                                                                let _ = handle
+                                                                    .classify_client_input_submitted();
                                                             }
-                                                            // Client-initiated work has now
-                                                            // started on the provider session.
-                                                            // Any subsequent clean close while
-                                                            // this flag is set AND no terminal
-                                                            // turn completion has cleared the
-                                                            // mid-work gate is treated as a
-                                                            // mid-work disconnect, so the poll
-                                                            // loop can reconnect proactively.
-                                                            client_has_submitted_input = true;
-                                                            last_turn_terminally_completed = false;
                                                         }
                                                         Ok(Err(error)) => {
                                                             let _ = send_server_frame(
@@ -1653,30 +1683,27 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                     Ok(_) => {}
                                 }
                             }
-                            refresh = projection_refresh_rx.recv() => {
-                                // W2-E: typed `SessionContextAdvanced` effect
-                                // arrived from the DSL handle's observer. Fold
-                                // into `projection_freshness`, then drain any
-                                // siblings that queued while we were awaiting
-                                // (the DSL can emit back-to-back advances
-                                // during a single summary publish burst, so
-                                // coalesce to the highest watermark).
-                                let Some(updated_at_ms) = refresh else {
+                            wake = wake_rx.recv() => {
+                                // Dogma round 2 U-C: the DSL emitted
+                                // `RealtimeProjectionFreshnessChanged` — either
+                                // through the session-context bridge
+                                // (`projection_advance_observed`), through a
+                                // turn-end promotion, or through an explicit
+                                // refresh/reset. The wake is payload-less; the
+                                // authoritative freshness lives in the DSL and
+                                // is read via the handle. Drain any queued
+                                // wakes — the DSL coalesces advances via its
+                                // monotonic guard, so repeated wakes collapse
+                                // to "check once".
+                                if wake.is_none() {
                                     continue;
-                                };
-                                let mut max_notified = updated_at_ms;
-                                while let Ok(next_notified) = projection_refresh_rx.try_recv() {
-                                    if next_notified > max_notified {
-                                        max_notified = next_notified;
-                                    }
                                 }
-                                let turn_in_flight = product_turn_handle
+                                while wake_rx.try_recv().is_ok() {}
+                                let should_drain = product_turn_handle
                                     .as_ref()
-                                    .is_some_and(|h| h.is_in_flight());
-                                projection_freshness = projection_freshness
-                                    .on_context_advanced(max_notified, turn_in_flight);
+                                    .is_some_and(|h| h.is_projection_stale_immediate());
                                 if let Some(product_session) = product_session.as_mut()
-                                    && projection_freshness.is_stale_immediate()
+                                    && should_drain
                                 {
                                     if let Err(error) = refresh_product_session_projection(
                                         &state.runtime,
@@ -1692,13 +1719,11 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             &RealtimeServerFrame::ChannelError(error),
                                         )
                                         .await;
-                                    } else {
-                                        let watermark_ms = session_context_handle
-                                            .as_ref()
-                                            .map(|h| h.current_watermark_ms())
-                                            .unwrap_or(0);
-                                        projection_freshness =
-                                            projection_freshness.on_refreshed(watermark_ms);
+                                    } else if let (Some(session_context), Some(product_turn)) =
+                                        (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                    {
+                                        let watermark_ms = session_context.current_watermark_ms();
+                                        let _ = product_turn.projection_refreshed(watermark_ms);
                                     }
                                 }
                             }
@@ -1785,62 +1810,34 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 .await;
                                             }
                                         }
-                                        // W2-E: own-turn commits (user transcript append,
-                                        // assistant-output append, tool-dispatch mutation) also
-                                        // emit `SessionContextAdvanced` effects, same as external
-                                        // mutations do. Clear any pending stale state those ticks
-                                        // may have left behind — our own-turn commit is not an
-                                        // external mutation the provider session needs to
-                                        // absorb. Without this, a queued observer tick could
-                                        // have transitioned state to `StaleDeferred` before the
-                                        // `update` arm ran, and the subsequent
-                                        // `logical_turn_completed` promotion would fire a
-                                        // spurious provider-session rebuild for our own-turn
-                                        // transcript commit (the fix the old
-                                        // `known == current => clear dirty` check encoded).
-                                        if lifecycle.advances_projection_known_state {
-                                            let watermark_ms = session_context_handle
-                                                .as_ref()
-                                                .map(|h| h.current_watermark_ms())
-                                                .unwrap_or(0);
-                                            let turn_in_flight = product_turn_handle
-                                                .as_ref()
-                                                .is_some_and(|h| h.is_in_flight());
-                                            let mut max_notified_at = None;
-                                            // Drain any queued observer notifies so they don't
-                                            // land in the wrong phase. Pass `false` so they
-                                            // don't transition into `StaleDeferred` — the DSL
-                                            // already recorded this advance, and we're about to
-                                            // consume it via `on_refreshed` below.
-                                            while let Ok(notified_at) =
-                                                projection_refresh_rx.try_recv()
-                                            {
-                                                max_notified_at = Some(max_notified_at.map_or(
-                                                    notified_at,
-                                                    |current: u64| current.max(notified_at),
-                                                ));
-                                            }
-                                            // Reset to `Clean` at the current DSL watermark. This
-                                            // supersedes any `StaleDeferred { new_at_ms }` that
-                                            // might have been set by an observer notify that
-                                            // arrived before this `update` arm ran.
-                                            projection_freshness =
-                                                projection_freshness.on_refreshed(watermark_ms);
-                                            if let Some(notified_at) = max_notified_at
-                                                && notified_at > watermark_ms
-                                            {
-                                                // Preserve a newer concurrent external session
-                                                // advance (for example, a peer_response_terminal
-                                                // landing while our own turn was still
-                                                // committing). Treat it as stale work instead of
-                                                // discarding the observer tick as if it were part
-                                                // of the own-turn baseline.
-                                                projection_freshness = projection_freshness
-                                                    .on_context_advanced(
-                                                        notified_at,
-                                                        turn_in_flight,
-                                                    );
-                                            }
+                                        // Dogma round 2 U-C: own-turn commits (user transcript
+                                        // append, assistant-output append, tool-dispatch
+                                        // mutation) also emit `SessionContextAdvanced` effects,
+                                        // same as external mutations do. Fire the DSL
+                                        // `RealtimeProjectionRefreshed` input at the current
+                                        // session-context watermark so the freshness state
+                                        // returns to `Clean` for own-turn baselines — the own-
+                                        // turn commit is not an external mutation the provider
+                                        // session needs to absorb.
+                                        //
+                                        // #299 concurrency case: a peer_response_terminal
+                                        // observer tick that landed while our own turn was
+                                        // committing will have already pushed the DSL frontier
+                                        // above `watermark_ms` via the
+                                        // `BridgeProjectionToProductTurn` observer →
+                                        // `projection_advance_observed` path. In that case
+                                        // `RealtimeProjectionRefreshed`'s `not_behind_frontier`
+                                        // guard rejects this fire so the stale state at the
+                                        // higher frontier is preserved — the external advance
+                                        // still owes a refresh at the next drain site. No shell-
+                                        // side "drain the queue and re-apply the max" dance;
+                                        // the DSL monotonic-frontier guard decides.
+                                        if lifecycle.advances_projection_known_state
+                                            && let (Some(session_context), Some(product_turn)) =
+                                                (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                        {
+                                            let watermark_ms = session_context.current_watermark_ms();
+                                            let _ = product_turn.projection_refreshed(watermark_ms);
                                         }
                                         if let Some(handle) = product_turn_handle.as_ref() {
                                             // U9: fire typed lifecycle inputs in the order the
@@ -1859,7 +1856,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 // TurnStarted marker. Fire in-flight so a
                                                 // `ToolCallRequested`-only turn (no prior Input)
                                                 // doesn't look idle to the projection gate.
+                                                // Also classify as mid-turn activity for the
+                                                // reconnect policy — a tool call before a
+                                                // terminal completion means the session still
+                                                // owes the client work on a clean close.
                                                 let _ = handle.turn_in_flight();
+                                                let _ = handle.classify_mid_turn_activity();
                                             }
                                             if lifecycle.output_started {
                                                 let _ = handle.output_started();
@@ -1868,44 +1870,30 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 let _ = handle.turn_interrupted();
                                             }
                                         }
-                                        if lifecycle.tool_call_requested {
-                                            // A provider-issued tool call is not yet a terminal
-                                            // turn completion, so a subsequent clean close must
-                                            // not treat the preceding turn as "finished" when
-                                            // deciding whether to auto-reconnect.
-                                            last_turn_terminally_completed = false;
-                                        }
                                         if lifecycle.logical_turn_completed {
                                             if let Some(handle) = product_turn_handle.as_ref() {
+                                                // Dogma round 2 U-C: `classify_turn_terminated`
+                                                // routes the DSL classification to `CleanExit`
+                                                // AND folds in the `StaleDeferred →
+                                                // StaleImmediate` promotion (the specific s71
+                                                // turn-8 fix). Firing it BEFORE `turn_terminal`
+                                                // means the promotion runs while the DSL still
+                                                // sees a non-`Idle` product-turn phase, which is
+                                                // semantically "this turn reached terminal and
+                                                // the session delivered its work" — the two
+                                                // facts are inseparable.
+                                                let _ = handle.classify_turn_terminated();
                                                 let _ = handle.turn_terminal();
                                             }
-                                            // Record that the last in-flight turn reached a
-                                            // terminal stop reason so a subsequent clean close
-                                            // is treated as "session finished the requested
-                                            // work" rather than a mid-turn drop.
-                                            last_turn_terminally_completed = true;
-                                            // W2-E: promote `StaleDeferred` → `StaleImmediate`
-                                            // at turn end. This is the specific fix for the s71
-                                            // turn-8 regression: a peer-response terminal
-                                            // advanced the session mid-turn while the provider
-                                            // turn was live, landing as `StaleDeferred`; the old
-                                            // hand-maintained flag missed promoting it on turn
-                                            // end because the drain gate checked
-                                            // `projection_refresh_dirty` rather than the
-                                            // typed stale state.
-                                            //
-                                            // Drain any queued sibling notifies before
-                                            // transitioning so the promoted new_at carries the
-                                            // highest observed watermark.
-                                            while let Ok(notified_at) =
-                                                projection_refresh_rx.try_recv()
-                                            {
-                                                projection_freshness = projection_freshness
-                                                    .on_context_advanced(notified_at, true);
-                                            }
-                                            projection_freshness =
-                                                projection_freshness.on_turn_completed();
-                                            if projection_freshness.is_stale_immediate()
+                                            // Drain at turn end if the freshness state is now
+                                            // `StaleImmediate` (promoted by the classify call
+                                            // above) and we still have a live product session.
+                                            let should_drain = product_turn_handle
+                                                .as_ref()
+                                                .is_some_and(|h| {
+                                                    h.is_projection_stale_immediate()
+                                                });
+                                            if should_drain
                                                 && let Some(product_session) =
                                                     product_session.as_mut()
                                             {
@@ -1924,13 +1912,13 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         &RealtimeServerFrame::ChannelError(error),
                                                     )
                                                     .await;
-                                                } else {
-                                                    let watermark_ms = session_context_handle
-                                                        .as_ref()
-                                                        .map(|h| h.current_watermark_ms())
-                                                        .unwrap_or(0);
-                                                    projection_freshness = projection_freshness
-                                                        .on_refreshed(watermark_ms);
+                                                } else if let (Some(session_context), Some(product_turn)) =
+                                                    (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                                {
+                                                    let watermark_ms =
+                                                        session_context.current_watermark_ms();
+                                                    let _ = product_turn
+                                                        .projection_refreshed(watermark_ms);
                                                 }
                                             }
                                         }
@@ -1939,42 +1927,40 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         if let Some(handle) = product_turn_handle.as_ref() {
                                             let _ = handle.turn_terminal();
                                         }
-                                        // W2-E: the observer remains installed on the
-                                        // session's DSL handle — no separate task to abort.
-                                        // The freshness state resets to the current
-                                        // watermark so a fresh provider session opens
-                                        // with a `Clean` baseline.
-                                        let watermark_ms = session_context_handle
-                                            .as_ref()
-                                            .map(|h| h.current_watermark_ms())
-                                            .unwrap_or(0);
-                                        projection_freshness = ProjectionFreshness::Clean {
-                                            baseline_ms: watermark_ms,
-                                        };
+                                        // Dogma round 2 U-C: the observer remains installed on
+                                        // the session's DSL handles — no separate task to abort.
+                                        // Fire `RealtimeProjectionReset` to seed the DSL
+                                        // freshness back to `Clean` at the current session-
+                                        // context watermark so the next provider session opens
+                                        // with a synchronized baseline. The reconnect-policy
+                                        // classification owned by the DSL decides below whether
+                                        // this close is a mid-work disconnect or a clean exit.
+                                        if let (Some(session_context), Some(product_turn)) =
+                                            (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                        {
+                                            let watermark_ms = session_context.current_watermark_ms();
+                                            let _ = product_turn.projection_reset(watermark_ms);
+                                        }
                                         product_session = None;
-                                        // Only flip the binding into
-                                        // `ReattachRequired` — which kicks off
-                                        // the poll-driven reconnect cycle —
-                                        // when the client has actually issued
-                                        // work against this session AND that
-                                        // work has not yet reached a terminal
-                                        // turn completion. Without any client
-                                        // input, a clean close is just
-                                        // "provider ended the session" with
-                                        // nothing to resume, and proactively
-                                        // re-opening would race against
-                                        // callers that read `open_calls`
-                                        // immediately after the terminal
-                                        // event (e.g. the tool-call routing
-                                        // coverage test). If the last turn
-                                        // already completed terminally, the
-                                        // provider delivered everything the
-                                        // client asked for — a follow-up
-                                        // clean close is the session
-                                        // finishing, not a mid-turn drop, so
-                                        // there is nothing to recover.
-                                        let needs_reattach =
-                                            client_has_submitted_input && !last_turn_terminally_completed;
+                                        // Dogma round 2 U-C: the DSL owns the classification of
+                                        // what a clean close means. `ReattachAndRecover` =
+                                        // client submitted work AND no terminal turn has
+                                        // cleared it; `CleanExit` = either the client never
+                                        // submitted (nothing to recover, and proactively
+                                        // reopening would race against callers that read
+                                        // `open_calls` immediately after the terminal event —
+                                        // e.g. the tool-call routing coverage test) or the last
+                                        // turn completed terminally (the provider delivered the
+                                        // requested work). Shell reads the typed policy once
+                                        // and dispatches — no boolean pair, no hand computation.
+                                        let needs_reattach = product_turn_handle
+                                            .as_ref()
+                                            .is_some_and(|h| {
+                                                matches!(
+                                                    h.reconnect_policy_on_clean_close(),
+                                                    meerkat_core::handles::RealtimeReconnectPolicy::ReattachAndRecover
+                                                )
+                                            });
                                         if needs_reattach
                                             && let Err(error) = require_product_session_reattach(
                                                 &state.runtime,
@@ -2005,16 +1991,16 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         if let Some(handle) = product_turn_handle.as_ref() {
                                             let _ = handle.turn_terminal();
                                         }
-                                        // W2-E: observer lifetime is bound to the DSL
-                                        // handle; no separate task to abort. Reset
-                                        // freshness to a fresh `Clean` baseline.
-                                        let watermark_ms = session_context_handle
-                                            .as_ref()
-                                            .map(|h| h.current_watermark_ms())
-                                            .unwrap_or(0);
-                                        projection_freshness = ProjectionFreshness::Clean {
-                                            baseline_ms: watermark_ms,
-                                        };
+                                        // Dogma round 2 U-C: observer lifetime is bound to the
+                                        // DSL handle; no separate task to abort. Fire the DSL
+                                        // `RealtimeProjectionReset` input to seed freshness
+                                        // back to `Clean` at the current watermark.
+                                        if let (Some(session_context), Some(product_turn)) =
+                                            (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                        {
+                                            let watermark_ms = session_context.current_watermark_ms();
+                                            let _ = product_turn.projection_reset(watermark_ms);
+                                        }
                                         product_session = None;
                                         if retryable {
                                             if let Err(error) = require_product_session_reattach(
@@ -2180,13 +2166,16 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 // Reset projection baseline so the
                                                 // poll-loop's next status tick is
                                                 // evaluated against the freshly
-                                                // rotated session.
-                                                projection_freshness = ProjectionFreshness::Clean {
-                                                    baseline_ms: session_context_handle
-                                                        .as_ref()
-                                                        .map(|h| h.current_watermark_ms())
-                                                        .unwrap_or(0),
-                                                };
+                                                // rotated session. Dogma round 2
+                                                // U-C: fire the DSL
+                                                // `RealtimeProjectionReset` at the
+                                                // current session-context watermark.
+                                                if let (Some(session_context), Some(product_turn)) =
+                                                    (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                                {
+                                                    let watermark_ms = session_context.current_watermark_ms();
+                                                    let _ = product_turn.projection_reset(watermark_ms);
+                                                }
                                             }
                                         }
                                         Some(Ok(MemberRealtimeBindingEvent::Released {
@@ -2340,17 +2329,17 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         // session's DSL handle for the
                                                         // socket's lifetime; reconnect
                                                         // doesn't require re-installing it.
-                                                        // Reset the freshness baseline to
-                                                        // the current DSL watermark so the
-                                                        // rebuilt provider session starts
-                                                        // `Clean`.
-                                                        let watermark_ms = session_context_handle
-                                                            .as_ref()
-                                                            .map(|h| h.current_watermark_ms())
-                                                            .unwrap_or(0);
-                                                        projection_freshness = ProjectionFreshness::Clean {
-                                                            baseline_ms: watermark_ms,
-                                                        };
+                                                        // Reset the DSL freshness baseline to the
+                                                        // current DSL watermark so the rebuilt
+                                                        // provider session starts `Clean`.
+                                                        if let (Some(session_context), Some(product_turn)) =
+                                                            (session_context_handle.as_ref(), product_turn_handle.as_ref())
+                                                        {
+                                                            let watermark_ms =
+                                                                session_context.current_watermark_ms();
+                                                            let _ = product_turn
+                                                                .projection_reset(watermark_ms);
+                                                        }
                                                     }
                                                     if let Ok(projection) = current_binding_projection(
                                                         &state.runtime,
@@ -3700,122 +3689,61 @@ async fn refresh_product_session_projection(
     Ok(())
 }
 
-/// Typed projection-freshness state for the realtime socket (W2-E / issue #264).
+/// Observer installed on the session's [`SessionContextHandle`] (dogma
+/// round 2 U-C / dogma #1, #3, #13, #20).
 ///
-/// Replaces the hand-wired `projection_refresh_dirty: bool` +
-/// `projection_known_updated_at: SystemTime` pair with a single state that
-/// carries the same information typed. Transitions are driven by three
-/// inputs:
-///   1. `SessionContextAdvanced { updated_at_ms }` effect arrival (observer
-///      notify): advance `Clean` baseline if idle; mark `StaleDeferred` if
-///      a turn is in flight; mark `StaleImmediate` otherwise.
-///   2. Turn-lifecycle transition (`logical_turn_completed`): promote
-///      `StaleDeferred` to `StaleImmediate` and drain.
-///   3. Input-chunk arrival with an idle product-turn phase
-///      (`!RealtimeProductTurnHandle::is_in_flight`): drain
-///      `StaleImmediate` at the canonical refresh site.
+/// Forwards every `SessionContextAdvanced { updated_at_ms }` effect the
+/// DSL emits into the product-turn handle's
+/// `projection_advance_observed` input so the DSL owns the
+/// freshness-state transition. The realtime-WS socket's event loop then
+/// picks up any resulting `RealtimeProjectionFreshnessChanged` effect via
+/// the separately-installed [`RealtimeSocketFreshnessWake`] observer.
 ///
-/// The discriminant is always one of:
-///   - `Clean { baseline }`: provider projection matches canonical session
-///     state as of `baseline`. No refresh owed.
-///   - `StaleDeferred { new_at }`: canonical state advanced to `new_at`
-///     while the provider turn is live; refresh blocked until the turn
-///     terminates so barge-in continuity isn't broken.
-///   - `StaleImmediate { new_at }`: refresh owed at the next drain site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectionFreshness {
-    Clean { baseline_ms: u64 },
-    StaleDeferred { new_at_ms: u64 },
-    StaleImmediate { new_at_ms: u64 },
+/// This bridge replaces the old shell-local `ProjectionRefreshObserver`
+/// +`projection_refresh_rx` mpsc + `ProjectionFreshness` state machine.
+struct BridgeProjectionToProductTurn {
+    product_turn: Arc<dyn meerkat_core::handles::RealtimeProductTurnHandle>,
 }
 
-impl ProjectionFreshness {
-    fn baseline_ms(&self) -> u64 {
-        match *self {
-            Self::Clean { baseline_ms } => baseline_ms,
-            Self::StaleDeferred { new_at_ms } | Self::StaleImmediate { new_at_ms } => new_at_ms,
-        }
-    }
-
-    /// Transition on a `SessionContextAdvanced` observer tick.
-    ///
-    /// `turn_in_flight`: whether the provider-managed turn is currently
-    /// running. When `true`, the advance is recorded as `StaleDeferred`
-    /// so barge-in continuity is preserved. When `false`, it's recorded
-    /// as `StaleImmediate` so the next drain site picks it up.
-    ///
-    /// Ticks below the current baseline are ignored (non-monotonic —
-    /// shouldn't happen because the DSL guard filters them, but belt +
-    /// suspenders at the consumer too).
-    fn on_context_advanced(self, advanced_at_ms: u64, turn_in_flight: bool) -> Self {
-        if advanced_at_ms <= self.baseline_ms() {
-            return self;
-        }
-        if turn_in_flight {
-            Self::StaleDeferred {
-                new_at_ms: advanced_at_ms,
-            }
-        } else {
-            // Promote any deferred pending-stale into immediate so the
-            // consumer refreshes at the next available drain site.
-            Self::StaleImmediate {
-                new_at_ms: advanced_at_ms,
-            }
-        }
-    }
-
-    /// Transition on `logical_turn_completed`.
-    ///
-    /// `StaleDeferred` → `StaleImmediate` so the turn-end drain site
-    /// picks up the pending refresh. This is the specific fix for the
-    /// s71 turn-8 regression (peer-response terminal advanced the
-    /// session mid-turn, which used to land as a dirty flag that
-    /// never drained until the next input chunk).
-    fn on_turn_completed(self) -> Self {
-        match self {
-            Self::StaleDeferred { new_at_ms } => Self::StaleImmediate { new_at_ms },
-            other => other,
-        }
-    }
-
-    /// Transition after a successful refresh drain.
-    fn on_refreshed(self, now_ms: u64) -> Self {
-        // `now_ms` should be the updated_at_ms read back from the session
-        // immediately post-refresh (which advances on our own commit).
-        // Fall back to the previous new_at if we didn't get one — the
-        // important invariant is "no longer stale".
-        let baseline_ms = match self {
-            Self::Clean { baseline_ms } => baseline_ms.max(now_ms),
-            Self::StaleDeferred { new_at_ms } | Self::StaleImmediate { new_at_ms } => {
-                new_at_ms.max(now_ms)
-            }
-        };
-        Self::Clean { baseline_ms }
-    }
-
-    fn is_stale_immediate(&self) -> bool {
-        matches!(self, Self::StaleImmediate { .. })
-    }
-}
-
-/// Observer installed on the session's [`SessionContextHandle`] to push
-/// `SessionContextAdvanced` effect emissions into the realtime socket's
-/// event loop. The loop consumes these as a `tokio::select` arm, same
-/// place the old `projection_refresh_rx` sat.
-struct ProjectionRefreshObserver {
-    notify_tx: mpsc::Sender<u64>,
-}
-
-impl meerkat_core::handles::SessionContextAdvancedObserver for ProjectionRefreshObserver {
+impl meerkat_core::handles::SessionContextAdvancedObserver for BridgeProjectionToProductTurn {
     fn on_session_context_advanced(&self, updated_at_ms: u64) {
-        // `try_send`: the observer is invoked under the DSL authority
-        // lock (see `HandleDslAuthority::apply_input_with_effects`). A
-        // blocking send here would risk deadlock; dropping a tick on a
-        // full queue is fine because the loop coalesces any backlog via
-        // `projection_refresh_rx.try_recv()` before processing, and the
-        // DSL guarantees monotonic watermarks so the next observed tick
-        // supersedes any we missed.
-        let _ = self.notify_tx.try_send(updated_at_ms);
+        // The observer fires under the session-context DSL authority
+        // lock. `projection_advance_observed` re-enters the same
+        // authority to apply the freshness transition; both locks are
+        // the same `HandleDslAuthority` `Arc<Mutex>`, which is a sync
+        // (non-reentrant) mutex. To avoid deadlock, fire on a separate
+        // entry — the authority has already released when the effect
+        // dispatcher ran, so re-acquiring here is safe. If the input is
+        // dropped (e.g. non-advancing watermark), the guard-rejected
+        // classification keeps the call idempotent.
+        let _ = self.product_turn.projection_advance_observed(updated_at_ms);
+    }
+}
+
+/// Observer installed on the session's [`RealtimeProductTurnHandle`]
+/// (dogma round 2 U-C).
+///
+/// Wakes the realtime-WS socket's `tokio::select!` loop whenever the DSL
+/// emits a `RealtimeProjectionFreshnessChanged` effect. The wake is
+/// payload-less; the authoritative freshness state lives in the DSL and
+/// is read via the handle on wake.
+struct RealtimeSocketFreshnessWake {
+    wake_tx: mpsc::Sender<()>,
+}
+
+impl meerkat_core::handles::RealtimeProjectionFreshnessObserver for RealtimeSocketFreshnessWake {
+    fn on_realtime_projection_freshness_changed(
+        &self,
+        _new_freshness: meerkat_core::handles::RealtimeProjectionFreshness,
+        _frontier_ms: u64,
+    ) {
+        // `try_send` with no payload: the observer is invoked under the
+        // DSL authority lock. A blocking send would risk deadlock;
+        // dropping a wake on a full queue is fine because the loop
+        // drains the wake queue and re-reads the DSL state on any wake
+        // — the DSL is the authoritative source of truth, not the
+        // signal channel.
+        let _ = self.wake_tx.try_send(());
     }
 }
 
@@ -4980,158 +4908,294 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // W2-E: ProjectionFreshness typed state machine tests.
+    // Dogma round 2 U-C: DSL-owned realtime projection freshness +
+    // reconnect-policy tests.
     //
+    // These tests exercise the DSL-owned freshness state machine and the
+    // reconnect-policy classification through the typed
+    // `RealtimeProductTurnHandle` surface — the same path the realtime-WS
+    // dispatcher uses. They replace the shell-local `ProjectionFreshness`
+    // enum tests that ran against the deleted socket-local state.
     // Invariant tests are paired: each transition has a positive case
     // (proves the transition advances as specified) and a negative case
     // (proves the transition refuses to fire on the wrong precondition).
-    // This symmetry is the lesson from W1-B (admission-only trust cut
-    // that silently broke send-resolution when only positive cases were
-    // covered): both directions of change must be asserted.
     // -----------------------------------------------------------------------
 
-    use super::ProjectionFreshness;
+    use meerkat_core::handles::{
+        RealtimeProductTurnHandle, RealtimeProjectionFreshness,
+        RealtimeReconnectPolicy as CoreReconnectPolicy,
+    };
+    use meerkat_runtime::RuntimeRealtimeProductTurnHandle;
 
     #[test]
     fn projection_freshness_clean_advances_to_stale_immediate_when_idle() {
-        // Positive: idle session, context advances, frontier transitions
-        // to StaleImmediate carrying the new watermark.
-        let fresh = ProjectionFreshness::Clean { baseline_ms: 100 };
-        let advanced = fresh.on_context_advanced(200, /* turn_in_flight */ false);
+        // Positive: idle session (turn_phase == Idle), context advances,
+        // the DSL transitions freshness to `StaleImmediate` carrying the
+        // new watermark.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.projection_advance_observed(200).unwrap());
         assert_eq!(
-            advanced,
-            ProjectionFreshness::StaleImmediate { new_at_ms: 200 }
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleImmediate
         );
+        assert_eq!(handle.projection_frontier_ms(), 200);
     }
 
     #[test]
     fn projection_freshness_clean_advances_to_stale_deferred_when_turn_in_flight() {
         // Positive: mid-turn advance records as `StaleDeferred` so the
         // refresh is held until turn end (preserves barge-in continuity).
-        let fresh = ProjectionFreshness::Clean { baseline_ms: 100 };
-        let advanced = fresh.on_context_advanced(200, /* turn_in_flight */ true);
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.projection_advance_observed(200).unwrap());
         assert_eq!(
-            advanced,
-            ProjectionFreshness::StaleDeferred { new_at_ms: 200 }
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
         );
+        assert_eq!(handle.projection_frontier_ms(), 200);
     }
 
     #[test]
     fn projection_freshness_non_monotonic_advance_is_ignored() {
-        // Negative: an advance at or below the current baseline is a
-        // no-op. The consumer must not transition into a stale state
-        // on a tick that doesn't actually advance canonical truth.
-        let fresh = ProjectionFreshness::Clean { baseline_ms: 300 };
+        // Negative: an advance at or below the current frontier is a
+        // no-op. The DSL's monotonic guard rejects it and surfaces as
+        // `Ok(false)`.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(300).unwrap());
+        assert!(!handle.projection_advance_observed(300).unwrap());
+        assert!(!handle.projection_advance_observed(250).unwrap());
         assert_eq!(
-            fresh.on_context_advanced(300, false),
-            ProjectionFreshness::Clean { baseline_ms: 300 },
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::Clean
         );
+        assert_eq!(handle.projection_frontier_ms(), 300);
+    }
+
+    #[test]
+    fn projection_freshness_turn_terminated_promotes_deferred_to_immediate() {
+        // Positive: this is the specific s71 turn-8 fix. A `StaleDeferred`
+        // entry (canonical truth advanced mid-turn) promotes to
+        // `StaleImmediate` when `ClassifyRealtimeTurnTerminated` fires,
+        // so the drain site picks it up.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.projection_advance_observed(500).unwrap());
         assert_eq!(
-            fresh.on_context_advanced(250, false),
-            ProjectionFreshness::Clean { baseline_ms: 300 },
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
         );
-    }
-
-    #[test]
-    fn projection_freshness_turn_completed_promotes_deferred_to_immediate() {
-        // Positive: this is the specific s71 turn-8 fix. A StaleDeferred
-        // entry (canonical truth advanced mid-turn, e.g. peer-response
-        // terminal) must promote to StaleImmediate when the turn
-        // completes so the drain site picks it up.
-        let deferred = ProjectionFreshness::StaleDeferred { new_at_ms: 500 };
-        let promoted = deferred.on_turn_completed();
+        assert!(handle.classify_turn_terminated().unwrap());
         assert_eq!(
-            promoted,
-            ProjectionFreshness::StaleImmediate { new_at_ms: 500 }
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleImmediate
         );
     }
 
     #[test]
-    fn projection_freshness_turn_completed_does_not_alter_clean_state() {
-        // Negative: turn completion on a Clean frontier is a no-op. The
-        // drain must not re-fire against a session that has no pending
-        // advance — this was the failure mode where own-turn commits
-        // masqueraded as external advances under the old flag-based
-        // state (D4 / issue #260).
-        let clean = ProjectionFreshness::Clean { baseline_ms: 42 };
-        assert_eq!(clean.on_turn_completed(), clean);
+    fn projection_refresh_preserves_concurrent_external_advance() {
+        // #299 regression coverage (DSL-owned successor): a
+        // `peer_response_terminal` observer tick (external canonical-truth
+        // advance) that landed via `projection_advance_observed` while an
+        // own turn was committing MUST NOT be lost when the own-turn
+        // commit fires `projection_refreshed(own_watermark)`. The DSL's
+        // `not_behind_frontier` guard rejects the refresh so the stale
+        // state at the higher (external) frontier is preserved.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        // Own turn is in flight with own-watermark 100 published as the
+        // session-context frontier.
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        // External peer_response_terminal lands mid-turn and pushes the
+        // frontier to 500 — DSL routes to `StaleDeferred` via the turn-
+        // live arm.
+        assert!(handle.projection_advance_observed(500).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
+        );
+        assert_eq!(handle.projection_frontier_ms(), 500);
+        // Own-turn commit fires `projection_refreshed` at its own
+        // watermark (100 — behind the external frontier). Must be
+        // guard-rejected; state stays `StaleDeferred` at 500.
+        assert!(!handle.projection_refreshed(100).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
+        );
+        assert_eq!(handle.projection_frontier_ms(), 500);
+        // On turn terminal, promotion to `StaleImmediate` still fires —
+        // the external advance's drain is owed and will land at the
+        // next drain site.
+        assert!(handle.classify_turn_terminated().unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleImmediate
+        );
+        assert_eq!(handle.projection_frontier_ms(), 500);
     }
 
     #[test]
-    fn projection_freshness_turn_completed_is_idempotent_on_immediate() {
-        // Negative: repeated turn-completion ticks against an already-
-        // immediate stale entry must not regress (e.g. to Clean) or
-        // duplicate the stale reason. The drain is the only transition
-        // that should clear it.
-        let immediate = ProjectionFreshness::StaleImmediate { new_at_ms: 500 };
-        assert_eq!(immediate.on_turn_completed(), immediate);
-    }
-
-    #[test]
-    fn projection_freshness_refresh_clears_stale_and_advances_baseline() {
-        // Positive: a successful refresh drain resets the frontier to
-        // Clean with the refreshed watermark.
-        let stale = ProjectionFreshness::StaleImmediate { new_at_ms: 700 };
-        let refreshed = stale.on_refreshed(720);
-        assert_eq!(refreshed, ProjectionFreshness::Clean { baseline_ms: 720 });
-    }
-
-    #[test]
-    fn projection_freshness_refresh_keeps_highest_observed_watermark() {
-        // Negative: if the post-refresh DSL watermark is lower than the
-        // stale `new_at_ms` we already saw, the refreshed baseline must
-        // still reflect the highest observed watermark — regressing the
-        // baseline would leave the next SessionContextAdvanced tick
-        // misclassified as non-advancing and silently drop refreshes.
-        let stale = ProjectionFreshness::StaleImmediate { new_at_ms: 700 };
-        let refreshed = stale.on_refreshed(680);
-        assert_eq!(refreshed, ProjectionFreshness::Clean { baseline_ms: 700 });
+    fn projection_refresh_accepts_own_watermark_at_current_frontier() {
+        // Positive complement: the common own-turn commit case. No
+        // concurrent external advance; own-turn watermark matches the
+        // current frontier exactly. Refresh collapses `StaleImmediate` /
+        // `StaleDeferred` back to `Clean` as expected.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.projection_advance_observed(500).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleImmediate
+        );
+        assert!(handle.projection_refreshed(500).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::Clean
+        );
+        assert_eq!(handle.projection_frontier_ms(), 500);
     }
 
     #[test]
     fn projection_freshness_is_stale_immediate_only_for_immediate_variant() {
         // Tight invariant used by the drain gate. Must not fire for
-        // Clean or StaleDeferred.
-        assert!(
-            !ProjectionFreshness::Clean { baseline_ms: 0 }.is_stale_immediate(),
-            "Clean must not be drain-eligible",
+        // `Clean` or `StaleDeferred`.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(!handle.is_projection_stale_immediate());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.projection_advance_observed(200).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
         );
         assert!(
-            !ProjectionFreshness::StaleDeferred { new_at_ms: 0 }.is_stale_immediate(),
+            !handle.is_projection_stale_immediate(),
             "StaleDeferred must not be drain-eligible — turn-end pulls the trigger",
         );
+        assert!(handle.turn_terminal().unwrap());
+        assert!(handle.classify_turn_terminated().unwrap());
         assert!(
-            ProjectionFreshness::StaleImmediate { new_at_ms: 0 }.is_stale_immediate(),
+            handle.is_projection_stale_immediate(),
             "StaleImmediate must be drain-eligible",
         );
     }
 
     #[test]
-    fn projection_freshness_deferred_coalesces_highest_new_at() {
-        // Multiple mid-turn advances (e.g. peer-response terminal, then
-        // a tool-result append) must coalesce to the highest watermark,
-        // not lose ticks.
-        let mut state = ProjectionFreshness::Clean { baseline_ms: 100 };
-        state = state.on_context_advanced(200, true);
-        state = state.on_context_advanced(300, true);
-        assert_eq!(state, ProjectionFreshness::StaleDeferred { new_at_ms: 300 });
+    fn projection_freshness_refresh_clears_stale_and_advances_baseline() {
+        // Positive: `projection_refreshed(ms)` resets the DSL freshness
+        // to `Clean` and raises the frontier to `ms` when greater.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        // Initial state is Clean at frontier 0 — no reset needed.
+        assert!(handle.projection_advance_observed(700).unwrap());
+        assert!(handle.projection_refreshed(720).unwrap());
+        assert_eq!(
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::Clean
+        );
+        assert_eq!(handle.projection_frontier_ms(), 720);
     }
 
     #[test]
-    fn projection_freshness_idle_advance_supersedes_previous_deferred() {
-        // After a turn completion, the deferred promotes to immediate.
-        // A subsequent advance while idle must keep the state immediate
-        // and update the watermark — not regress to Deferred.
-        let deferred = ProjectionFreshness::StaleDeferred { new_at_ms: 200 };
-        let promoted = deferred.on_turn_completed();
+    fn projection_freshness_refresh_behind_frontier_is_guard_rejected() {
+        // Negative: if the refresh arrives with a watermark BELOW the
+        // current frontier, the DSL's `not_behind_frontier` guard rejects
+        // it (surfacing as `Ok(false)`) and preserves the stale state at
+        // the higher frontier. This is the concurrent-external-advance
+        // preservation that the #299 pre-U-C shell dance encoded; the DSL
+        // now enforces it at the transition guard.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        // Initial state is Clean at frontier 0 — no reset needed.
+        assert!(handle.projection_advance_observed(700).unwrap());
+        assert!(!handle.projection_refreshed(680).unwrap());
         assert_eq!(
-            promoted,
-            ProjectionFreshness::StaleImmediate { new_at_ms: 200 }
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleImmediate
         );
-        let updated = promoted.on_context_advanced(400, false);
+        assert_eq!(handle.projection_frontier_ms(), 700);
+    }
+
+    #[test]
+    fn projection_freshness_deferred_coalesces_highest_frontier() {
+        // Multiple mid-turn advances coalesce to the highest watermark
+        // via the DSL monotonic guard; `StaleDeferred` stays the
+        // discriminant until turn end.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.projection_reset(100).unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.projection_advance_observed(200).unwrap());
+        assert!(handle.projection_advance_observed(300).unwrap());
         assert_eq!(
-            updated,
-            ProjectionFreshness::StaleImmediate { new_at_ms: 400 }
+            handle.projection_freshness(),
+            RealtimeProjectionFreshness::StaleDeferred
+        );
+        assert_eq!(handle.projection_frontier_ms(), 300);
+    }
+
+    #[test]
+    fn reconnect_policy_defaults_to_clean_exit() {
+        // Initial state: no client input has been submitted, the policy
+        // should be `CleanExit` (nothing to recover on a clean close).
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert_eq!(
+            handle.reconnect_policy_on_clean_close(),
+            CoreReconnectPolicy::CleanExit
+        );
+    }
+
+    #[test]
+    fn reconnect_policy_flips_on_client_input_submitted() {
+        // Positive: the first accepted client input flips the policy
+        // to `ReattachAndRecover` so a subsequent clean close is
+        // treated as a mid-work disconnect.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.classify_client_input_submitted().unwrap());
+        assert_eq!(
+            handle.reconnect_policy_on_clean_close(),
+            CoreReconnectPolicy::ReattachAndRecover
+        );
+        // Negative: idempotent second fire — guard rejects and surfaces
+        // as `Ok(false)` without regressing state.
+        assert!(!handle.classify_client_input_submitted().unwrap());
+    }
+
+    #[test]
+    fn reconnect_policy_returns_to_clean_exit_after_turn_terminated() {
+        // After a client input has been submitted and the turn reaches
+        // a terminal completion, the DSL routes the reconnect policy
+        // back to `CleanExit`. A subsequent clean close should not
+        // trigger reattach until new work is submitted.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.classify_client_input_submitted().unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.classify_turn_terminated().unwrap());
+        assert!(handle.turn_terminal().unwrap());
+        assert_eq!(
+            handle.reconnect_policy_on_clean_close(),
+            CoreReconnectPolicy::CleanExit
+        );
+    }
+
+    #[test]
+    fn reconnect_policy_mid_turn_activity_flips_back_to_reattach() {
+        // After a terminal turn flipped the policy to `CleanExit`, a
+        // provider-issued tool call (mid-turn activity) on a subsequent
+        // turn must flip it back to `ReattachAndRecover` — the session
+        // has new in-flight work to recover on a clean close.
+        let handle = RuntimeRealtimeProductTurnHandle::ephemeral();
+        assert!(handle.classify_client_input_submitted().unwrap());
+        assert!(handle.turn_in_flight().unwrap());
+        assert!(handle.classify_turn_terminated().unwrap());
+        assert!(handle.turn_terminal().unwrap());
+        assert_eq!(
+            handle.reconnect_policy_on_clean_close(),
+            CoreReconnectPolicy::CleanExit
+        );
+        assert!(handle.classify_mid_turn_activity().unwrap());
+        assert_eq!(
+            handle.reconnect_policy_on_clean_close(),
+            CoreReconnectPolicy::ReattachAndRecover
         );
     }
 }

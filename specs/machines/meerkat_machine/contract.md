@@ -26,6 +26,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `reserved_interaction_streams`: `Set<PeerCorrelationId>`
 - `attached_interaction_streams`: `Set<PeerCorrelationId>`
 - `realtime_product_turn_phase`: `RealtimeProductTurnPhase`
+- `realtime_projection_freshness`: `RealtimeProjectionFreshness`
+- `realtime_projection_frontier_ms`: `u64`
+- `realtime_reconnect_policy`: `RealtimeReconnectPolicy`
 - `peer_ingress_owner_kind`: `PeerIngressOwnerKind`
 - `peer_ingress_comms_runtime_id`: `Option<CommsRuntimeId>`
 - `peer_ingress_mob_id`: `Option<MobId>`
@@ -97,6 +100,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ProductOutputStarted`
 - `ProductTurnInterrupted`
 - `ProductTurnTerminal`
+- `RealtimeProjectionAdvanceObserved`(advanced_at_ms: u64)
+- `RealtimeProjectionRefreshed`(observed_ms: u64)
+- `RealtimeProjectionReset`(baseline_ms: u64)
+- `ClassifyRealtimeClientInputSubmitted`
+- `ClassifyRealtimeMidTurnActivity`
+- `ClassifyRealtimeTurnTerminated`
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
 - `ApplyLiveTopologyIdentity`
@@ -194,6 +203,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InteractionStreamStateChanged`(corr_id: PeerCorrelationId, new_state: InteractionStreamState)
 - `InteractionStreamCleanup`(corr_id: PeerCorrelationId)
 - `RealtimeProductTurnPhaseChanged`(new_phase: RealtimeProductTurnPhase)
+- `RealtimeProjectionFreshnessChanged`(new_freshness: RealtimeProjectionFreshness, frontier_ms: u64)
+- `RealtimeReconnectPolicyChanged`(new_policy: RealtimeReconnectPolicy)
 - `LiveTopologyPhaseChanged`
 
 ## Invariants
@@ -2625,6 +2636,360 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `not_already_idle`
 - Emits: `RealtimeProductTurnPhaseChanged`
+- To: `Stopped`
+
+### `RealtimeProjectionAdvanceDuringTurnInitializing`
+- From: `Initializing`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `RealtimeProjectionAdvanceDuringTurnIdle`
+- From: `Idle`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `RealtimeProjectionAdvanceDuringTurnAttached`
+- From: `Attached`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `RealtimeProjectionAdvanceDuringTurnRunning`
+- From: `Running`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `RealtimeProjectionAdvanceDuringTurnRetired`
+- From: `Retired`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `RealtimeProjectionAdvanceDuringTurnStopped`
+- From: `Stopped`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_in_flight`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Stopped`
+
+### `RealtimeProjectionAdvanceWhileIdleInitializing`
+- From: `Initializing`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `RealtimeProjectionAdvanceWhileIdleIdle`
+- From: `Idle`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `RealtimeProjectionAdvanceWhileIdleAttached`
+- From: `Attached`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `RealtimeProjectionAdvanceWhileIdleRunning`
+- From: `Running`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `RealtimeProjectionAdvanceWhileIdleRetired`
+- From: `Retired`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `RealtimeProjectionAdvanceWhileIdleStopped`
+- From: `Stopped`
+- On: `RealtimeProjectionAdvanceObserved`(advanced_at_ms)
+- Guards:
+  - `monotonic`
+  - `turn_idle`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Stopped`
+
+### `RealtimeProjectionRefreshedInitializing`
+- From: `Initializing`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `RealtimeProjectionRefreshedIdle`
+- From: `Idle`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `RealtimeProjectionRefreshedAttached`
+- From: `Attached`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `RealtimeProjectionRefreshedRunning`
+- From: `Running`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `RealtimeProjectionRefreshedRetired`
+- From: `Retired`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `RealtimeProjectionRefreshedStopped`
+- From: `Stopped`
+- On: `RealtimeProjectionRefreshed`(observed_ms)
+- Guards:
+  - `not_behind_frontier`
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Stopped`
+
+### `RealtimeProjectionResetInitializing`
+- From: `Initializing`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `RealtimeProjectionResetIdle`
+- From: `Idle`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `RealtimeProjectionResetAttached`
+- From: `Attached`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `RealtimeProjectionResetRunning`
+- From: `Running`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `RealtimeProjectionResetRetired`
+- From: `Retired`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `RealtimeProjectionResetStopped`
+- From: `Stopped`
+- On: `RealtimeProjectionReset`(baseline_ms)
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Stopped`
+
+### `ClassifyRealtimeClientInputSubmittedInitializing`
+- From: `Initializing`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Initializing`
+
+### `ClassifyRealtimeClientInputSubmittedIdle`
+- From: `Idle`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Idle`
+
+### `ClassifyRealtimeClientInputSubmittedAttached`
+- From: `Attached`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Attached`
+
+### `ClassifyRealtimeClientInputSubmittedRunning`
+- From: `Running`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Running`
+
+### `ClassifyRealtimeClientInputSubmittedRetired`
+- From: `Retired`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Retired`
+
+### `ClassifyRealtimeClientInputSubmittedStopped`
+- From: `Stopped`
+- On: `ClassifyRealtimeClientInputSubmitted`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Stopped`
+
+### `ClassifyRealtimeMidTurnActivityInitializing`
+- From: `Initializing`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Initializing`
+
+### `ClassifyRealtimeMidTurnActivityIdle`
+- From: `Idle`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Idle`
+
+### `ClassifyRealtimeMidTurnActivityAttached`
+- From: `Attached`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Attached`
+
+### `ClassifyRealtimeMidTurnActivityRunning`
+- From: `Running`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Running`
+
+### `ClassifyRealtimeMidTurnActivityRetired`
+- From: `Retired`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Retired`
+
+### `ClassifyRealtimeMidTurnActivityStopped`
+- From: `Stopped`
+- On: `ClassifyRealtimeMidTurnActivity`()
+- Guards:
+  - `not_already_reattach`
+- Emits: `RealtimeReconnectPolicyChanged`
+- To: `Stopped`
+
+### `ClassifyRealtimeTurnTerminatedInitializing`
+- From: `Initializing`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `ClassifyRealtimeTurnTerminatedIdle`
+- From: `Idle`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `ClassifyRealtimeTurnTerminatedAttached`
+- From: `Attached`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `ClassifyRealtimeTurnTerminatedRunning`
+- From: `Running`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `ClassifyRealtimeTurnTerminatedRetired`
+- From: `Retired`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `ClassifyRealtimeTurnTerminatedStopped`
+- From: `Stopped`
+- On: `ClassifyRealtimeTurnTerminated`()
+- Guards:
+  - `actually_changing`
+- Emits: `RealtimeReconnectPolicyChanged`, `RealtimeProjectionFreshnessChanged`
 - To: `Stopped`
 
 ### `BeginLiveTopologyReconfigureIdle`

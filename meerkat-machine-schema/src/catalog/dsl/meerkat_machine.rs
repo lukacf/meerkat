@@ -75,6 +75,26 @@ machine! {
             // `product_output_started`) in the realtime-WS dispatcher.
             realtime_product_turn_phase: Enum<RealtimeProductTurnPhase>,
 
+            // --- Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20) ---
+            //
+            // Closed-set encoding of the realtime provider session's
+            // projection-freshness relative to canonical session truth.
+            // Replaces the shell-local `ProjectionFreshness` enum +
+            // observer queue in `meerkat-rpc::realtime_ws`. The shell
+            // fires `RealtimeProjectionAdvanceObserved` /
+            // `RealtimeProjectionRefreshed` / `RealtimeProjectionReset`
+            // inputs; the DSL decides the resulting freshness.
+            realtime_projection_freshness: Enum<RealtimeProjectionFreshness>,
+            realtime_projection_frontier_ms: u64,
+
+            // --- Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20) ---
+            //
+            // Typed classification of what a clean provider-session close
+            // means for the realtime channel's reconnect behavior. Replaces
+            // the shell-local boolean pair (`client_has_submitted_input`,
+            // `last_turn_terminally_completed`).
+            realtime_reconnect_policy: Enum<RealtimeReconnectPolicy>,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport capability
@@ -112,6 +132,9 @@ machine! {
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
             realtime_product_turn_phase = RealtimeProductTurnPhase::Idle,
+            realtime_projection_freshness = RealtimeProjectionFreshness::Clean,
+            realtime_projection_frontier_ms = 0,
+            realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -229,6 +252,16 @@ machine! {
             ProductOutputStarted,
             ProductTurnInterrupted,
             ProductTurnTerminal,
+            // Realtime projection freshness inputs (dogma round 2, U-C /
+            // dogma #1, #3, #13, #20).
+            RealtimeProjectionAdvanceObserved { advanced_at_ms: u64 },
+            RealtimeProjectionRefreshed { observed_ms: u64 },
+            RealtimeProjectionReset { baseline_ms: u64 },
+            // Realtime reconnect-policy inputs (dogma round 2, U-C /
+            // dogma #1, #3, #18, #20).
+            ClassifyRealtimeClientInputSubmitted,
+            ClassifyRealtimeMidTurnActivity,
+            ClassifyRealtimeTurnTerminated,
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
             MarkLiveTopologyDetached,
@@ -355,6 +388,13 @@ machine! {
             InteractionStreamCleanup { corr_id: PeerCorrelationId },
             // Realtime product-turn phase change effect (U9 / dogma #4).
             RealtimeProductTurnPhaseChanged { new_phase: Enum<RealtimeProductTurnPhase> },
+            // Realtime projection freshness + reconnect policy change
+            // effects (dogma round 2, U-C / dogma #1, #3, #13, #18, #20).
+            RealtimeProjectionFreshnessChanged {
+                new_freshness: Enum<RealtimeProjectionFreshness>,
+                frontier_ms: u64,
+            },
+            RealtimeReconnectPolicyChanged { new_policy: Enum<RealtimeReconnectPolicy> },
             // Live-topology reconfigure effects.
             LiveTopologyPhaseChanged,
         }
@@ -414,6 +454,8 @@ machine! {
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
         disposition RealtimeProductTurnPhaseChanged => external,
+        disposition RealtimeProjectionFreshnessChanged => external,
+        disposition RealtimeReconnectPolicyChanged => external,
         disposition LiveTopologyPhaseChanged => external,
 
         // =====================================================================
@@ -2021,6 +2063,146 @@ machine! {
         }
 
         // =====================================================================
+        // Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20)
+        // =====================================================================
+
+        transition RealtimeProjectionAdvanceDuringTurn {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
+            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
+            guard "turn_in_flight" {
+                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleDeferred;
+                self.realtime_projection_frontier_ms = advanced_at_ms;
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::StaleDeferred,
+                frontier_ms: advanced_at_ms
+            }
+        }
+
+        transition RealtimeProjectionAdvanceWhileIdle {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
+            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
+            guard "turn_idle" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
+                self.realtime_projection_frontier_ms = advanced_at_ms;
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::StaleImmediate,
+                frontier_ms: advanced_at_ms
+            }
+        }
+
+        transition RealtimeProjectionRefreshed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionRefreshed { observed_ms }
+            guard "not_behind_frontier" {
+                observed_ms >= self.realtime_projection_frontier_ms
+            }
+            guard "actually_changing" {
+                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
+                || observed_ms > self.realtime_projection_frontier_ms
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
+                if observed_ms > self.realtime_projection_frontier_ms {
+                    self.realtime_projection_frontier_ms = observed_ms;
+                }
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::Clean,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        transition RealtimeProjectionReset {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionReset { baseline_ms }
+            guard "actually_changing" {
+                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
+                || baseline_ms > self.realtime_projection_frontier_ms
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
+                if baseline_ms > self.realtime_projection_frontier_ms {
+                    self.realtime_projection_frontier_ms = baseline_ms;
+                }
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::Clean,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        // =====================================================================
+        // Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20)
+        // =====================================================================
+
+        transition ClassifyRealtimeClientInputSubmitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeClientInputSubmitted
+            guard "not_already_reattach" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
+            }
+        }
+
+        transition ClassifyRealtimeMidTurnActivity {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeMidTurnActivity
+            guard "not_already_reattach" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
+            }
+        }
+
+        transition ClassifyRealtimeTurnTerminated {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeTurnTerminated
+            guard "actually_changing" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::CleanExit
+                || self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit;
+                if self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred {
+                    self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
+                }
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::CleanExit
+            }
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: self.realtime_projection_freshness,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        // =====================================================================
         // Live-topology reconfigure transitions
         // =====================================================================
 
@@ -2326,6 +2508,34 @@ pub enum RealtimeProductTurnPhase {
     Committed,
     OutputStarted,
     Preemptible,
+}
+
+/// Realtime provider-session projection freshness (dogma round 2, U-C /
+/// dogma #1, #3, #13, #20).
+///
+/// Catalog twin of [`crate::meerkat_machine::dsl::RealtimeProjectionFreshness`].
+/// Unit variants — the frontier watermark is carried in the companion
+/// state field `realtime_projection_frontier_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeProjectionFreshness {
+    #[default]
+    Clean,
+    StaleDeferred,
+    StaleImmediate,
+}
+
+/// Realtime reconnect-policy classification (dogma round 2, U-C /
+/// dogma #1, #3, #18, #20).
+///
+/// Catalog twin of [`crate::meerkat_machine::dsl::RealtimeReconnectPolicy`].
+/// Replaces the shell-local boolean pair (`client_has_submitted_input`,
+/// `last_turn_terminally_completed`) with a typed classification owned by
+/// the DSL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeReconnectPolicy {
+    #[default]
+    CleanExit,
+    ReattachAndRecover,
 }
 
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).

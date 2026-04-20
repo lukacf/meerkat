@@ -88,6 +88,17 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
         "ProductOutputStarted",
         "ProductTurnInterrupted",
         "ProductTurnTerminal",
+        // Dogma round 2 U-C (dogma #1, #3, #13, #18, #20): realtime
+        // projection freshness + reconnect policy are driven via
+        // `RealtimeProductTurnHandle` (meerkat-core/src/handles.rs) from
+        // the realtime-WS dispatch loop, not through
+        // `MeerkatMachineCommand`.
+        "RealtimeProjectionAdvanceObserved",
+        "RealtimeProjectionRefreshed",
+        "RealtimeProjectionReset",
+        "ClassifyRealtimeClientInputSubmitted",
+        "ClassifyRealtimeMidTurnActivity",
+        "ClassifyRealtimeTurnTerminated",
     ];
     let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
         .into_iter()

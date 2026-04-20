@@ -1012,6 +1012,76 @@ pub trait InteractionStreamCleanupObserver: Send + Sync {
 // RealtimeProductTurnHandle (U9 / dogma #4 — realtime WS lifecycle owner)
 // ---------------------------------------------------------------------------
 
+/// Realtime provider-session projection freshness (dogma round 2, U-C /
+/// dogma #1, #3, #13, #20).
+///
+/// Canonical typed mirror of the DSL-owned `realtime_projection_freshness`
+/// field. Replaces the socket-local `ProjectionFreshness` enum previously
+/// owned by `meerkat-rpc::realtime_ws`. The realtime-WS dispatcher reads
+/// this enum via [`RealtimeProductTurnHandle::projection_freshness`] and
+/// fires typed inputs for each observer tick, turn end, and refresh drain
+/// — no shell-local freshness state, no socket-local observer queue.
+///
+/// The `frontier_ms` companion carries the monotonic watermark: it is the
+/// `baseline_ms` while `Clean`, or the `new_at_ms` of the pending advance
+/// while `StaleDeferred` / `StaleImmediate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeProjectionFreshness {
+    /// Provider projection matches canonical session state at the
+    /// frontier watermark. No refresh owed.
+    #[default]
+    Clean,
+    /// Canonical state advanced while the provider turn was live; refresh
+    /// is blocked until the turn terminates so barge-in continuity isn't
+    /// broken.
+    StaleDeferred,
+    /// Refresh owed at the next drain site (idle input-chunk arrival or
+    /// turn end).
+    StaleImmediate,
+}
+
+/// Typed classification of what a clean provider-session close means for
+/// the realtime channel's reconnect behavior (dogma round 2, U-C /
+/// dogma #1, #3, #18, #20).
+///
+/// Replaces the shell-local boolean pair
+/// (`client_has_submitted_input`, `last_turn_terminally_completed`) that
+/// used to co-decide `needs_reattach` in `meerkat-rpc::realtime_ws`. The
+/// realtime-WS dispatcher reads this via
+/// [`RealtimeProductTurnHandle::reconnect_policy_on_clean_close`] at the
+/// clean-close branch point and dispatches on the typed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RealtimeReconnectPolicy {
+    /// A clean close has no in-flight work to recover — either the
+    /// client never submitted input, or the last observed turn reached a
+    /// terminal completion.
+    #[default]
+    CleanExit,
+    /// The client issued work that has not yet reached a terminal turn
+    /// completion; a clean close is a mid-work disconnect and the
+    /// channel should proactively reattach.
+    ReattachAndRecover,
+}
+
+/// Observer invoked by [`RealtimeProductTurnHandle`] when the DSL emits a
+/// `RealtimeProjectionFreshnessChanged` effect (dogma round 2, U-C).
+///
+/// Shell-owned consumers (the realtime-WS dispatch loop) implement this to
+/// wake the socket's `tokio::select!` loop so it can read the new freshness
+/// state and drain if necessary. Called under the same authority lock as
+/// the transition that emitted the effect, so the "advance → state
+/// change → shell wake" chain is causal.
+pub trait RealtimeProjectionFreshnessObserver: Send + Sync {
+    /// Called once per emitted `RealtimeProjectionFreshnessChanged`
+    /// effect. `new_freshness` is the post-transition discriminant;
+    /// `frontier_ms` is the post-transition monotonic watermark.
+    fn on_realtime_projection_freshness_changed(
+        &self,
+        new_freshness: RealtimeProjectionFreshness,
+        frontier_ms: u64,
+    );
+}
+
 /// Realtime product-turn lifecycle phase (U9 / dogma #4).
 ///
 /// Canonical typed mirror of the DSL-owned
@@ -1094,4 +1164,74 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
     fn should_preempt_on_input(&self) -> bool {
         self.current_phase() == RealtimeProductTurnPhase::Preemptible
     }
+
+    // ---- Projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20) ----
+
+    /// Fire `RealtimeProjectionAdvanceObserved { advanced_at_ms }` — the
+    /// shell received a `SessionContextAdvanced` observer tick. The DSL
+    /// decides the resulting freshness based on the current product-turn
+    /// phase (live → `StaleDeferred`; idle → `StaleImmediate`).
+    ///
+    /// Returns `Ok(true)` when the advance transitioned state,
+    /// `Ok(false)` when the DSL monotonic guard rejected the tick as
+    /// non-advancing (or when the caller fired redundantly below the
+    /// current frontier).
+    fn projection_advance_observed(&self, advanced_at_ms: u64) -> Result<bool, DslTransitionError>;
+
+    /// Fire `RealtimeProjectionRefreshed { observed_ms }` — the shell
+    /// completed a provider-session refresh drain. Returns to `Clean`.
+    fn projection_refreshed(&self, observed_ms: u64) -> Result<bool, DslTransitionError>;
+
+    /// Fire `RealtimeProjectionReset { baseline_ms }` — the shell closed
+    /// or reconnected the product session and wants to re-seed the
+    /// `Clean` baseline at the current DSL session-context watermark.
+    fn projection_reset(&self, baseline_ms: u64) -> Result<bool, DslTransitionError>;
+
+    /// Read the current typed projection-freshness discriminant from the
+    /// DSL. The shell reads this at the canonical drain sites (observer
+    /// tick arrival, input-chunk refresh gate, turn-end drain) to decide
+    /// whether to rebuild the provider session's projection.
+    fn projection_freshness(&self) -> RealtimeProjectionFreshness;
+
+    /// Read the current monotonic frontier watermark from the DSL.
+    fn projection_frontier_ms(&self) -> u64;
+
+    /// Convenience accessor: `true` iff the current freshness is
+    /// `StaleImmediate` — the shell uses this at drain sites.
+    fn is_projection_stale_immediate(&self) -> bool {
+        self.projection_freshness() == RealtimeProjectionFreshness::StaleImmediate
+    }
+
+    /// Install a typed observer for `RealtimeProjectionFreshnessChanged`
+    /// effect emission. Implementations without an installed observer
+    /// drop the effect (standalone / WASM paths).
+    fn install_projection_freshness_observer(
+        &self,
+        observer: Arc<dyn RealtimeProjectionFreshnessObserver>,
+    );
+
+    // ---- Reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20) ----
+
+    /// Fire `ClassifyRealtimeClientInputSubmitted` — the client's input
+    /// chunk was accepted by the provider session. Returns `Ok(false)`
+    /// when already `ReattachAndRecover`.
+    fn classify_client_input_submitted(&self) -> Result<bool, DslTransitionError>;
+
+    /// Fire `ClassifyRealtimeMidTurnActivity` — the provider session
+    /// emitted a non-terminal activity (e.g. a tool call) inside a live
+    /// turn. Returns `Ok(false)` when already `ReattachAndRecover`.
+    fn classify_mid_turn_activity(&self) -> Result<bool, DslTransitionError>;
+
+    /// Fire `ClassifyRealtimeTurnTerminated` — the current turn reached
+    /// a logical terminal stop reason. Also folds in the pending
+    /// `StaleDeferred → StaleImmediate` promotion so the turn-end drain
+    /// site picks up any pending advance.
+    fn classify_turn_terminated(&self) -> Result<bool, DslTransitionError>;
+
+    /// Read the typed reconnect-policy classification. The shell reads
+    /// this at the clean-close branch to decide whether a clean provider-
+    /// session close should trigger a proactive reattach
+    /// (`ReattachAndRecover`) or close the channel cleanly
+    /// (`CleanExit`).
+    fn reconnect_policy_on_clean_close(&self) -> RealtimeReconnectPolicy;
 }

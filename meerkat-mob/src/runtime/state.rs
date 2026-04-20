@@ -114,6 +114,12 @@ pub(crate) struct MobDslT2Snapshot {
     pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MobStartupKickoffSnapshot {
+    pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
+    pub ready_runtime_ids: std::collections::BTreeSet<String>,
+}
+
 // ---------------------------------------------------------------------------
 // MobCommand
 // ---------------------------------------------------------------------------
@@ -212,6 +218,9 @@ pub(super) enum MobCommand {
     #[cfg(test)]
     DslT2Snapshot {
         reply_tx: oneshot::Sender<MobDslT2Snapshot>,
+    },
+    StartupKickoffSnapshot {
+        reply_tx: oneshot::Sender<MobStartupKickoffSnapshot>,
     },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,

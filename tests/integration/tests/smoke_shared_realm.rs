@@ -1711,6 +1711,31 @@ async fn spawn_background_process_without_openai(
     Ok(cmd.spawn()?)
 }
 
+async fn spawn_background_process(
+    binary: &Path,
+    cwd: &Path,
+    args: &[&str],
+    api_key: Option<&str>,
+) -> Result<Child, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new(binary);
+    cmd.current_dir(cwd)
+        .env("HOME", cwd)
+        .env("XDG_DATA_HOME", cwd.join("data"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args);
+    if let Some(key) = api_key {
+        cmd.env("ANTHROPIC_API_KEY", key)
+            .env("RKAT_ANTHROPIC_API_KEY", key);
+    }
+    if let Some(key) = openai_api_key() {
+        cmd.env("OPENAI_API_KEY", &key)
+            .env("RKAT_OPENAI_API_KEY", key);
+    }
+    Ok(cmd.spawn()?)
+}
+
 async fn rpc_send_line(
     process: &mut RpcProcess,
     line: &str,
@@ -5086,7 +5111,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
     let rpc_port = allocate_port();
     let rpc_addr = format!("127.0.0.1:{rpc_port}");
     let rpc_child = wait_for_tcp_server_with_timeout(
-        spawn_background_process_without_openai(
+        spawn_background_process(
             &rkat_rpc,
             &project_dir,
             &[
@@ -5110,7 +5135,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
     )
     .await?;
 
-    let mut mcp = spawn_stdio_process_without_openai(
+    let mut mcp = spawn_stdio_process(
         &rkat_mcp,
         &project_dir,
         &[
@@ -5139,7 +5164,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
                 "id": "scenario-63-mob",
                 "profiles": {
                     "worker": {
-                        "model": smoke_model(),
+                        "model": "gpt-realtime-1.5",
                         "external_addressable": true,
                         "tools": { "comms": true }
                     }
@@ -5219,10 +5244,16 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
         30,
     )
     .await?;
-    assert_eq!(
-        attached_status["realtime_attachment_status"].as_str(),
-        Some("binding_not_ready"),
-        "member-target realtime open should project binding_not_ready on the owning RPC host"
+    // Status may be binding_not_ready (provider session still handshaking) or
+    // binding_ready (already attached). Both indicate the channel is actively
+    // attaching on the owning RPC host; what we reject is "unattached".
+    let status_str = attached_status["realtime_attachment_status"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        matches!(status_str, "binding_not_ready" | "binding_ready"),
+        "member-target realtime open should project binding_not_ready or binding_ready \
+         on the owning RPC host, got {status_str:?}"
     );
 
     send_realtime_text_and_wait_for_commit(

@@ -51,6 +51,7 @@ describe("Phase 1 release parity targets", () => {
       "updateMobProfile",
       "deleteMobProfile",
       "waitMobKickoff",
+      "waitMobReady",
     ];
     for (const method of expectedClientMethods) {
       assert.ok(

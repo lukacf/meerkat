@@ -1448,6 +1448,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 Ok(())
             }
             RealtimeInputChunk::TextChunk(chunk) => {
+                let text = chunk.text;
                 self.raw_mut()?
                     .send_raw(ClientEvent::ConversationItemCreate {
                         event_id: None,
@@ -1456,7 +1457,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             id: None,
                             status: None,
                             role: Role::User,
-                            content: vec![ContentPart::InputText { text: chunk.text }],
+                            content: vec![ContentPart::InputText { text: text.clone() }],
                         }),
                     })
                     .await?;
@@ -1465,13 +1466,22 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // analogue: OpenAI only emits `input_audio_buffer.committed`
                 // (which drives TurnCommitted) for audio turns. Mirror the audio
                 // flow synthetically for text so the public realtime contract
-                // stays consistent — callers waiting for TurnStarted/TurnCommitted
-                // before a response begins get the same sequence for text as for
-                // audio — and auto-trigger response.create since there is no VAD
-                // to start generation.
+                // stays consistent — callers waiting for the canonical
+                // TurnStarted / InputTranscriptPartial / InputTranscriptFinal /
+                // TurnCommitted sequence get the same events for text as for
+                // audio. InputTranscriptFinal is also the canonical-history
+                // append seam on the consumer side (handle_product_session_event
+                // in meerkat-rpc), so text chunks must emit it or the user's
+                // turn never lands in the session history.
                 if matches!(self.turning_mode, RealtimeTurningMode::ProviderManaged) {
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnStarted);
+                    self.pending_events
+                        .push_back(RealtimeSessionEvent::InputTranscriptPartial {
+                            text: text.clone(),
+                        });
+                    self.pending_events
+                        .push_back(RealtimeSessionEvent::InputTranscriptFinal { text });
                     self.pending_events
                         .push_back(RealtimeSessionEvent::TurnCommitted);
                     self.raw_mut()?

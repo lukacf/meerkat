@@ -29,6 +29,8 @@ export { Mob } from "./mob.js";
 export type {
   MobKickoffMemberSnapshot,
   MobKickoffWaitOptions,
+  MobReadyMemberSnapshot,
+  MobReadyWaitOptions,
 } from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";

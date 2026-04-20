@@ -523,115 +523,114 @@ if include_scenario(58):
     @pytest.mark.asyncio
     @requires_live_llm
     async def test_smoke_scenario_58_realtime_member_channel_respawn_continuity():
-        with without_openai_realtime_env():
-            async with live_client() as client:
-                if not client.has_capability("mob"):
-                    pytest.skip("mob capability not available")
+        async with live_client() as client:
+            if not client.has_capability("mob"):
+                pytest.skip("mob capability not available")
 
-                mob = await client.create_mob(
-                    definition={
-                        "id": f"python-realtime-mob-{uuid4().hex[:8]}",
-                        "orchestrator": {"profile": "lead"},
-                        "profiles": {
-                            "lead": {
-                                "model": smoke_model(),
-                                "tools": {"comms": True},
-                                "peer_description": "Lead realtime worker",
-                                "external_addressable": True,
-                            }
-                        },
-                    }
-                )
-                spawned = await mob.spawn(
-                    profile="lead",
-                    agent_identity="lead-rt",
-                    initial_message="Reply READY_RT_58.",
-                    runtime_mode="turn_driven",
-                )
-                assert spawned["agent_identity"] == "lead-rt"
-
-                channel = RealtimeChannel.mob_member(client, mob.id, "lead-rt")
-                connection = await channel.connect()
-                status = await channel.status()
-                assert status.status["state"] in {"opening", "ready", "reconnecting"}
-
-                await connection.send_input(
-                    {
-                        "kind": "text_chunk",
-                        "text": "Reply with PY-MEMBER-58 and spruce.",
-                    }
-                )
-                await read_realtime_until(
-                    connection,
-                    lambda frame, _frames: frame.get("type") == "channel.event"
-                    and isinstance(frame.get("event"), dict)
-                    and frame["event"].get("type") == "turn_committed",
-                )
-
-                initial_state = await wait_for(
-                    "member realtime reply",
-                    lambda: mob.member_status("lead-rt"),
-                    lambda state: "py-member-58"
-                    in (state.get("output_preview") or "").lower(),
-                    timeout_secs=120.0,
-                )
-                assert "spruce" in (initial_state.get("output_preview") or "").lower()
-
-                await mob.force_cancel("lead-rt")
-                post_cancel_status = await channel.status()
-                assert post_cancel_status.status["state"] in {
-                    "opening",
-                    "ready",
-                    "reconnecting",
+            mob = await client.create_mob(
+                definition={
+                    "id": f"python-realtime-mob-{uuid4().hex[:8]}",
+                    "orchestrator": {"profile": "lead"},
+                    "profiles": {
+                        "lead": {
+                            "model": "gpt-realtime-1.5",
+                            "tools": {"comms": True},
+                            "peer_description": "Lead realtime worker",
+                            "external_addressable": True,
+                        }
+                    },
                 }
+            )
+            spawned = await mob.spawn(
+                profile="lead",
+                agent_identity="lead-rt",
+                initial_message="Reply READY_RT_58.",
+                runtime_mode="turn_driven",
+            )
+            assert spawned["agent_identity"] == "lead-rt"
 
-                respawn = await mob.respawn(
-                    "lead-rt",
-                    "Come back online and say PY-RESPAWN-58.",
-                )
-                receipt = respawn["receipt"]
-                assert receipt["agent_identity"] == "lead-rt"
+            channel = RealtimeChannel.mob_member(client, mob.id, "lead-rt")
+            connection = await channel.connect()
+            status = await channel.status()
+            assert status.status["state"] in {"opening", "ready", "reconnecting"}
 
-                await wait_for(
-                    "respawned member status",
-                    lambda: mob.member_status("lead-rt"),
-                    lambda state: state.get("agent_runtime_id")
-                    == receipt["agent_runtime_id"],
-                    timeout_secs=60.0,
-                )
+            await connection.send_input(
+                {
+                    "kind": "text_chunk",
+                    "text": "Reply with PY-MEMBER-58 and spruce.",
+                }
+            )
+            await read_realtime_until(
+                connection,
+                lambda frame, _frames: frame.get("type") == "channel.event"
+                and isinstance(frame.get("event"), dict)
+                and frame["event"].get("type") == "turn_committed",
+            )
 
-                await connection.send_input(
-                    {
-                        "kind": "text_chunk",
-                        "text": "Reply with PY-MEMBER-RESPAWN-58 and maple.",
-                    }
-                )
-                await read_realtime_until(
-                    connection,
-                    lambda frame, _frames: frame.get("type") == "channel.event"
-                    and isinstance(frame.get("event"), dict)
-                    and frame["event"].get("type") == "turn_committed",
-                )
+            initial_state = await wait_for(
+                "member realtime reply",
+                lambda: mob.member_status("lead-rt"),
+                lambda state: "py-member-58"
+                in (state.get("output_preview") or "").lower(),
+                timeout_secs=120.0,
+            )
+            assert "spruce" in (initial_state.get("output_preview") or "").lower()
 
-                respawned_state = await wait_for(
-                    "respawned member realtime reply",
-                    lambda: mob.member_status("lead-rt"),
-                    lambda state: "py-member-respawn-58"
-                    in (state.get("output_preview") or "").lower(),
-                    timeout_secs=120.0,
-                )
-                respawned_preview = (
-                    respawned_state.get("output_preview") or ""
-                ).lower()
-                assert "py-member-respawn-58" in respawned_preview
-                assert "maple" in respawned_preview
+            await mob.force_cancel("lead-rt")
+            post_cancel_status = await channel.status()
+            assert post_cancel_status.status["state"] in {
+                "opening",
+                "ready",
+                "reconnecting",
+            }
 
-                await connection.close()
-                closed_frames = await read_realtime_until(
-                    connection,
-                    lambda frame, _frames: frame.get("type") == "channel.closed",
-                )
-                assert closed_frames[-1]["type"] == "channel.closed"
+            respawn = await mob.respawn(
+                "lead-rt",
+                "Come back online and say PY-RESPAWN-58.",
+            )
+            receipt = respawn["receipt"]
+            assert receipt["agent_identity"] == "lead-rt"
+
+            await wait_for(
+                "respawned member status",
+                lambda: mob.member_status("lead-rt"),
+                lambda state: state.get("agent_runtime_id")
+                == receipt["agent_runtime_id"],
+                timeout_secs=60.0,
+            )
+
+            await connection.send_input(
+                {
+                    "kind": "text_chunk",
+                    "text": "Reply with PY-MEMBER-RESPAWN-58 and maple.",
+                }
+            )
+            await read_realtime_until(
+                connection,
+                lambda frame, _frames: frame.get("type") == "channel.event"
+                and isinstance(frame.get("event"), dict)
+                and frame["event"].get("type") == "turn_committed",
+            )
+
+            respawned_state = await wait_for(
+                "respawned member realtime reply",
+                lambda: mob.member_status("lead-rt"),
+                lambda state: "py-member-respawn-58"
+                in (state.get("output_preview") or "").lower(),
+                timeout_secs=120.0,
+            )
+            respawned_preview = (
+                respawned_state.get("output_preview") or ""
+            ).lower()
+            assert "py-member-respawn-58" in respawned_preview
+            assert "maple" in respawned_preview
+
+            await connection.close()
+            closed_frames = await read_realtime_until(
+                connection,
+                lambda frame, _frames: frame.get("type") == "channel.closed",
+            )
+            assert closed_frames[-1]["type"] == "channel.closed"
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +652,7 @@ if include_scenario(64):
                     "orchestrator": {"profile": "lead"},
                     "profiles": {
                         "lead": {
-                            "model": smoke_model(),
+                            "model": "gpt-realtime-1.5",
                             "tools": {"comms": True},
                             "peer_description": "Lead realtime worker",
                             "external_addressable": True,

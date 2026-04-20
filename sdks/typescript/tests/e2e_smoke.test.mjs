@@ -64,30 +64,8 @@ function anthropicModel() {
 }
 
 function openaiModel() {
-  // Default to the current approved OpenAI smoke model per CLAUDE.md;
-  // the previous default `gpt-4.1-mini` is obsolete and was silently
-  // degrading instruction-following (s44 reviewer failing to repeat
-  // the literal `[TS-SWARM]` marker it was told to remember).
+  // Default to the current approved OpenAI smoke model per CLAUDE.md.
   return process.env.SMOKE_MODEL_OPENAI || "gpt-5.4-mini";
-}
-
-// s44 reviewer-specific model. gpt-5.4-mini consistently fails the
-// staged-system-context retrieval assertion on this scenario: when the
-// reviewer's system prompt contains both the appended `[TS-SWARM]`
-// marker AND identifier-like strings (mob_id, peer_name, peer_id),
-// the model picks one of the identifier-like strings as "the swarm
-// marker". Renaming the mob_id away from "swarm" did not fix it —
-// the model picked the renamed id too. gpt-5.4 (approved standard
-// tier per CLAUDE.md) handles this referential retrieval with ~60%
-// first-pass success; the `retries = 2` entry in `.config/nextest.toml`
-// for s44 absorbs the residual model-variance (matches the
-// `realtime_ws_protocol` precedent from W1-A).
-function reviewerModel() {
-  return (
-    process.env.SMOKE_MODEL_OPENAI_REVIEWER ||
-    process.env.SMOKE_MODEL_OPENAI ||
-    "gpt-5.4"
-  );
 }
 
 function includeScenario(id) {
@@ -351,7 +329,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
               external_addressable: true,
             },
             reviewer: {
-              model: reviewerModel(),
+              model: openaiModel(),
               tools: { comms: true },
               peer_description: "Review worker",
               external_addressable: true,
@@ -388,7 +366,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       await withStepTimeout(scenario, "wire lead -> reviewer", mob.wire("lead-1", "reviewer-1"));
       const append = await withStepTimeout(scenario, "append reviewer system context", mob.appendSystemContext(
         "reviewer-1",
-        "Remember the swarm marker [TS-SWARM].",
+        "Remember the swarm marker SWARM_MARKER_7F3X2A.",
         { source: "typescript-sdk", idempotencyKey: "ts-swarm-marker" },
       ));
       assert.ok(["Staged", "staged", "Duplicate", "duplicate"].includes(String(append.status)));
@@ -439,10 +417,10 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       );
       const reviewerText = (reviewerState.outputPreview || "").toLowerCase();
       // Test-support instrumentation: surface the raw reviewer output
-      // when the `ts-swarm` assertion would fail, so post-hoc log
-      // inspection does not require a re-run. The assertions below
-      // remain untouched (test semantics unchanged).
-      if (!reviewerText.includes("ts-swarm") || !reviewerText.includes("reviewer ready")) {
+      // when the marker assertion would fail, so post-hoc log inspection
+      // does not require a re-run. The assertions below remain untouched
+      // (test semantics unchanged).
+      if (!reviewerText.includes("swarm_marker_7f3x2a") || !reviewerText.includes("reviewer ready")) {
         console.error(
           `[${scenario}] reviewer output_preview (raw): ${JSON.stringify(reviewerState.outputPreview)}`,
         );
@@ -451,7 +429,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         );
       }
       assert.ok(reviewerText.includes("reviewer ready"));
-      assert.ok(reviewerText.includes("ts-swarm"));
+      assert.ok(reviewerText.includes("swarm_marker_7f3x2a"));
 
       const members = await withStepTimeout(scenario, "list members before respawn", mob.listMembers());
       const memberIds = members.map((member) => member.agentIdentity);
@@ -532,7 +510,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
     it(
       "Scenario 59: realtime channel session exchange through the packaged SDK",
       { skip: !hasAnthropicKey() },
-      async () => withoutOpenAiRealtimeEnv(async () => {
+      async () => {
       const scenario = "Scenario 59";
       const client = await withStepTimeout(
         scenario,
@@ -546,8 +524,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         client.createSession(
         "When asked through realtime, reply with TS-REALTIME-59 and mention cedar.",
         {
-          model: anthropicModel(),
-          provider: "anthropic",
+          model: "gpt-realtime-1.5",
+          provider: "openai",
         },
         ),
       );
@@ -632,7 +610,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         }
       })());
       assert.equal(closed.type, "channel.closed");
-      }),
+      },
     );
   }
 });

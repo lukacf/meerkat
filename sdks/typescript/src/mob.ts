@@ -89,6 +89,9 @@ export interface MobKickoffMemberSnapshot extends MobMemberSnapshot {
   agentIdentity: string;
 }
 
+export type MobReadyWaitOptions = MobKickoffWaitOptions;
+export type MobReadyMemberSnapshot = MobKickoffMemberSnapshot;
+
 export interface ExternalPeerTarget {
   readonly external: {
     readonly name: string;
@@ -181,6 +184,12 @@ export class Mob {
     options?: MobKickoffWaitOptions,
   ): Promise<MobKickoffMemberSnapshot[]> {
     return this.client.waitMobKickoff(this.mobId, options);
+  }
+
+  async waitForReady(
+    options?: MobReadyWaitOptions,
+  ): Promise<MobReadyMemberSnapshot[]> {
+    return this.client.waitMobReady(this.mobId, options);
   }
 
   async spawnHelper(

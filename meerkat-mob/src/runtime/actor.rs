@@ -759,6 +759,32 @@ impl MobActor {
             .collect()
     }
 
+    fn pending_kickoff_member_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
+        self.dsl_authority
+            .state
+            .member_kickoff_pending
+            .iter()
+            .chain(self.dsl_authority.state.member_kickoff_starting.iter())
+            .chain(
+                self.dsl_authority
+                    .state
+                    .member_kickoff_callback_pending
+                    .iter(),
+            )
+            .cloned()
+            .collect()
+    }
+
+    fn ready_runtime_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
+        self.dsl_authority
+            .state
+            .member_startup_runtime_ready
+            .iter()
+            .chain(self.dsl_authority.state.member_startup_ready.iter())
+            .map(|runtime_id| runtime_id.0.clone())
+            .collect()
+    }
+
     /// Re-project the DSL's `member_state_markers` onto the shell's
     /// [`Roster::state`] field. Called by callers who have just applied
     /// a DSL transition that mutated the marker map (Retire /
@@ -886,22 +912,6 @@ impl MobActor {
             }
             mob_dsl::KickoffPhase::Failed => crate::roster::MobMemberKickoffPhase::Failed,
             mob_dsl::KickoffPhase::Cancelled => crate::roster::MobMemberKickoffPhase::Cancelled,
-        }
-    }
-
-    fn kickoff_outcome_string(outcome: &meerkat_runtime::completion::CompletionOutcome) -> String {
-        match outcome {
-            meerkat_runtime::completion::CompletionOutcome::Completed(_)
-            | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                "Started".to_string()
-            }
-            meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
-                "CallbackPending".to_string()
-            }
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
-            | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                reason.clone()
-            }
         }
     }
 
@@ -1780,9 +1790,25 @@ impl MobActor {
         let _ = self
             .apply_kickoff_input(
                 agent_identity,
-                mob_dsl::MobMachineInput::KickoffResolveOutcome {
-                    member_id: agent_identity.to_string(),
-                    outcome: Self::kickoff_outcome_string(&outcome),
+                match outcome {
+                    meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                    | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
+                        mob_dsl::MobMachineInput::KickoffResolveStarted {
+                            member_id: agent_identity.to_string(),
+                        }
+                    }
+                    meerkat_runtime::completion::CompletionOutcome::CallbackPending { .. } => {
+                        mob_dsl::MobMachineInput::KickoffResolveCallbackPending {
+                            member_id: agent_identity.to_string(),
+                        }
+                    }
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
+                    | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
+                        mob_dsl::MobMachineInput::KickoffResolveFailed {
+                            member_id: agent_identity.to_string(),
+                            error,
+                        }
+                    }
                 },
             )
             .await?;
@@ -2250,6 +2276,12 @@ impl MobActor {
                         tasks: dsl.tasks.clone(),
                         in_progress_task_ids: dsl.in_progress_task_ids.clone(),
                         completed_task_ids: dsl.completed_task_ids.clone(),
+                    });
+                }
+                MobCommand::StartupKickoffSnapshot { reply_tx } => {
+                    let _ = reply_tx.send(super::state::MobStartupKickoffSnapshot {
+                        pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
+                        ready_runtime_ids: self.ready_runtime_ids_from_dsl(),
                     });
                 }
                 MobCommand::Stop { reply_tx } => {

@@ -129,6 +129,8 @@ MobKickoffMemberSnapshot = TypedDict(
     },
 )
 
+MobReadyMemberSnapshot = MobKickoffMemberSnapshot
+
 MobHelperResult = TypedDict(
     "MobHelperResult",
     {
@@ -281,6 +283,18 @@ class Mob:
         timeout_ms: int | None = None,
     ) -> list[MobKickoffMemberSnapshot]:
         return await self._client.wait_mob_kickoff(
+            self.id,
+            member_ids=member_ids,
+            timeout_ms=timeout_ms,
+        )
+
+    async def wait_for_ready(
+        self,
+        *,
+        member_ids: list[str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> list[MobReadyMemberSnapshot]:
+        return await self._client.wait_mob_ready(
             self.id,
             member_ids=member_ids,
             timeout_ms=timeout_ms,

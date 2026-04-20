@@ -991,6 +991,27 @@ impl MobMcpState {
             .collect())
     }
 
+    pub async fn mob_wait_ready(
+        &self,
+        mob_id: &MobId,
+        member_ids: Option<Vec<AgentIdentity>>,
+        timeout_ms: Option<u64>,
+    ) -> Result<Vec<KickoffMemberSnapshot>, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let snapshots = match member_ids {
+            Some(ids) => handle.wait_for_members_ready(&ids, timeout).await?,
+            None => handle.wait_for_ready(timeout).await?,
+        };
+        Ok(snapshots
+            .into_iter()
+            .map(|(identity, snapshot)| KickoffMemberSnapshot {
+                agent_identity: identity,
+                snapshot,
+            })
+            .collect())
+    }
+
     pub async fn mob_spawn_helper(
         &self,
         mob_id: &MobId,
@@ -2032,6 +2053,21 @@ impl MobMcpDispatcher {
                     "required":["mob_id"]
                 }),
             ),
+            tool(
+                "mob_wait_ready",
+                &format!(
+                    "Wait until mob startup readiness (members bound but kickoff not required). Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
+                ),
+                json!({
+                    "type":"object",
+                    "properties":{
+                        "mob_id":{"type":"string"},
+                        "member_ids":{"type":"array","items":{"type":"string"}},
+                        "timeout_ms":{"type":"integer","minimum":1}
+                    },
+                    "required":["mob_id"]
+                }),
+            ),
         ]
         .into();
         Self { state, tools }
@@ -2205,6 +2241,14 @@ struct MeerkatStatusArgs {
 }
 #[derive(Deserialize)]
 struct WaitKickoffArgs {
+    mob_id: String,
+    #[serde(default)]
+    member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+#[derive(Deserialize)]
+struct WaitReadyArgs {
     mob_id: String,
     #[serde(default)]
     member_ids: Option<Vec<String>>,
@@ -2559,6 +2603,22 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                 let members = self
                     .state
                     .mob_wait_kickoff(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
+                    .await
+                    .map_err(|e| map_mob_err(call, e))?;
+                encode(call, json!({"members": members}))
+            }
+            "mob_wait_ready" => {
+                let args: WaitReadyArgs = call
+                    .parse_args()
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
+                let member_ids = args.member_ids.map(|ids| {
+                    ids.into_iter()
+                        .map(|id| AgentIdentity::from(id.as_str()))
+                        .collect::<Vec<_>>()
+                });
+                let members = self
+                    .state
+                    .mob_wait_ready(&MobId::from(args.mob_id), member_ids, args.timeout_ms)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
                 encode(call, json!({"members": members}))
@@ -3443,6 +3503,7 @@ mod tests {
                 "mob_force_cancel",
                 "mob_member_status",
                 "mob_wait_kickoff",
+                "mob_wait_ready",
             ]
         );
     }

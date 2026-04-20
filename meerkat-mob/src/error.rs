@@ -55,6 +55,10 @@ pub enum MobError {
     #[error("kickoff wait timed out")]
     KickoffWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
 
+    /// Waiting for startup readiness timed out.
+    #[error("member ready wait timed out")]
+    ReadyWaitTimedOut { pending_member_ids: Vec<MeerkatId> },
+
     /// The mob definition failed validation.
     #[error("definition error: {}", format_diagnostics(.0))]
     DefinitionError(Vec<Diagnostic>),

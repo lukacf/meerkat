@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeerConnectivityProjection {
@@ -2969,24 +2970,39 @@ impl MobHandle {
         }
     }
 
-    fn kickoff_wait_is_satisfied(entry: &RosterEntry) -> bool {
+    async fn startup_kickoff_snapshot(
+        &self,
+    ) -> Result<super::state::MobStartupKickoffSnapshot, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::StartupKickoffSnapshot { reply_tx })
+            .await
+    }
+
+    fn kickoff_wait_is_satisfied(
+        entry: &RosterEntry,
+        material: &CanonicalMemberSnapshotMaterial,
+        pending_kickoff_member_ids: &BTreeSet<String>,
+    ) -> bool {
         if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
             return true;
         }
-
-        match entry.kickoff.as_ref().map(|kickoff| kickoff.phase) {
-            None
-            | Some(
-                MobMemberKickoffPhase::Started
-                | MobMemberKickoffPhase::Failed
-                | MobMemberKickoffPhase::Cancelled,
-            ) => true,
-            Some(
-                MobMemberKickoffPhase::Pending
-                | MobMemberKickoffPhase::Starting
-                | MobMemberKickoffPhase::CallbackPending,
-            ) => false,
+        if material.status != CanonicalMemberStatus::Active {
+            return true;
         }
+        !pending_kickoff_member_ids.contains(entry.agent_identity.as_str())
+    }
+
+    fn ready_wait_is_satisfied(
+        entry: &RosterEntry,
+        material: &CanonicalMemberSnapshotMaterial,
+        ready_runtime_ids: &BTreeSet<String>,
+    ) -> bool {
+        if entry.runtime_mode != crate::MobRuntimeMode::AutonomousHost {
+            return true;
+        }
+        if material.status != CanonicalMemberStatus::Active {
+            return true;
+        }
+        ready_runtime_ids.contains(&entry.agent_runtime_id.to_string())
     }
 
     async fn wait_for_kickoff_resolution(
@@ -3000,6 +3016,7 @@ impl MobHandle {
 
         let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_KICKOFF_WAIT_TIMEOUT);
         loop {
+            let snapshot = self.startup_kickoff_snapshot().await?;
             let entries = self
                 .list_all_members()
                 .await
@@ -3007,15 +3024,20 @@ impl MobHandle {
                 .map(|entry| (entry.agent_identity.clone(), entry))
                 .collect::<HashMap<_, _>>();
 
-            let pending_member_ids = target_ids
-                .iter()
-                .filter(|id| {
-                    entries
-                        .get(*id)
-                        .is_some_and(|entry| !Self::kickoff_wait_is_satisfied(entry))
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut pending_member_ids = Vec::new();
+            for id in target_ids {
+                let Some(entry) = entries.get(id) else {
+                    continue;
+                };
+                let material = self.canonical_member_list_material(id).await;
+                if !Self::kickoff_wait_is_satisfied(
+                    entry,
+                    &material,
+                    &snapshot.pending_kickoff_member_ids,
+                ) {
+                    pending_member_ids.push(id.clone());
+                }
+            }
 
             if pending_member_ids.is_empty() {
                 return Ok(());
@@ -3024,6 +3046,49 @@ impl MobHandle {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(MobError::KickoffWaitTimedOut { pending_member_ids });
+            }
+
+            tokio::time::sleep(std::cmp::min(remaining, Duration::from_millis(50))).await;
+        }
+    }
+
+    async fn wait_for_ready_resolution(
+        &self,
+        target_ids: &[MeerkatId],
+        timeout: Option<Duration>,
+    ) -> Result<(), MobError> {
+        if target_ids.is_empty() {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + timeout.unwrap_or(DEFAULT_READY_WAIT_TIMEOUT);
+        loop {
+            let snapshot = self.startup_kickoff_snapshot().await?;
+            let entries = self
+                .list_all_members()
+                .await
+                .into_iter()
+                .map(|entry| (entry.agent_identity.clone(), entry))
+                .collect::<HashMap<_, _>>();
+
+            let mut pending_member_ids = Vec::new();
+            for id in target_ids {
+                let Some(entry) = entries.get(id) else {
+                    continue;
+                };
+                let material = self.canonical_member_list_material(id).await;
+                if !Self::ready_wait_is_satisfied(entry, &material, &snapshot.ready_runtime_ids) {
+                    pending_member_ids.push(id.clone());
+                }
+            }
+
+            if pending_member_ids.is_empty() {
+                return Ok(());
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(MobError::ReadyWaitTimedOut { pending_member_ids });
             }
 
             tokio::time::sleep(std::cmp::min(remaining, Duration::from_millis(50))).await;
@@ -3132,6 +3197,44 @@ impl MobHandle {
     ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
         let target_meerkat_ids: Vec<MeerkatId> = ids.iter().map(MeerkatId::from).collect();
         self.wait_for_kickoff_resolution(&target_meerkat_ids, timeout)
+            .await?;
+
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for identity in ids {
+            snapshots.push((identity.clone(), self.member_status(identity).await?));
+        }
+        Ok(snapshots)
+    }
+
+    /// Wait until all current members are startup-ready for orchestration.
+    pub async fn wait_for_ready(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
+        let target_ids = self
+            .list_all_members()
+            .await
+            .into_iter()
+            .map(|entry| entry.agent_identity)
+            .collect::<Vec<_>>();
+        let identities: Vec<AgentIdentity> = target_ids.clone();
+        self.wait_for_ready_resolution(&target_ids, timeout).await?;
+
+        let mut snapshots = Vec::with_capacity(identities.len());
+        for identity in identities {
+            snapshots.push((identity.clone(), self.member_status(&identity).await?));
+        }
+        Ok(snapshots)
+    }
+
+    /// Wait until the given members are startup-ready for orchestration.
+    pub async fn wait_for_members_ready(
+        &self,
+        ids: &[AgentIdentity],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<(AgentIdentity, MobMemberSnapshot)>, MobError> {
+        let target_meerkat_ids: Vec<MeerkatId> = ids.iter().map(MeerkatId::from).collect();
+        self.wait_for_ready_resolution(&target_meerkat_ids, timeout)
             .await?;
 
         let mut snapshots = Vec::with_capacity(ids.len());

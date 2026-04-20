@@ -113,6 +113,7 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/cancel_work` | Mob | Cancel a previously submitted unit of work (mob feature) |
 | `mob/cancel_all_work` | Mob | Cancel all in-flight work for a mob member (mob feature) |
 | `mob/wait_kickoff` | Mob | Wait for kickoff completion for a member (mob feature) |
+| `mob/wait_ready` | Mob | Wait for mob startup readiness (members bound but kickoff not required, mob feature) |
 | `mob/profile/create` | Mob | Create a realm-scoped mob profile (mob feature) |
 | `mob/profile/get` | Mob | Read a realm-scoped mob profile (mob feature) |
 | `mob/profile/list` | Mob | List realm-scoped mob profiles (mob feature) |
@@ -248,7 +249,7 @@ Handshake. Returns server capabilities.
       "mob/member_send", "mob/append_system_context", "mob/flows", "mob/flow_run",
       "mob/flow_status", "mob/flow_cancel",
       "mob/spawn_helper", "mob/fork_helper", "mob/force_cancel", "mob/member_status",
-      "mob/wait_kickoff", "mob/turn_start",
+      "mob/wait_kickoff", "mob/wait_ready", "mob/turn_start",
       "mob/profile/create", "mob/profile/get", "mob/profile/list",
       "mob/profile/update", "mob/profile/delete",
       "mcp/add", "mcp/remove", "mcp/reload",

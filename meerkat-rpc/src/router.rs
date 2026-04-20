@@ -967,6 +967,8 @@ impl MethodRouter {
                 handlers::mob::handle_wait_kickoff(id, params, &self.mob_state).await
             }
             #[cfg(feature = "mob")]
+            "mob/wait_ready" => handlers::mob::handle_wait_ready(id, params, &self.mob_state).await,
+            #[cfg(feature = "mob")]
             "mob/profile/create" => {
                 handlers::mob::handle_profile_create(id, params, &self.mob_state).await
             }

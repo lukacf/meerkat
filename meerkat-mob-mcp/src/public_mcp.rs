@@ -153,6 +153,16 @@ struct MeerkatMobWaitKickoffInput {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MeerkatMobWaitReadyInput {
+    mob_id: String,
+    #[serde(default)]
+    member_ids: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MeerkatMobProfileCreateInput {
@@ -584,6 +594,11 @@ pub fn public_tools_list() -> Vec<Value> {
             "meerkat_mob_wait_kickoff",
             "Wait for autonomous kickoff turns to complete.",
             schema_for!(MeerkatMobWaitKickoffInput),
+        ),
+        tool(
+            "meerkat_mob_wait_ready",
+            "Wait for mob members to become startup-ready for orchestration.",
+            schema_for!(MeerkatMobWaitReadyInput),
         ),
         tool_json(
             "meerkat_mob_profile_create",
@@ -1047,6 +1062,20 @@ pub async fn handle_public_tools_call(
             });
             let members = state
                 .mob_wait_kickoff(&mob_id, member_ids, input.timeout_ms)
+                .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
+            Ok(json!({ "members": members }))
+        }
+        "meerkat_mob_wait_ready" => {
+            let input: MeerkatMobWaitReadyInput = parse_args(arguments)?;
+            let mob_id = parse_mob_id(&input.mob_id)?;
+            let member_ids = input.member_ids.map(|ids| {
+                ids.into_iter()
+                    .map(|member_id| meerkat_mob::AgentIdentity::from(member_id.as_str()))
+                    .collect::<Vec<_>>()
+            });
+            let members = state
+                .mob_wait_ready(&mob_id, member_ids, input.timeout_ms)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
             Ok(json!({ "members": members }))

@@ -64,7 +64,11 @@ function anthropicModel() {
 }
 
 function openaiModel() {
-  return process.env.SMOKE_MODEL_OPENAI || "gpt-4.1-mini";
+  // Default to the current approved OpenAI smoke model per CLAUDE.md;
+  // the previous default `gpt-4.1-mini` is obsolete and was silently
+  // degrading instruction-following (s44 reviewer failing to repeat
+  // the literal `[TS-SWARM]` marker it was told to remember).
+  return process.env.SMOKE_MODEL_OPENAI || "gpt-5.4-mini";
 }
 
 function includeScenario(id) {
@@ -383,7 +387,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           scenario,
           "send reviewer ready turn",
           mob.member("reviewer-1").send(
-          "Repeat the swarm marker and say reviewer ready.",
+            "Repeat the swarm marker and say reviewer ready.",
           ),
         );
         assert.equal(reviewerReceipt.agentIdentity, "reviewer-1");
@@ -415,6 +419,18 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         { timeoutMs: 120000, intervalMs: 500 },
       );
       const reviewerText = (reviewerState.outputPreview || "").toLowerCase();
+      // Test-support instrumentation: surface the raw reviewer output
+      // when the `ts-swarm` assertion would fail, so post-hoc log
+      // inspection does not require a re-run. The assertions below
+      // remain untouched (test semantics unchanged).
+      if (!reviewerText.includes("ts-swarm") || !reviewerText.includes("reviewer ready")) {
+        console.error(
+          `[${scenario}] reviewer output_preview (raw): ${JSON.stringify(reviewerState.outputPreview)}`,
+        );
+        console.error(
+          `[${scenario}] reviewer output_preview (lowercased): ${JSON.stringify(reviewerText)}`,
+        );
+      }
       assert.ok(reviewerText.includes("reviewer ready"));
       assert.ok(reviewerText.includes("ts-swarm"));
 

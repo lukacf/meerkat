@@ -22,7 +22,9 @@ function anthropicModel() {
 }
 
 function openaiModel() {
-  return process.env.SMOKE_MODEL_OPENAI || "gpt-4.1-mini";
+  // Default to the current approved OpenAI smoke model per CLAUDE.md;
+  // `gpt-4.1-mini` is obsolete.
+  return process.env.SMOKE_MODEL_OPENAI || "gpt-5.4-mini";
 }
 
 async function makeNodeCompatibleWasmModule() {

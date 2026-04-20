@@ -331,6 +331,85 @@ pub enum RealtimeProductTurnPhase {
     Preemptible,
 }
 
+/// Projection-freshness discriminant for the realtime provider session
+/// (dogma round 2, U-C / dogma #1, #3, #13, #20).
+///
+/// Replaces the shell-local `ProjectionFreshness` enum previously owned by
+/// `meerkat-rpc::realtime_ws`. Freshness truth is now canonical DSL state
+/// owned by the session's MeerkatMachine; the realtime-WS shell reads it via
+/// the [`RealtimeProductTurnHandle`] and fires typed inputs for each
+/// observer tick, turn terminal, and refresh-drain.
+///
+/// The `baseline_ms` companion field
+/// ([`MeerkatMachineState::realtime_projection_frontier_ms`]) pairs with this
+/// discriminant: it holds the `baseline_ms` while `Clean`, and the
+/// `new_at_ms` of the pending advance while `StaleDeferred` / `StaleImmediate`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeProjectionFreshness {
+    /// Provider projection matches canonical session state as of
+    /// `realtime_projection_frontier_ms`. No refresh owed.
+    #[default]
+    Clean,
+    /// Canonical state advanced while the provider turn was live; refresh
+    /// blocked until the turn terminates so barge-in continuity isn't broken.
+    StaleDeferred,
+    /// Refresh owed at the next drain site (idle input-chunk arrival or
+    /// turn-end).
+    StaleImmediate,
+}
+
+/// Typed classification of a clean provider-session close for the realtime
+/// socket (dogma round 2, U-C / dogma #1, #3, #18, #20).
+///
+/// Replaces the shell-local boolean pair (`client_has_submitted_input`,
+/// `last_turn_terminally_completed`) previously owned by the realtime-WS
+/// dispatch loop. The DSL owns the classification; the shell reads
+/// [`RealtimeProductTurnHandle::reconnect_policy_on_clean_close`] at the
+/// clean-close branch point and dispatches on the typed value.
+///
+/// Semantics: a `CleanExit` means the session has no in-flight client work
+/// that would need to be recovered via reattach (either the client never
+/// submitted anything, or the last turn reached a terminal completion).
+/// `ReattachAndRecover` means the client issued work that has not yet
+/// reached a terminal completion, so a clean close is treated as a
+/// mid-work disconnect and the channel proactively re-opens.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeReconnectPolicy {
+    /// A clean close has nothing to recover — either the client never
+    /// submitted input on this session, or the last observed turn reached
+    /// a terminal completion.
+    #[default]
+    CleanExit,
+    /// The client issued work that has not yet reached a terminal turn
+    /// completion; a clean close is a mid-work disconnect and the channel
+    /// should proactively reattach.
+    ReattachAndRecover,
+}
+
 /// Bridging type for an MCP server identifier, matching the catalog type.
 /// Used as the key in `mcp_server_states` and carried on MCP lifecycle
 /// inputs and effects.
@@ -1308,6 +1387,45 @@ machine! {
             // shell-side bool tracking, no helper-local event matching.
             realtime_product_turn_phase: Enum<RealtimeProductTurnPhase>,
 
+            // --- Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20) ---
+            //
+            // Canonical freshness truth for the realtime provider session's
+            // projection relative to the canonical session state. Replaces
+            // the shell-local `ProjectionFreshness` enum + observer queue
+            // previously owned by `meerkat-rpc::realtime_ws`.
+            //
+            // `realtime_projection_freshness` carries the discriminant;
+            // `realtime_projection_frontier_ms` holds the monotonic
+            // watermark — the `baseline_ms` while `Clean`, or the pending
+            // advance's `new_at_ms` while `StaleDeferred` / `StaleImmediate`.
+            // Transitions are driven by four inputs:
+            //   * `RealtimeProjectionAdvanceObserved { advanced_at_ms }` —
+            //     fired on every `SessionContextAdvanced` observer tick;
+            //     routes to `StaleDeferred` if the product turn is live,
+            //     `StaleImmediate` otherwise.
+            //   * `RealtimeProjectionRefreshed { observed_ms }` — fired
+            //     after a successful provider-session refresh drain.
+            //   * `RealtimeProjectionReset { baseline_ms }` — fired on
+            //     product-session close / error / reconnect to re-seed the
+            //     `Clean` baseline.
+            //   * `ProductTurnTerminal` also folds in a
+            //     `StaleDeferred → StaleImmediate` promotion so the DSL
+            //     owns the turn-end-drain promotion directly.
+            realtime_projection_freshness: Enum<RealtimeProjectionFreshness>,
+            realtime_projection_frontier_ms: u64,
+
+            // --- Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20) ---
+            //
+            // Classifies what a clean provider-session close means for the
+            // realtime channel's reconnect behavior. Replaces the shell-
+            // local boolean pair (`client_has_submitted_input`,
+            // `last_turn_terminally_completed`) that used to co-decide
+            // `needs_reattach`. The shell reads this field directly at the
+            // clean-close branch via
+            // `RealtimeProductTurnHandle::reconnect_policy_on_clean_close`
+            // and dispatches on the typed value.
+            realtime_reconnect_policy: Enum<RealtimeReconnectPolicy>,
+
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
             // Tracks which subsystem owns the peer-ingress transport
@@ -1417,6 +1535,9 @@ machine! {
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
             realtime_product_turn_phase = RealtimeProductTurnPhase::Idle,
+            realtime_projection_freshness = RealtimeProjectionFreshness::Clean,
+            realtime_projection_frontier_ms = 0,
+            realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -1650,6 +1771,29 @@ machine! {
             ProductOutputStarted,
             ProductTurnInterrupted,
             ProductTurnTerminal,
+            // Realtime projection freshness inputs (dogma round 2, U-C /
+            // dogma #1, #3, #13, #20). The realtime-WS shell fires
+            // `RealtimeProjectionAdvanceObserved` on every
+            // `SessionContextAdvanced` observer tick, `RealtimeProjectionRefreshed`
+            // after a successful provider-session rebuild, and
+            // `RealtimeProjectionReset` on product-session close / error /
+            // reconnect. The DSL decides whether each advance lands as
+            // `StaleDeferred` (turn live) or `StaleImmediate` (turn idle).
+            RealtimeProjectionAdvanceObserved { advanced_at_ms: u64 },
+            RealtimeProjectionRefreshed { observed_ms: u64 },
+            RealtimeProjectionReset { baseline_ms: u64 },
+            // Realtime reconnect-policy inputs (dogma round 2, U-C / dogma
+            // #1, #3, #18, #20). `ClassifyRealtimeClientInputSubmitted` fires
+            // when the client's input chunk is accepted by the provider
+            // session, flipping the policy to `ReattachAndRecover`.
+            // `ClassifyRealtimeMidTurnActivity` fires on a provider-issued
+            // tool call inside a live turn (mid-work signal), also routing to
+            // `ReattachAndRecover`. `ClassifyRealtimeTurnTerminated` fires
+            // on a logical turn terminal, routing to `CleanExit` (the
+            // session delivered what the client asked for).
+            ClassifyRealtimeClientInputSubmitted,
+            ClassifyRealtimeMidTurnActivity,
+            ClassifyRealtimeTurnTerminated,
             // Peer-ingress transport capability ownership (W2-G).
             //
             // `AttachSessionIngress` only succeeds from `Unattached`:
@@ -1774,6 +1918,17 @@ machine! {
             // The realtime-WS dispatch loop reads the typed handle directly
             // for preempt decisions; this effect is currently informational.
             RealtimeProductTurnPhaseChanged { new_phase: Enum<RealtimeProductTurnPhase> },
+            // Realtime projection freshness + reconnect policy change
+            // effects (dogma round 2, U-C / dogma #1, #3, #13, #18, #20).
+            // Emitted on every DSL-owned projection-state / policy advance
+            // so the shell can trace transitions. The realtime-WS dispatcher
+            // reads the typed handle directly for drain + close-branch
+            // decisions; these effects are informational.
+            RealtimeProjectionFreshnessChanged {
+                new_freshness: Enum<RealtimeProjectionFreshness>,
+                frontier_ms: u64,
+            },
+            RealtimeReconnectPolicyChanged { new_policy: Enum<RealtimeReconnectPolicy> },
         }
 
         // =====================================================================
@@ -1838,6 +1993,8 @@ machine! {
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
         disposition RealtimeProductTurnPhaseChanged => external,
+        disposition RealtimeProjectionFreshnessChanged => external,
+        disposition RealtimeReconnectPolicyChanged => external,
 
         // =====================================================================
         // Invariants
@@ -4884,6 +5041,198 @@ machine! {
             }
             to Idle
             emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Idle }
+        }
+
+        // =====================================================================
+        // Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20)
+        // =====================================================================
+        //
+        // Canonical freshness state for the realtime provider session's
+        // projection relative to canonical session truth. Three transitions
+        // split on product-turn phase + current freshness to decide the next
+        // state; a fourth handles turn-end promotion.
+
+        // Observer tick arrived while the product turn is live — record the
+        // pending advance as `StaleDeferred` so barge-in continuity is
+        // preserved. Monotonic: rejects advances that don't surpass the
+        // current frontier.
+        transition RealtimeProjectionAdvanceDuringTurn {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
+            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
+            guard "turn_in_flight" {
+                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleDeferred;
+                self.realtime_projection_frontier_ms = advanced_at_ms;
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::StaleDeferred,
+                frontier_ms: advanced_at_ms
+            }
+        }
+
+        // Observer tick arrived while the product turn is idle — record the
+        // pending advance as `StaleImmediate` so the next drain site picks
+        // it up.
+        transition RealtimeProjectionAdvanceWhileIdle {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
+            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
+            guard "turn_idle" {
+                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
+                self.realtime_projection_frontier_ms = advanced_at_ms;
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::StaleImmediate,
+                frontier_ms: advanced_at_ms
+            }
+        }
+
+        // After a successful provider-session refresh drain (or at an
+        // own-turn commit that advanced the session-context watermark to
+        // `observed_ms`). Returns to `Clean` ONLY when `observed_ms`
+        // matches or exceeds the current frontier. If a concurrent
+        // external advance (e.g. a peer_response_terminal landing while
+        // our own turn was committing) already pushed the frontier above
+        // `observed_ms` via a `RealtimeProjectionAdvanceObserved` tick,
+        // the refresh is guard-rejected so the stale state at the higher
+        // frontier is preserved — the external advance still owes a
+        // refresh, and clobbering it here would drop the tick the next
+        // drain site depends on. This is the DSL-owned successor of the
+        // shell-side "preserve newer concurrent external advance" dance
+        // #299 introduced on the pre-U-C W2-E freshness state.
+        transition RealtimeProjectionRefreshed {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionRefreshed { observed_ms }
+            guard "not_behind_frontier" {
+                observed_ms >= self.realtime_projection_frontier_ms
+            }
+            guard "actually_changing" {
+                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
+                || observed_ms > self.realtime_projection_frontier_ms
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
+                if observed_ms > self.realtime_projection_frontier_ms {
+                    self.realtime_projection_frontier_ms = observed_ms;
+                }
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::Clean,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        // Re-seed `Clean` baseline on product-session close / error /
+        // reconnect. Monotonic in the same sense as `RealtimeProjectionRefreshed`:
+        // `baseline_ms` must not regress the frontier. If a newer observer
+        // tick transitioned the freshness to `StaleImmediate` / `StaleDeferred`
+        // at a higher frontier between the caller's read and this fire, the
+        // reset collapses to `Clean` at that higher frontier — the drain is
+        // about to re-enter via the product-session rebuild anyway, and
+        // regressing the frontier would drop a real advance.
+        transition RealtimeProjectionReset {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RealtimeProjectionReset { baseline_ms }
+            guard "actually_changing" {
+                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
+                || baseline_ms > self.realtime_projection_frontier_ms
+            }
+            update {
+                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
+                if baseline_ms > self.realtime_projection_frontier_ms {
+                    self.realtime_projection_frontier_ms = baseline_ms;
+                }
+            }
+            to Idle
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: RealtimeProjectionFreshness::Clean,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
+        }
+
+        // =====================================================================
+        // Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20)
+        // =====================================================================
+        //
+        // The DSL classifies what a clean provider-session close means for
+        // the realtime channel's reconnect behavior. Replaces the shell-local
+        // boolean pair (`client_has_submitted_input`,
+        // `last_turn_terminally_completed`).
+
+        // Client submitted work to the provider session — any subsequent
+        // clean close while this policy stands is a mid-work disconnect.
+        // Also promotes `StaleDeferred → StaleImmediate` at turn end is
+        // handled by `ClassifyRealtimeTurnTerminated`.
+        transition ClassifyRealtimeClientInputSubmitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeClientInputSubmitted
+            guard "not_already_reattach" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
+            }
+        }
+
+        // Mid-turn activity on the provider session (e.g. a provider-issued
+        // tool call before a terminal turn completion) is not terminal, so
+        // flag the reconnect policy back to `ReattachAndRecover` if a prior
+        // terminal had already flipped us to `CleanExit`. Idempotent when
+        // already `ReattachAndRecover`.
+        transition ClassifyRealtimeMidTurnActivity {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeMidTurnActivity
+            guard "not_already_reattach" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
+            }
+        }
+
+        // Logical turn reached a terminal stop reason — the session delivered
+        // the client's requested work. A subsequent clean close is a session
+        // finishing, not a mid-work drop. Also folds in the `StaleDeferred →
+        // StaleImmediate` promotion so the turn-end drain site picks up any
+        // pending async mutation.
+        transition ClassifyRealtimeTurnTerminated {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifyRealtimeTurnTerminated
+            guard "actually_changing" {
+                self.realtime_reconnect_policy != RealtimeReconnectPolicy::CleanExit
+                || self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred
+            }
+            update {
+                self.realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit;
+                if self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred {
+                    self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
+                }
+            }
+            to Idle
+            emit RealtimeReconnectPolicyChanged {
+                new_policy: RealtimeReconnectPolicy::CleanExit
+            }
+            emit RealtimeProjectionFreshnessChanged {
+                new_freshness: self.realtime_projection_freshness,
+                frontier_ms: self.realtime_projection_frontier_ms
+            }
         }
 
         // =====================================================================

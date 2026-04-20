@@ -3,7 +3,7 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for MeerkatMachine.
 
-CONSTANTS AgentRuntimeIdValues, BooleanValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputIdValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfPeerCorrelationIdValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues, WorkOriginValues
+CONSTANTS AgentRuntimeIdValues, BooleanValues, CommsRuntimeIdValues, FenceTokenValues, GenerationValues, InboundPeerRequestStateValues, InputIdValues, LiveTopologyPhaseValues, McpServerIdValues, McpServerStateValues, MobIdValues, NatValues, OutboundPeerRequestStateValues, PeerCorrelationIdValues, PeerIngressOwnerKindValues, PeerTerminalDispositionValues, RealtimeBindingStateValues, RealtimeProductTurnPhaseValues, RealtimeProjectionFreshnessValues, RealtimeReconnectPolicyValues, RunIdValues, SessionIdValues, SessionLlmCapabilitySurfaceStatusValues, SessionLlmCapabilitySurfaceValues, SessionLlmIdentityValues, SessionToolVisibilityDeltaValues, SessionToolVisibilityStateValues, SetOfPeerCorrelationIdValues, SetOfStringValues, StringValues, ToolFilterValues, ToolVisibilityWitnessValues, WorkIdValues, WorkOriginValues
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -32,9 +32,9 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id
+VARIABLES phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id
 
-vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+vars == << phase, model_step_count, session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 Init ==
     /\ phase = "Initializing"
@@ -58,6 +58,9 @@ Init ==
     /\ reserved_interaction_streams = {}
     /\ attached_interaction_streams = {}
     /\ realtime_product_turn_phase = "Idle"
+    /\ realtime_projection_freshness = "Clean"
+    /\ realtime_projection_frontier_ms = 0
+    /\ realtime_reconnect_policy = "CleanExit"
     /\ peer_ingress_owner_kind = "Unattached"
     /\ peer_ingress_comms_runtime_id = None
     /\ peer_ingress_mob_id = None
@@ -70,7 +73,7 @@ Initialize ==
     /\ phase = "Initializing"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RegisterSessionIdle(arg_session_id) ==
@@ -78,7 +81,7 @@ RegisterSessionIdle(arg_session_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RegisterSessionAttached(arg_session_id) ==
@@ -86,7 +89,7 @@ RegisterSessionAttached(arg_session_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RegisterSessionRunning(arg_session_id) ==
@@ -94,7 +97,7 @@ RegisterSessionRunning(arg_session_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RegisterSessionRetired(arg_session_id) ==
@@ -102,7 +105,7 @@ RegisterSessionRetired(arg_session_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RegisterSessionStopped(arg_session_id) ==
@@ -110,7 +113,7 @@ RegisterSessionStopped(arg_session_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ session_id' = Some(arg_session_id)
-    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 UnregisterSessionIdle(arg_session_id) ==
@@ -123,7 +126,7 @@ UnregisterSessionIdle(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 UnregisterSessionAttached(arg_session_id) ==
@@ -136,7 +139,7 @@ UnregisterSessionAttached(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 UnregisterSessionRunning(arg_session_id) ==
@@ -149,7 +152,7 @@ UnregisterSessionRunning(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 UnregisterSessionRetired(arg_session_id) ==
@@ -162,7 +165,7 @@ UnregisterSessionRetired(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 UnregisterSessionStopped(arg_session_id) ==
@@ -175,7 +178,7 @@ UnregisterSessionStopped(arg_session_id) ==
     /\ active_fence_token' = None
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
@@ -184,7 +187,7 @@ ReconfigureSessionLlmIdentityAttached(previous_identity, previous_visibility_sta
     /\ (active_runtime_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_state, previous_capability_surface, previous_capability_surface_status, target_identity, target_capability_surface, next_visibility_state, next_capability_base_filter, next_active_visibility_revision, tool_visibility_delta) ==
@@ -193,7 +196,7 @@ ReconfigureSessionLlmIdentityRunning(previous_identity, previous_visibility_stat
     /\ (active_runtime_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StagePersistentFilterIdle(filter, witnesses) ==
@@ -201,7 +204,7 @@ StagePersistentFilterIdle(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StagePersistentFilterAttached(filter, witnesses) ==
@@ -209,7 +212,7 @@ StagePersistentFilterAttached(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StagePersistentFilterRunning(filter, witnesses) ==
@@ -217,7 +220,7 @@ StagePersistentFilterRunning(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StagePersistentFilterRetired(filter, witnesses) ==
@@ -225,7 +228,7 @@ StagePersistentFilterRetired(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StagePersistentFilterStopped(filter, witnesses) ==
@@ -233,7 +236,7 @@ StagePersistentFilterStopped(filter, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequestDeferredToolsIdle(names, witnesses) ==
@@ -241,7 +244,7 @@ RequestDeferredToolsIdle(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequestDeferredToolsAttached(names, witnesses) ==
@@ -249,7 +252,7 @@ RequestDeferredToolsAttached(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequestDeferredToolsRunning(names, witnesses) ==
@@ -257,7 +260,7 @@ RequestDeferredToolsRunning(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequestDeferredToolsRetired(names, witnesses) ==
@@ -265,7 +268,7 @@ RequestDeferredToolsRetired(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequestDeferredToolsStopped(names, witnesses) ==
@@ -273,7 +276,7 @@ RequestDeferredToolsStopped(names, witnesses) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
@@ -282,7 +285,7 @@ PrepareBindingsInitializing(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
@@ -291,7 +294,7 @@ PrepareBindingsIdle(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
@@ -300,7 +303,7 @@ PrepareBindingsAttached(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
@@ -309,7 +312,7 @@ PrepareBindingsRunning(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
@@ -318,7 +321,7 @@ PrepareBindingsRetired(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
@@ -327,7 +330,7 @@ PrepareBindingsStopped(agent_runtime_id, fence_token, generation) ==
     /\ model_step_count' = model_step_count + 1
     /\ active_runtime_id' = Some(agent_runtime_id)
     /\ active_fence_token' = Some(fence_token)
-    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetPeerIngressContextIdle(keep_alive) ==
@@ -335,7 +338,7 @@ SetPeerIngressContextIdle(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetPeerIngressContextAttached(keep_alive) ==
@@ -343,7 +346,7 @@ SetPeerIngressContextAttached(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetPeerIngressContextRunning(keep_alive) ==
@@ -351,7 +354,7 @@ SetPeerIngressContextRunning(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetPeerIngressContextRetired(keep_alive) ==
@@ -359,7 +362,7 @@ SetPeerIngressContextRetired(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetPeerIngressContextStopped(keep_alive) ==
@@ -367,7 +370,7 @@ SetPeerIngressContextStopped(keep_alive) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 NotifyDrainExitedIdle(reason) ==
@@ -375,7 +378,7 @@ NotifyDrainExitedIdle(reason) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 NotifyDrainExitedAttached(reason) ==
@@ -383,7 +386,7 @@ NotifyDrainExitedAttached(reason) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 NotifyDrainExitedRunning(reason) ==
@@ -391,7 +394,7 @@ NotifyDrainExitedRunning(reason) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 NotifyDrainExitedRetired(reason) ==
@@ -399,7 +402,7 @@ NotifyDrainExitedRetired(reason) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 NotifyDrainExitedStopped(reason) ==
@@ -407,42 +410,42 @@ NotifyDrainExitedStopped(reason) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InterruptCurrentRunAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InterruptCurrentRun ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CancelAfterBoundaryAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CancelAfterBoundary ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BoundaryAppliedPublish(revision) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -453,7 +456,7 @@ PublishCommittedVisibleSetIdle(active_filter, staged_filter, active_requested_de
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -464,7 +467,7 @@ PublishCommittedVisibleSetAttached(active_filter, staged_filter, active_requeste
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -475,7 +478,7 @@ PublishCommittedVisibleSetRunning(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -486,7 +489,7 @@ PublishCommittedVisibleSetRetired(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested_deferred_names, staged_requested_deferred_names, active_visibility_revision, staged_visibility_revision) ==
@@ -497,14 +500,14 @@ PublishCommittedVisibleSetStopped(active_filter, staged_filter, active_requested
     /\ (\A requested_name \in active_requested_deferred_names : (requested_name \in staged_requested_deferred_names))
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RetireRequestedFromIdle ==
     /\ phase = "Idle" \/ phase = "Attached" \/ phase = "Running"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 Reset ==
@@ -515,7 +518,7 @@ Reset ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StopRuntimeExecutorUnbound ==
@@ -525,7 +528,7 @@ StopRuntimeExecutorUnbound ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StopRuntimeExecutorAttached ==
@@ -533,7 +536,7 @@ StopRuntimeExecutorAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StopRuntimeExecutorRunning ==
@@ -541,7 +544,7 @@ StopRuntimeExecutorRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 Destroy ==
@@ -552,42 +555,42 @@ Destroy ==
     /\ current_run_id' = None
     /\ pre_run_phase' = None
     /\ silent_intent_overrides' = {}
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureSessionWithExecutorIdle(arg_session_id) ==
     /\ phase = "Idle"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureSessionWithExecutorAttached(arg_session_id) ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureSessionWithExecutorRunning(arg_session_id) ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureSessionWithExecutorRetired(arg_session_id) ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureSessionWithExecutorStopped(arg_session_id) ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetSilentIntentsIdle(arg_session_id, intents) ==
@@ -596,7 +599,7 @@ SetSilentIntentsIdle(arg_session_id, intents) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetSilentIntentsAttached(arg_session_id, intents) ==
@@ -605,7 +608,7 @@ SetSilentIntentsAttached(arg_session_id, intents) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetSilentIntentsRunning(arg_session_id, intents) ==
@@ -614,7 +617,7 @@ SetSilentIntentsRunning(arg_session_id, intents) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetSilentIntentsRetired(arg_session_id, intents) ==
@@ -623,7 +626,7 @@ SetSilentIntentsRetired(arg_session_id, intents) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ silent_intent_overrides' = intents
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SetSilentIntentsStopped(arg_session_id, intents) ==
@@ -631,7 +634,7 @@ SetSilentIntentsStopped(arg_session_id, intents) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortIdle(arg_session_id) ==
@@ -639,7 +642,7 @@ AbortIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAttached(arg_session_id) ==
@@ -647,7 +650,7 @@ AbortAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortRunning(arg_session_id) ==
@@ -655,7 +658,7 @@ AbortRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortRetired(arg_session_id) ==
@@ -663,7 +666,7 @@ AbortRetired(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortStopped(arg_session_id) ==
@@ -671,7 +674,7 @@ AbortStopped(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 WaitIdle(arg_session_id) ==
@@ -679,7 +682,7 @@ WaitIdle(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 WaitAttached(arg_session_id) ==
@@ -687,7 +690,7 @@ WaitAttached(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 WaitRunning(arg_session_id) ==
@@ -695,7 +698,7 @@ WaitRunning(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 WaitRetired(arg_session_id) ==
@@ -703,7 +706,7 @@ WaitRetired(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 WaitStopped(arg_session_id) ==
@@ -711,42 +714,42 @@ WaitStopped(arg_session_id) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAllIdle ==
     /\ phase = "Idle"
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAllAttached ==
     /\ phase = "Attached"
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAllRunning ==
     /\ phase = "Running"
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAllRetired ==
     /\ phase = "Retired"
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortAllStopped ==
     /\ phase = "Stopped"
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureDrainRunningAttached ==
@@ -754,7 +757,7 @@ EnsureDrainRunningAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 EnsureDrainRunningRunning ==
@@ -762,7 +765,7 @@ EnsureDrainRunningRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 IngestIdle(runtime_id, work_id, origin) ==
@@ -770,7 +773,7 @@ IngestIdle(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 IngestAttached(runtime_id, work_id, origin) ==
@@ -778,7 +781,7 @@ IngestAttached(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 IngestRunning(runtime_id, work_id, origin) ==
@@ -786,7 +789,7 @@ IngestRunning(runtime_id, work_id, origin) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishEventIdle(kind) ==
@@ -794,7 +797,7 @@ PublishEventIdle(kind) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishEventAttached(kind) ==
@@ -802,7 +805,7 @@ PublishEventAttached(kind) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishEventRunning(kind) ==
@@ -810,7 +813,7 @@ PublishEventRunning(kind) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishEventRetired(kind) ==
@@ -818,7 +821,7 @@ PublishEventRetired(kind) ==
     /\ (session_id # None)
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishEventStopped(kind) ==
@@ -826,7 +829,7 @@ PublishEventStopped(kind) ==
     /\ (session_id # None)
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -836,7 +839,7 @@ AcceptWithCompletionIdleQueued(input_id, request_immediate_processing, interrupt
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -846,7 +849,7 @@ AcceptWithCompletionIdleImmediate(input_id, request_immediate_processing, interr
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -858,7 +861,7 @@ AcceptWithCompletionAttachedImmediate(input_id, request_immediate_processing, in
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("attached")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -868,7 +871,7 @@ AcceptWithCompletionAttachedQueued(input_id, request_immediate_processing, inter
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -879,7 +882,7 @@ AcceptWithCompletionRunningQueuedPassive(input_id, request_immediate_processing,
     /\ (wake_if_idle = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionRunningQueuedWakeIfIdle(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -890,7 +893,7 @@ AcceptWithCompletionRunningQueuedWakeIfIdle(input_id, request_immediate_processi
     /\ (wake_if_idle = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -900,7 +903,7 @@ AcceptWithCompletionRunningInterruptYielding(input_id, request_immediate_process
     /\ (interrupt_yielding = TRUE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, interrupt_yielding, wake_if_idle, run_id) ==
@@ -910,7 +913,7 @@ AcceptWithCompletionRunningImmediate(input_id, request_immediate_processing, int
     /\ (interrupt_yielding = FALSE)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithoutWakeIdle(input_id) ==
@@ -918,7 +921,7 @@ AcceptWithoutWakeIdle(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithoutWakeAttached(input_id) ==
@@ -926,7 +929,7 @@ AcceptWithoutWakeAttached(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AcceptWithoutWakeRunning(input_id) ==
@@ -934,7 +937,7 @@ AcceptWithoutWakeRunning(input_id) ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ClassifyExternalEnvelopeAttached ==
@@ -942,7 +945,7 @@ ClassifyExternalEnvelopeAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ClassifyExternalEnvelopeRunning ==
@@ -950,7 +953,7 @@ ClassifyExternalEnvelopeRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ClassifyPlainEventAttached ==
@@ -958,7 +961,7 @@ ClassifyPlainEventAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ClassifyPlainEventRunning ==
@@ -966,7 +969,7 @@ ClassifyPlainEventRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareIdle(arg_session_id, run_id) ==
@@ -976,7 +979,7 @@ PrepareIdle(arg_session_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("idle")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PrepareAttached(arg_session_id, run_id) ==
@@ -986,7 +989,7 @@ PrepareAttached(arg_session_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("attached")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DrainQueuedRunRetired(run_id) ==
@@ -995,7 +998,7 @@ DrainQueuedRunRetired(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = Some(run_id)
     /\ pre_run_phase' = Some("retired")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StartConversationRunAttached ==
@@ -1003,7 +1006,7 @@ StartConversationRunAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StartImmediateAppendAttached ==
@@ -1011,7 +1014,7 @@ StartImmediateAppendAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StartImmediateContextAttached ==
@@ -1019,7 +1022,7 @@ StartImmediateContextAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CommitRunningToIdle(input_id, run_id) ==
@@ -1030,7 +1033,7 @@ CommitRunningToIdle(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CommitRunningToAttached(input_id, run_id) ==
@@ -1041,7 +1044,7 @@ CommitRunningToAttached(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CommitRunningToRetired(input_id, run_id) ==
@@ -1052,7 +1055,7 @@ CommitRunningToRetired(input_id, run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailRunningToIdle(run_id) ==
@@ -1063,7 +1066,7 @@ FailRunningToIdle(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailRunningToAttached(run_id) ==
@@ -1074,7 +1077,7 @@ FailRunningToAttached(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailRunningToRetired(run_id) ==
@@ -1085,7 +1088,7 @@ FailRunningToRetired(run_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ current_run_id' = None
     /\ pre_run_phase' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageAddAttached ==
@@ -1093,7 +1096,7 @@ StageAddAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageAddRunning ==
@@ -1101,7 +1104,7 @@ StageAddRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageRemoveAttached ==
@@ -1109,7 +1112,7 @@ StageRemoveAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageRemoveRunning ==
@@ -1117,7 +1120,7 @@ StageRemoveRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageReloadAttached ==
@@ -1125,7 +1128,7 @@ StageReloadAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 StageReloadRunning ==
@@ -1133,7 +1136,7 @@ StageReloadRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplySurfaceBoundaryAttached ==
@@ -1141,7 +1144,7 @@ ApplySurfaceBoundaryAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplySurfaceBoundaryRunning ==
@@ -1149,7 +1152,7 @@ ApplySurfaceBoundaryRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PendingSucceededAttached ==
@@ -1157,7 +1160,7 @@ PendingSucceededAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PendingSucceededRunning ==
@@ -1165,7 +1168,7 @@ PendingSucceededRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PendingFailedAttached ==
@@ -1173,7 +1176,7 @@ PendingFailedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PendingFailedRunning ==
@@ -1181,7 +1184,7 @@ PendingFailedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CallStartedAttached ==
@@ -1189,7 +1192,7 @@ CallStartedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CallStartedRunning ==
@@ -1197,7 +1200,7 @@ CallStartedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CallFinishedAttached ==
@@ -1205,7 +1208,7 @@ CallFinishedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CallFinishedRunning ==
@@ -1213,7 +1216,7 @@ CallFinishedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FinalizeRemovalCleanAttached ==
@@ -1221,7 +1224,7 @@ FinalizeRemovalCleanAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FinalizeRemovalCleanRunning ==
@@ -1229,7 +1232,7 @@ FinalizeRemovalCleanRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FinalizeRemovalForcedAttached ==
@@ -1237,7 +1240,7 @@ FinalizeRemovalForcedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FinalizeRemovalForcedRunning ==
@@ -1245,7 +1248,7 @@ FinalizeRemovalForcedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SnapshotAlignedAttached ==
@@ -1253,7 +1256,7 @@ SnapshotAlignedAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 SnapshotAlignedRunning ==
@@ -1261,7 +1264,7 @@ SnapshotAlignedRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ShutdownSurfaceAttached ==
@@ -1269,7 +1272,7 @@ ShutdownSurfaceAttached ==
     /\ (session_id # None)
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ShutdownSurfaceRunning ==
@@ -1277,7 +1280,7 @@ ShutdownSurfaceRunning ==
     /\ (session_id # None)
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RecycleFromIdleOrRetired ==
@@ -1287,7 +1290,7 @@ RecycleFromIdleOrRetired ==
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None
     /\ current_run_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RecycleFromAttached ==
@@ -1297,7 +1300,7 @@ RecycleFromAttached ==
     /\ model_step_count' = model_step_count + 1
     /\ active_fence_token' = None
     /\ current_run_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProjectRealtimeIntentIdle(present) ==
@@ -1306,7 +1309,7 @@ ProjectRealtimeIntentIdle(present) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_intent_present' = present
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProjectRealtimeIntentAttached(present) ==
@@ -1315,7 +1318,7 @@ ProjectRealtimeIntentAttached(present) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_intent_present' = present
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProjectRealtimeIntentRunning(present) ==
@@ -1324,7 +1327,7 @@ ProjectRealtimeIntentRunning(present) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_intent_present' = present
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProjectRealtimeIntentRetired(present) ==
@@ -1333,7 +1336,7 @@ ProjectRealtimeIntentRetired(present) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_intent_present' = present
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProjectRealtimeIntentStopped(present) ==
@@ -1342,7 +1345,7 @@ ProjectRealtimeIntentStopped(present) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_intent_present' = present
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginRealtimeBindingIdle ==
@@ -1355,7 +1358,7 @@ BeginRealtimeBindingIdle ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginRealtimeBindingAttached ==
@@ -1368,7 +1371,7 @@ BeginRealtimeBindingAttached ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginRealtimeBindingRunning ==
@@ -1381,7 +1384,7 @@ BeginRealtimeBindingRunning ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginRealtimeBindingRetired ==
@@ -1394,7 +1397,7 @@ BeginRealtimeBindingRetired ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginRealtimeBindingStopped ==
@@ -1407,7 +1410,7 @@ BeginRealtimeBindingStopped ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReplaceRealtimeBindingIdle ==
@@ -1420,7 +1423,7 @@ ReplaceRealtimeBindingIdle ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReplaceRealtimeBindingAttached ==
@@ -1433,7 +1436,7 @@ ReplaceRealtimeBindingAttached ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReplaceRealtimeBindingRunning ==
@@ -1446,7 +1449,7 @@ ReplaceRealtimeBindingRunning ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReplaceRealtimeBindingRetired ==
@@ -1459,7 +1462,7 @@ ReplaceRealtimeBindingRetired ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ReplaceRealtimeBindingStopped ==
@@ -1472,7 +1475,7 @@ ReplaceRealtimeBindingStopped ==
     /\ realtime_binding_authority_epoch' = Some(realtime_next_authority_epoch)
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DetachRealtimeBindingIdle ==
@@ -1484,7 +1487,7 @@ DetachRealtimeBindingIdle ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DetachRealtimeBindingAttached ==
@@ -1496,7 +1499,7 @@ DetachRealtimeBindingAttached ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DetachRealtimeBindingRunning ==
@@ -1508,7 +1511,7 @@ DetachRealtimeBindingRunning ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DetachRealtimeBindingRetired ==
@@ -1520,7 +1523,7 @@ DetachRealtimeBindingRetired ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 DetachRealtimeBindingStopped ==
@@ -1532,7 +1535,7 @@ DetachRealtimeBindingStopped ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequireRealtimeReattachIdle ==
@@ -1544,7 +1547,7 @@ RequireRealtimeReattachIdle ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequireRealtimeReattachAttached ==
@@ -1556,7 +1559,7 @@ RequireRealtimeReattachAttached ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequireRealtimeReattachRunning ==
@@ -1568,7 +1571,7 @@ RequireRealtimeReattachRunning ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequireRealtimeReattachRetired ==
@@ -1580,7 +1583,7 @@ RequireRealtimeReattachRetired ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 RequireRealtimeReattachStopped ==
@@ -1592,7 +1595,7 @@ RequireRealtimeReattachStopped ==
     /\ realtime_binding_authority_epoch' = None
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishRealtimeSignalIdle(authority_epoch, next_binding_state) ==
@@ -1604,7 +1607,7 @@ PublishRealtimeSignalIdle(authority_epoch, next_binding_state) ==
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = next_binding_state
     /\ realtime_reattach_required' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishRealtimeSignalAttached(authority_epoch, next_binding_state) ==
@@ -1616,7 +1619,7 @@ PublishRealtimeSignalAttached(authority_epoch, next_binding_state) ==
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = next_binding_state
     /\ realtime_reattach_required' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishRealtimeSignalRunning(authority_epoch, next_binding_state) ==
@@ -1628,7 +1631,7 @@ PublishRealtimeSignalRunning(authority_epoch, next_binding_state) ==
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = next_binding_state
     /\ realtime_reattach_required' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishRealtimeSignalRetired(authority_epoch, next_binding_state) ==
@@ -1640,7 +1643,7 @@ PublishRealtimeSignalRetired(authority_epoch, next_binding_state) ==
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = next_binding_state
     /\ realtime_reattach_required' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PublishRealtimeSignalStopped(authority_epoch, next_binding_state) ==
@@ -1652,7 +1655,7 @@ PublishRealtimeSignalStopped(authority_epoch, next_binding_state) ==
     /\ model_step_count' = model_step_count + 1
     /\ realtime_binding_state' = next_binding_state
     /\ realtime_reattach_required' = FALSE
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_authority_epoch, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectPendingIdle(server_id) ==
@@ -1661,7 +1664,7 @@ McpServerConnectPendingIdle(server_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectPendingAttached(server_id) ==
@@ -1670,7 +1673,7 @@ McpServerConnectPendingAttached(server_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectPendingRunning(server_id) ==
@@ -1679,7 +1682,7 @@ McpServerConnectPendingRunning(server_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectPendingRetired(server_id) ==
@@ -1688,7 +1691,7 @@ McpServerConnectPendingRetired(server_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectPendingStopped(server_id) ==
@@ -1697,7 +1700,7 @@ McpServerConnectPendingStopped(server_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectedIdle(server_id) ==
@@ -1706,7 +1709,7 @@ McpServerConnectedIdle(server_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Connected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectedAttached(server_id) ==
@@ -1715,7 +1718,7 @@ McpServerConnectedAttached(server_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Connected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectedRunning(server_id) ==
@@ -1724,7 +1727,7 @@ McpServerConnectedRunning(server_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Connected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectedRetired(server_id) ==
@@ -1733,7 +1736,7 @@ McpServerConnectedRetired(server_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Connected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerConnectedStopped(server_id) ==
@@ -1742,7 +1745,7 @@ McpServerConnectedStopped(server_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Connected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerFailedIdle(server_id, error) ==
@@ -1751,7 +1754,7 @@ McpServerFailedIdle(server_id, error) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Failed")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerFailedAttached(server_id, error) ==
@@ -1760,7 +1763,7 @@ McpServerFailedAttached(server_id, error) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Failed")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerFailedRunning(server_id, error) ==
@@ -1769,7 +1772,7 @@ McpServerFailedRunning(server_id, error) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Failed")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerFailedRetired(server_id, error) ==
@@ -1778,7 +1781,7 @@ McpServerFailedRetired(server_id, error) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Failed")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerFailedStopped(server_id, error) ==
@@ -1787,7 +1790,7 @@ McpServerFailedStopped(server_id, error) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Failed")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerDisconnectedIdle(server_id) ==
@@ -1796,7 +1799,7 @@ McpServerDisconnectedIdle(server_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Disconnected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerDisconnectedAttached(server_id) ==
@@ -1805,7 +1808,7 @@ McpServerDisconnectedAttached(server_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Disconnected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerDisconnectedRunning(server_id) ==
@@ -1814,7 +1817,7 @@ McpServerDisconnectedRunning(server_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Disconnected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerDisconnectedRetired(server_id) ==
@@ -1823,7 +1826,7 @@ McpServerDisconnectedRetired(server_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Disconnected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerDisconnectedStopped(server_id) ==
@@ -1832,7 +1835,7 @@ McpServerDisconnectedStopped(server_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "Disconnected")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerReloadIdle(server_id) ==
@@ -1841,7 +1844,7 @@ McpServerReloadIdle(server_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerReloadAttached(server_id) ==
@@ -1850,7 +1853,7 @@ McpServerReloadAttached(server_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerReloadRunning(server_id) ==
@@ -1859,7 +1862,7 @@ McpServerReloadRunning(server_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerReloadRetired(server_id) ==
@@ -1868,7 +1871,7 @@ McpServerReloadRetired(server_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 McpServerReloadStopped(server_id) ==
@@ -1877,7 +1880,7 @@ McpServerReloadStopped(server_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ mcp_server_states' = MapSet(mcp_server_states, server_id, "PendingConnect")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestSentIdle(corr_id, to) ==
@@ -1886,7 +1889,7 @@ PeerRequestSentIdle(corr_id, to) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "Sent")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestSentAttached(corr_id, to) ==
@@ -1895,7 +1898,7 @@ PeerRequestSentAttached(corr_id, to) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "Sent")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestSentRunning(corr_id, to) ==
@@ -1904,7 +1907,7 @@ PeerRequestSentRunning(corr_id, to) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "Sent")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestSentRetired(corr_id, to) ==
@@ -1913,7 +1916,7 @@ PeerRequestSentRetired(corr_id, to) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "Sent")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestSentStopped(corr_id, to) ==
@@ -1922,7 +1925,7 @@ PeerRequestSentStopped(corr_id, to) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "Sent")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseProgressArrivedIdle(corr_id) ==
@@ -1931,7 +1934,7 @@ PeerResponseProgressArrivedIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "AcceptedProgress")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseProgressArrivedAttached(corr_id) ==
@@ -1940,7 +1943,7 @@ PeerResponseProgressArrivedAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "AcceptedProgress")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseProgressArrivedRunning(corr_id) ==
@@ -1949,7 +1952,7 @@ PeerResponseProgressArrivedRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "AcceptedProgress")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseProgressArrivedRetired(corr_id) ==
@@ -1958,7 +1961,7 @@ PeerResponseProgressArrivedRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "AcceptedProgress")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseProgressArrivedStopped(corr_id) ==
@@ -1967,7 +1970,7 @@ PeerResponseProgressArrivedStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapSet(pending_peer_requests, corr_id, "AcceptedProgress")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedCompletedIdle(corr_id, disposition) ==
@@ -1977,7 +1980,7 @@ PeerResponseTerminalArrivedCompletedIdle(corr_id, disposition) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedCompletedAttached(corr_id, disposition) ==
@@ -1987,7 +1990,7 @@ PeerResponseTerminalArrivedCompletedAttached(corr_id, disposition) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedCompletedRunning(corr_id, disposition) ==
@@ -1997,7 +2000,7 @@ PeerResponseTerminalArrivedCompletedRunning(corr_id, disposition) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedCompletedRetired(corr_id, disposition) ==
@@ -2007,7 +2010,7 @@ PeerResponseTerminalArrivedCompletedRetired(corr_id, disposition) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedCompletedStopped(corr_id, disposition) ==
@@ -2017,7 +2020,7 @@ PeerResponseTerminalArrivedCompletedStopped(corr_id, disposition) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedFailedIdle(corr_id, disposition) ==
@@ -2027,7 +2030,7 @@ PeerResponseTerminalArrivedFailedIdle(corr_id, disposition) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedFailedAttached(corr_id, disposition) ==
@@ -2037,7 +2040,7 @@ PeerResponseTerminalArrivedFailedAttached(corr_id, disposition) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedFailedRunning(corr_id, disposition) ==
@@ -2047,7 +2050,7 @@ PeerResponseTerminalArrivedFailedRunning(corr_id, disposition) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedFailedRetired(corr_id, disposition) ==
@@ -2057,7 +2060,7 @@ PeerResponseTerminalArrivedFailedRetired(corr_id, disposition) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseTerminalArrivedFailedStopped(corr_id, disposition) ==
@@ -2067,7 +2070,7 @@ PeerResponseTerminalArrivedFailedStopped(corr_id, disposition) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestTimedOutIdle(corr_id) ==
@@ -2076,7 +2079,7 @@ PeerRequestTimedOutIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestTimedOutAttached(corr_id) ==
@@ -2085,7 +2088,7 @@ PeerRequestTimedOutAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestTimedOutRunning(corr_id) ==
@@ -2094,7 +2097,7 @@ PeerRequestTimedOutRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestTimedOutRetired(corr_id) ==
@@ -2103,7 +2106,7 @@ PeerRequestTimedOutRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestTimedOutStopped(corr_id) ==
@@ -2112,7 +2115,7 @@ PeerRequestTimedOutStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ pending_peer_requests' = MapRemove(pending_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestReceivedIdle(corr_id) ==
@@ -2121,7 +2124,7 @@ PeerRequestReceivedIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapSet(inbound_peer_requests, corr_id, "Received")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestReceivedAttached(corr_id) ==
@@ -2130,7 +2133,7 @@ PeerRequestReceivedAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapSet(inbound_peer_requests, corr_id, "Received")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestReceivedRunning(corr_id) ==
@@ -2139,7 +2142,7 @@ PeerRequestReceivedRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapSet(inbound_peer_requests, corr_id, "Received")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestReceivedRetired(corr_id) ==
@@ -2148,7 +2151,7 @@ PeerRequestReceivedRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapSet(inbound_peer_requests, corr_id, "Received")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerRequestReceivedStopped(corr_id) ==
@@ -2157,7 +2160,7 @@ PeerRequestReceivedStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapSet(inbound_peer_requests, corr_id, "Received")
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseRepliedIdle(corr_id) ==
@@ -2166,7 +2169,7 @@ PeerResponseRepliedIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapRemove(inbound_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseRepliedAttached(corr_id) ==
@@ -2175,7 +2178,7 @@ PeerResponseRepliedAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapRemove(inbound_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseRepliedRunning(corr_id) ==
@@ -2184,7 +2187,7 @@ PeerResponseRepliedRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapRemove(inbound_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseRepliedRetired(corr_id) ==
@@ -2193,7 +2196,7 @@ PeerResponseRepliedRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapRemove(inbound_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 PeerResponseRepliedStopped(corr_id) ==
@@ -2202,7 +2205,7 @@ PeerResponseRepliedStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ inbound_peer_requests' = MapRemove(inbound_peer_requests, corr_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AdvanceSessionContextIdle(updated_at_ms) ==
@@ -2211,7 +2214,7 @@ AdvanceSessionContextIdle(updated_at_ms) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ last_session_context_updated_at_ms' = updated_at_ms
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AdvanceSessionContextAttached(updated_at_ms) ==
@@ -2220,7 +2223,7 @@ AdvanceSessionContextAttached(updated_at_ms) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ last_session_context_updated_at_ms' = updated_at_ms
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AdvanceSessionContextRunning(updated_at_ms) ==
@@ -2229,7 +2232,7 @@ AdvanceSessionContextRunning(updated_at_ms) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ last_session_context_updated_at_ms' = updated_at_ms
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AdvanceSessionContextRetired(updated_at_ms) ==
@@ -2238,7 +2241,7 @@ AdvanceSessionContextRetired(updated_at_ms) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ last_session_context_updated_at_ms' = updated_at_ms
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AdvanceSessionContextStopped(updated_at_ms) ==
@@ -2247,7 +2250,7 @@ AdvanceSessionContextStopped(updated_at_ms) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ last_session_context_updated_at_ms' = updated_at_ms
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamReservedIdle(corr_id) ==
@@ -2257,7 +2260,7 @@ InteractionStreamReservedIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamReservedAttached(corr_id) ==
@@ -2267,7 +2270,7 @@ InteractionStreamReservedAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamReservedRunning(corr_id) ==
@@ -2277,7 +2280,7 @@ InteractionStreamReservedRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamReservedRetired(corr_id) ==
@@ -2287,7 +2290,7 @@ InteractionStreamReservedRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamReservedStopped(corr_id) ==
@@ -2297,7 +2300,7 @@ InteractionStreamReservedStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamAttachedIdle(corr_id) ==
@@ -2307,7 +2310,7 @@ InteractionStreamAttachedIdle(corr_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
     /\ attached_interaction_streams' = (attached_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamAttachedAttached(corr_id) ==
@@ -2317,7 +2320,7 @@ InteractionStreamAttachedAttached(corr_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
     /\ attached_interaction_streams' = (attached_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamAttachedRunning(corr_id) ==
@@ -2327,7 +2330,7 @@ InteractionStreamAttachedRunning(corr_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
     /\ attached_interaction_streams' = (attached_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamAttachedRetired(corr_id) ==
@@ -2337,7 +2340,7 @@ InteractionStreamAttachedRetired(corr_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
     /\ attached_interaction_streams' = (attached_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamAttachedStopped(corr_id) ==
@@ -2347,7 +2350,7 @@ InteractionStreamAttachedStopped(corr_id) ==
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
     /\ attached_interaction_streams' = (attached_interaction_streams \cup {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamCompletedIdle(corr_id) ==
@@ -2356,7 +2359,7 @@ InteractionStreamCompletedIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamCompletedAttached(corr_id) ==
@@ -2365,7 +2368,7 @@ InteractionStreamCompletedAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamCompletedRunning(corr_id) ==
@@ -2374,7 +2377,7 @@ InteractionStreamCompletedRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamCompletedRetired(corr_id) ==
@@ -2383,7 +2386,7 @@ InteractionStreamCompletedRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamCompletedStopped(corr_id) ==
@@ -2392,7 +2395,7 @@ InteractionStreamCompletedStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamExpiredIdle(corr_id) ==
@@ -2401,7 +2404,7 @@ InteractionStreamExpiredIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamExpiredAttached(corr_id) ==
@@ -2410,7 +2413,7 @@ InteractionStreamExpiredAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamExpiredRunning(corr_id) ==
@@ -2419,7 +2422,7 @@ InteractionStreamExpiredRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamExpiredRetired(corr_id) ==
@@ -2428,7 +2431,7 @@ InteractionStreamExpiredRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamExpiredStopped(corr_id) ==
@@ -2437,7 +2440,7 @@ InteractionStreamExpiredStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ reserved_interaction_streams' = (reserved_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamClosedEarlyIdle(corr_id) ==
@@ -2446,7 +2449,7 @@ InteractionStreamClosedEarlyIdle(corr_id) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamClosedEarlyAttached(corr_id) ==
@@ -2455,7 +2458,7 @@ InteractionStreamClosedEarlyAttached(corr_id) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamClosedEarlyRunning(corr_id) ==
@@ -2464,7 +2467,7 @@ InteractionStreamClosedEarlyRunning(corr_id) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamClosedEarlyRetired(corr_id) ==
@@ -2473,7 +2476,7 @@ InteractionStreamClosedEarlyRetired(corr_id) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 InteractionStreamClosedEarlyStopped(corr_id) ==
@@ -2482,7 +2485,7 @@ InteractionStreamClosedEarlyStopped(corr_id) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ attached_interaction_streams' = (attached_interaction_streams \ {corr_id})
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightInitializing ==
@@ -2491,7 +2494,7 @@ ProductTurnInFlightInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightIdle ==
@@ -2500,7 +2503,7 @@ ProductTurnInFlightIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightAttached ==
@@ -2509,7 +2512,7 @@ ProductTurnInFlightAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightRunning ==
@@ -2518,7 +2521,7 @@ ProductTurnInFlightRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightRetired ==
@@ -2527,7 +2530,7 @@ ProductTurnInFlightRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInFlightStopped ==
@@ -2536,7 +2539,7 @@ ProductTurnInFlightStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingInitializing ==
@@ -2545,7 +2548,7 @@ ProductTurnCommittedFromAwaitingInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingIdle ==
@@ -2554,7 +2557,7 @@ ProductTurnCommittedFromAwaitingIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingAttached ==
@@ -2563,7 +2566,7 @@ ProductTurnCommittedFromAwaitingAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingRunning ==
@@ -2572,7 +2575,7 @@ ProductTurnCommittedFromAwaitingRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingRetired ==
@@ -2581,7 +2584,7 @@ ProductTurnCommittedFromAwaitingRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromAwaitingStopped ==
@@ -2590,7 +2593,7 @@ ProductTurnCommittedFromAwaitingStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputInitializing ==
@@ -2599,7 +2602,7 @@ ProductTurnCommittedFromOutputInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputIdle ==
@@ -2608,7 +2611,7 @@ ProductTurnCommittedFromOutputIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputAttached ==
@@ -2617,7 +2620,7 @@ ProductTurnCommittedFromOutputAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputRunning ==
@@ -2626,7 +2629,7 @@ ProductTurnCommittedFromOutputRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputRetired ==
@@ -2635,7 +2638,7 @@ ProductTurnCommittedFromOutputRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnCommittedFromOutputStopped ==
@@ -2644,7 +2647,7 @@ ProductTurnCommittedFromOutputStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingInitializing ==
@@ -2653,7 +2656,7 @@ ProductOutputStartedFromAwaitingInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingIdle ==
@@ -2662,7 +2665,7 @@ ProductOutputStartedFromAwaitingIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingAttached ==
@@ -2671,7 +2674,7 @@ ProductOutputStartedFromAwaitingAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingRunning ==
@@ -2680,7 +2683,7 @@ ProductOutputStartedFromAwaitingRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingRetired ==
@@ -2689,7 +2692,7 @@ ProductOutputStartedFromAwaitingRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromAwaitingStopped ==
@@ -2698,7 +2701,7 @@ ProductOutputStartedFromAwaitingStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "OutputStarted"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedInitializing ==
@@ -2707,7 +2710,7 @@ ProductOutputStartedFromCommittedInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedIdle ==
@@ -2716,7 +2719,7 @@ ProductOutputStartedFromCommittedIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedAttached ==
@@ -2725,7 +2728,7 @@ ProductOutputStartedFromCommittedAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedRunning ==
@@ -2734,7 +2737,7 @@ ProductOutputStartedFromCommittedRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedRetired ==
@@ -2743,7 +2746,7 @@ ProductOutputStartedFromCommittedRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductOutputStartedFromCommittedStopped ==
@@ -2752,7 +2755,7 @@ ProductOutputStartedFromCommittedStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Preemptible"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleInitializing ==
@@ -2761,7 +2764,7 @@ ProductTurnInterruptedFromPreemptibleInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleIdle ==
@@ -2770,7 +2773,7 @@ ProductTurnInterruptedFromPreemptibleIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleAttached ==
@@ -2779,7 +2782,7 @@ ProductTurnInterruptedFromPreemptibleAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleRunning ==
@@ -2788,7 +2791,7 @@ ProductTurnInterruptedFromPreemptibleRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleRetired ==
@@ -2797,7 +2800,7 @@ ProductTurnInterruptedFromPreemptibleRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromPreemptibleStopped ==
@@ -2806,7 +2809,7 @@ ProductTurnInterruptedFromPreemptibleStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Committed"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputInitializing ==
@@ -2815,7 +2818,7 @@ ProductTurnInterruptedFromOutputInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputIdle ==
@@ -2824,7 +2827,7 @@ ProductTurnInterruptedFromOutputIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputAttached ==
@@ -2833,7 +2836,7 @@ ProductTurnInterruptedFromOutputAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputRunning ==
@@ -2842,7 +2845,7 @@ ProductTurnInterruptedFromOutputRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputRetired ==
@@ -2851,7 +2854,7 @@ ProductTurnInterruptedFromOutputRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnInterruptedFromOutputStopped ==
@@ -2860,7 +2863,7 @@ ProductTurnInterruptedFromOutputStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "AwaitingProgress"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalInitializing ==
@@ -2869,7 +2872,7 @@ ProductTurnTerminalInitializing ==
     /\ phase' = "Initializing"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalIdle ==
@@ -2878,7 +2881,7 @@ ProductTurnTerminalIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalAttached ==
@@ -2887,7 +2890,7 @@ ProductTurnTerminalAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalRunning ==
@@ -2896,7 +2899,7 @@ ProductTurnTerminalRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalRetired ==
@@ -2905,7 +2908,7 @@ ProductTurnTerminalRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ProductTurnTerminalStopped ==
@@ -2914,7 +2917,433 @@ ProductTurnTerminalStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ realtime_product_turn_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnInitializing(advanced_at_ms) ==
+    /\ phase = "Initializing"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnIdle(advanced_at_ms) ==
+    /\ phase = "Idle"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnAttached(advanced_at_ms) ==
+    /\ phase = "Attached"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnRunning(advanced_at_ms) ==
+    /\ phase = "Running"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnRetired(advanced_at_ms) ==
+    /\ phase = "Retired"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceDuringTurnStopped(advanced_at_ms) ==
+    /\ phase = "Stopped"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase # "Idle")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleDeferred"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleInitializing(advanced_at_ms) ==
+    /\ phase = "Initializing"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleIdle(advanced_at_ms) ==
+    /\ phase = "Idle"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleAttached(advanced_at_ms) ==
+    /\ phase = "Attached"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleRunning(advanced_at_ms) ==
+    /\ phase = "Running"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleRetired(advanced_at_ms) ==
+    /\ phase = "Retired"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionAdvanceWhileIdleStopped(advanced_at_ms) ==
+    /\ phase = "Stopped"
+    /\ (advanced_at_ms > realtime_projection_frontier_ms)
+    /\ (realtime_product_turn_phase = "Idle")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "StaleImmediate"
+    /\ realtime_projection_frontier_ms' = advanced_at_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedInitializing(observed_ms) ==
+    /\ phase = "Initializing"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedIdle(observed_ms) ==
+    /\ phase = "Idle"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedAttached(observed_ms) ==
+    /\ phase = "Attached"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedRunning(observed_ms) ==
+    /\ phase = "Running"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedRetired(observed_ms) ==
+    /\ phase = "Retired"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionRefreshedStopped(observed_ms) ==
+    /\ phase = "Stopped"
+    /\ (observed_ms >= realtime_projection_frontier_ms)
+    /\ ((realtime_projection_freshness # "Clean") \/ (observed_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (observed_ms > realtime_projection_frontier_ms) THEN observed_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetInitializing(baseline_ms) ==
+    /\ phase = "Initializing"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetIdle(baseline_ms) ==
+    /\ phase = "Idle"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetAttached(baseline_ms) ==
+    /\ phase = "Attached"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetRunning(baseline_ms) ==
+    /\ phase = "Running"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetRetired(baseline_ms) ==
+    /\ phase = "Retired"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+RealtimeProjectionResetStopped(baseline_ms) ==
+    /\ phase = "Stopped"
+    /\ ((realtime_projection_freshness # "Clean") \/ (baseline_ms > realtime_projection_frontier_ms))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = "Clean"
+    /\ realtime_projection_frontier_ms' = IF (baseline_ms > realtime_projection_frontier_ms) THEN baseline_ms ELSE realtime_projection_frontier_ms
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedInitializing ==
+    /\ phase = "Initializing"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedIdle ==
+    /\ phase = "Idle"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedAttached ==
+    /\ phase = "Attached"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedRunning ==
+    /\ phase = "Running"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedRetired ==
+    /\ phase = "Retired"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeClientInputSubmittedStopped ==
+    /\ phase = "Stopped"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityInitializing ==
+    /\ phase = "Initializing"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityIdle ==
+    /\ phase = "Idle"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityAttached ==
+    /\ phase = "Attached"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityRunning ==
+    /\ phase = "Running"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityRetired ==
+    /\ phase = "Retired"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeMidTurnActivityStopped ==
+    /\ phase = "Stopped"
+    /\ (realtime_reconnect_policy # "ReattachAndRecover")
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_reconnect_policy' = "ReattachAndRecover"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedInitializing ==
+    /\ phase = "Initializing"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Initializing"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedIdle ==
+    /\ phase = "Idle"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Idle"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedAttached ==
+    /\ phase = "Attached"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Attached"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedRunning ==
+    /\ phase = "Running"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedRetired ==
+    /\ phase = "Retired"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Retired"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+
+
+ClassifyRealtimeTurnTerminatedStopped ==
+    /\ phase = "Stopped"
+    /\ ((realtime_reconnect_policy # "CleanExit") \/ (realtime_projection_freshness = "StaleDeferred"))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ realtime_projection_freshness' = IF (realtime_projection_freshness = "StaleDeferred") THEN "StaleImmediate" ELSE realtime_projection_freshness
+    /\ realtime_reconnect_policy' = "CleanExit"
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_frontier_ms, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginLiveTopologyReconfigureIdle(authority_epoch) ==
@@ -2925,7 +3354,7 @@ BeginLiveTopologyReconfigureIdle(authority_epoch) ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Reconfiguring"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginLiveTopologyReconfigureAttached(authority_epoch) ==
@@ -2936,7 +3365,7 @@ BeginLiveTopologyReconfigureAttached(authority_epoch) ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Reconfiguring"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginLiveTopologyReconfigureRunning(authority_epoch) ==
@@ -2947,7 +3376,7 @@ BeginLiveTopologyReconfigureRunning(authority_epoch) ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Reconfiguring"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginLiveTopologyReconfigureRetired(authority_epoch) ==
@@ -2958,7 +3387,7 @@ BeginLiveTopologyReconfigureRetired(authority_epoch) ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Reconfiguring"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 BeginLiveTopologyReconfigureStopped(authority_epoch) ==
@@ -2969,7 +3398,7 @@ BeginLiveTopologyReconfigureStopped(authority_epoch) ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Reconfiguring"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 MarkLiveTopologyDetachedIdle ==
@@ -2984,7 +3413,7 @@ MarkLiveTopologyDetachedIdle ==
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Detached"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 MarkLiveTopologyDetachedAttached ==
@@ -2999,7 +3428,7 @@ MarkLiveTopologyDetachedAttached ==
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Detached"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 MarkLiveTopologyDetachedRunning ==
@@ -3014,7 +3443,7 @@ MarkLiveTopologyDetachedRunning ==
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Detached"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 MarkLiveTopologyDetachedRetired ==
@@ -3029,7 +3458,7 @@ MarkLiveTopologyDetachedRetired ==
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Detached"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 MarkLiveTopologyDetachedStopped ==
@@ -3044,7 +3473,7 @@ MarkLiveTopologyDetachedStopped ==
     /\ realtime_reattach_required' = FALSE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Detached"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyIdentityIdle ==
@@ -3054,7 +3483,7 @@ ApplyLiveTopologyIdentityIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostIdentityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyIdentityAttached ==
@@ -3064,7 +3493,7 @@ ApplyLiveTopologyIdentityAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostIdentityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyIdentityRunning ==
@@ -3074,7 +3503,7 @@ ApplyLiveTopologyIdentityRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostIdentityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyIdentityRetired ==
@@ -3084,7 +3513,7 @@ ApplyLiveTopologyIdentityRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostIdentityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyIdentityStopped ==
@@ -3094,7 +3523,7 @@ ApplyLiveTopologyIdentityStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostIdentityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyVisibilityIdle ==
@@ -3104,7 +3533,7 @@ ApplyLiveTopologyVisibilityIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostVisibilityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyVisibilityAttached ==
@@ -3114,7 +3543,7 @@ ApplyLiveTopologyVisibilityAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostVisibilityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyVisibilityRunning ==
@@ -3124,7 +3553,7 @@ ApplyLiveTopologyVisibilityRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostVisibilityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyVisibilityRetired ==
@@ -3134,7 +3563,7 @@ ApplyLiveTopologyVisibilityRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostVisibilityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 ApplyLiveTopologyVisibilityStopped ==
@@ -3144,7 +3573,7 @@ ApplyLiveTopologyVisibilityStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "HostVisibilityApplied"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CompleteLiveTopologyIdle ==
@@ -3154,7 +3583,7 @@ CompleteLiveTopologyIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CompleteLiveTopologyAttached ==
@@ -3164,7 +3593,7 @@ CompleteLiveTopologyAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CompleteLiveTopologyRunning ==
@@ -3174,7 +3603,7 @@ CompleteLiveTopologyRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CompleteLiveTopologyRetired ==
@@ -3184,7 +3613,7 @@ CompleteLiveTopologyRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 CompleteLiveTopologyStopped ==
@@ -3194,7 +3623,7 @@ CompleteLiveTopologyStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortLiveTopologyBeforeDetachIdle ==
@@ -3204,7 +3633,7 @@ AbortLiveTopologyBeforeDetachIdle ==
     /\ phase' = "Idle"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortLiveTopologyBeforeDetachAttached ==
@@ -3214,7 +3643,7 @@ AbortLiveTopologyBeforeDetachAttached ==
     /\ phase' = "Attached"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortLiveTopologyBeforeDetachRunning ==
@@ -3224,7 +3653,7 @@ AbortLiveTopologyBeforeDetachRunning ==
     /\ phase' = "Running"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortLiveTopologyBeforeDetachRetired ==
@@ -3234,7 +3663,7 @@ AbortLiveTopologyBeforeDetachRetired ==
     /\ phase' = "Retired"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AbortLiveTopologyBeforeDetachStopped ==
@@ -3244,7 +3673,7 @@ AbortLiveTopologyBeforeDetachStopped ==
     /\ phase' = "Stopped"
     /\ model_step_count' = model_step_count + 1
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailLiveTopologyAfterDetachIdle ==
@@ -3258,7 +3687,7 @@ FailLiveTopologyAfterDetachIdle ==
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailLiveTopologyAfterDetachAttached ==
@@ -3272,7 +3701,7 @@ FailLiveTopologyAfterDetachAttached ==
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailLiveTopologyAfterDetachRunning ==
@@ -3286,7 +3715,7 @@ FailLiveTopologyAfterDetachRunning ==
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailLiveTopologyAfterDetachRetired ==
@@ -3300,7 +3729,7 @@ FailLiveTopologyAfterDetachRetired ==
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 FailLiveTopologyAfterDetachStopped ==
@@ -3314,7 +3743,7 @@ FailLiveTopologyAfterDetachStopped ==
     /\ realtime_reattach_required' = TRUE
     /\ realtime_next_authority_epoch' = (realtime_next_authority_epoch + 1)
     /\ live_topology_phase' = "Idle"
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy, peer_ingress_owner_kind, peer_ingress_comms_runtime_id, peer_ingress_mob_id >>
 
 
 AttachSessionIngressIdle(comms_runtime_id) ==
@@ -3326,7 +3755,7 @@ AttachSessionIngressIdle(comms_runtime_id) ==
     /\ peer_ingress_owner_kind' = "SessionOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachSessionIngressAttached(comms_runtime_id) ==
@@ -3338,7 +3767,7 @@ AttachSessionIngressAttached(comms_runtime_id) ==
     /\ peer_ingress_owner_kind' = "SessionOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachSessionIngressRunning(comms_runtime_id) ==
@@ -3350,7 +3779,7 @@ AttachSessionIngressRunning(comms_runtime_id) ==
     /\ peer_ingress_owner_kind' = "SessionOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachSessionIngressRetired(comms_runtime_id) ==
@@ -3362,7 +3791,7 @@ AttachSessionIngressRetired(comms_runtime_id) ==
     /\ peer_ingress_owner_kind' = "SessionOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachSessionIngressStopped(comms_runtime_id) ==
@@ -3374,7 +3803,7 @@ AttachSessionIngressStopped(comms_runtime_id) ==
     /\ peer_ingress_owner_kind' = "SessionOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachMobIngressIdle(comms_runtime_id, mob_id) ==
@@ -3386,7 +3815,7 @@ AttachMobIngressIdle(comms_runtime_id, mob_id) ==
     /\ peer_ingress_owner_kind' = "MobOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = Some(mob_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachMobIngressAttached(comms_runtime_id, mob_id) ==
@@ -3398,7 +3827,7 @@ AttachMobIngressAttached(comms_runtime_id, mob_id) ==
     /\ peer_ingress_owner_kind' = "MobOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = Some(mob_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachMobIngressRunning(comms_runtime_id, mob_id) ==
@@ -3410,7 +3839,7 @@ AttachMobIngressRunning(comms_runtime_id, mob_id) ==
     /\ peer_ingress_owner_kind' = "MobOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = Some(mob_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachMobIngressRetired(comms_runtime_id, mob_id) ==
@@ -3422,7 +3851,7 @@ AttachMobIngressRetired(comms_runtime_id, mob_id) ==
     /\ peer_ingress_owner_kind' = "MobOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = Some(mob_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 AttachMobIngressStopped(comms_runtime_id, mob_id) ==
@@ -3434,7 +3863,7 @@ AttachMobIngressStopped(comms_runtime_id, mob_id) ==
     /\ peer_ingress_owner_kind' = "MobOwned"
     /\ peer_ingress_comms_runtime_id' = Some(comms_runtime_id)
     /\ peer_ingress_mob_id' = Some(mob_id)
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 DetachIngressIdle ==
@@ -3446,7 +3875,7 @@ DetachIngressIdle ==
     /\ peer_ingress_owner_kind' = "Unattached"
     /\ peer_ingress_comms_runtime_id' = None
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 DetachIngressAttached ==
@@ -3458,7 +3887,7 @@ DetachIngressAttached ==
     /\ peer_ingress_owner_kind' = "Unattached"
     /\ peer_ingress_comms_runtime_id' = None
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 DetachIngressRunning ==
@@ -3470,7 +3899,7 @@ DetachIngressRunning ==
     /\ peer_ingress_owner_kind' = "Unattached"
     /\ peer_ingress_comms_runtime_id' = None
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 DetachIngressRetired ==
@@ -3482,7 +3911,7 @@ DetachIngressRetired ==
     /\ peer_ingress_owner_kind' = "Unattached"
     /\ peer_ingress_comms_runtime_id' = None
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 DetachIngressStopped ==
@@ -3494,7 +3923,7 @@ DetachIngressStopped ==
     /\ peer_ingress_owner_kind' = "Unattached"
     /\ peer_ingress_comms_runtime_id' = None
     /\ peer_ingress_mob_id' = None
-    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase >>
+    /\ UNCHANGED << session_id, active_runtime_id, active_fence_token, current_run_id, pre_run_phase, silent_intent_overrides, realtime_intent_present, realtime_binding_state, realtime_binding_authority_epoch, realtime_reattach_required, realtime_next_authority_epoch, live_topology_phase, mcp_server_states, pending_peer_requests, inbound_peer_requests, last_session_context_updated_at_ms, reserved_interaction_streams, attached_interaction_streams, realtime_product_turn_phase, realtime_projection_freshness, realtime_projection_frontier_ms, realtime_reconnect_policy >>
 
 
 Next ==
@@ -3809,6 +4238,48 @@ Next ==
     \/ ProductTurnTerminalRunning
     \/ ProductTurnTerminalRetired
     \/ ProductTurnTerminalStopped
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnInitializing(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnIdle(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnAttached(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnRunning(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnRetired(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceDuringTurnStopped(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleInitializing(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleIdle(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleAttached(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleRunning(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleRetired(advanced_at_ms)
+    \/ \E advanced_at_ms \in 0..2 : RealtimeProjectionAdvanceWhileIdleStopped(advanced_at_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedInitializing(observed_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedIdle(observed_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedAttached(observed_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedRunning(observed_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedRetired(observed_ms)
+    \/ \E observed_ms \in 0..2 : RealtimeProjectionRefreshedStopped(observed_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetInitializing(baseline_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetIdle(baseline_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetAttached(baseline_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetRunning(baseline_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetRetired(baseline_ms)
+    \/ \E baseline_ms \in 0..2 : RealtimeProjectionResetStopped(baseline_ms)
+    \/ ClassifyRealtimeClientInputSubmittedInitializing
+    \/ ClassifyRealtimeClientInputSubmittedIdle
+    \/ ClassifyRealtimeClientInputSubmittedAttached
+    \/ ClassifyRealtimeClientInputSubmittedRunning
+    \/ ClassifyRealtimeClientInputSubmittedRetired
+    \/ ClassifyRealtimeClientInputSubmittedStopped
+    \/ ClassifyRealtimeMidTurnActivityInitializing
+    \/ ClassifyRealtimeMidTurnActivityIdle
+    \/ ClassifyRealtimeMidTurnActivityAttached
+    \/ ClassifyRealtimeMidTurnActivityRunning
+    \/ ClassifyRealtimeMidTurnActivityRetired
+    \/ ClassifyRealtimeMidTurnActivityStopped
+    \/ ClassifyRealtimeTurnTerminatedInitializing
+    \/ ClassifyRealtimeTurnTerminatedIdle
+    \/ ClassifyRealtimeTurnTerminatedAttached
+    \/ ClassifyRealtimeTurnTerminatedRunning
+    \/ ClassifyRealtimeTurnTerminatedRetired
+    \/ ClassifyRealtimeTurnTerminatedStopped
     \/ \E authority_epoch \in 0..2 : BeginLiveTopologyReconfigureIdle(authority_epoch)
     \/ \E authority_epoch \in 0..2 : BeginLiveTopologyReconfigureAttached(authority_epoch)
     \/ \E authority_epoch \in 0..2 : BeginLiveTopologyReconfigureRunning(authority_epoch)

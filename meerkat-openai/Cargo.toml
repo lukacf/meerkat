@@ -16,6 +16,10 @@ categories.workspace = true
 meerkat-core = { workspace = true }
 meerkat-llm-core = { workspace = true }
 meerkat-contracts = { workspace = true }
+# meerkat-auth-core's resolver is wasm-compatible; needed so the
+# provider runtime can resolve inline-secret bindings in the browser
+# (closes Cluster C in the smoke-fix track).
+meerkat-auth-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,7 +31,6 @@ tracing = { workspace = true }
 indexmap = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-meerkat-auth-core = { workspace = true }
 meerkat-runtime = { workspace = true, optional = true, default-features = false }
 tokio = { workspace = true }
 reqwest = { workspace = true }

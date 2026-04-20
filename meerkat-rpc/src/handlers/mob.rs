@@ -11,12 +11,15 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
-use meerkat_contracts::{MobCreateParams, MobCreateResult, WireAgentRuntimeId};
+use meerkat_contracts::{
+    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobMemberStatus,
+    WireMobRuntimeMode,
+};
 use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::{
-    AgentIdentity, FlowId, MemberRespawnReceipt, MobBackendKind, MobId, MobRespawnError,
-    MobRuntimeMode, RunId, SpawnMemberSpec, SpawnResult,
+    AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobId,
+    MobMemberStatus, MobRespawnError, MobRuntimeMode, RunId, SpawnMemberSpec, SpawnResult,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -36,12 +39,70 @@ fn parse_mob_id(id: Option<RpcId>, raw: &str) -> Result<MobId, RpcResponse> {
 }
 
 fn spawn_result_payload(mob_id: &MobId, result: &SpawnResult) -> serde_json::Value {
+    let identity_str = result.agent_identity.to_string();
     serde_json::json!({
         "mob_id": mob_id,
         "agent_identity": result.agent_identity,
-        "agent_runtime_id": result.agent_runtime_id,
-        "fence_token": result.fence_token,
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     })
+}
+
+/// Project a domain `MobMemberStatus` into its wire twin.
+///
+/// `MobMemberStatus` is `#[non_exhaustive]`, so a plain exhaustive match is not
+/// possible without a wildcard. We do map every known variant explicitly and
+/// log at `error!` on the wildcard arm so a future upstream variant surfaces in
+/// traces as "wire projection silently collapsed to Unknown" rather than
+/// vanishing into a defaulted value. Adding the variant to this match is the
+/// expected response to the log line.
+fn project_member_status(status: MobMemberStatus) -> WireMobMemberStatus {
+    match status {
+        MobMemberStatus::Active => WireMobMemberStatus::Active,
+        MobMemberStatus::Retiring => WireMobMemberStatus::Retiring,
+        MobMemberStatus::Broken => WireMobMemberStatus::Broken,
+        MobMemberStatus::Completed => WireMobMemberStatus::Completed,
+        MobMemberStatus::Unknown => WireMobMemberStatus::Unknown,
+        other => {
+            tracing::error!(
+                ?other,
+                "MobMemberStatus variant has no WireMobMemberStatus mapping; \
+                 projecting to Unknown — add an explicit arm in `project_member_status`"
+            );
+            WireMobMemberStatus::Unknown
+        }
+    }
+}
+
+/// Convert a mob roster entry into the public typed wire shape. Used for
+/// `mob/ensure_member`'s `Existed` outcome and for typed member-list
+/// responses.
+fn member_list_entry_wire(
+    mob_id: &MobId,
+    entry: &meerkat_mob::runtime::MobMemberListEntry,
+) -> MobMemberListEntryWire {
+    let identity_str = entry.agent_identity.to_string();
+    MobMemberListEntryWire {
+        agent_identity: identity_str.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+        role: entry.role.to_string(),
+        runtime_mode: match entry.runtime_mode {
+            MobRuntimeMode::AutonomousHost => WireMobRuntimeMode::AutonomousHost,
+            MobRuntimeMode::TurnDriven => WireMobRuntimeMode::TurnDriven,
+        },
+        state: match entry.state {
+            MemberState::Active => WireMemberState::Active,
+            MemberState::Retiring => WireMemberState::Retiring,
+        },
+        wired_to: entry
+            .wired_to
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        labels: entry.labels.clone(),
+        status: project_member_status(entry.status),
+        error: entry.error.clone(),
+        is_final: entry.is_final,
+    }
 }
 
 pub async fn handle_create(
@@ -128,10 +189,13 @@ pub async fn handle_members(
         Err(resp) => return resp,
     };
     match state.mob_list_members(&mob_id).await {
-        Ok(members) => RpcResponse::success(
-            id,
-            serde_json::json!({"mob_id": mob_id, "members": members}),
-        ),
+        Ok(members) => {
+            let typed: Vec<_> = members
+                .iter()
+                .map(|entry| member_list_entry_wire(&mob_id, entry))
+                .collect();
+            RpcResponse::success(id, serde_json::json!({"mob_id": mob_id, "members": typed}))
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -297,9 +361,7 @@ struct SpawnManyResultEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_identity: Option<meerkat_mob::AgentIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    agent_runtime_id: Option<meerkat_mob::AgentRuntimeId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    fence_token: Option<meerkat_mob::FenceToken>,
+    member_ref: Option<meerkat_contracts::WireMemberRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -336,18 +398,22 @@ pub async fn handle_spawn_many(
             let entries: Vec<SpawnManyResultEntry> = results
                 .into_iter()
                 .map(|r| match r {
-                    Ok(spawn_result) => SpawnManyResultEntry {
-                        ok: true,
-                        agent_identity: Some(spawn_result.agent_identity),
-                        agent_runtime_id: Some(spawn_result.agent_runtime_id),
-                        fence_token: Some(spawn_result.fence_token),
-                        error: None,
-                    },
+                    Ok(spawn_result) => {
+                        let identity_str = spawn_result.agent_identity.to_string();
+                        SpawnManyResultEntry {
+                            ok: true,
+                            agent_identity: Some(spawn_result.agent_identity),
+                            member_ref: Some(meerkat_contracts::WireMemberRef::encode(
+                                mob_id.as_str(),
+                                &identity_str,
+                            )),
+                            error: None,
+                        }
+                    }
                     Err(err) => SpawnManyResultEntry {
                         ok: false,
                         agent_identity: None,
-                        agent_runtime_id: None,
-                        fence_token: None,
+                        member_ref: None,
                         error: Some(err.to_string()),
                     },
                 })
@@ -415,13 +481,28 @@ pub async fn handle_respawn(
         )
         .await
     {
-        Ok(receipt) => respawn_result_response(id, Ok(receipt)),
-        Err(err) => respawn_result_response(id, Err(err)),
+        Ok(receipt) => respawn_result_response(id, &mob_id, Ok(receipt)),
+        Err(err) => respawn_result_response(id, &mob_id, Err(err)),
     }
+}
+
+fn respawn_receipt_value(mob_id: &MobId, receipt: &MemberRespawnReceipt) -> serde_json::Value {
+    let identity_str = receipt.identity.to_string();
+    // App-facing respawn receipt exposes only identity-native fields and the
+    // server-resolved `member_ref`. Binding-era fence tokens are retired per
+    // dogma #10 — callers never reason about incarnation counters. The
+    // `status: "completed"` envelope field on the parent response communicates
+    // success; clients that need "before vs after" observability should track
+    // their own state around the call.
+    serde_json::json!({
+        "identity": receipt.identity,
+        "member_ref": meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
+    })
 }
 
 fn respawn_result_response(
     id: Option<RpcId>,
+    mob_id: &MobId,
     result: Result<MemberRespawnReceipt, MobRespawnError>,
 ) -> RpcResponse {
     match result {
@@ -429,7 +510,7 @@ fn respawn_result_response(
             id,
             serde_json::json!({
                 "status": "completed",
-                "receipt": receipt,
+                "receipt": respawn_receipt_value(mob_id, &receipt),
             }),
         ),
         Err(MobRespawnError::TopologyRestoreFailed {
@@ -439,7 +520,7 @@ fn respawn_result_response(
             id,
             serde_json::json!({
                 "status": "topology_restore_failed",
-                "receipt": receipt,
+                "receipt": respawn_receipt_value(mob_id, &receipt),
                 "failed_peer_ids": failed_peer_ids
                     .iter()
                     .map(std::string::ToString::to_string)
@@ -510,11 +591,7 @@ pub async fn handle_unwire(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MobLifecycleParams {
-    pub mob_id: String,
-    pub action: String,
-}
+pub use meerkat_contracts::{MobLifecycleParams, WireMobLifecycleAction};
 
 pub async fn handle_lifecycle(
     id: Option<RpcId>,
@@ -535,28 +612,27 @@ pub async fn handle_lifecycle(
     // destroy so clients (mobkit, tests) can distinguish clean destroy from
     // partial cleanup instead of assuming `ok: true` means everything
     // succeeded.
-    let destroy_report = match params.action.as_str() {
-        "stop" => match state.mob_stop(&mob_id).await {
+    let destroy_report = match params.action {
+        WireMobLifecycleAction::Stop => match state.mob_stop(&mob_id).await {
             Ok(()) => None,
             Err(err) => return invalid_params(id, err.to_string()),
         },
-        "resume" => match state.mob_resume(&mob_id).await {
+        WireMobLifecycleAction::Resume => match state.mob_resume(&mob_id).await {
             Ok(()) => None,
             Err(err) => return invalid_params(id, err.to_string()),
         },
-        "complete" => match state.mob_complete(&mob_id).await {
+        WireMobLifecycleAction::Complete => match state.mob_complete(&mob_id).await {
             Ok(()) => None,
             Err(err) => return invalid_params(id, err.to_string()),
         },
-        "reset" => match state.mob_reset(&mob_id).await {
+        WireMobLifecycleAction::Reset => match state.mob_reset(&mob_id).await {
             Ok(()) => None,
             Err(err) => return invalid_params(id, err.to_string()),
         },
-        "destroy" => match state.mob_destroy(&mob_id).await {
+        WireMobLifecycleAction::Destroy => match state.mob_destroy(&mob_id).await {
             Ok(report) => Some(report),
             Err(err) => return invalid_params(id, err.to_string()),
         },
-        other => return invalid_params(id, format!("Unknown mob lifecycle action: {other}")),
     };
     let mut body = serde_json::json!({"mob_id": mob_id, "action": params.action, "ok": true});
     if let Some(report) = destroy_report
@@ -616,19 +692,21 @@ pub async fn handle_member_send(
         )
         .await
     {
-        Ok(receipt) => RpcResponse::success(
-            id,
-            MobMemberSendResult {
-                mob_id: mob_id.to_string(),
-                agent_identity: receipt.identity.to_string(),
-                agent_runtime_id: WireAgentRuntimeId {
-                    identity: receipt.agent_runtime_id.identity.to_string(),
-                    generation: receipt.agent_runtime_id.generation.get(),
+        Ok(receipt) => {
+            let identity_str = receipt.identity.to_string();
+            RpcResponse::success(
+                id,
+                MobMemberSendResult {
+                    mob_id: mob_id.to_string(),
+                    agent_identity: identity_str.clone(),
+                    member_ref: meerkat_contracts::WireMemberRef::encode(
+                        mob_id.as_str(),
+                        &identity_str,
+                    ),
+                    handling_mode: receipt.handling_mode.into(),
                 },
-                fence_token: receipt.fence_token.get(),
-                handling_mode: receipt.handling_mode.into(),
-            },
-        ),
+            )
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -871,16 +949,21 @@ pub async fn handle_spawn_helper(
         .mob_spawn_helper(&mob_id, agent_identity, params.prompt, options)
         .await
     {
-        Ok(result) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "output": result.output,
-                "tokens_used": result.tokens_used,
-                "agent_identity": result.agent_identity,
-                "agent_runtime_id": result.agent_runtime_id,
-                "fence_token": result.fence_token,
-            }),
-        ),
+        Ok(result) => {
+            let identity_str = result.agent_identity.to_string();
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "output": result.output,
+                    "tokens_used": result.tokens_used,
+                    "agent_identity": result.agent_identity,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        mob_id.as_str(),
+                        &identity_str,
+                    ),
+                }),
+            )
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -945,16 +1028,21 @@ pub async fn handle_fork_helper(
         )
         .await
     {
-        Ok(result) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "output": result.output,
-                "tokens_used": result.tokens_used,
-                "agent_identity": result.agent_identity,
-                "agent_runtime_id": result.agent_runtime_id,
-                "fence_token": result.fence_token,
-            }),
-        ),
+        Ok(result) => {
+            let identity_str = result.agent_identity.to_string();
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "output": result.output,
+                    "tokens_used": result.tokens_used,
+                    "agent_identity": result.agent_identity,
+                    "member_ref": meerkat_contracts::WireMemberRef::encode(
+                        mob_id.as_str(),
+                        &identity_str,
+                    ),
+                }),
+            )
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1121,36 +1209,41 @@ pub async fn handle_rotate_supervisor(
 // Exposes the work lane (previously Rust-only) through JSON-RPC so mobkit
 // and other non-Rust consumers can submit / cancel work.
 
-#[derive(Debug, Deserialize)]
-pub struct MobSubmitWorkParams {
-    pub mob_id: String,
-    pub agent_identity: String,
-    pub generation: u64,
-    pub fence_token: u64,
-    /// Optional caller-supplied work reference. When absent the server
-    /// generates a fresh UUID.
-    #[serde(default)]
-    pub work_ref: Option<String>,
-    pub content: ContentInput,
-    /// One of `"external"` or `"internal"`. Defaults to `"external"` when
-    /// omitted — matches the dominant mob work-lane usage (user-originated
-    /// turns into a mob member).
-    #[serde(default)]
-    pub origin: Option<String>,
-}
+pub use meerkat_contracts::{
+    MobCancelAllWorkParams, MobCancelWorkParams, MobSubmitWorkParams, MobSubmitWorkResult,
+    WireMemberRef, WireWorkOrigin,
+};
 
-#[derive(Debug, Deserialize)]
-pub struct MobCancelWorkParams {
-    pub mob_id: String,
-    pub work_ref: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MobCancelAllWorkParams {
-    pub mob_id: String,
-    pub agent_identity: String,
-    pub generation: u64,
-    pub fence_token: u64,
+/// Resolve the `(mob_id, agent_identity)` pair carried by a `WireMemberRef`
+/// against the live mob roster, returning the current `AgentRuntimeId` and
+/// fence token. Replaces binding-era `{generation, fence_token}` arguments
+/// from app callers — clients pass the opaque token, the server looks up the
+/// current incarnation.
+async fn resolve_member_ref(
+    member_ref: &WireMemberRef,
+    state: &Arc<MobMcpState>,
+) -> Result<
+    (
+        MobId,
+        AgentIdentity,
+        meerkat_mob::AgentRuntimeId,
+        meerkat_mob::FenceToken,
+    ),
+    String,
+> {
+    let (mob_id_str, identity_str) = member_ref
+        .decode()
+        .map_err(|err| format!("invalid member_ref: {err}"))?;
+    let mob_id = MobId::from(mob_id_str);
+    let identity = AgentIdentity::from(identity_str);
+    let entry = state
+        .mob_list_members(&mob_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .find(|entry| entry.agent_identity == identity)
+        .ok_or_else(|| format!("member {identity} not found in mob {mob_id}"))?;
+    Ok((mob_id, identity, entry.agent_runtime_id, entry.fence_token))
 }
 
 pub async fn handle_submit_work(
@@ -1162,14 +1255,11 @@ pub async fn handle_submit_work(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    let identity = AgentIdentity::from(params.agent_identity.as_str());
-    let generation = meerkat_mob::Generation::new(params.generation);
-    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity.clone(), generation);
-    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    let (mob_id, _identity, runtime_id, fence_token) =
+        match resolve_member_ref(&params.member_ref, state).await {
+            Ok(resolved) => resolved,
+            Err(err) => return invalid_params(id, err),
+        };
     let work_ref = match params.work_ref {
         Some(ref s) if !s.is_empty() => match meerkat_mob::WorkRef::from_str(s) {
             Ok(wr) => wr,
@@ -1179,32 +1269,28 @@ pub async fn handle_submit_work(
         },
         _ => meerkat_mob::WorkRef::new(),
     };
-    let origin = match params.origin.as_deref().unwrap_or("external") {
-        "external" => meerkat_mob::WorkOrigin::External,
-        "internal" => meerkat_mob::WorkOrigin::Internal,
-        other => {
-            return invalid_params(
-                id,
-                format!("origin must be 'external' or 'internal', got: {other}"),
-            );
-        }
+    let origin = match params.origin {
+        WireWorkOrigin::External => meerkat_mob::WorkOrigin::External,
+        WireWorkOrigin::Internal => meerkat_mob::WorkOrigin::Internal,
     };
-    let spec = meerkat_mob::WorkSpec::new(params.content, origin);
+    let content = match ContentInput::try_from(params.content) {
+        Ok(c) => c,
+        Err(err) => return invalid_params(id, format!("invalid content: {err}")),
+    };
+    let spec = meerkat_mob::WorkSpec::new(content, origin);
     match state
-        .mob_submit_work(&mob_id, runtime_id, fence_token, work_ref, spec)
+        .mob_submit_work(&mob_id, runtime_id.clone(), fence_token, work_ref, spec)
         .await
     {
-        Ok(receipt) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "work_ref": receipt.work_ref.to_string(),
-                "agent_runtime_id": WireAgentRuntimeId {
-                    identity: receipt.runtime_id.identity.to_string(),
-                    generation: receipt.runtime_id.generation.get(),
-                },
-            }),
-        ),
+        Ok(receipt) => {
+            let identity_str = receipt.runtime_id.identity.to_string();
+            let body = MobSubmitWorkResult {
+                mob_id: mob_id.to_string(),
+                work_ref: receipt.work_ref.to_string(),
+                member_ref: WireMemberRef::encode(mob_id.as_str(), &identity_str),
+            };
+            RpcResponse::success(id, body)
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1243,14 +1329,11 @@ pub async fn handle_cancel_all_work(
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
-        Ok(m) => m,
-        Err(resp) => return resp,
-    };
-    let identity = AgentIdentity::from(params.agent_identity.as_str());
-    let generation = meerkat_mob::Generation::new(params.generation);
-    let runtime_id = meerkat_mob::AgentRuntimeId::new(identity, generation);
-    let fence_token = meerkat_mob::FenceToken::new(params.fence_token);
+    let (mob_id, _identity, runtime_id, fence_token) =
+        match resolve_member_ref(&params.member_ref, state).await {
+            Ok(resolved) => resolved,
+            Err(err) => return invalid_params(id, err),
+        };
     match state
         .mob_cancel_all_work(&mob_id, runtime_id, fence_token)
         .await
@@ -1605,14 +1688,14 @@ fn spawn_spec_from_wire(
     Ok(spec)
 }
 
-fn spawn_receipt_wire(result: &meerkat_mob::SpawnResult) -> meerkat_contracts::MobSpawnReceiptWire {
+fn spawn_receipt_wire(
+    mob_id: &MobId,
+    result: &meerkat_mob::SpawnResult,
+) -> meerkat_contracts::MobSpawnReceiptWire {
+    let identity_str = result.agent_identity.to_string();
     meerkat_contracts::MobSpawnReceiptWire {
-        agent_identity: result.agent_identity.to_string(),
-        agent_runtime_id: meerkat_contracts::WireAgentRuntimeId {
-            identity: result.agent_runtime_id.identity.to_string(),
-            generation: result.agent_runtime_id.generation.get(),
-        },
-        fence_token: result.fence_token.get(),
+        agent_identity: identity_str.clone(),
+        member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
     }
 }
 
@@ -1639,16 +1722,15 @@ pub async fn handle_ensure_member(
     };
     match handle.ensure_member(spec).await {
         Ok(meerkat_mob::runtime::EnsureMemberOutcome::Spawned(spawn)) => {
-            let outcome =
-                meerkat_contracts::MobEnsureMemberOutcomeWire::Spawned(spawn_receipt_wire(&spawn));
+            let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Spawned(
+                spawn_receipt_wire(&mob_id, &spawn),
+            );
             RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
         }
         Ok(meerkat_mob::runtime::EnsureMemberOutcome::Existed(entry)) => {
-            let member = match serde_json::to_value(&entry) {
-                Ok(v) => v,
-                Err(err) => return invalid_params(id, format!("serialize member: {err}")),
-            };
-            let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(member);
+            let outcome = meerkat_contracts::MobEnsureMemberOutcomeWire::Existed(
+                member_list_entry_wire(&mob_id, &entry),
+            );
             RpcResponse::success(id, meerkat_contracts::MobEnsureMemberResult { outcome })
         }
         Err(err) => invalid_params(id, err.to_string()),
@@ -1697,7 +1779,11 @@ pub async fn handle_reconcile(
                     .iter()
                     .map(std::string::ToString::to_string)
                     .collect(),
-                spawned: report.spawned.iter().map(spawn_receipt_wire).collect(),
+                spawned: report
+                    .spawned
+                    .iter()
+                    .map(|spawn| spawn_receipt_wire(&mob_id, spawn))
+                    .collect(),
                 retired: report
                     .retired
                     .iter()
@@ -1758,7 +1844,7 @@ pub async fn handle_list_members_matching(
     let entries = handle.list_members_matching(filter).await;
     let members: Vec<Value> = entries
         .iter()
-        .filter_map(|e| serde_json::to_value(e).ok())
+        .filter_map(|entry| serde_json::to_value(member_list_entry_wire(&mob_id, entry)).ok())
         .collect();
     RpcResponse::success(
         id,
@@ -1781,8 +1867,10 @@ mod tests {
             FenceToken::new(3),
             FenceToken::new(4),
         );
+        let mob_id = MobId::from("mob-1");
         let response = respawn_result_response(
             Some(RpcId::Num(42)),
+            &mob_id,
             Err(MobRespawnError::TopologyRestoreFailed {
                 receipt: receipt.clone(),
                 failed_peer_ids: vec![AgentIdentity::from("peer-a"), AgentIdentity::from("peer-b")],

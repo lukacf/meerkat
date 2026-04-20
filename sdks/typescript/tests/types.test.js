@@ -4,6 +4,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import packageJson from "../package.json" with { type: "json" };
 import {
@@ -21,6 +22,24 @@ import {
   Session,
   DeferredSession,
 } from "../dist/index.js";
+
+/**
+ * Build an opaque wire `member_ref` token using the same shape the server
+ * emits (``base64url({"m": mob_id, "a": agent_identity})``).
+ *
+ * The TypeScript SDK only forwards `member_ref` opaquely — it never decodes
+ * the token — so any non-empty string would satisfy the parser. Mirroring
+ * the server-side encoding here keeps fixtures realistic and leaves the
+ * door open for future round-trip decode assertions without churn.
+ */
+function makeMemberRef(mobId, agentIdentity) {
+  const payload = JSON.stringify({ m: mobId, a: agentIdentity });
+  return Buffer.from(payload, "utf-8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
 // ---------------------------------------------------------------------------
 // Contract version
@@ -1018,8 +1037,7 @@ describe("Parity wrappers", () => {
         return {
           mob_id: params.mob_id,
           agent_identity: params.agent_identity,
-          agent_runtime_id: "worker-0:1",
-          fence_token: 1,
+          member_ref: makeMemberRef(params.mob_id, params.agent_identity),
         };
       }
       if (method === "mob/append_system_context") {
@@ -1030,8 +1048,7 @@ describe("Parity wrappers", () => {
           results: [{
             ok: true,
             agent_identity: "worker-1",
-            agent_runtime_id: "worker-1:1",
-            fence_token: 2,
+            member_ref: makeMemberRef(params.mob_id, "worker-1"),
           }],
         };
       }
@@ -1079,12 +1096,14 @@ describe("Parity wrappers", () => {
     const deleted = await client.deleteMobProfile("worker", 2);
 
     assert.equal(spawnedOne.agentIdentity, "worker-0");
-    assert.equal(spawnedOne.agentRuntimeId, "worker-0:1");
-    assert.equal(spawnedOne.fenceToken, 1);
+    assert.equal(spawnedOne.memberRef, makeMemberRef("mob-1", "worker-0"));
+    assert.equal(spawnedOne.agentRuntimeId, undefined);
+    assert.equal(spawnedOne.fenceToken, undefined);
     assert.equal(spawned[0].ok, true);
     assert.equal(spawned[0].agentIdentity, "worker-1");
-    assert.equal(spawned[0].agentRuntimeId, "worker-1:1");
-    assert.equal(spawned[0].fenceToken, 2);
+    assert.equal(spawned[0].memberRef, makeMemberRef("mob-1", "worker-1"));
+    assert.equal(spawned[0].agentRuntimeId, undefined);
+    assert.equal(spawned[0].fenceToken, undefined);
     assert.equal(append.agent_identity, "worker-1");
     assert.equal(events.events.length, 1);
     assert.equal(created.notFound, false);
@@ -1109,14 +1128,14 @@ describe("Parity wrappers", () => {
 
   it("returns identity-native mob member listings", async () => {
     const client = new MeerkatClient();
+    const expectedRef = makeMemberRef("mob-1", "worker-1");
     client.request = async (method) => {
       if (method === "mob/members") {
         return {
           members: [
             {
               agent_identity: "worker-1",
-              agent_runtime_id: "worker-1:3",
-              fence_token: 3,
+              member_ref: expectedRef,
               profile: "worker",
             },
           ],
@@ -1129,21 +1148,23 @@ describe("Parity wrappers", () => {
 
     assert.equal(members.length, 1);
     assert.equal(members[0].agentIdentity, "worker-1");
-    assert.equal(members[0].agentRuntimeId, "worker-1:3");
-    assert.equal(members[0].fenceToken, 3);
+    assert.equal(members[0].memberRef, expectedRef);
+    assert.equal(members[0].agentRuntimeId, undefined);
+    assert.equal(members[0].fenceToken, undefined);
   });
 
   it("uses canonical role_name for helper APIs while accepting profileName alias", async () => {
     const client = new MeerkatClient();
     const calls = [];
+    const expectedRef = makeMemberRef("mob-1", "generated-helper");
     client.request = async (method, params) => {
       calls.push({ method, params });
+      const agentIdentity = params.agent_identity ?? "generated-helper";
       return {
         output: "ok",
         tokens_used: 1,
-        agent_identity: params.agent_identity ?? "generated-helper",
-        agent_runtime_id: "generated-helper:1",
-        fence_token: 9,
+        agent_identity: agentIdentity,
+        member_ref: makeMemberRef("mob-1", agentIdentity),
       };
     };
 
@@ -1156,10 +1177,16 @@ describe("Parity wrappers", () => {
     assert.equal(calls[1].params.role_name, "legacy-worker");
     assert.equal(calls[2].params.role_name, "worker");
     assert.equal(calls[3].params.role_name, "legacy-worker");
-    assert.equal(spawnByRole.agentRuntimeId, "generated-helper:1");
-    assert.equal(spawnByProfile.agentRuntimeId, "generated-helper:1");
-    assert.equal(forkByRole.agentRuntimeId, "generated-helper:1");
-    assert.equal(forkByProfile.agentRuntimeId, "generated-helper:1");
+    // App-facing helper receipts expose only `member_ref`; binding-era
+    // `agent_runtime_id` / `fence_token` are retired per dogma #10.
+    assert.equal(spawnByRole.memberRef, expectedRef);
+    assert.equal(spawnByProfile.memberRef, expectedRef);
+    assert.equal(forkByRole.memberRef, expectedRef);
+    assert.equal(forkByProfile.memberRef, expectedRef);
+    assert.equal(spawnByRole.agentRuntimeId, undefined);
+    assert.equal(spawnByRole.fenceToken, undefined);
+    assert.equal(forkByRole.agentRuntimeId, undefined);
+    assert.equal(forkByRole.fenceToken, undefined);
   });
 });
 
@@ -1283,15 +1310,12 @@ describe("Mob member host ingress", () => {
   it("routes member sends through the canonical host member-send lane", async () => {
     const client = new MeerkatClient();
     const calls = [];
+    const expectedRef = makeMemberRef("mob-1", "reviewer-1");
     client.request = async (method, params) => {
       calls.push({ method, params });
       return {
         agent_identity: "reviewer-1",
-        agent_runtime_id: {
-          identity: "reviewer-1",
-          generation: 4,
-        },
-        fence_token: 4,
+        member_ref: expectedRef,
         handling_mode: "steer",
       };
     };
@@ -1309,9 +1333,7 @@ describe("Mob member host ingress", () => {
 
     assert.deepEqual(receipt, {
       agentIdentity: "reviewer-1",
-      agentRuntimeId: "reviewer-1:4",
-      fenceToken: 4,
-      generation: 4,
+      memberRef: expectedRef,
       handlingMode: "steer",
     });
     assert.deepEqual(calls, [
@@ -1337,7 +1359,7 @@ describe("Mob member host ingress", () => {
 
     await assert.rejects(
       () => new Mob(client, "mob-1").member("reviewer-1").send("hello reviewer"),
-      /missing runtime identity fields/,
+      /missing member_ref/,
     );
   });
 });

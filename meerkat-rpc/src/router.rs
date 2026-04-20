@@ -3180,8 +3180,14 @@ mod tests {
             .unwrap();
         let sent = result_value(&send_resp);
         assert_eq!(sent["agent_identity"], "worker-1");
-        assert_eq!(sent["agent_runtime_id"]["identity"], "worker-1");
-        assert_eq!(sent["agent_runtime_id"]["generation"], 0);
+        assert!(
+            sent["member_ref"].as_str().is_some_and(|s| !s.is_empty()),
+            "mob/member_send must return the opaque member_ref"
+        );
+        assert!(
+            sent.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing mob/member_send"
+        );
         assert_eq!(sent["handling_mode"], "queue");
     }
 
@@ -4420,7 +4426,7 @@ mod tests {
         let members = members_value["members"].as_array().expect("members array");
         assert_eq!(members.len(), 1, "retiring member should remain observable");
         assert_eq!(members[0]["agent_identity"], "lead-1");
-        assert_eq!(members[0]["state"], "Retiring");
+        assert_eq!(members[0]["state"], "retiring");
 
         let send_resp = router
             .dispatch(make_request(

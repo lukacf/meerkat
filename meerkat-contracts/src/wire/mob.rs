@@ -518,10 +518,11 @@ pub struct MobMemberSendResult {
     pub mob_id: String,
     /// Identity-native member identity (0.6).
     pub agent_identity: String,
-    /// Identity-native runtime ID for this incarnation (0.6).
-    pub agent_runtime_id: WireAgentRuntimeId,
-    /// Fence token for the current incarnation (0.6).
-    pub fence_token: u64,
+    /// Server-resolved opaque handle for subsequent member-targeted calls.
+    /// App code routes through `member_ref`; the binding-era
+    /// `{identity, generation}` pair carried by `WireAgentRuntimeId` is
+    /// retired from app-facing responses per dogma #10.
+    pub member_ref: WireMemberRef,
     pub handling_mode: WireHandlingMode,
 }
 
@@ -715,28 +716,142 @@ pub struct MobEnsureMemberParams {
     pub spec: MobMemberSpecWire,
 }
 
+/// Server-resolved opaque handle for a mob member.
+///
+/// Encodes `{mob_id, agent_identity}` as a single base64url-encoded token
+/// that callers treat as opaque. The server resolves the current
+/// `AgentRuntimeId` and fence token against the live mob roster on every
+/// dispatch — clients never reason about `generation` or `fence_token`
+/// directly.
+///
+/// Use [`WireMemberRef::encode`] to produce a token and
+/// [`WireMemberRef::decode`] inside an RPC handler to recover the
+/// `(mob_id, agent_identity)` pair before resolving against the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct WireMemberRef(String);
+
+impl WireMemberRef {
+    /// Construct a handle from its components. The `mob_id` and
+    /// `agent_identity` together form the resolution key the server uses to
+    /// look up the member's current incarnation.
+    #[must_use]
+    pub fn encode(mob_id: &str, agent_identity: &str) -> Self {
+        // Single-letter keys keep the encoded payload short so the token
+        // remains compact in URLs and JSON payloads.
+        // `Value::to_string` on a two-field object is infallible.
+        let payload = serde_json::json!({ "m": mob_id, "a": agent_identity });
+        Self(base64_url_encode(payload.to_string().as_bytes()))
+    }
+
+    /// Borrow the raw token string for transport.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Construct a handle from a raw token string without validation. Used
+    /// when forwarding an opaque token received from the wire.
+    #[must_use]
+    pub fn from_token(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// Decode the handle into `(mob_id, agent_identity)`. Returns `Err` when
+    /// the token is malformed.
+    pub fn decode(&self) -> Result<(String, String), WireMemberRefError> {
+        let bytes = base64_url_decode(&self.0).map_err(|_| WireMemberRefError::Malformed)?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| WireMemberRefError::Malformed)?;
+        let mob_id = value
+            .get("m")
+            .and_then(Value::as_str)
+            .ok_or(WireMemberRefError::Malformed)?;
+        let agent_identity = value
+            .get("a")
+            .and_then(Value::as_str)
+            .ok_or(WireMemberRefError::Malformed)?;
+        Ok((mob_id.to_string(), agent_identity.to_string()))
+    }
+}
+
+/// Failure modes for [`WireMemberRef::decode`].
+#[derive(Debug, thiserror::Error)]
+pub enum WireMemberRefError {
+    /// Token is not valid base64url or its decoded payload is not the
+    /// expected `{m, a}` shape.
+    #[error("malformed member ref token")]
+    Malformed,
+}
+
+fn base64_url_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn base64_url_decode(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(input)
+}
+
 /// Identity-native payload for `EnsureMemberOutcome::Spawned`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobSpawnReceiptWire {
     pub agent_identity: String,
-    pub agent_runtime_id: WireAgentRuntimeId,
-    pub fence_token: u64,
+    /// Server-resolved opaque handle for subsequent member-targeted calls
+    /// (work submission, cancellation, lifecycle). Replaces the binding-era
+    /// `generation` / `fence_token` pair on app-facing surfaces.
+    pub member_ref: WireMemberRef,
+}
+
+/// Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobMemberStatus {
+    Active,
+    Retiring,
+    Broken,
+    Completed,
+    Unknown,
+}
+
+/// Public roster entry returned by `mob/ensure_member`'s `Existed` outcome
+/// (and other surfaces that want a typed snapshot of a single member). Mirrors
+/// the public-facing fields of `meerkat_mob::runtime::MobMemberListEntry`
+/// without leaking bridge-internal fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobMemberListEntryWire {
+    pub agent_identity: String,
+    pub member_ref: WireMemberRef,
+    pub role: String,
+    pub runtime_mode: WireMobRuntimeMode,
+    pub state: WireMemberState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wired_to: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+    pub status: WireMobMemberStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub is_final: bool,
 }
 
 /// Outcome of a `mob/ensure_member` call.
 ///
-/// `Existed` returns the raw roster entry as untyped JSON — the Rust
-/// `MobMemberListEntry` type is the source of truth and carries its own
-/// `#[derive(Serialize)]` shape. Consumers that want a strongly-typed shape
-/// should parse it with the domain crate directly.
+/// `Existed` returns the typed [`MobMemberListEntryWire`] roster snapshot so
+/// public consumers do not need out-of-band knowledge of the Rust domain
+/// `MobMemberListEntry` shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum MobEnsureMemberOutcomeWire {
     #[serde(rename = "spawned")]
     Spawned(MobSpawnReceiptWire),
     #[serde(rename = "existed")]
-    Existed(Value),
+    Existed(MobMemberListEntryWire),
 }
 
 /// Response payload for `mob/ensure_member`.
@@ -803,6 +918,86 @@ pub struct MobReconcileResult {
     pub report: MobReconcileReportWire,
 }
 
+/// Typed lifecycle action for `mob/lifecycle`. Replaces the prior
+/// `action: String` discriminator with an exhaustive enum so callers and
+/// handlers reason about lifecycle transitions through the type system
+/// rather than string folklore.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobLifecycleAction {
+    Stop,
+    Resume,
+    Complete,
+    Reset,
+    Destroy,
+}
+
+/// Request payload for `mob/lifecycle`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobLifecycleParams {
+    pub mob_id: String,
+    pub action: WireMobLifecycleAction,
+}
+
+/// Origin for `MobSubmitWorkParams`. Replaces the prior free-form
+/// `origin: Option<String>` shape.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireWorkOrigin {
+    #[default]
+    External,
+    Internal,
+}
+
+/// Request payload for `mob/submit_work`.
+///
+/// Identifies the member through the opaque [`WireMemberRef`] handle the
+/// server resolves against the live roster — callers do not pass
+/// `generation` or `fence_token`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobSubmitWorkParams {
+    pub member_ref: WireMemberRef,
+    /// Optional caller-supplied work reference. When absent the server
+    /// generates a fresh UUID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_ref: Option<String>,
+    pub content: WireContentInput,
+    #[serde(default)]
+    pub origin: WireWorkOrigin,
+}
+
+/// Response payload for `mob/submit_work`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobSubmitWorkResult {
+    pub mob_id: String,
+    pub work_ref: String,
+    pub member_ref: WireMemberRef,
+}
+
+/// Request payload for `mob/cancel_work`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobCancelWorkParams {
+    pub mob_id: String,
+    pub work_ref: String,
+}
+
+/// Request payload for `mob/cancel_all_work`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobCancelAllWorkParams {
+    pub member_ref: WireMemberRef,
+}
+
 /// Roster member lifecycle state for `MobMemberFilterWire`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -852,6 +1047,22 @@ pub struct MobListMembersMatchingResult {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_member_ref_round_trips_through_encode_decode() {
+        let token = WireMemberRef::encode("mob-42", "worker-1");
+        let (mob_id, agent_identity) = token.decode().expect("decode round-trips");
+        assert_eq!(mob_id, "mob-42");
+        assert_eq!(agent_identity, "worker-1");
+    }
+
+    #[test]
+    fn wire_member_ref_rejects_malformed_token() {
+        let err = WireMemberRef::from_token("not-a-token-payload")
+            .decode()
+            .expect_err("malformed tokens must fail to decode");
+        assert!(matches!(err, WireMemberRefError::Malformed));
+    }
 
     #[test]
     fn mob_wire_params_reject_legacy_local_target_shape() {

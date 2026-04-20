@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,6 +9,14 @@ import pytest
 from meerkat.client import MeerkatClient
 from meerkat.mob import Mob
 from meerkat.session import DeferredSession, Session
+
+
+def _make_member_ref(mob_id: str, agent_identity: str) -> str:
+    """Build an opaque wire `member_ref` token using the same shape the
+    server emits (``base64url({"m": mob_id, "a": agent_identity})``).
+    """
+    payload = json.dumps({"m": mob_id, "a": agent_identity}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
 CANONICAL_APP_RPC_METHODS = {
@@ -221,6 +231,10 @@ async def test_spawn_many_uses_explicit_rpc_method():
     client = MeerkatClient()
     client._process = MagicMock()
     client._dispatcher = MagicMock()
+    # Server-resolved `member_ref` is the sole identity handle on
+    # `mob/spawn_many` responses (dogma #10). Binding-era
+    # `agent_runtime_id` / `fence_token` are retired from the app-facing
+    # wire shape.
     client._request = AsyncMock(
         return_value={
             "results": [
@@ -228,8 +242,7 @@ async def test_spawn_many_uses_explicit_rpc_method():
                     "ok": True,
                     "mob_id": "mob1",
                     "agent_identity": "m1",
-                    "agent_runtime_id": "m1:1",
-                    "fence_token": 3,
+                    "member_ref": _make_member_ref("mob1", "m1"),
                 }
             ]
         }
@@ -247,6 +260,7 @@ async def test_spawn_many_uses_explicit_rpc_method():
         },
     )
     assert results[0]["agent_identity"] == "m1"
+    assert results[0]["member_ref"] == _make_member_ref("mob1", "m1")
 
 
 @pytest.mark.asyncio
@@ -254,7 +268,14 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
     client = MeerkatClient()
     client._process = MagicMock()
     client._dispatcher = MagicMock()
-    client._request = AsyncMock(return_value={"output": "ok", "tokens_used": 1})
+    client._request = AsyncMock(
+        return_value={
+            "output": "ok",
+            "tokens_used": 1,
+            "agent_identity": "helper-1",
+            "member_ref": _make_member_ref("mob1", "helper-1"),
+        }
+    )
 
     await client.spawn_mob_helper(
         "mob1",
@@ -273,6 +294,14 @@ async def test_role_name_is_canonical_for_helper_calls_with_profile_alias():
         },
     )
 
+    client._request = AsyncMock(
+        return_value={
+            "output": "ok",
+            "tokens_used": 1,
+            "agent_identity": "fork-1",
+            "member_ref": _make_member_ref("mob1", "fork-1"),
+        }
+    )
     await client.fork_mob_helper(
         "mob1",
         "source-id",

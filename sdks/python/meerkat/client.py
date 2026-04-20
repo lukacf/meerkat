@@ -53,11 +53,14 @@ from .mob import (
     Mob,
     MobHelperResult,
     MobKickoffMemberSnapshot,
+    MobLifecycleAction,
     MobMember,
+    MobMemberRef,
     MobMemberSnapshot,
     MobReadyMemberSnapshot,
     MobSpawnResult,
     MobSpawnSpec,
+    WorkOrigin,
 )
 from .session import DeferredSession, Session, _normalize_skill_ref
 from .streaming import EventStream, EventSubscription, _StdoutDispatcher
@@ -1048,9 +1051,12 @@ class MeerkatClient:
         for entry in members:
             if not isinstance(entry, dict):
                 continue
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                entry.get("agent_runtime_id")
-            )
+            member_ref = entry.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
+                raise MeerkatError(
+                    "INVALID_RESPONSE",
+                    "Invalid mob/members response: entry missing member_ref",
+                )
             normalized.append(
                 {
                     "agent_identity": (
@@ -1058,14 +1064,13 @@ class MeerkatClient:
                         if entry.get("agent_identity") is not None
                         else ""
                     ),
-                    "agent_runtime_id": runtime_id,
-                    "fence_token": (
-                        int(entry["fence_token"])
-                        if isinstance(entry.get("fence_token"), int)
-                        else 0
+                    "member_ref": member_ref,
+                    "profile": str(
+                        entry.get("profile_name")
+                        or entry.get("profile")
+                        or entry.get("role")
+                        or ""
                     ),
-                    **({"generation": generation} if generation is not None else {}),
-                    "profile": str(entry.get("profile_name") or entry.get("profile") or ""),
                     **(
                         {"peer_id": str(entry["peer_id"])}
                         if entry.get("peer_id") is not None
@@ -1148,14 +1153,11 @@ class MeerkatClient:
                 "render_metadata": render_metadata,
             },
         )
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
-        fence_token = result.get("fence_token")
-        if not runtime_id or not isinstance(fence_token, int):
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/member_send response: missing runtime identity fields",
+                "Invalid mob/member_send response: missing member_ref",
             )
         receipt_handling_mode = result.get("handling_mode")
         return {
@@ -1169,9 +1171,7 @@ class MeerkatClient:
                     else agent_identity
                 )
             ),
-            "agent_runtime_id": runtime_id,
-            "fence_token": fence_token,
-            **({"generation": generation} if generation is not None else {}),
+            "member_ref": member_ref,
             "handling_mode": (
                 receipt_handling_mode
                 if receipt_handling_mode in {"queue", "steer"}
@@ -1204,10 +1204,6 @@ class MeerkatClient:
             "additional_instructions": additional_instructions,
         }
         result = await self._request_with_member_identity_compat("mob/spawn", params)
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
-        fence_token = result.get("fence_token")
         resolved_identity = (
             result["agent_identity"]
             if isinstance(result.get("agent_identity"), str)
@@ -1218,23 +1214,16 @@ class MeerkatClient:
                 else agent_identity
             )
         )
-        if not runtime_id and resolved_identity:
-            runtime_id = f"{resolved_identity}:0"
-            if generation is None:
-                generation = 0
-        if not isinstance(fence_token, int):
-            fence_token = 0 if runtime_id else None
-        if not runtime_id or fence_token is None:
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/spawn response: missing runtime identity fields",
+                "Invalid mob/spawn response: missing member_ref",
             )
         return {
             "mob_id": str(result.get("mob_id", mob_id)),
             "agent_identity": resolved_identity,
-            "agent_runtime_id": runtime_id,
-            "fence_token": fence_token,
-            **({"generation": generation} if generation is not None else {}),
+            "member_ref": member_ref,
         }
 
 
@@ -1271,10 +1260,6 @@ class MeerkatClient:
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict) or not bool(entry.get("ok")):
                 continue
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                entry.get("agent_runtime_id")
-            )
-            fence_token = entry.get("fence_token")
             requested_identity = (
                 str(specs[index].get("agent_identity", ""))
                 if index < len(specs)
@@ -1286,24 +1271,17 @@ class MeerkatClient:
                 and str(entry["agent_identity"])
                 else requested_identity
             )
-            if not runtime_id and resolved_identity:
-                runtime_id = f"{resolved_identity}:0"
-                if generation is None:
-                    generation = 0
-            if not isinstance(fence_token, int):
-                fence_token = 0 if runtime_id else None
-            if not runtime_id or fence_token is None:
+            member_ref = entry.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/spawn_many response: missing runtime identity fields",
+                    "Invalid mob/spawn_many response: successful entry missing member_ref",
                 )
             normalized.append(
                 {
                     "mob_id": str(entry.get("mob_id", mob_id)),
                     "agent_identity": resolved_identity,
-                    "agent_runtime_id": runtime_id,
-                    "fence_token": fence_token,
-                    **({"generation": generation} if generation is not None else {}),
+                    "member_ref": member_ref,
                 }
             )
         return normalized
@@ -1347,13 +1325,11 @@ class MeerkatClient:
         )
         receipt = result.get("receipt")
         if isinstance(receipt, dict):
-            runtime_id, generation = _parse_agent_runtime_id_wire(
-                receipt.get("agent_runtime_id")
-            )
-            if not runtime_id:
+            member_ref = receipt.get("member_ref")
+            if not isinstance(member_ref, str) or not member_ref:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/respawn response: missing runtime identity fields",
+                    "Invalid mob/respawn response: receipt missing member_ref",
                 )
             result = dict(result)
             result["receipt"] = {
@@ -1368,10 +1344,7 @@ class MeerkatClient:
                         else agent_identity
                     )
                 ),
-                "agent_runtime_id": runtime_id,
-                "previous_fence_token": int(receipt.get("previous_fence_token", 0)),
-                "fence_token": int(receipt.get("fence_token", 0)),
-                **({"generation": generation} if generation is not None else {}),
+                "member_ref": member_ref,
             }
         return {
             "status": (
@@ -1606,9 +1579,12 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/spawn_helper response: missing member_ref",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
@@ -1618,13 +1594,7 @@ class MeerkatClient:
                 and result["agent_identity"]
                 else (agent_identity or "")
             ),
-            "agent_runtime_id": runtime_id,
-            "fence_token": (
-                int(result["fence_token"])
-                if isinstance(result.get("fence_token"), int)
-                else 0
-            ),
-            **({"generation": generation} if generation is not None else {}),
+            "member_ref": member_ref,
         }
 
     async def fork_mob_helper(
@@ -1651,9 +1621,12 @@ class MeerkatClient:
             "runtime_mode": runtime_mode,
             "backend": backend,
         })
-        runtime_id, generation = _parse_agent_runtime_id_wire(
-            result.get("agent_runtime_id")
-        )
+        member_ref = result.get("member_ref")
+        if not isinstance(member_ref, str) or not member_ref:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/fork_helper response: missing member_ref",
+            )
         return {
             "output": str(result["output"]) if result.get("output") is not None else None,
             "tokens_used": int(result.get("tokens_used", 0)),
@@ -1663,13 +1636,7 @@ class MeerkatClient:
                 and result["agent_identity"]
                 else (agent_identity or "")
             ),
-            "agent_runtime_id": runtime_id,
-            "fence_token": (
-                int(result["fence_token"])
-                if isinstance(result.get("fence_token"), int)
-                else 0
-            ),
-            **({"generation": generation} if generation is not None else {}),
+            "member_ref": member_ref,
         }
 
     async def create_mob_profile(self, name: str, profile: MobProfile) -> StoredMobProfile:
@@ -1727,7 +1694,13 @@ class MeerkatClient:
         )
         await self._request("mob/unwire", payload)
 
-    async def mob_lifecycle(self, mob_id: str, action: str) -> None:
+    async def mob_lifecycle(self, mob_id: str, action: MobLifecycleAction) -> None:
+        """Drive a mob through a typed lifecycle transition.
+
+        ``action`` must be one of the `MobLifecycleAction` literals
+        ("stop", "resume", "complete", "reset", "destroy"). The wire
+        contract rejects any other value.
+        """
         await self._request("mob/lifecycle", {"mob_id": mob_id, "action": action})
 
     async def mob_snapshot(self, mob_id: str) -> dict[str, Any]:
@@ -1763,28 +1736,24 @@ class MeerkatClient:
 
     async def mob_submit_work(
         self,
-        mob_id: str,
-        agent_identity: str,
-        generation: int,
-        fence_token: int,
+        member_ref: MobMemberRef,
         content: Any,
         *,
         work_ref: str | None = None,
-        origin: str = "external",
+        origin: WorkOrigin = "external",
     ) -> dict[str, Any]:
         """Submit a unit of work to a mob member through the work lane.
 
-        Wraps the ``mob/submit_work`` RPC (DELETE_ME C4). The work lane
-        was Rust-only prior to this; ``origin`` is ``"external"`` for
-        user-originated turns and ``"internal"`` for mob-orchestration
-        work. When ``work_ref`` is omitted the server generates a fresh
-        UUID.
+        ``member_ref`` is the opaque handle returned by
+        ``ensure_member``/``spawn_helper``/``fork_helper`` and member-list
+        responses. The server resolves it to the current incarnation, so
+        callers never pass raw ``generation`` / ``fence_token`` values.
+        ``origin`` is ``"external"`` for user-originated turns and
+        ``"internal"`` for mob-orchestration work. When ``work_ref`` is
+        omitted the server generates a fresh UUID.
         """
         params: dict[str, Any] = {
-            "mob_id": mob_id,
-            "agent_identity": agent_identity,
-            "generation": generation,
-            "fence_token": fence_token,
+            "member_ref": member_ref,
             "content": content,
             "origin": origin,
         }
@@ -1801,25 +1770,16 @@ class MeerkatClient:
             "mob/cancel_work", {"mob_id": mob_id, "work_ref": work_ref}
         )
 
-    async def mob_cancel_all_work(
-        self,
-        mob_id: str,
-        agent_identity: str,
-        generation: int,
-        fence_token: int,
-    ) -> dict[str, Any]:
+    async def mob_cancel_all_work(self, member_ref: MobMemberRef) -> dict[str, Any]:
         """Cancel all in-flight work for a specific mob member.
 
-        Wraps the ``mob/cancel_all_work`` RPC (DELETE_ME C4).
+        ``member_ref`` is the opaque handle returned by
+        ``ensure_member``/``spawn_helper``/``fork_helper`` and member-list
+        responses.
         """
         return await self._request(
             "mob/cancel_all_work",
-            {
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-                "generation": generation,
-                "fence_token": fence_token,
-            },
+            {"member_ref": member_ref},
         )
 
     async def append_mob_system_context(

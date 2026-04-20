@@ -89,7 +89,9 @@ import type {
   MobEventsResult,
   MobCreateOptions,
   MobFlowStatus,
+  MobLifecycleAction,
   MobMember,
+  MobMemberRef,
   MobProfile,
   MobProfileDeleteResult,
   MobProfileLookupResult,
@@ -778,12 +780,11 @@ export class MeerkatClient {
     const members = (result.members as Array<Record<string, unknown>>) ?? [];
     return members.map((member) => {
       const agentIdentity = String(member.agent_identity ?? "");
-      const runtime = parseAgentRuntimeId(member.agent_runtime_id);
-      const fenceToken =
-        typeof member.fence_token === "number" && Number.isFinite(member.fence_token)
-          ? member.fence_token
+      const memberRef =
+        typeof member.member_ref === "string" && member.member_ref.length > 0
+          ? member.member_ref
           : undefined;
-      if (!agentIdentity || !runtime.value || fenceToken === undefined) {
+      if (!agentIdentity || !memberRef) {
         throw new MeerkatError(
           "INVALID_RESPONSE",
           "Invalid mob/members response: missing identity-native member fields",
@@ -791,10 +792,8 @@ export class MeerkatClient {
       }
       return {
         agentIdentity,
-        agentRuntimeId: runtime.value,
-        fenceToken,
-        generation: runtime.generation,
-        profile: String(member.profile_name ?? member.profile ?? ""),
+        memberRef,
+        profile: String(member.profile_name ?? member.profile ?? member.role ?? ""),
         peerId: member.peer_id != null ? String(member.peer_id) : undefined,
         externalPeerSpecs:
           member.external_peer_specs && typeof member.external_peer_specs === "object"
@@ -817,8 +816,6 @@ export class MeerkatClient {
         status: member.status != null ? String(member.status) : undefined,
         error: member.error != null ? String(member.error) : undefined,
         isFinal: member.is_final != null ? Boolean(member.is_final) : undefined,
-        currentRuntimeId: runtime.value || undefined,
-        currentFenceToken: fenceToken || undefined,
       };
     });
   }
@@ -836,15 +833,14 @@ export class MeerkatClient {
       handling_mode: options?.handlingMode,
       render_metadata: options?.renderMetadata,
     });
-    const runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    const fenceToken =
-      typeof result.fence_token === "number" && Number.isFinite(result.fence_token)
-        ? result.fence_token
+    const memberRef =
+      typeof result.member_ref === "string" && result.member_ref.length > 0
+        ? result.member_ref
         : undefined;
-    if (!runtime.value || fenceToken === undefined) {
+    if (!memberRef) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid mob/member_send response: missing runtime identity fields",
+        "Invalid mob/member_send response: missing member_ref",
       );
     }
     return {
@@ -852,9 +848,7 @@ export class MeerkatClient {
         typeof result.agent_identity === "string" && result.agent_identity.length > 0
           ? result.agent_identity
           : agentIdentity,
-      agentRuntimeId: runtime.value,
-      fenceToken,
-      ...(runtime.generation !== undefined ? { generation: runtime.generation } : {}),
+      memberRef,
       handlingMode:
         result.handling_mode === "steer" || result.handling_mode === "queue"
           ? result.handling_mode
@@ -877,15 +871,14 @@ export class MeerkatClient {
       context: options.context,
       additional_instructions: options.additionalInstructions,
     });
-    const runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    const fenceToken =
-      typeof result.fence_token === "number" && Number.isFinite(result.fence_token)
-        ? result.fence_token
+    const memberRef =
+      typeof result.member_ref === "string" && result.member_ref.length > 0
+        ? result.member_ref
         : undefined;
-    if (!runtime.value || fenceToken === undefined) {
+    if (!memberRef) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid mob/spawn response: missing runtime identity fields",
+        "Invalid mob/spawn response: missing member_ref",
       );
     }
     return {
@@ -894,9 +887,7 @@ export class MeerkatClient {
         typeof result.agent_identity === "string" && result.agent_identity.length > 0
           ? result.agent_identity
           : options.agentIdentity,
-      agentRuntimeId: runtime.value,
-      fenceToken,
-      generation: runtime.generation,
+      memberRef,
     };
   }
 
@@ -924,23 +915,20 @@ export class MeerkatClient {
       const ok = Boolean(entry.ok);
       const agentIdentity =
         entry.agent_identity != null ? String(entry.agent_identity) : undefined;
-      const runtime = parseAgentRuntimeId(entry.agent_runtime_id);
-      const fenceToken =
-        typeof entry.fence_token === "number" && Number.isFinite(entry.fence_token)
-          ? entry.fence_token
+      const memberRef =
+        typeof entry.member_ref === "string" && entry.member_ref.length > 0
+          ? entry.member_ref
           : undefined;
-      if (ok && (!agentIdentity || !runtime.value || fenceToken === undefined)) {
+      if (ok && (!agentIdentity || !memberRef)) {
         throw new MeerkatError(
           "INVALID_RESPONSE",
-          "Invalid mob/spawn_many response: successful entry missing runtime identity fields",
+          "Invalid mob/spawn_many response: successful entry missing member_ref",
         );
       }
       return {
         ok,
         agentIdentity,
-        agentRuntimeId: runtime.value || undefined,
-        fenceToken,
-        generation: runtime.generation,
+        memberRef,
         error: entry.error != null ? String(entry.error) : undefined,
       };
     });
@@ -961,10 +949,7 @@ export class MeerkatClient {
     status: "completed" | "topology_restore_failed";
     receipt: {
       agentIdentity: string;
-      agentRuntimeId: string;
-      previousFenceToken: number;
-      fenceToken: number;
-      generation?: number;
+      memberRef: MobMemberRef;
     };
     failedPeerIds?: string[];
   }> {
@@ -984,11 +969,14 @@ export class MeerkatClient {
         "Invalid mob/respawn response: missing receipt",
       );
     }
-    const runtime = parseAgentRuntimeId(receipt.agent_runtime_id);
-    if (!runtime.value) {
+    const memberRef =
+      typeof receipt.member_ref === "string" && receipt.member_ref.length > 0
+        ? receipt.member_ref
+        : undefined;
+    if (!memberRef) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid mob/respawn response: receipt missing runtime identity",
+        "Invalid mob/respawn response: receipt missing member_ref",
       );
     }
     return {
@@ -996,10 +984,7 @@ export class MeerkatClient {
       receipt: {
         agentIdentity:
           receipt.identity != null ? String(receipt.identity) : agentIdentity,
-        agentRuntimeId: runtime.value,
-        previousFenceToken: Number(receipt.previous_fence_token ?? 0),
-        fenceToken: Number(receipt.fence_token ?? 0),
-        generation: runtime.generation,
+        memberRef,
       },
       failedPeerIds: rawFailed.map((peerId) => String(peerId)),
     };
@@ -1179,19 +1164,13 @@ export class MeerkatClient {
    * When `workRef` is omitted the server generates a fresh UUID.
    */
   async mobSubmitWork(args: {
-    mobId: string;
-    agentIdentity: string;
-    generation: number;
-    fenceToken: number;
+    memberRef: string;
     content: unknown;
     workRef?: string;
     origin?: "external" | "internal";
-  }): Promise<{ mobId: string; workRef: string; agentRuntimeId: unknown }> {
+  }): Promise<{ mobId: string; workRef: string; memberRef: string }> {
     const params: Record<string, unknown> = {
-      mob_id: args.mobId,
-      agent_identity: args.agentIdentity,
-      generation: args.generation,
-      fence_token: args.fenceToken,
+      member_ref: args.memberRef,
       content: args.content,
       origin: args.origin ?? "external",
     };
@@ -1200,9 +1179,9 @@ export class MeerkatClient {
     }
     const result = await this.request("mob/submit_work", params);
     return {
-      mobId: String(result.mob_id ?? args.mobId),
+      mobId: String(result.mob_id ?? ""),
       workRef: String(result.work_ref ?? ""),
-      agentRuntimeId: result.agent_runtime_id,
+      memberRef: String(result.member_ref ?? args.memberRef),
     };
   }
 
@@ -1223,16 +1202,10 @@ export class MeerkatClient {
    * Wraps the `mob/cancel_all_work` RPC (DELETE_ME C4).
    */
   async mobCancelAllWork(args: {
-    mobId: string;
-    agentIdentity: string;
-    generation: number;
-    fenceToken: number;
+    memberRef: string;
   }): Promise<{ ok: boolean }> {
     const result = await this.request("mob/cancel_all_work", {
-      mob_id: args.mobId,
-      agent_identity: args.agentIdentity,
-      generation: args.generation,
-      fence_token: args.fenceToken,
+      member_ref: args.memberRef,
     });
     return { ok: Boolean(result.ok ?? false) };
   }
@@ -1391,9 +1364,7 @@ export class MeerkatClient {
     output?: string;
     tokensUsed: number;
     agentIdentity: string;
-    agentRuntimeId: string;
-    fenceToken: number;
-    generation?: number;
+    memberRef: MobMemberRef;
   }> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/spawn_helper", {
@@ -1404,13 +1375,6 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
-    const runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    if (!runtime.value) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/spawn_helper response: missing runtime identity",
-      );
-    }
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0
         ? result.agent_identity
@@ -1421,13 +1385,21 @@ export class MeerkatClient {
         "Invalid mob/spawn_helper response: missing agent identity",
       );
     }
+    const memberRef =
+      typeof result.member_ref === "string" && result.member_ref.length > 0
+        ? result.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/spawn_helper response: missing member_ref",
+      );
+    }
     return {
       output: result.output != null ? String(result.output) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       agentIdentity: resultIdentity,
-      agentRuntimeId: runtime.value,
-      fenceToken: Number(result.fence_token ?? 0),
-      generation: runtime.generation,
+      memberRef,
     };
   }
 
@@ -1447,9 +1419,7 @@ export class MeerkatClient {
     output?: string;
     tokensUsed: number;
     agentIdentity: string;
-    agentRuntimeId: string;
-    fenceToken: number;
-    generation?: number;
+    memberRef: MobMemberRef;
   }> {
     const roleName = options?.roleName ?? options?.profileName;
     const result = await this.request("mob/fork_helper", {
@@ -1462,13 +1432,6 @@ export class MeerkatClient {
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
     });
-    const runtime = parseAgentRuntimeId(result.agent_runtime_id);
-    if (!runtime.value) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/fork_helper response: missing runtime identity",
-      );
-    }
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0
         ? result.agent_identity
@@ -1479,13 +1442,21 @@ export class MeerkatClient {
         "Invalid mob/fork_helper response: missing agent identity",
       );
     }
+    const memberRef =
+      typeof result.member_ref === "string" && result.member_ref.length > 0
+        ? result.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/fork_helper response: missing member_ref",
+      );
+    }
     return {
       output: result.output != null ? String(result.output) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       agentIdentity: resultIdentity,
-      agentRuntimeId: runtime.value,
-      fenceToken: Number(result.fence_token ?? 0),
-      generation: runtime.generation,
+      memberRef,
     };
   }
 
@@ -1505,7 +1476,7 @@ export class MeerkatClient {
     await this.request("mob/unwire", { mob_id: mobId, ...payload });
   }
 
-  async mobLifecycle(mobId: string, action: 'stop' | 'resume' | 'complete' | 'reset' | 'destroy'): Promise<void> {
+  async mobLifecycle(mobId: string, action: MobLifecycleAction): Promise<void> {
     await this.request("mob/lifecycle", { mob_id: mobId, action });
   }
 

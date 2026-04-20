@@ -270,16 +270,12 @@ export interface SpawnSpec {
 export interface MobSpawnResult {
   readonly mobId: string;
   readonly agentIdentity: string;
-  readonly agentRuntimeId: string;
-  readonly fenceToken: number;
-  readonly generation?: number;
+  readonly memberRef: MobMemberRef;
 }
 
 export interface MobMember {
   readonly agentIdentity: string;
-  readonly agentRuntimeId: string;
-  readonly fenceToken: number;
-  readonly generation?: number;
+  readonly memberRef: MobMemberRef;
   readonly profile: string;
   readonly peerId?: string;
   readonly externalPeerSpecs?: Readonly<Record<string, Record<string, unknown>>>;
@@ -290,8 +286,6 @@ export interface MobMember {
   readonly status?: string;
   readonly error?: string;
   readonly isFinal?: boolean;
-  readonly currentRuntimeId?: string;
-  readonly currentFenceToken?: number;
 }
 
 export interface MobSummary {
@@ -306,6 +300,15 @@ export interface MobStatus {
 
 export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "reset";
 
+/**
+ * Server-resolved opaque handle for a mob member. Treat as an opaque token:
+ * app code never constructs or inspects these — they come back from
+ * `mob/ensure_member`, `mob/spawn_helper`, `mob/fork_helper`, and member
+ * list surfaces, and are passed back on work-lane and member-targeted
+ * calls.
+ */
+export type MobMemberRef = string;
+
 export interface MobFlowStatus {
   readonly run?: Record<string, unknown> | null;
 }
@@ -313,9 +316,7 @@ export interface MobFlowStatus {
 export interface MobSpawnManyResultEntry {
   readonly ok: boolean;
   readonly agentIdentity?: string;
-  readonly agentRuntimeId?: string;
-  readonly fenceToken?: number;
-  readonly generation?: number;
+  readonly memberRef?: MobMemberRef;
   readonly error?: string;
 }
 

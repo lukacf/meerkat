@@ -4,6 +4,16 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from .streaming import EventSubscription
 
+MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
+
+WorkOrigin = Literal["external", "internal"]
+
+# Opaque server-resolved handle for a mob member. App code treats this as
+# a transparent token — obtained from `ensure_member`/`spawn_helper`/
+# `fork_helper`/member-list responses, passed back on work-lane and
+# member-targeted calls.
+MobMemberRef = str
+
 RenderClass = Literal[
     "user_prompt",
     "peer_message",
@@ -26,9 +36,7 @@ MemberDeliveryReceipt = TypedDict(
     "MemberDeliveryReceipt",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
         "handling_mode": Literal["queue", "steer"],
     },
 )
@@ -37,10 +45,7 @@ MemberRespawnReceipt = TypedDict(
     "MemberRespawnReceipt",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "previous_fence_token": int,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
     },
 )
 
@@ -49,9 +54,7 @@ MobSpawnResult = TypedDict(
     {
         "mob_id": str,
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
     },
 )
 
@@ -137,9 +140,7 @@ MobHelperResult = TypedDict(
         "output": NotRequired[str],
         "tokens_used": int,
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
     },
 )
 
@@ -147,9 +148,7 @@ MobMember = TypedDict(
     "MobMember",
     {
         "agent_identity": str,
-        "agent_runtime_id": str,
-        "fence_token": int,
-        "generation": NotRequired[int],
+        "member_ref": MobMemberRef,
         "profile": str,
         "peer_id": NotRequired[str],
         "external_peer_specs": NotRequired[dict[str, dict[str, Any]]],

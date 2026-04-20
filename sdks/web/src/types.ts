@@ -145,19 +145,14 @@ export interface MobAppendSystemContextResult {
 /** Delivery receipt for a direct mob member turn. */
 export interface MemberDeliveryReceipt {
   agent_identity: string;
-  agent_runtime_id: string;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
   handling_mode: HandlingMode;
 }
 
 /** Respawn receipt for a mob member. */
 export interface MemberRespawnReceipt {
   agent_identity: string;
-  agent_runtime_id: string;
-  previous_fence_token: number;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
 }
 
 /** Result envelope for a member respawn operation. */
@@ -329,21 +324,28 @@ export interface SpawnSpec {
   additional_instructions?: string[];
 }
 
+/**
+ * Server-resolved opaque handle for a mob member. Treat as an opaque
+ * token: app code never constructs or inspects these — they come back
+ * from mob spawn and member-list surfaces, and are passed back on
+ * work-lane and member-targeted calls.
+ */
+export type MobMemberRef = string;
+
+/** Typed lifecycle action for the `mob/lifecycle` surface. */
+export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
+
 /** Result of a spawn operation. */
 export interface SpawnResult {
   mob_id: string;
   agent_identity: string;
-  agent_runtime_id: string;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
 }
 
 /** A mob member entry from listMembers. */
 export interface MobMember {
   agent_identity: string;
-  agent_runtime_id: string;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
   profile: string;
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
@@ -405,13 +407,8 @@ export interface MobHelperResult {
   output?: string;
   tokens_used: number;
   agent_identity: string;
-  agent_runtime_id: string;
-  fence_token: number;
-  generation?: number;
+  member_ref: MobMemberRef;
 }
-
-/** Mob lifecycle actions. */
-export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 

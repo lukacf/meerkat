@@ -1363,42 +1363,48 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                                 continue;
                                                             }
                                                         };
-                                                        if let Err(error) = wait_for_runtime_turn_quiescence(
+                                                        let waited_for_runtime = match wait_for_runtime_turn_quiescence(
                                                             &state.runtime,
                                                             &session_id,
                                                             Duration::from_secs(2),
                                                         )
-                                                        .await
-                                                        {
-                                                            let _ = send_server_frame(
-                                                                &mut socket,
-                                                                &RealtimeServerFrame::ChannelError(error),
+                                                        .await {
+                                                            Ok(waited_for_runtime) => {
+                                                                waited_for_runtime
+                                                            }
+                                                            Err(error) => {
+                                                                let _ = send_server_frame(
+                                                                    &mut socket,
+                                                                    &RealtimeServerFrame::ChannelError(error),
+                                                                )
+                                                                .await;
+                                                                continue;
+                                                            }
+                                                        };
+                                                        if waited_for_runtime {
+                                                            if let Err(error) = refresh_product_session_projection(
+                                                                &state.runtime,
+                                                                binding.as_ref(),
+                                                                turning_mode,
+                                                                state.host.session_factory.clone(),
+                                                                product_session,
                                                             )
-                                                            .await;
-                                                            continue;
+                                                            .await
+                                                            {
+                                                                let _ = send_server_frame(
+                                                                    &mut socket,
+                                                                    &RealtimeServerFrame::ChannelError(error),
+                                                                )
+                                                                .await;
+                                                                continue;
+                                                            }
+                                                            let watermark_ms = session_context_handle
+                                                                .as_ref()
+                                                                .map(|h| h.current_watermark_ms())
+                                                                .unwrap_or(0);
+                                                            projection_freshness =
+                                                                projection_freshness.on_refreshed(watermark_ms);
                                                         }
-                                                        if let Err(error) = refresh_product_session_projection(
-                                                            &state.runtime,
-                                                            binding.as_ref(),
-                                                            turning_mode,
-                                                            state.host.session_factory.clone(),
-                                                            product_session,
-                                                        )
-                                                        .await
-                                                        {
-                                                            let _ = send_server_frame(
-                                                                &mut socket,
-                                                                &RealtimeServerFrame::ChannelError(error),
-                                                            )
-                                                            .await;
-                                                            continue;
-                                                        }
-                                                        let watermark_ms = session_context_handle
-                                                            .as_ref()
-                                                            .map(|h| h.current_watermark_ms())
-                                                            .unwrap_or(0);
-                                                        projection_freshness =
-                                                            projection_freshness.on_refreshed(watermark_ms);
                                                     }
                                                     let (respond_tx, respond_rx) = oneshot::channel();
                                                     let _ = product_session
@@ -3118,8 +3124,9 @@ async fn wait_for_runtime_turn_quiescence(
     runtime: &SessionRuntime,
     session_id: &SessionId,
     timeout: Duration,
-) -> Result<(), RealtimeChannelErrorFrame> {
+) -> Result<bool, RealtimeChannelErrorFrame> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut waited = false;
     loop {
         let state = match runtime.runtime_adapter().runtime_state(session_id).await {
             Ok(state) => state,
@@ -3134,6 +3141,7 @@ async fn wait_for_runtime_turn_quiescence(
             Err(error) => return Err(runtime_error_frame(error, "input")),
         };
         if matches!(state, meerkat_runtime::RuntimeState::Running) || !active_inputs.is_empty() {
+            waited = true;
             if tokio::time::Instant::now() >= deadline {
                 return Err(RealtimeChannelErrorFrame {
                     code: RealtimeErrorCode::InvalidTarget,
@@ -3144,7 +3152,7 @@ async fn wait_for_runtime_turn_quiescence(
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         } else {
-            return Ok(());
+            return Ok(waited);
         }
     }
 }

@@ -387,10 +387,12 @@ impl HttpSkillSource {
         );
 
         Self {
-            external: ExternalSkillSource::new(
-                source_uuid.clone(),
-                HttpExternalClient::new_with_timeout(source_uuid, base_url, auth, request_timeout),
-            ),
+            external: ExternalSkillSource::new(HttpExternalClient::new_with_timeout(
+                source_uuid,
+                base_url,
+                auth,
+                request_timeout,
+            )),
             client,
             cache_ttl,
             cache: RwLock::new(HttpSkillCache::new()),

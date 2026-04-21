@@ -23,6 +23,10 @@ use meerkat_machine_schema::{
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
 };
+use meerkat_mob::runtime::flow_kernels::{
+    flow_frame as local_flow_frame_kernel, flow_run as local_flow_run_kernel,
+    loop_iteration as local_loop_iteration_kernel,
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Args)]
@@ -260,6 +264,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
 pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()> {
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
+    let local_flow_machines = local_flow_machine_artifacts(root);
     prune_stale_generated_kernel_modules(root, &registry)?;
     write_generated(
         &generated_kernel_mod_path(root),
@@ -308,6 +313,30 @@ pub fn machine_codegen_at_root(root: &Path, selection: &Selection) -> Result<()>
             "generated {}",
             generated_kernel_module_path(root, &generated_slug).display()
         );
+    }
+
+    for machine in &local_flow_machines {
+        write_generated(
+            &machine_model_path(root, machine.slug),
+            &render_machine_semantic_model(&machine.schema),
+        )?;
+        write_generated(
+            &machine_ci_path(root, machine.slug),
+            &render_machine_ci_cfg(&machine.schema, false),
+        )?;
+        write_generated(
+            &machine_deep_path(root, machine.slug),
+            &render_machine_ci_cfg(&machine.schema, true),
+        )?;
+        write_generated(
+            &machine.wrapper_path,
+            &render_local_flow_kernel_wrapper(machine),
+        )?;
+        println!(
+            "generated {}",
+            machine_model_path(root, machine.slug).display()
+        );
+        println!("generated {}", machine.wrapper_path.display());
     }
 
     for composition in &selection.compositions {
@@ -367,6 +396,7 @@ fn machine_verify_at_root(
     workers: usize,
 ) -> Result<()> {
     ensure_no_drift(root, selection)?;
+    let local_flow_machines = local_flow_machine_artifacts(root);
 
     for machine in &selection.machines {
         println!("machine: {}", machine.schema.machine);
@@ -382,6 +412,18 @@ fn machine_verify_at_root(
             {
                 ensure_machine_transition_coverage(&machine.schema, &coverage)?;
             }
+        }
+    }
+
+    for machine in &local_flow_machines {
+        println!("machine: {}", machine.schema.machine);
+        if run_tlc {
+            let _ = maybe_run_tlc_in_dir(
+                &machine_dir(root, machine.slug),
+                machine.slug,
+                profile,
+                workers,
+            )?;
         }
     }
 
@@ -459,6 +501,7 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
     let mut mismatches = Vec::new();
     let registry = CanonicalRegistry::load();
     let kernel_export_schemas = generated_kernel_export_schemas(&registry);
+    let local_flow_machines = local_flow_machine_artifacts(root);
 
     for machine in &selection.machines {
         collect_legacy_authority_mismatch(
@@ -506,6 +549,29 @@ pub fn collect_drift_mismatches(root: &Path, selection: &Selection) -> Result<Ve
         &render_generated_kernel_mod(&kernel_export_schemas),
         &mut mismatches,
     )?;
+
+    for machine in &local_flow_machines {
+        compare_generated(
+            &machine_model_path(root, machine.slug),
+            &render_machine_semantic_model(&machine.schema),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine_ci_path(root, machine.slug),
+            &render_machine_ci_cfg(&machine.schema, false),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine_deep_path(root, machine.slug),
+            &render_machine_ci_cfg(&machine.schema, true),
+            &mut mismatches,
+        )?;
+        compare_generated(
+            &machine.wrapper_path,
+            &render_local_flow_kernel_wrapper(machine),
+            &mut mismatches,
+        )?;
+    }
 
     for composition in &selection.compositions {
         collect_legacy_authority_mismatch(
@@ -699,6 +765,7 @@ struct MachineOwnerInventoryRow {
 
 pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> {
     let registry = CanonicalRegistry::load();
+    let local_flow_machines = local_flow_machine_artifacts(root);
 
     // The doc-based owner/mode inventories were in docs/architecture/0.5/ which
     // has been removed (the machine schema catalog is the sole source of truth).
@@ -758,6 +825,11 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
         .machines
         .iter()
         .map(|machine| machine_slug(&machine.machine))
+        .chain(
+            local_flow_machines
+                .iter()
+                .map(|machine| machine.slug.to_string()),
+        )
         .collect();
     for slug in expected_machine_dirs.difference(&actual_machine_dirs) {
         mismatches.push(format!(
@@ -831,6 +903,22 @@ pub fn collect_machine_inventory_mismatches(root: &Path) -> Result<Vec<String>> 
             if !artifact_path.exists() {
                 mismatches.push(format!(
                     "missing canonical machine artifact {}",
+                    artifact_path.display()
+                ));
+            }
+        }
+    }
+
+    for machine in &local_flow_machines {
+        for artifact_path in [
+            machine_model_path(root, machine.slug),
+            machine_ci_path(root, machine.slug),
+            machine_deep_path(root, machine.slug),
+            machine.wrapper_path.clone(),
+        ] {
+            if !artifact_path.exists() {
+                mismatches.push(format!(
+                    "missing local flow machine artifact {}",
                     artifact_path.display()
                 ));
             }
@@ -2117,6 +2205,57 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
     schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
     schemas.dedup_by(|a, b| a.machine == b.machine);
     schemas
+}
+
+struct LocalFlowMachineArtifact {
+    slug: &'static str,
+    schema: MachineSchema,
+    wrapper_path: PathBuf,
+    banner: &'static str,
+}
+
+fn local_flow_machine_artifacts(root: &Path) -> Vec<LocalFlowMachineArtifact> {
+    let wrapper_root = root.join("meerkat-mob/src/runtime/flow_kernels");
+    vec![
+        LocalFlowMachineArtifact {
+            slug: "flow_frame",
+            schema: local_flow_frame_kernel::schema(),
+            wrapper_path: wrapper_root.join("flow_frame.rs"),
+            banner: "Local flow-frame kernel wrapper derived from the former compat codegen.",
+        },
+        LocalFlowMachineArtifact {
+            slug: "flow_run",
+            schema: local_flow_run_kernel::schema(),
+            wrapper_path: wrapper_root.join("flow_run.rs"),
+            banner: "Local flow-run kernel wrapper derived from the former compat codegen.",
+        },
+        LocalFlowMachineArtifact {
+            slug: "loop_iteration",
+            schema: local_loop_iteration_kernel::schema(),
+            wrapper_path: wrapper_root.join("loop_iteration.rs"),
+            banner: "Local loop-iteration kernel wrapper derived from the former compat codegen.",
+        },
+    ]
+}
+
+fn render_local_flow_kernel_wrapper(machine: &LocalFlowMachineArtifact) -> String {
+    let canonical = render_machine_kernel_module(&machine.schema);
+    let generated_slug = generated_kernel_module_slug(&machine.schema.machine);
+    canonical
+        .replacen(
+            "// Generated by `cargo xtask machine-codegen --all`.",
+            &format!("// {}\n#![allow(dead_code)]", machine.banner),
+            1,
+        )
+        .replacen("use crate::runtime::{", "use meerkat_machine_kernels::{", 1)
+        .replacen(
+            &format!("    meerkat_machine_schema::catalog::dsl::dsl_{generated_slug}_machine()"),
+            &format!(
+                "    super::{}_machine_schema::{}_machine()",
+                machine.slug, machine.slug
+            ),
+            1,
+        )
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {

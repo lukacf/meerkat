@@ -1,6 +1,5 @@
 // Local flow-frame kernel wrapper derived from the former compat codegen.
 #![allow(dead_code)]
-
 use meerkat_machine_kernels::{
     GeneratedMachineKernel, KernelEffectVariant, KernelField, KernelFields, KernelHelperName,
     KernelInput, KernelInputVariant, KernelPhase, KernelSignal, KernelSignalVariant, KernelState,

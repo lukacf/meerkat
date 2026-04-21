@@ -289,36 +289,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(completion) = completion_rx.recv() => {
-                // Late cancel must not override committed work: if the task
-                // produced a Publish terminal, the work already ran and the
-                // client must learn the result. Only suppress uncommitted
-                // (RespondWithoutPublish) terminals when cancel was requested.
-                let terminal = match completion.terminal {
-                    RequestTerminal::Publish(_) => completion.terminal,
-                    RequestTerminal::RespondWithoutPublish(ref _resp)
-                        if request_executor.cancel_requested(&completion.request_key) =>
-                    {
-                        RequestTerminal::RespondWithoutPublish(
-                            request_cancelled_response(request_id_from_terminal(&completion.terminal)),
-                        )
-                    }
-                    other => other,
-                };
-
-                match terminal {
+                // Lifecycle truth lives in the executor's typed state machine:
+                // Publish always commits; RespondWithoutPublish yields to a
+                // prior cancel via CompleteOutcome. No shell-side rewriting.
+                match completion.terminal {
                     RequestTerminal::Publish(response) => {
-                        if writer.send(response).await.is_ok() {
-                            request_executor.mark_published(&completion.request_key);
-                            request_executor.remove_published(&completion.request_key);
-                        } else {
-                            request_executor.finish_unpublished(&completion.request_key).await;
+                        if writer.send(response).await.is_err() {
+                            let _ = request_executor
+                                .finish_unpublished(&completion.request_key)
+                                .await;
                             break Ok(());
                         }
+                        let _ = request_executor
+                            .publish_and_complete(&completion.request_key);
                     }
                     RequestTerminal::RespondWithoutPublish(response) => {
-                        let send_result = writer.send(response).await;
-                        request_executor.finish_unpublished(&completion.request_key).await;
-                        if send_result.is_err() {
+                        let cancel_id = response.get("id").cloned();
+                        let outcome = request_executor
+                            .finish_unpublished(&completion.request_key)
+                            .await;
+                        let to_write = match outcome {
+                            meerkat::surface::CompleteOutcome::Completed => response,
+                            meerkat::surface::CompleteOutcome::SupersededByCancel => {
+                                request_cancelled_response(cancel_id)
+                            }
+                        };
+                        if writer.send(to_write).await.is_err() {
                             break Ok(());
                         }
                     }
@@ -350,15 +346,6 @@ fn request_key(id: &Value) -> String {
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {
     let request_id = params?.get("requestId")?;
     Some(request_key(request_id))
-}
-
-fn request_id_from_terminal(terminal: &RequestTerminal<Value>) -> Option<Value> {
-    let response = match terminal {
-        RequestTerminal::Publish(response) | RequestTerminal::RespondWithoutPublish(response) => {
-            response
-        }
-    };
-    response.get("id").cloned()
 }
 
 fn request_cancelled_response(id: Option<Value>) -> Value {

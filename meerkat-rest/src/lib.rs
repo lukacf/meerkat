@@ -1032,12 +1032,20 @@ async fn with_request_lifecycle<T>(
     match ctx {
         Some(ctx) => match outcome {
             RequestOutcome::Published(val) => {
-                executor.mark_published(ctx.key());
-                executor.remove_published(ctx.key());
+                // publish_and_complete rejects terminal phases (e.g. late
+                // cancel landed first). REST handlers don't spawn long-running
+                // tasks after announcing Published, so the only way this can
+                // fail in practice is shutdown racing, where we still want
+                // to return the caller's value.
+                let _ = executor.publish_and_complete(ctx.key());
                 val
             }
             RequestOutcome::Unpublished(val) => {
-                executor.finish_unpublished(ctx.key()).await;
+                // CompleteOutcome is observed by RPC/MCP surfaces for the
+                // late-cancel branch; REST decides Unpublished inline so the
+                // outcome is always Completed (cleanup runs) or the entry was
+                // already removed by a parallel shutdown path.
+                let _ = executor.finish_unpublished(ctx.key()).await;
                 val
             }
         },
@@ -2879,7 +2887,7 @@ async fn create_session_inner(
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
-        && ctx.run_cancel_if_requested().await
+        && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
     {
         return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
     }
@@ -2951,19 +2959,22 @@ async fn create_session_inner(
             }
         }));
 
-        // Install cancel action: interrupt the session.
+        // Install cancel action: interrupt the session. If a cancel already
+        // landed before this install, install_cancel_action fires the newly
+        // installed action immediately and reports the observed phase.
         let cancel_svc = state.session_service.clone();
         let cancel_sid = session_id.clone();
-        ctx.replace_cancel_action(request_action(move || {
-            let svc = cancel_svc.clone();
-            let sid = cancel_sid.clone();
-            async move {
-                let _ = svc.interrupt(&sid).await;
-            }
-        }));
+        let phase = ctx
+            .install_cancel_action(request_action(move || {
+                let svc = cancel_svc.clone();
+                let sid = cancel_sid.clone();
+                async move {
+                    let _ = svc.interrupt(&sid).await;
+                }
+            }))
+            .await;
 
-        // Re-check cancel after installing the action.
-        if ctx.run_cancel_if_requested().await {
+        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
@@ -3129,7 +3140,7 @@ async fn create_session_inner(
     // when no turn is running, so cancel between the last recheck and here
     // would be lost without this gate.
     if let Some(ctx) = req_ctx.as_ref()
-        && ctx.cancel_requested()
+        && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
     {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
@@ -3516,15 +3527,24 @@ async fn cancel_request(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if state.request_executor.cancel_request(&request_id).await {
-        Ok(Json(json!({
+    use meerkat::surface::CancelOutcome;
+    match state.request_executor.cancel_request(&request_id).await {
+        CancelOutcome::Cancelled | CancelOutcome::AlreadyCancelled => Ok(Json(json!({
             "request_id": request_id,
             "cancelled": true
-        })))
-    } else {
-        Err(ApiError::NotFound(format!(
+        }))),
+        CancelOutcome::AlreadyPublished | CancelOutcome::AlreadyCompleted => {
+            // Committed work cannot be revoked; caller already observed (or
+            // will observe) the terminal response on the original request.
+            Ok(Json(json!({
+                "request_id": request_id,
+                "cancelled": false,
+                "reason": "already_terminal"
+            })))
+        }
+        CancelOutcome::NotFound => Err(ApiError::NotFound(format!(
             "request not found: {request_id}"
-        )))
+        ))),
     }
 }
 
@@ -3620,7 +3640,7 @@ async fn continue_session_inner(
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
-        && ctx.run_cancel_if_requested().await
+        && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
     {
         return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled { details: None }));
     }
@@ -3849,16 +3869,19 @@ async fn continue_session_inner(
 
             let cancel_svc = state.session_service.clone();
             let cancel_sid = session_id.clone();
-            ctx.replace_cancel_action(request_action(move || {
-                let svc = cancel_svc.clone();
-                let sid = cancel_sid.clone();
-                async move {
-                    let _ = svc.interrupt(&sid).await;
-                }
-            }));
+            let phase = ctx
+                .install_cancel_action(request_action(move || {
+                    let svc = cancel_svc.clone();
+                    let sid = cancel_sid.clone();
+                    async move {
+                        let _ = svc.interrupt(&sid).await;
+                    }
+                }))
+                .await;
 
-            // Post-install recheck.
-            if ctx.run_cancel_if_requested().await {
+            // If cancel raced with install, install_cancel_action already ran
+            // the newly installed action; bail out with a cancelled terminal.
+            if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
@@ -3889,7 +3912,7 @@ async fn continue_session_inner(
             ));
         // Final cancel recheck before submitting input.
         if let Some(ctx) = req_ctx.as_ref()
-            && ctx.cancel_requested()
+            && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
@@ -3972,16 +3995,19 @@ async fn continue_session_inner(
         if let Some(ctx) = req_ctx.as_ref() {
             let cancel_svc = state.session_service.clone();
             let cancel_sid = session_id.clone();
-            ctx.replace_cancel_action(request_action(move || {
-                let svc = cancel_svc.clone();
-                let sid = cancel_sid.clone();
-                async move {
-                    let _ = svc.interrupt(&sid).await;
-                }
-            }));
+            let phase = ctx
+                .install_cancel_action(request_action(move || {
+                    let svc = cancel_svc.clone();
+                    let sid = cancel_sid.clone();
+                    async move {
+                        let _ = svc.interrupt(&sid).await;
+                    }
+                }))
+                .await;
 
-            // Post-install recheck.
-            if ctx.run_cancel_if_requested().await {
+            // If cancel raced with install, install_cancel_action already ran
+            // the newly installed action; bail out with a cancelled terminal.
+            if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return RequestOutcome::Unpublished(Err(ApiError::RequestCancelled {
@@ -4005,7 +4031,7 @@ async fn continue_session_inner(
             ));
         // Final cancel recheck before submitting input.
         if let Some(ctx) = req_ctx.as_ref()
-            && ctx.cancel_requested()
+            && ctx.phase() == meerkat::surface::SurfaceRequestPhase::Cancelled
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
@@ -6664,10 +6690,12 @@ mod tests {
             assert!(val.is_ok());
             assert_eq!(val.unwrap(), 200);
 
-            // Cancel arrives after completion — should return false (already gone).
-            assert!(
-                !executor.cancel_request(&key).await,
-                "cancel after Published removal should return false"
+            // Cancel arrives after completion — entry is gone, so the typed
+            // NotFound outcome is returned (no rewriting, no side effects).
+            assert_eq!(
+                executor.cancel_request(&key).await,
+                meerkat::surface::CancelOutcome::NotFound,
+                "cancel after Published removal must report NotFound"
             );
         }
     }

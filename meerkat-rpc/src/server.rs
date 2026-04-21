@@ -292,41 +292,44 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 }
 
                 Some(response) = self.long_running_rx.recv() => {
-                    // Late cancel must not override committed work: if the task
-                    // produced a Publish terminal, the work already ran and the
-                    // client must learn the result. Only suppress uncommitted
-                    // (RespondWithoutPublish) terminals when cancel was requested.
-                    let terminal = match response.terminal {
-                        RequestTerminal::Publish(_) => response.terminal,
-                        RequestTerminal::RespondWithoutPublish(ref _resp)
-                            if self.request_executor.cancel_requested(&response.request_key) =>
-                        {
-                            RequestTerminal::RespondWithoutPublish(
-                                request_cancelled_response(request_id_from_response(&response.terminal)),
-                            )
-                        }
-                        other => other,
-                    };
-
-                    match terminal {
+                    // Lifecycle truth lives in the executor's typed state
+                    // machine: Publish always commits; RespondWithoutPublish
+                    // yields to a prior cancel via CompleteOutcome.
+                    match response.terminal {
                         RequestTerminal::Publish(rpc_response) => {
-                            // Defer ownership publication until the response is
-                            // actually written to the transport (not just enqueued).
-                            match self.transport.write_response(&rpc_response).await {
-                                Ok(()) => {
-                                    self.request_executor.mark_published(&response.request_key);
-                                    self.request_executor.remove_published(&response.request_key);
-                                }
-                                Err(_) => {
-                                    self.request_executor.finish_unpublished(&response.request_key).await;
-                                    break;
-                                }
+                            // Committed work is observable; write first, then
+                            // record publish. publish_and_complete rejects
+                            // post-terminal transitions with a typed error,
+                            // which here can only mean shutdown raced ahead.
+                            if self.transport.write_response(&rpc_response).await.is_err() {
+                                let _ = self
+                                    .request_executor
+                                    .finish_unpublished(&response.request_key)
+                                    .await;
+                                break;
                             }
+                            let _ = self
+                                .request_executor
+                                .publish_and_complete(&response.request_key);
                         }
                         RequestTerminal::RespondWithoutPublish(rpc_response) => {
-                            let write_result = self.transport.write_response(&rpc_response).await;
-                            self.request_executor.finish_unpublished(&response.request_key).await;
-                            if write_result.is_err() {
+                            // Uncommitted terminal: the executor tells us
+                            // whether cancel landed first. No shell-side
+                            // rewriting — a SupersededByCancel outcome means
+                            // we emit the cancel response the caller
+                            // requested, not the task's stale payload.
+                            let cancel_id = rpc_response.id.clone();
+                            let outcome = self
+                                .request_executor
+                                .finish_unpublished(&response.request_key)
+                                .await;
+                            let to_write = match outcome {
+                                meerkat::surface::CompleteOutcome::Completed => rpc_response,
+                                meerkat::surface::CompleteOutcome::SupersededByCancel => {
+                                    request_cancelled_response(cancel_id)
+                                }
+                            };
+                            if self.transport.write_response(&to_write).await.is_err() {
                                 break;
                             }
                         }
@@ -500,14 +503,6 @@ fn session_create_runs_immediately(params: Option<&serde_json::value::RawValue>)
             .and_then(serde_json::Value::as_str),
         Some("deferred")
     )
-}
-
-fn request_id_from_response(terminal: &RequestTerminal<RpcResponse>) -> Option<RpcId> {
-    match terminal {
-        RequestTerminal::Publish(response) | RequestTerminal::RespondWithoutPublish(response) => {
-            response.id.clone()
-        }
-    }
 }
 
 /// Start the RPC server on stdin/stdout.

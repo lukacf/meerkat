@@ -160,14 +160,16 @@ pub async fn handle_start(
     if let Some(context) = request_context.as_ref() {
         let runtime = Arc::clone(&runtime);
         let session_id = session_id.clone();
-        context.replace_cancel_action(request_action(move || {
-            let runtime = Arc::clone(&runtime);
-            let session_id = session_id.clone();
-            async move {
-                let _ = runtime.interrupt(&session_id).await;
-            }
-        }));
-        if context.run_cancel_if_requested().await {
+        let phase = context
+            .install_cancel_action(request_action(move || {
+                let runtime = Arc::clone(&runtime);
+                let session_id = session_id.clone();
+                async move {
+                    let _ = runtime.interrupt(&session_id).await;
+                }
+            }))
+            .await;
+        if phase == meerkat::surface::SurfaceRequestPhase::Cancelled {
             return RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,

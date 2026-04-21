@@ -119,11 +119,11 @@ color="white";
 #[cfg(feature = "machine-authority")]
 #[test]
 fn parse_tlc_graph_stats_extracts_generated_distinct_and_depth() {
-    let output = r#"
+    let output = r"
 TLC2 Version 2.19 of Day Month 20?? (rev: abcdef)
 1234 states generated, 567 distinct states found, 89 states left on queue.
 The depth of the complete state graph search is 42.
-"#;
+";
 
     let stats = parse_tlc_graph_stats(output);
     assert_eq!(stats.generated_states, Some(1234));

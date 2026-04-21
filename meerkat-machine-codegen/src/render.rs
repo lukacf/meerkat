@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, fmt::Write};
+#[cfg(not(test))]
+use std::collections::BTreeSet;
+use std::fmt::Write;
 
 fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
     let _ignored = out.write_fmt(args);

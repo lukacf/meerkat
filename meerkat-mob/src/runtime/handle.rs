@@ -2915,6 +2915,13 @@ impl MobHandle {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn debug_startup_kickoff_snapshot(
+        &self,
+    ) -> Result<super::state::MobStartupKickoffSnapshot, MobError> {
+        self.startup_kickoff_snapshot().await
+    }
+
     /// Set or clear the spawn policy for automatic member provisioning.
     ///
     /// When set, external turns targeting an unknown member identity will

@@ -2445,8 +2445,54 @@ impl MobActor {
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
+                    let dsl = self.dsl_state();
                     let _ = reply_tx.send(super::state::MobStartupKickoffSnapshot {
+                        member_startup_binding_requested: dsl
+                            .member_startup_binding_requested
+                            .iter()
+                            .map(|runtime_id| runtime_id.0.clone())
+                            .collect(),
+                        member_startup_runtime_ready: dsl
+                            .member_startup_runtime_ready
+                            .iter()
+                            .map(|runtime_id| runtime_id.0.clone())
+                            .collect(),
+                        member_startup_ready: dsl
+                            .member_startup_ready
+                            .iter()
+                            .map(|runtime_id| runtime_id.0.clone())
+                            .collect(),
                         pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
+                        member_kickoff_starting_ids: dsl
+                            .member_kickoff_starting
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_callback_pending_ids: dsl
+                            .member_kickoff_callback_pending
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_started_ids: dsl
+                            .member_kickoff_started
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_failed_ids: dsl
+                            .member_kickoff_failed
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_cancelled_ids: dsl
+                            .member_kickoff_cancelled
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        member_kickoff_error: dsl
+                            .member_kickoff_error
+                            .iter()
+                            .map(|(member_id, error)| (member_id.clone(), error.clone()))
+                            .collect(),
                         ready_runtime_ids: self.ready_runtime_ids_from_dsl(),
                     });
                 }

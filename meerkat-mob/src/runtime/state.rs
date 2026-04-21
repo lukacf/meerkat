@@ -123,8 +123,18 @@ pub(crate) struct MobDslT2Snapshot {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub(crate) struct MobStartupKickoffSnapshot {
+    pub member_startup_binding_requested: std::collections::BTreeSet<String>,
+    pub member_startup_runtime_ready: std::collections::BTreeSet<String>,
+    pub member_startup_ready: std::collections::BTreeSet<String>,
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_starting_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_callback_pending_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_started_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_failed_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_cancelled_ids: std::collections::BTreeSet<String>,
+    pub member_kickoff_error: std::collections::BTreeMap<String, String>,
     pub ready_runtime_ids: std::collections::BTreeSet<String>,
 }
 

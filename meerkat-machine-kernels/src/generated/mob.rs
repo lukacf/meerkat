@@ -70,6 +70,46 @@ pub mod field {
         super::KernelField::new_static("coordinator_bound")
     }
     #[must_use]
+    pub fn member_startup_binding_requested() -> super::KernelField {
+        super::KernelField::new_static("member_startup_binding_requested")
+    }
+    #[must_use]
+    pub fn member_startup_runtime_ready() -> super::KernelField {
+        super::KernelField::new_static("member_startup_runtime_ready")
+    }
+    #[must_use]
+    pub fn member_startup_ready() -> super::KernelField {
+        super::KernelField::new_static("member_startup_ready")
+    }
+    #[must_use]
+    pub fn member_kickoff_pending() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_pending")
+    }
+    #[must_use]
+    pub fn member_kickoff_starting() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_starting")
+    }
+    #[must_use]
+    pub fn member_kickoff_callback_pending() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_callback_pending")
+    }
+    #[must_use]
+    pub fn member_kickoff_started() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_started")
+    }
+    #[must_use]
+    pub fn member_kickoff_failed() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_failed")
+    }
+    #[must_use]
+    pub fn member_kickoff_cancelled() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_cancelled")
+    }
+    #[must_use]
+    pub fn member_kickoff_error() -> super::KernelField {
+        super::KernelField::new_static("member_kickoff_error")
+    }
+    #[must_use]
     pub fn member_state_markers() -> super::KernelField {
         super::KernelField::new_static("member_state_markers")
     }
@@ -150,8 +190,24 @@ pub mod field {
         super::KernelField::new_static("new_status")
     }
     #[must_use]
+    pub fn member_id() -> super::KernelField {
+        super::KernelField::new_static("member_id")
+    }
+    #[must_use]
+    pub fn error() -> super::KernelField {
+        super::KernelField::new_static("error")
+    }
+    #[must_use]
     pub fn kind() -> super::KernelField {
         super::KernelField::new_static("kind")
+    }
+    #[must_use]
+    pub fn phase() -> super::KernelField {
+        super::KernelField::new_static("phase")
+    }
+    #[must_use]
+    pub fn intent() -> super::KernelField {
+        super::KernelField::new_static("intent")
     }
     #[must_use]
     pub fn old_session_id() -> super::KernelField {
@@ -315,6 +371,42 @@ pub mod input {
     #[must_use]
     pub fn force_cancel() -> super::KernelInputVariant {
         super::KernelInputVariant::new_static("ForceCancel")
+    }
+    #[must_use]
+    pub fn kickoff_mark_pending() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffMarkPending")
+    }
+    #[must_use]
+    pub fn kickoff_mark_starting() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffMarkStarting")
+    }
+    #[must_use]
+    pub fn startup_mark_ready() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("StartupMarkReady")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_started() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffResolveStarted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffResolveCallbackPending")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_failed() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffResolveFailed")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_cancelled() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffResolveCancelled")
+    }
+    #[must_use]
+    pub fn kickoff_cancel_requested() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffCancelRequested")
+    }
+    #[must_use]
+    pub fn kickoff_clear() -> super::KernelInputVariant {
+        super::KernelInputVariant::new_static("KickoffClear")
     }
 }
 
@@ -499,6 +591,18 @@ pub mod effect {
         super::KernelEffectVariant::new_static("EmitTaskNotice")
     }
     #[must_use]
+    pub fn persist_kickoff_update() -> super::KernelEffectVariant {
+        super::KernelEffectVariant::new_static("PersistKickoffUpdate")
+    }
+    #[must_use]
+    pub fn persist_kickoff_failure_update() -> super::KernelEffectVariant {
+        super::KernelEffectVariant::new_static("PersistKickoffFailureUpdate")
+    }
+    #[must_use]
+    pub fn emit_kickoff_lifecycle_notice() -> super::KernelEffectVariant {
+        super::KernelEffectVariant::new_static("EmitKickoffLifecycleNotice")
+    }
+    #[must_use]
     pub fn member_realtime_binding_set() -> super::KernelEffectVariant {
         super::KernelEffectVariant::new_static("MemberRealtimeBindingSet")
     }
@@ -526,6 +630,114 @@ pub mod transition {
     #[must_use]
     pub fn observe_runtime_ready() -> super::KernelTransitionName {
         super::KernelTransitionName::new_static("ObserveRuntimeReady")
+    }
+    #[must_use]
+    pub fn startup_mark_ready_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("StartupMarkReadyRunning")
+    }
+    #[must_use]
+    pub fn startup_mark_ready_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("StartupMarkReadyStopped")
+    }
+    #[must_use]
+    pub fn startup_mark_ready_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("StartupMarkReadyCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_mark_pending_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkPendingRunning")
+    }
+    #[must_use]
+    pub fn kickoff_mark_pending_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkPendingStopped")
+    }
+    #[must_use]
+    pub fn kickoff_mark_pending_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkPendingCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_mark_starting_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkStartingRunning")
+    }
+    #[must_use]
+    pub fn kickoff_mark_starting_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkStartingStopped")
+    }
+    #[must_use]
+    pub fn kickoff_mark_starting_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffMarkStartingCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_started_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveStartedRunning")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_started_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveStartedStopped")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_started_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveStartedCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingRunning")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingStopped")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_callback_pending_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCallbackPendingCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_failed_from_starting_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveFailedFromStartingRunning")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_failed_from_starting_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveFailedFromStartingStopped")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_failed_from_starting_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveFailedFromStartingCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_cancelled_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCancelledRunning")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_cancelled_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCancelledStopped")
+    }
+    #[must_use]
+    pub fn kickoff_resolve_cancelled_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffResolveCancelledCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_cancel_requested_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffCancelRequestedRunning")
+    }
+    #[must_use]
+    pub fn kickoff_cancel_requested_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffCancelRequestedStopped")
+    }
+    #[must_use]
+    pub fn kickoff_cancel_requested_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffCancelRequestedCompleted")
+    }
+    #[must_use]
+    pub fn kickoff_clear_running() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffClearRunning")
+    }
+    #[must_use]
+    pub fn kickoff_clear_stopped() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffClearStopped")
+    }
+    #[must_use]
+    pub fn kickoff_clear_completed() -> super::KernelTransitionName {
+        super::KernelTransitionName::new_static("KickoffClearCompleted")
     }
     #[must_use]
     pub fn submit_work_running_external() -> super::KernelTransitionName {

@@ -174,7 +174,7 @@ impl ProviderRuntimeRegistry {
         binding_id: &str,
         env: &ResolverEnvironment,
     ) -> Result<ResolvedConnection, ProviderAuthError> {
-        let (_binding, backend, auth) = realm
+        let (binding, backend, auth) = realm
             .lookup_binding(binding_id)
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
         let runtime = self
@@ -182,7 +182,7 @@ impl ProviderRuntimeRegistry {
             .get(&backend.provider)
             .ok_or(ProviderAuthError::NoRuntimeRegistered(backend.provider))?;
         let validated = runtime
-            .validate_binding(backend, auth)
+            .validate_binding(backend, auth, &binding.policy)
             .map_err(ProviderAuthError::Binding)?;
         runtime.resolve_binding(&validated, env).await
     }

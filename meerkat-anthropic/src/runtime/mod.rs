@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, Provider};
+use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
 use meerkat_llm_core::LlmClient;
@@ -95,6 +95,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
         &self,
         backend: &BackendProfile,
         auth: &AuthProfile,
+        policy: &BindingPolicy,
     ) -> Result<ValidatedBinding, ProviderBindingError> {
         if backend.provider != Provider::Anthropic || auth.provider != Provider::Anthropic {
             return Err(ProviderBindingError::ProviderMismatch);
@@ -116,7 +117,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             auth: NormalizedAuthMethod::Anthropic(auth_method),
             backend_profile: Arc::new(backend.clone()),
             auth_profile: Arc::new(auth.clone()),
-            policy: Default::default(),
+            policy: policy.clone(),
         })
     }
 

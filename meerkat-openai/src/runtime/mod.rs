@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, Provider};
+use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
 use meerkat_llm_core::LlmClient;
@@ -56,6 +56,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         &self,
         backend: &BackendProfile,
         auth: &AuthProfile,
+        policy: &BindingPolicy,
     ) -> Result<ValidatedBinding, ProviderBindingError> {
         if backend.provider != Provider::OpenAI || auth.provider != Provider::OpenAI {
             return Err(ProviderBindingError::ProviderMismatch);
@@ -77,7 +78,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             auth: NormalizedAuthMethod::OpenAi(auth_method),
             backend_profile: Arc::new(backend.clone()),
             auth_profile: Arc::new(auth.clone()),
-            policy: Default::default(),
+            policy: policy.clone(),
         })
     }
 
@@ -408,7 +409,11 @@ mod tests {
     fn validate_accepts_allowed_combination() {
         let rt = OpenAiProviderRuntime;
         let vb = rt
-            .validate_binding(&backend("openai_api"), &auth("api_key"))
+            .validate_binding(
+                &backend("openai_api"),
+                &auth("api_key"),
+                &BindingPolicy::default(),
+            )
             .expect("allowed combination");
         assert_eq!(vb.provider, Provider::OpenAI);
     }
@@ -417,7 +422,11 @@ mod tests {
     fn validate_rejects_unknown_backend_kind() {
         let rt = OpenAiProviderRuntime;
         let err = rt
-            .validate_binding(&backend("bogus_backend"), &auth("api_key"))
+            .validate_binding(
+                &backend("bogus_backend"),
+                &auth("api_key"),
+                &BindingPolicy::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, ProviderBindingError::UnknownBackendKind(_)));
     }
@@ -427,7 +436,11 @@ mod tests {
         // openai_api + managed_chatgpt_oauth is NOT in ALLOWED_BINDINGS.
         let rt = OpenAiProviderRuntime;
         let err = rt
-            .validate_binding(&backend("openai_api"), &auth("managed_chatgpt_oauth"))
+            .validate_binding(
+                &backend("openai_api"),
+                &auth("managed_chatgpt_oauth"),
+                &BindingPolicy::default(),
+            )
             .unwrap_err();
         assert!(matches!(
             err,
@@ -440,7 +453,25 @@ mod tests {
         let rt = OpenAiProviderRuntime;
         let mut wrong = backend("openai_api");
         wrong.provider = Provider::Anthropic;
-        let err = rt.validate_binding(&wrong, &auth("api_key")).unwrap_err();
+        let err = rt
+            .validate_binding(&wrong, &auth("api_key"), &BindingPolicy::default())
+            .unwrap_err();
         assert!(matches!(err, ProviderBindingError::ProviderMismatch));
+    }
+
+    #[test]
+    fn validate_propagates_binding_policy() {
+        // Dogma §16: policy declared on the binding must flow through
+        // validate_binding, not default-injected at the provider seam.
+        let rt = OpenAiProviderRuntime;
+        let policy = BindingPolicy {
+            allow_auth_override: true,
+            require_metadata_account: true,
+            require_metadata_workspace: false,
+        };
+        let vb = rt
+            .validate_binding(&backend("openai_api"), &auth("api_key"), &policy)
+            .expect("allowed combination");
+        assert_eq!(vb.policy, policy);
     }
 }

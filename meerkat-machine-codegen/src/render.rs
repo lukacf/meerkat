@@ -25,7 +25,7 @@ use meerkat_machine_schema::{
 };
 use meerkat_machine_schema::{
     EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, Guard, HelperSchema, MachineSchema,
-    Quantifier, TransitionSchema, TypeRef, Update, VariantSchema,
+    Quantifier, TransitionSchema, TriggerKind, TypeRef, Update, VariantSchema,
 };
 
 #[cfg(not(test))]
@@ -338,6 +338,13 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     let has_signals = !schema.signals.variants.is_empty();
     let signal_name = schema.signals.name.clone();
     let signal_kind_name = format!("{}Kind", schema.signals.name);
+    let phase_field_name = canonical_phase_field_name(schema);
+    let wrapper_fields = schema
+        .state
+        .fields
+        .iter()
+        .filter(|field| Some(field.name.as_str()) != phase_field_name)
+        .collect::<Vec<_>>();
 
     pushln!(
         &mut out,
@@ -384,7 +391,10 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out, "#[derive(Debug, Clone, PartialEq, Eq)]");
     pushln!(&mut out, "pub struct State {{");
     pushln!(&mut out, "    pub phase: Phase,");
-    pushln!(&mut out, "    inner: InnerState,");
+    for field in &wrapper_fields {
+        let ty = rust_type_for_substrate(&field.ty);
+        pushln!(&mut out, "    pub {}: {},", field.name, ty);
+    }
     pushln!(&mut out, "}}");
     pushln!(&mut out);
     pushln!(&mut out, "impl Default for State {{");
@@ -395,7 +405,7 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(&mut out, "impl State {{");
     pushln!(&mut out, "    pub fn into_inner(self) -> InnerState {{");
-    pushln!(&mut out, "        self.inner");
+    pushln!(&mut out, "        state_to_inner(&self)");
     pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
     pushln!(&mut out);
@@ -473,7 +483,44 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
     pushln!(&mut out, "impl Context for EmptyContext {{}}");
     pushln!(&mut out);
-    pushln!(&mut out, "pub mod helpers {{}}");
+    pushln!(&mut out, "pub mod helpers {{");
+    pushln!(&mut out, "    use super::*;");
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        let return_ty = rust_type_for_substrate(&helper.returns);
+        let params = helper
+            .params
+            .iter()
+            .map(|field| format!("{}: {}", field.name, rust_type_for_substrate(&field.ty)))
+            .collect::<Vec<_>>();
+        let call_args = helper
+            .params
+            .iter()
+            .map(|field| format!("&{}", field.name))
+            .collect::<Vec<_>>();
+        pushln!(&mut out, "    pub fn {}(", helper.name);
+        pushln!(&mut out, "        state: &State,");
+        for param in &params {
+            pushln!(&mut out, "        {param},");
+        }
+        pushln!(&mut out, "        _context: &impl Context,");
+        pushln!(&mut out, "    ) -> Result<{return_ty}, KernelError> {{");
+        if helper.params.is_empty() {
+            pushln!(
+                &mut out,
+                "        let authority = Authority::from_state(state_to_inner(state));"
+            );
+            pushln!(&mut out, "        Ok(authority.{}())", helper.name);
+        } else {
+            pushln!(
+                &mut out,
+                "        Ok(Authority::{}({}))",
+                helper.name,
+                call_args.join(", ")
+            );
+        }
+        pushln!(&mut out, "    }}");
+    }
+    pushln!(&mut out, "}}");
     pushln!(&mut out);
     pushln!(&mut out, "pub fn initial_state() -> State {{");
     pushln!(&mut out, "    State::default()");
@@ -490,7 +537,7 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(
         &mut out,
-        "    let mut authority = Authority::from_state(state.inner.clone());"
+        "    let mut authority = Authority::from_state(state_to_inner(state));"
     );
     pushln!(
         &mut out,
@@ -518,7 +565,7 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
         );
         pushln!(
             &mut out,
-            "    let mut authority = Authority::from_state(state.inner.clone());"
+            "    let mut authority = Authority::from_state(state_to_inner(state));"
         );
         pushln!(&mut out, "    let transition = authority");
         pushln!(&mut out, "        .apply_signal(signal)");
@@ -553,8 +600,45 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(&mut out, "    State {{");
     pushln!(&mut out, "        phase: inner.phase(),");
-    pushln!(&mut out, "        inner,");
+    for field in &wrapper_fields {
+        pushln!(
+            &mut out,
+            "        {}: inner.{}.clone(),",
+            field.name,
+            field.name
+        );
+    }
     pushln!(&mut out, "    }}");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "fn state_to_inner(state: &State) -> InnerState {{"
+    );
+    if let Some(phase_field_name) = phase_field_name {
+        pushln!(&mut out, "    InnerState {{");
+        pushln!(&mut out, "        {}: state.phase,", phase_field_name);
+        for field in &wrapper_fields {
+            pushln!(
+                &mut out,
+                "        {}: state.{}.clone(),",
+                field.name,
+                field.name
+            );
+        }
+        pushln!(&mut out, "    }}");
+    } else {
+        pushln!(&mut out, "    let mut inner = InnerState::default();");
+        for field in &wrapper_fields {
+            pushln!(
+                &mut out,
+                "    inner.{} = state.{}.clone();",
+                field.name,
+                field.name
+            );
+        }
+        pushln!(&mut out, "    inner");
+    }
     pushln!(&mut out, "}}");
     pushln!(&mut out);
     pushln!(&mut out, "fn map_legacy_error(");
@@ -569,10 +653,66 @@ fn render_canonical_machine_kernel_module(schema: &MachineSchema) -> String {
     );
     pushln!(
         &mut out,
-        "        LegacyTransitionError::GuardRejected {{ .. }} => TransitionRefusal::GuardRejected {{ rejections: Vec::new() }},"
+        "        LegacyTransitionError::GuardRejected {{ .. }} => TransitionRefusal::GuardRejected {{ rejections: guard_rejections_for_trigger(&phase, &trigger) }},"
     );
     pushln!(&mut out, "    }};");
     pushln!(&mut out, "    TransitionError::Refusal(refusal)");
+    pushln!(&mut out, "}}");
+    pushln!(&mut out);
+    pushln!(
+        &mut out,
+        "fn guard_rejections_for_trigger(phase: &Phase, trigger: &TriggerDiscriminant) -> Vec<GuardRejection> {{"
+    );
+    pushln!(&mut out, "    match (phase, trigger) {{");
+    let mut grouped_rejections =
+        std::collections::BTreeMap::<(String, String), Vec<(String, usize)>>::new();
+    for transition in &schema.transitions {
+        if transition.guards.is_empty() {
+            continue;
+        }
+        let trigger_expr = match transition.on.kind {
+            TriggerKind::Input => {
+                format!(
+                    "TriggerDiscriminant::Input(InputKind::{})",
+                    transition.on.variant
+                )
+            }
+            TriggerKind::Signal => {
+                format!(
+                    "TriggerDiscriminant::Signal(SignalKind::{})",
+                    transition.on.variant
+                )
+            }
+        };
+        for from_phase in &transition.from {
+            let entry = grouped_rejections
+                .entry((from_phase.clone(), trigger_expr.clone()))
+                .or_default();
+            for (index, _) in transition.guards.iter().enumerate() {
+                entry.push((transition.name.clone(), index + 1));
+            }
+        }
+    }
+    for ((from_phase, trigger_expr), rejections) in grouped_rejections {
+        pushln!(
+            &mut out,
+            "        (Phase::{}, {}) => vec![",
+            from_phase,
+            trigger_expr
+        );
+        for (transition_name, index) in rejections {
+            pushln!(
+                &mut out,
+                "            GuardRejection {{ transition_id: TransitionId::{}, guard_id: GuardId::{}Guard{} }},",
+                transition_name,
+                transition_name,
+                index
+            );
+        }
+        pushln!(&mut out, "        ],");
+    }
+    pushln!(&mut out, "        _ => Vec::new(),");
+    pushln!(&mut out, "    }}");
     pushln!(&mut out, "}}");
 
     out
@@ -765,6 +905,63 @@ fn schema_constructor_path(schema: &MachineSchema) -> String {
             let slug = dsl_machine_slug(other);
             format!("meerkat_machine_schema::catalog::dsl::dsl_{slug}")
         }
+    }
+}
+
+#[cfg(not(test))]
+fn canonical_phase_field_name(schema: &MachineSchema) -> Option<&str> {
+    if matches!(
+        schema.machine.as_str(),
+        "MeerkatMachine"
+            | "MobMachine"
+            | "ScheduleLifecycleMachine"
+            | "OccurrenceLifecycleMachine"
+            | "AuthMachine"
+    ) {
+        return Some("lifecycle_phase");
+    }
+    if schema
+        .state
+        .fields
+        .iter()
+        .any(|field| field.name == "phase")
+    {
+        return Some("phase");
+    }
+    let phase_name = schema.state.phase.name.as_str();
+    schema
+        .state
+        .fields
+        .iter()
+        .find_map(|field| match &field.ty {
+            TypeRef::Named(name) | TypeRef::Enum(name) if name == phase_name => {
+                Some(field.name.as_str())
+            }
+            _ => None,
+        })
+}
+
+#[cfg(not(test))]
+fn rust_type_for_substrate(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Bool => "bool".into(),
+        TypeRef::U32 => "u32".into(),
+        TypeRef::U64 => "u64".into(),
+        TypeRef::String => "String".into(),
+        TypeRef::Named(name) | TypeRef::Enum(name) => format!("substrate::{name}"),
+        TypeRef::Option(inner) => format!("Option<{}>", rust_type_for_substrate(inner)),
+        TypeRef::Set(inner) => {
+            format!(
+                "std::collections::BTreeSet<{}>",
+                rust_type_for_substrate(inner)
+            )
+        }
+        TypeRef::Seq(inner) => format!("Vec<{}>", rust_type_for_substrate(inner)),
+        TypeRef::Map(key, value) => format!(
+            "std::collections::BTreeMap<{}, {}>",
+            rust_type_for_substrate(key),
+            rust_type_for_substrate(value)
+        ),
     }
 }
 

@@ -18,7 +18,9 @@ type Authority = substrate::AuthMachineAuthority;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
-    inner: InnerState,
+    pub expires_at: Option<u64>,
+    pub last_refresh: Option<u64>,
+    pub refresh_attempt: u64,
 }
 
 impl Default for State {
@@ -29,7 +31,7 @@ impl Default for State {
 
 impl State {
     pub fn into_inner(self) -> InnerState {
-        self.inner
+        state_to_inner(&self)
     }
 }
 
@@ -101,7 +103,9 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {}
+pub mod helpers {
+    use super::*;
+}
 
 pub fn initial_state() -> State {
     State::default()
@@ -113,7 +117,7 @@ pub fn transition(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Input(input.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = substrate::AuthMachineMutator::apply(&mut authority, input)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
     Ok(outcome_from_transition(&authority, transition))
@@ -130,7 +134,18 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        inner,
+        expires_at: inner.expires_at.clone(),
+        last_refresh: inner.last_refresh.clone(),
+        refresh_attempt: inner.refresh_attempt.clone(),
+    }
+}
+
+fn state_to_inner(state: &State) -> InnerState {
+    InnerState {
+        lifecycle_phase: state.phase,
+        expires_at: state.expires_at.clone(),
+        last_refresh: state.last_refresh.clone(),
+        refresh_attempt: state.refresh_attempt.clone(),
     }
 }
 
@@ -144,8 +159,17 @@ fn map_legacy_error(
             TransitionRefusal::NoMatchingTransition { phase, trigger }
         }
         LegacyTransitionError::GuardRejected { .. } => TransitionRefusal::GuardRejected {
-            rejections: Vec::new(),
+            rejections: guard_rejections_for_trigger(&phase, &trigger),
         },
     };
     TransitionError::Refusal(refusal)
+}
+
+fn guard_rejections_for_trigger(
+    phase: &Phase,
+    trigger: &TriggerDiscriminant,
+) -> Vec<GuardRejection> {
+    match (phase, trigger) {
+        _ => Vec::new(),
+    }
 }

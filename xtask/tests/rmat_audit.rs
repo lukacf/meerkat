@@ -434,7 +434,7 @@ fn row22_audit_catches_fields_get_and_phase_string_introspection() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "meerkat-machine-kernels/src/generated/meerkat.rs",
         r#"
 struct KernelState {
     phase: String,
@@ -449,7 +449,7 @@ fn inspect(state: &KernelState) -> Option<&String> {
     );
 
     let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
-    let path = "meerkat-mob/src/generated/flow_frame_loop_driver.rs";
+    let path = "meerkat-machine-kernels/src/generated/meerkat.rs";
     assert_unsuppressed_finding(&findings, "Row22NoFieldsGet", path, "state.fields.get");
     assert_unsuppressed_finding(
         &findings,
@@ -506,7 +506,7 @@ fn row22_audit_catches_string_identity_matches_and_effect_variant_checks() {
     let dir = tempdir().expect("tempdir");
     write_file(
         dir.path(),
-        "meerkat-mob/src/generated/flow_frame_loop_driver.rs",
+        "meerkat-machine-kernels/src/generated/meerkat.rs",
         r#"
 struct Input {
     variant: String,
@@ -527,7 +527,7 @@ fn route(input: &Input, effect: &Effect) -> bool {
     );
 
     let findings = collect_findings(dir.path(), &AuditPolicy::load()).expect("findings");
-    let path = "meerkat-mob/src/generated/flow_frame_loop_driver.rs";
+    let path = "meerkat-machine-kernels/src/generated/meerkat.rs";
     assert_unsuppressed_finding(
         &findings,
         "Row22NoStringIdentityMatches",

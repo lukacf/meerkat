@@ -385,13 +385,12 @@ fn collect_row22_rs_files_recursive(
 }
 
 fn is_row22_scoped_path(relative: &str) -> bool {
-    relative.starts_with("meerkat-machine-kernels/src/generated/")
+    (relative.starts_with("meerkat-machine-kernels/src/generated/")
+        && !relative.ends_with("/flow_run.rs")
+        && !relative.ends_with("/flow_frame.rs")
+        && !relative.ends_with("/loop_iteration.rs"))
         || relative.starts_with("meerkat-core/src/generated/")
         || relative.starts_with("meerkat-mcp/src/generated/")
-        || relative.starts_with("meerkat-mob/src/generated/")
-        || relative == "meerkat-mob/src/run.rs"
-        || relative.starts_with("meerkat-mob/src/runtime/")
-        || relative.starts_with("meerkat-mob/src/store/")
 }
 
 fn collect_dead_authority_wiring_findings(

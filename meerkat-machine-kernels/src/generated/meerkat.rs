@@ -20,7 +20,43 @@ type Authority = substrate::MeerkatMachineAuthority;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
-    inner: InnerState,
+    pub session_id: Option<substrate::SessionId>,
+    pub active_runtime_id: Option<substrate::AgentRuntimeId>,
+    pub active_fence_token: Option<substrate::FenceToken>,
+    pub current_run_id: Option<substrate::RunId>,
+    pub pre_run_phase: Option<String>,
+    pub silent_intent_overrides: std::collections::BTreeSet<String>,
+    pub realtime_intent_present: bool,
+    pub realtime_binding_state: substrate::RealtimeBindingState,
+    pub realtime_binding_authority_epoch: Option<u64>,
+    pub realtime_reattach_required: bool,
+    pub realtime_next_authority_epoch: u64,
+    pub live_topology_phase: substrate::LiveTopologyPhase,
+    pub mcp_server_states:
+        std::collections::BTreeMap<substrate::McpServerId, substrate::McpServerState>,
+    pub pending_peer_requests: std::collections::BTreeMap<
+        substrate::PeerCorrelationId,
+        substrate::OutboundPeerRequestState,
+    >,
+    pub inbound_peer_requests: std::collections::BTreeMap<
+        substrate::PeerCorrelationId,
+        substrate::InboundPeerRequestState,
+    >,
+    pub last_session_context_updated_at_ms: u64,
+    pub reserved_interaction_streams: std::collections::BTreeSet<substrate::PeerCorrelationId>,
+    pub attached_interaction_streams: std::collections::BTreeSet<substrate::PeerCorrelationId>,
+    pub realtime_product_turn_phase: substrate::RealtimeProductTurnPhase,
+    pub realtime_projection_freshness: substrate::RealtimeProjectionFreshness,
+    pub realtime_projection_frontier_ms: u64,
+    pub realtime_reconnect_policy: substrate::RealtimeReconnectPolicy,
+    pub peer_ingress_owner_kind: substrate::PeerIngressOwnerKind,
+    pub peer_ingress_comms_runtime_id: Option<substrate::CommsRuntimeId>,
+    pub peer_ingress_mob_id: Option<substrate::MobId>,
+    pub supervisor_binding_kind: substrate::SupervisorBindingKind,
+    pub supervisor_bound_name: Option<String>,
+    pub supervisor_bound_peer_id: Option<String>,
+    pub supervisor_bound_address: Option<String>,
+    pub supervisor_bound_epoch: Option<u64>,
 }
 
 impl Default for State {
@@ -31,7 +67,7 @@ impl Default for State {
 
 impl State {
     pub fn into_inner(self) -> InnerState {
-        self.inner
+        state_to_inner(&self)
     }
 }
 
@@ -104,7 +140,9 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {}
+pub mod helpers {
+    use super::*;
+}
 
 pub fn initial_state() -> State {
     State::default()
@@ -116,7 +154,7 @@ pub fn transition(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Input(input.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = substrate::MeerkatMachineMutator::apply(&mut authority, input)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
     Ok(outcome_from_transition(&authority, transition))
@@ -128,7 +166,7 @@ pub fn transition_signal(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Signal(signal.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = authority
         .apply_signal(signal)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
@@ -146,7 +184,72 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        inner,
+        session_id: inner.session_id.clone(),
+        active_runtime_id: inner.active_runtime_id.clone(),
+        active_fence_token: inner.active_fence_token.clone(),
+        current_run_id: inner.current_run_id.clone(),
+        pre_run_phase: inner.pre_run_phase.clone(),
+        silent_intent_overrides: inner.silent_intent_overrides.clone(),
+        realtime_intent_present: inner.realtime_intent_present.clone(),
+        realtime_binding_state: inner.realtime_binding_state.clone(),
+        realtime_binding_authority_epoch: inner.realtime_binding_authority_epoch.clone(),
+        realtime_reattach_required: inner.realtime_reattach_required.clone(),
+        realtime_next_authority_epoch: inner.realtime_next_authority_epoch.clone(),
+        live_topology_phase: inner.live_topology_phase.clone(),
+        mcp_server_states: inner.mcp_server_states.clone(),
+        pending_peer_requests: inner.pending_peer_requests.clone(),
+        inbound_peer_requests: inner.inbound_peer_requests.clone(),
+        last_session_context_updated_at_ms: inner.last_session_context_updated_at_ms.clone(),
+        reserved_interaction_streams: inner.reserved_interaction_streams.clone(),
+        attached_interaction_streams: inner.attached_interaction_streams.clone(),
+        realtime_product_turn_phase: inner.realtime_product_turn_phase.clone(),
+        realtime_projection_freshness: inner.realtime_projection_freshness.clone(),
+        realtime_projection_frontier_ms: inner.realtime_projection_frontier_ms.clone(),
+        realtime_reconnect_policy: inner.realtime_reconnect_policy.clone(),
+        peer_ingress_owner_kind: inner.peer_ingress_owner_kind.clone(),
+        peer_ingress_comms_runtime_id: inner.peer_ingress_comms_runtime_id.clone(),
+        peer_ingress_mob_id: inner.peer_ingress_mob_id.clone(),
+        supervisor_binding_kind: inner.supervisor_binding_kind.clone(),
+        supervisor_bound_name: inner.supervisor_bound_name.clone(),
+        supervisor_bound_peer_id: inner.supervisor_bound_peer_id.clone(),
+        supervisor_bound_address: inner.supervisor_bound_address.clone(),
+        supervisor_bound_epoch: inner.supervisor_bound_epoch.clone(),
+    }
+}
+
+fn state_to_inner(state: &State) -> InnerState {
+    InnerState {
+        lifecycle_phase: state.phase,
+        session_id: state.session_id.clone(),
+        active_runtime_id: state.active_runtime_id.clone(),
+        active_fence_token: state.active_fence_token.clone(),
+        current_run_id: state.current_run_id.clone(),
+        pre_run_phase: state.pre_run_phase.clone(),
+        silent_intent_overrides: state.silent_intent_overrides.clone(),
+        realtime_intent_present: state.realtime_intent_present.clone(),
+        realtime_binding_state: state.realtime_binding_state.clone(),
+        realtime_binding_authority_epoch: state.realtime_binding_authority_epoch.clone(),
+        realtime_reattach_required: state.realtime_reattach_required.clone(),
+        realtime_next_authority_epoch: state.realtime_next_authority_epoch.clone(),
+        live_topology_phase: state.live_topology_phase.clone(),
+        mcp_server_states: state.mcp_server_states.clone(),
+        pending_peer_requests: state.pending_peer_requests.clone(),
+        inbound_peer_requests: state.inbound_peer_requests.clone(),
+        last_session_context_updated_at_ms: state.last_session_context_updated_at_ms.clone(),
+        reserved_interaction_streams: state.reserved_interaction_streams.clone(),
+        attached_interaction_streams: state.attached_interaction_streams.clone(),
+        realtime_product_turn_phase: state.realtime_product_turn_phase.clone(),
+        realtime_projection_freshness: state.realtime_projection_freshness.clone(),
+        realtime_projection_frontier_ms: state.realtime_projection_frontier_ms.clone(),
+        realtime_reconnect_policy: state.realtime_reconnect_policy.clone(),
+        peer_ingress_owner_kind: state.peer_ingress_owner_kind.clone(),
+        peer_ingress_comms_runtime_id: state.peer_ingress_comms_runtime_id.clone(),
+        peer_ingress_mob_id: state.peer_ingress_mob_id.clone(),
+        supervisor_binding_kind: state.supervisor_binding_kind.clone(),
+        supervisor_bound_name: state.supervisor_bound_name.clone(),
+        supervisor_bound_peer_id: state.supervisor_bound_peer_id.clone(),
+        supervisor_bound_address: state.supervisor_bound_address.clone(),
+        supervisor_bound_epoch: state.supervisor_bound_epoch.clone(),
     }
 }
 
@@ -160,8 +263,2998 @@ fn map_legacy_error(
             TransitionRefusal::NoMatchingTransition { phase, trigger }
         }
         LegacyTransitionError::GuardRejected { .. } => TransitionRefusal::GuardRejected {
-            rejections: Vec::new(),
+            rejections: guard_rejections_for_trigger(&phase, &trigger),
         },
     };
     TransitionError::Refusal(refusal)
+}
+
+fn guard_rejections_for_trigger(
+    phase: &Phase,
+    trigger: &TriggerDiscriminant,
+) -> Vec<GuardRejection> {
+    match (phase, trigger) {
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Abort)) => vec![GuardRejection {
+            transition_id: TransitionId::AbortAttached,
+            guard_id: GuardId::AbortAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AbortLiveTopologyBeforeDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachAttached,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachAttached,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AcceptWithCompletion)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedImmediate,
+                guard_id: GuardId::AcceptWithCompletionAttachedImmediateGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedImmediate,
+                guard_id: GuardId::AcceptWithCompletionAttachedImmediateGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedImmediate,
+                guard_id: GuardId::AcceptWithCompletionAttachedImmediateGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedQueued,
+                guard_id: GuardId::AcceptWithCompletionAttachedQueuedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedQueued,
+                guard_id: GuardId::AcceptWithCompletionAttachedQueuedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionAttachedQueued,
+                guard_id: GuardId::AcceptWithCompletionAttachedQueuedGuard3,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AcceptWithoutWake)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AcceptWithoutWakeAttached,
+                guard_id: GuardId::AcceptWithoutWakeAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AdvanceSessionContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AdvanceSessionContextAttached,
+                guard_id: GuardId::AdvanceSessionContextAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyIdentity)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyIdentityAttached,
+                    guard_id: GuardId::ApplyLiveTopologyIdentityAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyIdentityAttached,
+                    guard_id: GuardId::ApplyLiveTopologyIdentityAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyVisibility)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityAttached,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityAttached,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AttachMobIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressAttached,
+                guard_id: GuardId::AttachMobIngressAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressAttached,
+                guard_id: GuardId::AttachMobIngressAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AttachSessionIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressAttached,
+                guard_id: GuardId::AttachSessionIngressAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressAttached,
+                guard_id: GuardId::AttachSessionIngressAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::AuthorizeSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AuthorizeSupervisorAttached,
+                guard_id: GuardId::AuthorizeSupervisorAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::BeginLiveTopologyReconfigure)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureAttached,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureAttached,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureAttachedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureAttached,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureAttachedGuard3,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::BeginRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingAttached,
+                guard_id: GuardId::BeginRealtimeBindingAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingAttached,
+                guard_id: GuardId::BeginRealtimeBindingAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::BindSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::BindSupervisorAttached,
+                guard_id: GuardId::BindSupervisorAttachedGuard1,
+            }]
+        }
+        (
+            Phase::Attached,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedAttached,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedAttachedGuard1,
+        }],
+        (
+            Phase::Attached,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeMidTurnActivityAttached,
+            guard_id: GuardId::ClassifyRealtimeMidTurnActivityAttachedGuard1,
+        }],
+        (
+            Phase::Attached,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeTurnTerminatedAttached,
+            guard_id: GuardId::ClassifyRealtimeTurnTerminatedAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::CompleteLiveTopology)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyAttached,
+                guard_id: GuardId::CompleteLiveTopologyAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyAttached,
+                guard_id: GuardId::CompleteLiveTopologyAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Destroy)) => vec![GuardRejection {
+            transition_id: TransitionId::Destroy,
+            guard_id: GuardId::DestroyGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::DetachIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressAttached,
+                guard_id: GuardId::DetachIngressAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressAttached,
+                guard_id: GuardId::DetachIngressAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::DetachRealtimeBinding)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::DetachRealtimeBindingAttached,
+                guard_id: GuardId::DetachRealtimeBindingAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::FailLiveTopologyAfterDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachAttached,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachAttached,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Ingest)) => vec![GuardRejection {
+            transition_id: TransitionId::IngestAttached,
+            guard_id: GuardId::IngestAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::InteractionStreamAttached)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamAttachedAttached,
+                guard_id: GuardId::InteractionStreamAttachedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::InteractionStreamClosedEarly)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamClosedEarlyAttached,
+                guard_id: GuardId::InteractionStreamClosedEarlyAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::InteractionStreamCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamCompletedAttached,
+                guard_id: GuardId::InteractionStreamCompletedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::InteractionStreamExpired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamExpiredAttached,
+                guard_id: GuardId::InteractionStreamExpiredAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::InteractionStreamReserved)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::InteractionStreamReservedAttached,
+                    guard_id: GuardId::InteractionStreamReservedAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::InteractionStreamReservedAttached,
+                    guard_id: GuardId::InteractionStreamReservedAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::MarkLiveTopologyDetached)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedAttached,
+                guard_id: GuardId::MarkLiveTopologyDetachedAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedAttached,
+                guard_id: GuardId::MarkLiveTopologyDetachedAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedAttached,
+                guard_id: GuardId::MarkLiveTopologyDetachedAttachedGuard3,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::McpServerConnectPending)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectPendingAttached,
+                guard_id: GuardId::McpServerConnectPendingAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::McpServerConnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectedAttached,
+                guard_id: GuardId::McpServerConnectedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::McpServerDisconnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerDisconnectedAttached,
+                guard_id: GuardId::McpServerDisconnectedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::McpServerFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerFailedAttached,
+                guard_id: GuardId::McpServerFailedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::McpServerReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerReloadAttached,
+                guard_id: GuardId::McpServerReloadAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::NotifyDrainExited)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::NotifyDrainExitedAttached,
+                guard_id: GuardId::NotifyDrainExitedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerRequestReceived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestReceivedAttached,
+                guard_id: GuardId::PeerRequestReceivedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerRequestSent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestSentAttached,
+                guard_id: GuardId::PeerRequestSentAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerRequestTimedOut)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestTimedOutAttached,
+                guard_id: GuardId::PeerRequestTimedOutAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerResponseProgressArrived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseProgressArrivedAttached,
+                guard_id: GuardId::PeerResponseProgressArrivedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerResponseReplied)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseRepliedAttached,
+                guard_id: GuardId::PeerResponseRepliedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PeerResponseTerminalArrived)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedAttached,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedAttached,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedAttachedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedAttached,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedAttached,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Prepare)) => vec![GuardRejection {
+            transition_id: TransitionId::PrepareAttached,
+            guard_id: GuardId::PrepareAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingAttached,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedAttached,
+                guard_id: GuardId::ProductOutputStartedFromCommittedAttachedGuard1,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingAttached,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputAttached,
+                guard_id: GuardId::ProductTurnCommittedFromOutputAttachedGuard1,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightAttached,
+                guard_id: GuardId::ProductTurnInFlightAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleAttached,
+                guard_id: GuardId::ProductTurnInterruptedFromPreemptibleAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromOutputAttached,
+                guard_id: GuardId::ProductTurnInterruptedFromOutputAttachedGuard1,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalAttached,
+                guard_id: GuardId::ProductTurnTerminalAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ProjectRealtimeIntent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProjectRealtimeIntentAttached,
+                guard_id: GuardId::ProjectRealtimeIntentAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PublishCommittedVisibleSet)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetAttached,
+                    guard_id: GuardId::PublishCommittedVisibleSetAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetAttached,
+                    guard_id: GuardId::PublishCommittedVisibleSetAttachedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetAttached,
+                    guard_id: GuardId::PublishCommittedVisibleSetAttachedGuard3,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetAttached,
+                    guard_id: GuardId::PublishCommittedVisibleSetAttachedGuard4,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PublishEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PublishEventAttached,
+                guard_id: GuardId::PublishEventAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::PublishRealtimeSignal)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalAttached,
+                guard_id: GuardId::PublishRealtimeSignalAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalAttached,
+                guard_id: GuardId::PublishRealtimeSignalAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalAttached,
+                guard_id: GuardId::PublishRealtimeSignalAttachedGuard3,
+            },
+        ],
+        (
+            Phase::Attached,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnAttached,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnAttached,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleAttached,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleAttached,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedAttached,
+                    guard_id: GuardId::RealtimeProjectionRefreshedAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedAttached,
+                    guard_id: GuardId::RealtimeProjectionRefreshedAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetAttached,
+                guard_id: GuardId::RealtimeProjectionResetAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ReconfigureSessionLlmIdentity)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ReconfigureSessionLlmIdentityAttached,
+                    guard_id: GuardId::ReconfigureSessionLlmIdentityAttachedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ReconfigureSessionLlmIdentityAttached,
+                    guard_id: GuardId::ReconfigureSessionLlmIdentityAttachedGuard2,
+                },
+            ]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Recycle)) => vec![GuardRejection {
+            transition_id: TransitionId::RecycleFromAttached,
+            guard_id: GuardId::RecycleFromAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::ReplaceRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingAttached,
+                guard_id: GuardId::ReplaceRealtimeBindingAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingAttached,
+                guard_id: GuardId::ReplaceRealtimeBindingAttachedGuard2,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::RequestDeferredTools)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequestDeferredToolsAttached,
+                guard_id: GuardId::RequestDeferredToolsAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::RequireRealtimeReattach)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequireRealtimeReattachAttached,
+                guard_id: GuardId::RequireRealtimeReattachAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::RevokeSupervisor)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorAttached,
+                guard_id: GuardId::RevokeSupervisorAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorAttached,
+                guard_id: GuardId::RevokeSupervisorAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorAttached,
+                guard_id: GuardId::RevokeSupervisorAttachedGuard3,
+            },
+        ],
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::SetPeerIngressContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetPeerIngressContextAttached,
+                guard_id: GuardId::SetPeerIngressContextAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::SetSilentIntents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetSilentIntentsAttached,
+                guard_id: GuardId::SetSilentIntentsAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::StagePersistentFilter)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StagePersistentFilterAttached,
+                guard_id: GuardId::StagePersistentFilterAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::UnregisterSession)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::UnregisterSessionAttached,
+                guard_id: GuardId::UnregisterSessionAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Input(InputKind::Wait)) => vec![GuardRejection {
+            transition_id: TransitionId::WaitAttached,
+            guard_id: GuardId::WaitAttachedGuard1,
+        }],
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::ApplySurfaceBoundary)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ApplySurfaceBoundaryAttached,
+                guard_id: GuardId::ApplySurfaceBoundaryAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::CallFinished)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CallFinishedAttached,
+                guard_id: GuardId::CallFinishedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::CallStarted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CallStartedAttached,
+                guard_id: GuardId::CallStartedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::ClassifyExternalEnvelope)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyExternalEnvelopeAttached,
+                guard_id: GuardId::ClassifyExternalEnvelopeAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::ClassifyPlainEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyPlainEventAttached,
+                guard_id: GuardId::ClassifyPlainEventAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::EnsureDrainRunning)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::EnsureDrainRunningAttached,
+                guard_id: GuardId::EnsureDrainRunningAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::FinalizeRemovalClean)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::FinalizeRemovalCleanAttached,
+                guard_id: GuardId::FinalizeRemovalCleanAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::FinalizeRemovalForced)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::FinalizeRemovalForcedAttached,
+                guard_id: GuardId::FinalizeRemovalForcedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::PendingFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PendingFailedAttached,
+                guard_id: GuardId::PendingFailedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::PendingSucceeded)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PendingSucceededAttached,
+                guard_id: GuardId::PendingSucceededAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::ShutdownSurface)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ShutdownSurfaceAttached,
+                guard_id: GuardId::ShutdownSurfaceAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::SnapshotAligned)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SnapshotAlignedAttached,
+                guard_id: GuardId::SnapshotAlignedAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StageAdd)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageAddAttached,
+                guard_id: GuardId::StageAddAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StageReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageReloadAttached,
+                guard_id: GuardId::StageReloadAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StageRemove)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageRemoveAttached,
+                guard_id: GuardId::StageRemoveAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StartConversationRun)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StartConversationRunAttached,
+                guard_id: GuardId::StartConversationRunAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StartImmediateAppend)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StartImmediateAppendAttached,
+                guard_id: GuardId::StartImmediateAppendAttachedGuard1,
+            }]
+        }
+        (Phase::Attached, TriggerDiscriminant::Signal(SignalKind::StartImmediateContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StartImmediateContextAttached,
+                guard_id: GuardId::StartImmediateContextAttachedGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Abort)) => vec![GuardRejection {
+            transition_id: TransitionId::AbortIdle,
+            guard_id: GuardId::AbortIdleGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AbortLiveTopologyBeforeDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachIdle,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachIdleGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachIdle,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachIdleGuard2,
+                },
+            ]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AcceptWithCompletion)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleQueued,
+                guard_id: GuardId::AcceptWithCompletionIdleQueuedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleQueued,
+                guard_id: GuardId::AcceptWithCompletionIdleQueuedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleQueued,
+                guard_id: GuardId::AcceptWithCompletionIdleQueuedGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleImmediate,
+                guard_id: GuardId::AcceptWithCompletionIdleImmediateGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleImmediate,
+                guard_id: GuardId::AcceptWithCompletionIdleImmediateGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionIdleImmediate,
+                guard_id: GuardId::AcceptWithCompletionIdleImmediateGuard3,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AcceptWithoutWake)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AcceptWithoutWakeIdle,
+                guard_id: GuardId::AcceptWithoutWakeIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AdvanceSessionContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AdvanceSessionContextIdle,
+                guard_id: GuardId::AdvanceSessionContextIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyIdentity)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityIdle,
+                guard_id: GuardId::ApplyLiveTopologyIdentityIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityIdle,
+                guard_id: GuardId::ApplyLiveTopologyIdentityIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyVisibility)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyVisibilityIdle,
+                guard_id: GuardId::ApplyLiveTopologyVisibilityIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyVisibilityIdle,
+                guard_id: GuardId::ApplyLiveTopologyVisibilityIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AttachMobIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressIdle,
+                guard_id: GuardId::AttachMobIngressIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressIdle,
+                guard_id: GuardId::AttachMobIngressIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AttachSessionIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressIdle,
+                guard_id: GuardId::AttachSessionIngressIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressIdle,
+                guard_id: GuardId::AttachSessionIngressIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::AuthorizeSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AuthorizeSupervisorIdle,
+                guard_id: GuardId::AuthorizeSupervisorIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::BeginLiveTopologyReconfigure)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginLiveTopologyReconfigureIdle,
+                guard_id: GuardId::BeginLiveTopologyReconfigureIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginLiveTopologyReconfigureIdle,
+                guard_id: GuardId::BeginLiveTopologyReconfigureIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginLiveTopologyReconfigureIdle,
+                guard_id: GuardId::BeginLiveTopologyReconfigureIdleGuard3,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::BeginRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingIdle,
+                guard_id: GuardId::BeginRealtimeBindingIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingIdle,
+                guard_id: GuardId::BeginRealtimeBindingIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::BindSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::BindSupervisorIdle,
+                guard_id: GuardId::BindSupervisorIdleGuard1,
+            }]
+        }
+        (
+            Phase::Idle,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedIdle,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedIdleGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyRealtimeMidTurnActivityIdle,
+                guard_id: GuardId::ClassifyRealtimeMidTurnActivityIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyRealtimeTurnTerminatedIdle,
+                guard_id: GuardId::ClassifyRealtimeTurnTerminatedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::CompleteLiveTopology)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyIdle,
+                guard_id: GuardId::CompleteLiveTopologyIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyIdle,
+                guard_id: GuardId::CompleteLiveTopologyIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Destroy)) => vec![GuardRejection {
+            transition_id: TransitionId::Destroy,
+            guard_id: GuardId::DestroyGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::DetachIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressIdle,
+                guard_id: GuardId::DetachIngressIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressIdle,
+                guard_id: GuardId::DetachIngressIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::DetachRealtimeBinding)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::DetachRealtimeBindingIdle,
+                guard_id: GuardId::DetachRealtimeBindingIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::FailLiveTopologyAfterDetach)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::FailLiveTopologyAfterDetachIdle,
+                guard_id: GuardId::FailLiveTopologyAfterDetachIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailLiveTopologyAfterDetachIdle,
+                guard_id: GuardId::FailLiveTopologyAfterDetachIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Ingest)) => vec![GuardRejection {
+            transition_id: TransitionId::IngestIdle,
+            guard_id: GuardId::IngestIdleGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::InteractionStreamAttached)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamAttachedIdle,
+                guard_id: GuardId::InteractionStreamAttachedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::InteractionStreamClosedEarly)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamClosedEarlyIdle,
+                guard_id: GuardId::InteractionStreamClosedEarlyIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::InteractionStreamCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamCompletedIdle,
+                guard_id: GuardId::InteractionStreamCompletedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::InteractionStreamExpired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamExpiredIdle,
+                guard_id: GuardId::InteractionStreamExpiredIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::InteractionStreamReserved)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedIdle,
+                guard_id: GuardId::InteractionStreamReservedIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedIdle,
+                guard_id: GuardId::InteractionStreamReservedIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::MarkLiveTopologyDetached)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedIdle,
+                guard_id: GuardId::MarkLiveTopologyDetachedIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedIdle,
+                guard_id: GuardId::MarkLiveTopologyDetachedIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedIdle,
+                guard_id: GuardId::MarkLiveTopologyDetachedIdleGuard3,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::McpServerConnectPending)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectPendingIdle,
+                guard_id: GuardId::McpServerConnectPendingIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::McpServerConnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectedIdle,
+                guard_id: GuardId::McpServerConnectedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::McpServerDisconnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerDisconnectedIdle,
+                guard_id: GuardId::McpServerDisconnectedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::McpServerFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerFailedIdle,
+                guard_id: GuardId::McpServerFailedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::McpServerReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerReloadIdle,
+                guard_id: GuardId::McpServerReloadIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::NotifyDrainExited)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::NotifyDrainExitedIdle,
+                guard_id: GuardId::NotifyDrainExitedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerRequestReceived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestReceivedIdle,
+                guard_id: GuardId::PeerRequestReceivedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerRequestSent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestSentIdle,
+                guard_id: GuardId::PeerRequestSentIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerRequestTimedOut)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestTimedOutIdle,
+                guard_id: GuardId::PeerRequestTimedOutIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerResponseProgressArrived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseProgressArrivedIdle,
+                guard_id: GuardId::PeerResponseProgressArrivedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerResponseReplied)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseRepliedIdle,
+                guard_id: GuardId::PeerResponseRepliedIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PeerResponseTerminalArrived)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PeerResponseTerminalArrivedCompletedIdle,
+                guard_id: GuardId::PeerResponseTerminalArrivedCompletedIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PeerResponseTerminalArrivedCompletedIdle,
+                guard_id: GuardId::PeerResponseTerminalArrivedCompletedIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PeerResponseTerminalArrivedFailedIdle,
+                guard_id: GuardId::PeerResponseTerminalArrivedFailedIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PeerResponseTerminalArrivedFailedIdle,
+                guard_id: GuardId::PeerResponseTerminalArrivedFailedIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Prepare)) => vec![GuardRejection {
+            transition_id: TransitionId::PrepareIdle,
+            guard_id: GuardId::PrepareIdleGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingIdle,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedIdle,
+                guard_id: GuardId::ProductOutputStartedFromCommittedIdleGuard1,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingIdle,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputIdle,
+                guard_id: GuardId::ProductTurnCommittedFromOutputIdleGuard1,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightIdle,
+                guard_id: GuardId::ProductTurnInFlightIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleIdle,
+                guard_id: GuardId::ProductTurnInterruptedFromPreemptibleIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromOutputIdle,
+                guard_id: GuardId::ProductTurnInterruptedFromOutputIdleGuard1,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalIdle,
+                guard_id: GuardId::ProductTurnTerminalIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ProjectRealtimeIntent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProjectRealtimeIntentIdle,
+                guard_id: GuardId::ProjectRealtimeIntentIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PublishCommittedVisibleSet)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishCommittedVisibleSetIdle,
+                guard_id: GuardId::PublishCommittedVisibleSetIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishCommittedVisibleSetIdle,
+                guard_id: GuardId::PublishCommittedVisibleSetIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishCommittedVisibleSetIdle,
+                guard_id: GuardId::PublishCommittedVisibleSetIdleGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishCommittedVisibleSetIdle,
+                guard_id: GuardId::PublishCommittedVisibleSetIdleGuard4,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PublishEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PublishEventIdle,
+                guard_id: GuardId::PublishEventIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::PublishRealtimeSignal)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalIdle,
+                guard_id: GuardId::PublishRealtimeSignalIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalIdle,
+                guard_id: GuardId::PublishRealtimeSignalIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalIdle,
+                guard_id: GuardId::PublishRealtimeSignalIdleGuard3,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnIdle,
+                    guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnIdleGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnIdle,
+                    guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnIdleGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleIdle,
+                    guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleIdleGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleIdle,
+                    guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleIdleGuard2,
+                },
+            ]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionRefreshedIdle,
+                guard_id: GuardId::RealtimeProjectionRefreshedIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionRefreshedIdle,
+                guard_id: GuardId::RealtimeProjectionRefreshedIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetIdle,
+                guard_id: GuardId::RealtimeProjectionResetIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Recycle)) => vec![GuardRejection {
+            transition_id: TransitionId::RecycleFromIdleOrRetired,
+            guard_id: GuardId::RecycleFromIdleOrRetiredGuard1,
+        }],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::ReplaceRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingIdle,
+                guard_id: GuardId::ReplaceRealtimeBindingIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingIdle,
+                guard_id: GuardId::ReplaceRealtimeBindingIdleGuard2,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RequestDeferredTools)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequestDeferredToolsIdle,
+                guard_id: GuardId::RequestDeferredToolsIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RequireRealtimeReattach)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequireRealtimeReattachIdle,
+                guard_id: GuardId::RequireRealtimeReattachIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::RevokeSupervisor)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorIdle,
+                guard_id: GuardId::RevokeSupervisorIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorIdle,
+                guard_id: GuardId::RevokeSupervisorIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorIdle,
+                guard_id: GuardId::RevokeSupervisorIdleGuard3,
+            },
+        ],
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::SetPeerIngressContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetPeerIngressContextIdle,
+                guard_id: GuardId::SetPeerIngressContextIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::SetSilentIntents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetSilentIntentsIdle,
+                guard_id: GuardId::SetSilentIntentsIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::StagePersistentFilter)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StagePersistentFilterIdle,
+                guard_id: GuardId::StagePersistentFilterIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::UnregisterSession)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::UnregisterSessionIdle,
+                guard_id: GuardId::UnregisterSessionIdleGuard1,
+            }]
+        }
+        (Phase::Idle, TriggerDiscriminant::Input(InputKind::Wait)) => vec![GuardRejection {
+            transition_id: TransitionId::WaitIdle,
+            guard_id: GuardId::WaitIdleGuard1,
+        }],
+        (
+            Phase::Initializing,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedInitializing,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedInitializingGuard1,
+        }],
+        (
+            Phase::Initializing,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeMidTurnActivityInitializing,
+            guard_id: GuardId::ClassifyRealtimeMidTurnActivityInitializingGuard1,
+        }],
+        (
+            Phase::Initializing,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeTurnTerminatedInitializing,
+            guard_id: GuardId::ClassifyRealtimeTurnTerminatedInitializingGuard1,
+        }],
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::Destroy)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::Destroy,
+                guard_id: GuardId::DestroyGuard1,
+            }]
+        }
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingInitializing,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingInitializingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedInitializing,
+                guard_id: GuardId::ProductOutputStartedFromCommittedInitializingGuard1,
+            },
+        ],
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingInitializing,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingInitializingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputInitializing,
+                guard_id: GuardId::ProductTurnCommittedFromOutputInitializingGuard1,
+            },
+        ],
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightInitializing,
+                guard_id: GuardId::ProductTurnInFlightInitializingGuard1,
+            }]
+        }
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleInitializing,
+                    guard_id: GuardId::ProductTurnInterruptedFromPreemptibleInitializingGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ProductTurnInterruptedFromOutputInitializing,
+                    guard_id: GuardId::ProductTurnInterruptedFromOutputInitializingGuard1,
+                },
+            ]
+        }
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalInitializing,
+                guard_id: GuardId::ProductTurnTerminalInitializingGuard1,
+            }]
+        }
+        (
+            Phase::Initializing,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnInitializing,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnInitializingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnInitializing,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnInitializingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleInitializing,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleInitializingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleInitializing,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleInitializingGuard2,
+            },
+        ],
+        (
+            Phase::Initializing,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionRefreshedInitializing,
+                guard_id: GuardId::RealtimeProjectionRefreshedInitializingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionRefreshedInitializing,
+                guard_id: GuardId::RealtimeProjectionRefreshedInitializingGuard2,
+            },
+        ],
+        (Phase::Initializing, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetInitializing,
+                guard_id: GuardId::RealtimeProjectionResetInitializingGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::Abort)) => vec![GuardRejection {
+            transition_id: TransitionId::AbortRetired,
+            guard_id: GuardId::AbortRetiredGuard1,
+        }],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::AbortLiveTopologyBeforeDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachRetired,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachRetired,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachRetiredGuard2,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::AdvanceSessionContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AdvanceSessionContextRetired,
+                guard_id: GuardId::AdvanceSessionContextRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyIdentity)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityRetired,
+                guard_id: GuardId::ApplyLiveTopologyIdentityRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityRetired,
+                guard_id: GuardId::ApplyLiveTopologyIdentityRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyVisibility)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityRetired,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityRetired,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityRetiredGuard2,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::AttachMobIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressRetired,
+                guard_id: GuardId::AttachMobIngressRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressRetired,
+                guard_id: GuardId::AttachMobIngressRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::AttachSessionIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressRetired,
+                guard_id: GuardId::AttachSessionIngressRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressRetired,
+                guard_id: GuardId::AttachSessionIngressRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::AuthorizeSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AuthorizeSupervisorRetired,
+                guard_id: GuardId::AuthorizeSupervisorRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::BeginLiveTopologyReconfigure)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRetired,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRetired,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRetiredGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRetired,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRetiredGuard3,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::BeginRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingRetired,
+                guard_id: GuardId::BeginRealtimeBindingRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingRetired,
+                guard_id: GuardId::BeginRealtimeBindingRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::BindSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::BindSupervisorRetired,
+                guard_id: GuardId::BindSupervisorRetiredGuard1,
+            }]
+        }
+        (
+            Phase::Retired,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedRetired,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedRetiredGuard1,
+        }],
+        (
+            Phase::Retired,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeMidTurnActivityRetired,
+            guard_id: GuardId::ClassifyRealtimeMidTurnActivityRetiredGuard1,
+        }],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyRealtimeTurnTerminatedRetired,
+                guard_id: GuardId::ClassifyRealtimeTurnTerminatedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::CompleteLiveTopology)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyRetired,
+                guard_id: GuardId::CompleteLiveTopologyRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyRetired,
+                guard_id: GuardId::CompleteLiveTopologyRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::Destroy)) => vec![GuardRejection {
+            transition_id: TransitionId::Destroy,
+            guard_id: GuardId::DestroyGuard1,
+        }],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::DetachIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressRetired,
+                guard_id: GuardId::DetachIngressRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressRetired,
+                guard_id: GuardId::DetachIngressRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::DetachRealtimeBinding)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::DetachRealtimeBindingRetired,
+                guard_id: GuardId::DetachRealtimeBindingRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::FailLiveTopologyAfterDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachRetired,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachRetired,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachRetiredGuard2,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::InteractionStreamAttached)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamAttachedRetired,
+                guard_id: GuardId::InteractionStreamAttachedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::InteractionStreamClosedEarly)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamClosedEarlyRetired,
+                guard_id: GuardId::InteractionStreamClosedEarlyRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::InteractionStreamCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamCompletedRetired,
+                guard_id: GuardId::InteractionStreamCompletedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::InteractionStreamExpired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamExpiredRetired,
+                guard_id: GuardId::InteractionStreamExpiredRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::InteractionStreamReserved)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedRetired,
+                guard_id: GuardId::InteractionStreamReservedRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedRetired,
+                guard_id: GuardId::InteractionStreamReservedRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::MarkLiveTopologyDetached)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRetired,
+                guard_id: GuardId::MarkLiveTopologyDetachedRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRetired,
+                guard_id: GuardId::MarkLiveTopologyDetachedRetiredGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRetired,
+                guard_id: GuardId::MarkLiveTopologyDetachedRetiredGuard3,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::McpServerConnectPending)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectPendingRetired,
+                guard_id: GuardId::McpServerConnectPendingRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::McpServerConnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectedRetired,
+                guard_id: GuardId::McpServerConnectedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::McpServerDisconnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerDisconnectedRetired,
+                guard_id: GuardId::McpServerDisconnectedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::McpServerFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerFailedRetired,
+                guard_id: GuardId::McpServerFailedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::McpServerReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerReloadRetired,
+                guard_id: GuardId::McpServerReloadRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::NotifyDrainExited)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::NotifyDrainExitedRetired,
+                guard_id: GuardId::NotifyDrainExitedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerRequestReceived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestReceivedRetired,
+                guard_id: GuardId::PeerRequestReceivedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerRequestSent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestSentRetired,
+                guard_id: GuardId::PeerRequestSentRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerRequestTimedOut)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestTimedOutRetired,
+                guard_id: GuardId::PeerRequestTimedOutRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerResponseProgressArrived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseProgressArrivedRetired,
+                guard_id: GuardId::PeerResponseProgressArrivedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerResponseReplied)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseRepliedRetired,
+                guard_id: GuardId::PeerResponseRepliedRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PeerResponseTerminalArrived)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedRetired,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedRetired,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedRetiredGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedRetired,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedRetired,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedRetiredGuard2,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingRetired,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedRetired,
+                guard_id: GuardId::ProductOutputStartedFromCommittedRetiredGuard1,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingRetired,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputRetired,
+                guard_id: GuardId::ProductTurnCommittedFromOutputRetiredGuard1,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightRetired,
+                guard_id: GuardId::ProductTurnInFlightRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleRetired,
+                guard_id: GuardId::ProductTurnInterruptedFromPreemptibleRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromOutputRetired,
+                guard_id: GuardId::ProductTurnInterruptedFromOutputRetiredGuard1,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalRetired,
+                guard_id: GuardId::ProductTurnTerminalRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ProjectRealtimeIntent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProjectRealtimeIntentRetired,
+                guard_id: GuardId::ProjectRealtimeIntentRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PublishCommittedVisibleSet)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRetired,
+                    guard_id: GuardId::PublishCommittedVisibleSetRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRetired,
+                    guard_id: GuardId::PublishCommittedVisibleSetRetiredGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRetired,
+                    guard_id: GuardId::PublishCommittedVisibleSetRetiredGuard3,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRetired,
+                    guard_id: GuardId::PublishCommittedVisibleSetRetiredGuard4,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PublishEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PublishEventRetired,
+                guard_id: GuardId::PublishEventRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::PublishRealtimeSignal)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRetired,
+                guard_id: GuardId::PublishRealtimeSignalRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRetired,
+                guard_id: GuardId::PublishRealtimeSignalRetiredGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRetired,
+                guard_id: GuardId::PublishRealtimeSignalRetiredGuard3,
+            },
+        ],
+        (
+            Phase::Retired,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnRetired,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnRetired,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnRetiredGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleRetired,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleRetired,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedRetired,
+                    guard_id: GuardId::RealtimeProjectionRefreshedRetiredGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedRetired,
+                    guard_id: GuardId::RealtimeProjectionRefreshedRetiredGuard2,
+                },
+            ]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetRetired,
+                guard_id: GuardId::RealtimeProjectionResetRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::Recycle)) => vec![GuardRejection {
+            transition_id: TransitionId::RecycleFromIdleOrRetired,
+            guard_id: GuardId::RecycleFromIdleOrRetiredGuard1,
+        }],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::ReplaceRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingRetired,
+                guard_id: GuardId::ReplaceRealtimeBindingRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingRetired,
+                guard_id: GuardId::ReplaceRealtimeBindingRetiredGuard2,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::RequestDeferredTools)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequestDeferredToolsRetired,
+                guard_id: GuardId::RequestDeferredToolsRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::RequireRealtimeReattach)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequireRealtimeReattachRetired,
+                guard_id: GuardId::RequireRealtimeReattachRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::RevokeSupervisor)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRetired,
+                guard_id: GuardId::RevokeSupervisorRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRetired,
+                guard_id: GuardId::RevokeSupervisorRetiredGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRetired,
+                guard_id: GuardId::RevokeSupervisorRetiredGuard3,
+            },
+        ],
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::SetPeerIngressContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetPeerIngressContextRetired,
+                guard_id: GuardId::SetPeerIngressContextRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::SetSilentIntents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetSilentIntentsRetired,
+                guard_id: GuardId::SetSilentIntentsRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::StagePersistentFilter)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StagePersistentFilterRetired,
+                guard_id: GuardId::StagePersistentFilterRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::UnregisterSession)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::UnregisterSessionRetired,
+                guard_id: GuardId::UnregisterSessionRetiredGuard1,
+            }]
+        }
+        (Phase::Retired, TriggerDiscriminant::Input(InputKind::Wait)) => vec![GuardRejection {
+            transition_id: TransitionId::WaitRetired,
+            guard_id: GuardId::WaitRetiredGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Abort)) => vec![GuardRejection {
+            transition_id: TransitionId::AbortRunning,
+            guard_id: GuardId::AbortRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AbortLiveTopologyBeforeDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachRunning,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachRunning,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AcceptWithCompletion)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedPassive,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedPassiveGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedPassive,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedPassiveGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedPassive,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedPassiveGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedPassive,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedPassiveGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedWakeIfIdle,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedWakeIfIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedWakeIfIdle,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedWakeIfIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedWakeIfIdle,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedWakeIfIdleGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningQueuedWakeIfIdle,
+                guard_id: GuardId::AcceptWithCompletionRunningQueuedWakeIfIdleGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningInterruptYielding,
+                guard_id: GuardId::AcceptWithCompletionRunningInterruptYieldingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningInterruptYielding,
+                guard_id: GuardId::AcceptWithCompletionRunningInterruptYieldingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningInterruptYielding,
+                guard_id: GuardId::AcceptWithCompletionRunningInterruptYieldingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningImmediate,
+                guard_id: GuardId::AcceptWithCompletionRunningImmediateGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningImmediate,
+                guard_id: GuardId::AcceptWithCompletionRunningImmediateGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AcceptWithCompletionRunningImmediate,
+                guard_id: GuardId::AcceptWithCompletionRunningImmediateGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AcceptWithoutWake)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AcceptWithoutWakeRunning,
+                guard_id: GuardId::AcceptWithoutWakeRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AdvanceSessionContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AdvanceSessionContextRunning,
+                guard_id: GuardId::AdvanceSessionContextRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyIdentity)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityRunning,
+                guard_id: GuardId::ApplyLiveTopologyIdentityRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityRunning,
+                guard_id: GuardId::ApplyLiveTopologyIdentityRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyVisibility)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityRunning,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityRunning,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AttachMobIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressRunning,
+                guard_id: GuardId::AttachMobIngressRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressRunning,
+                guard_id: GuardId::AttachMobIngressRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AttachSessionIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressRunning,
+                guard_id: GuardId::AttachSessionIngressRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressRunning,
+                guard_id: GuardId::AttachSessionIngressRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::AuthorizeSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AuthorizeSupervisorRunning,
+                guard_id: GuardId::AuthorizeSupervisorRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::BeginLiveTopologyReconfigure)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRunning,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRunning,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRunningGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureRunning,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureRunningGuard3,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::BeginRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingRunning,
+                guard_id: GuardId::BeginRealtimeBindingRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingRunning,
+                guard_id: GuardId::BeginRealtimeBindingRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::BindSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::BindSupervisorRunning,
+                guard_id: GuardId::BindSupervisorRunningGuard1,
+            }]
+        }
+        (
+            Phase::Running,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedRunning,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedRunningGuard1,
+        }],
+        (
+            Phase::Running,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeMidTurnActivityRunning,
+            guard_id: GuardId::ClassifyRealtimeMidTurnActivityRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyRealtimeTurnTerminatedRunning,
+                guard_id: GuardId::ClassifyRealtimeTurnTerminatedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Commit)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToIdle,
+                guard_id: GuardId::CommitRunningToIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToIdle,
+                guard_id: GuardId::CommitRunningToIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToAttached,
+                guard_id: GuardId::CommitRunningToAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToAttached,
+                guard_id: GuardId::CommitRunningToAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToRetired,
+                guard_id: GuardId::CommitRunningToRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CommitRunningToRetired,
+                guard_id: GuardId::CommitRunningToRetiredGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::CompleteLiveTopology)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyRunning,
+                guard_id: GuardId::CompleteLiveTopologyRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyRunning,
+                guard_id: GuardId::CompleteLiveTopologyRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Destroy)) => vec![GuardRejection {
+            transition_id: TransitionId::Destroy,
+            guard_id: GuardId::DestroyGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::DetachIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressRunning,
+                guard_id: GuardId::DetachIngressRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressRunning,
+                guard_id: GuardId::DetachIngressRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::DetachRealtimeBinding)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::DetachRealtimeBindingRunning,
+                guard_id: GuardId::DetachRealtimeBindingRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Fail)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToIdle,
+                guard_id: GuardId::FailRunningToIdleGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToIdle,
+                guard_id: GuardId::FailRunningToIdleGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToAttached,
+                guard_id: GuardId::FailRunningToAttachedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToAttached,
+                guard_id: GuardId::FailRunningToAttachedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToRetired,
+                guard_id: GuardId::FailRunningToRetiredGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FailRunningToRetired,
+                guard_id: GuardId::FailRunningToRetiredGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::FailLiveTopologyAfterDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachRunning,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachRunning,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Ingest)) => vec![GuardRejection {
+            transition_id: TransitionId::IngestRunning,
+            guard_id: GuardId::IngestRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::InteractionStreamAttached)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamAttachedRunning,
+                guard_id: GuardId::InteractionStreamAttachedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::InteractionStreamClosedEarly)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamClosedEarlyRunning,
+                guard_id: GuardId::InteractionStreamClosedEarlyRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::InteractionStreamCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamCompletedRunning,
+                guard_id: GuardId::InteractionStreamCompletedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::InteractionStreamExpired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamExpiredRunning,
+                guard_id: GuardId::InteractionStreamExpiredRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::InteractionStreamReserved)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedRunning,
+                guard_id: GuardId::InteractionStreamReservedRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedRunning,
+                guard_id: GuardId::InteractionStreamReservedRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::MarkLiveTopologyDetached)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRunning,
+                guard_id: GuardId::MarkLiveTopologyDetachedRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRunning,
+                guard_id: GuardId::MarkLiveTopologyDetachedRunningGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedRunning,
+                guard_id: GuardId::MarkLiveTopologyDetachedRunningGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::McpServerConnectPending)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectPendingRunning,
+                guard_id: GuardId::McpServerConnectPendingRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::McpServerConnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectedRunning,
+                guard_id: GuardId::McpServerConnectedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::McpServerDisconnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerDisconnectedRunning,
+                guard_id: GuardId::McpServerDisconnectedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::McpServerFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerFailedRunning,
+                guard_id: GuardId::McpServerFailedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::McpServerReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerReloadRunning,
+                guard_id: GuardId::McpServerReloadRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::NotifyDrainExited)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::NotifyDrainExitedRunning,
+                guard_id: GuardId::NotifyDrainExitedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerRequestReceived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestReceivedRunning,
+                guard_id: GuardId::PeerRequestReceivedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerRequestSent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestSentRunning,
+                guard_id: GuardId::PeerRequestSentRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerRequestTimedOut)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestTimedOutRunning,
+                guard_id: GuardId::PeerRequestTimedOutRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerResponseProgressArrived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseProgressArrivedRunning,
+                guard_id: GuardId::PeerResponseProgressArrivedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerResponseReplied)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseRepliedRunning,
+                guard_id: GuardId::PeerResponseRepliedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PeerResponseTerminalArrived)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedRunning,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedRunning,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedRunningGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedRunning,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedRunning,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingRunning,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedRunning,
+                guard_id: GuardId::ProductOutputStartedFromCommittedRunningGuard1,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingRunning,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputRunning,
+                guard_id: GuardId::ProductTurnCommittedFromOutputRunningGuard1,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightRunning,
+                guard_id: GuardId::ProductTurnInFlightRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleRunning,
+                guard_id: GuardId::ProductTurnInterruptedFromPreemptibleRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromOutputRunning,
+                guard_id: GuardId::ProductTurnInterruptedFromOutputRunningGuard1,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalRunning,
+                guard_id: GuardId::ProductTurnTerminalRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ProjectRealtimeIntent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProjectRealtimeIntentRunning,
+                guard_id: GuardId::ProjectRealtimeIntentRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PublishCommittedVisibleSet)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRunning,
+                    guard_id: GuardId::PublishCommittedVisibleSetRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRunning,
+                    guard_id: GuardId::PublishCommittedVisibleSetRunningGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRunning,
+                    guard_id: GuardId::PublishCommittedVisibleSetRunningGuard3,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetRunning,
+                    guard_id: GuardId::PublishCommittedVisibleSetRunningGuard4,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PublishEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PublishEventRunning,
+                guard_id: GuardId::PublishEventRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::PublishRealtimeSignal)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRunning,
+                guard_id: GuardId::PublishRealtimeSignalRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRunning,
+                guard_id: GuardId::PublishRealtimeSignalRunningGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalRunning,
+                guard_id: GuardId::PublishRealtimeSignalRunningGuard3,
+            },
+        ],
+        (
+            Phase::Running,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnRunning,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnRunning,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnRunningGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleRunning,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleRunning,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedRunning,
+                    guard_id: GuardId::RealtimeProjectionRefreshedRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedRunning,
+                    guard_id: GuardId::RealtimeProjectionRefreshedRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetRunning,
+                guard_id: GuardId::RealtimeProjectionResetRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ReconfigureSessionLlmIdentity)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ReconfigureSessionLlmIdentityRunning,
+                    guard_id: GuardId::ReconfigureSessionLlmIdentityRunningGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ReconfigureSessionLlmIdentityRunning,
+                    guard_id: GuardId::ReconfigureSessionLlmIdentityRunningGuard2,
+                },
+            ]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::ReplaceRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingRunning,
+                guard_id: GuardId::ReplaceRealtimeBindingRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingRunning,
+                guard_id: GuardId::ReplaceRealtimeBindingRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RequestDeferredTools)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequestDeferredToolsRunning,
+                guard_id: GuardId::RequestDeferredToolsRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RequireRealtimeReattach)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequireRealtimeReattachRunning,
+                guard_id: GuardId::RequireRealtimeReattachRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RevokeSupervisor)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRunning,
+                guard_id: GuardId::RevokeSupervisorRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRunning,
+                guard_id: GuardId::RevokeSupervisorRunningGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorRunning,
+                guard_id: GuardId::RevokeSupervisorRunningGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::SetPeerIngressContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetPeerIngressContextRunning,
+                guard_id: GuardId::SetPeerIngressContextRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::SetSilentIntents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetSilentIntentsRunning,
+                guard_id: GuardId::SetSilentIntentsRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::StagePersistentFilter)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StagePersistentFilterRunning,
+                guard_id: GuardId::StagePersistentFilterRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::UnregisterSession)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::UnregisterSessionRunning,
+                guard_id: GuardId::UnregisterSessionRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Wait)) => vec![GuardRejection {
+            transition_id: TransitionId::WaitRunning,
+            guard_id: GuardId::WaitRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ApplySurfaceBoundary)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ApplySurfaceBoundaryRunning,
+                guard_id: GuardId::ApplySurfaceBoundaryRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::CallFinished)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CallFinishedRunning,
+                guard_id: GuardId::CallFinishedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::CallStarted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CallStartedRunning,
+                guard_id: GuardId::CallStartedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ClassifyExternalEnvelope)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyExternalEnvelopeRunning,
+                guard_id: GuardId::ClassifyExternalEnvelopeRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ClassifyPlainEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyPlainEventRunning,
+                guard_id: GuardId::ClassifyPlainEventRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::EnsureDrainRunning)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::EnsureDrainRunningRunning,
+                guard_id: GuardId::EnsureDrainRunningRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::FinalizeRemovalClean)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::FinalizeRemovalCleanRunning,
+                guard_id: GuardId::FinalizeRemovalCleanRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::FinalizeRemovalForced)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::FinalizeRemovalForcedRunning,
+                guard_id: GuardId::FinalizeRemovalForcedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::PendingFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PendingFailedRunning,
+                guard_id: GuardId::PendingFailedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::PendingSucceeded)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PendingSucceededRunning,
+                guard_id: GuardId::PendingSucceededRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ShutdownSurface)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ShutdownSurfaceRunning,
+                guard_id: GuardId::ShutdownSurfaceRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::SnapshotAligned)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SnapshotAlignedRunning,
+                guard_id: GuardId::SnapshotAlignedRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::StageAdd)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageAddRunning,
+                guard_id: GuardId::StageAddRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::StageReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageReloadRunning,
+                guard_id: GuardId::StageReloadRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::StageRemove)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StageRemoveRunning,
+                guard_id: GuardId::StageRemoveRunningGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::Abort)) => vec![GuardRejection {
+            transition_id: TransitionId::AbortStopped,
+            guard_id: GuardId::AbortStoppedGuard1,
+        }],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::AbortLiveTopologyBeforeDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachStopped,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::AbortLiveTopologyBeforeDetachStopped,
+                    guard_id: GuardId::AbortLiveTopologyBeforeDetachStoppedGuard2,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::AdvanceSessionContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AdvanceSessionContextStopped,
+                guard_id: GuardId::AdvanceSessionContextStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyIdentity)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityStopped,
+                guard_id: GuardId::ApplyLiveTopologyIdentityStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ApplyLiveTopologyIdentityStopped,
+                guard_id: GuardId::ApplyLiveTopologyIdentityStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ApplyLiveTopologyVisibility)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityStopped,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::ApplyLiveTopologyVisibilityStopped,
+                    guard_id: GuardId::ApplyLiveTopologyVisibilityStoppedGuard2,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::AttachMobIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressStopped,
+                guard_id: GuardId::AttachMobIngressStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachMobIngressStopped,
+                guard_id: GuardId::AttachMobIngressStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::AttachSessionIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressStopped,
+                guard_id: GuardId::AttachSessionIngressStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::AttachSessionIngressStopped,
+                guard_id: GuardId::AttachSessionIngressStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::AuthorizeSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::AuthorizeSupervisorStopped,
+                guard_id: GuardId::AuthorizeSupervisorStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::BeginLiveTopologyReconfigure)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureStopped,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureStopped,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureStoppedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::BeginLiveTopologyReconfigureStopped,
+                    guard_id: GuardId::BeginLiveTopologyReconfigureStoppedGuard3,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::BeginRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingStopped,
+                guard_id: GuardId::BeginRealtimeBindingStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::BeginRealtimeBindingStopped,
+                guard_id: GuardId::BeginRealtimeBindingStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::BindSupervisor)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::BindSupervisorStopped,
+                guard_id: GuardId::BindSupervisorStoppedGuard1,
+            }]
+        }
+        (
+            Phase::Stopped,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeClientInputSubmitted),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeClientInputSubmittedStopped,
+            guard_id: GuardId::ClassifyRealtimeClientInputSubmittedStoppedGuard1,
+        }],
+        (
+            Phase::Stopped,
+            TriggerDiscriminant::Input(InputKind::ClassifyRealtimeMidTurnActivity),
+        ) => vec![GuardRejection {
+            transition_id: TransitionId::ClassifyRealtimeMidTurnActivityStopped,
+            guard_id: GuardId::ClassifyRealtimeMidTurnActivityStoppedGuard1,
+        }],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ClassifyRealtimeTurnTerminated)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ClassifyRealtimeTurnTerminatedStopped,
+                guard_id: GuardId::ClassifyRealtimeTurnTerminatedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::CompleteLiveTopology)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyStopped,
+                guard_id: GuardId::CompleteLiveTopologyStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteLiveTopologyStopped,
+                guard_id: GuardId::CompleteLiveTopologyStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::Destroy)) => vec![GuardRejection {
+            transition_id: TransitionId::Destroy,
+            guard_id: GuardId::DestroyGuard1,
+        }],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::DetachIngress)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressStopped,
+                guard_id: GuardId::DetachIngressStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::DetachIngressStopped,
+                guard_id: GuardId::DetachIngressStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::DetachRealtimeBinding)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::DetachRealtimeBindingStopped,
+                guard_id: GuardId::DetachRealtimeBindingStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::FailLiveTopologyAfterDetach)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachStopped,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::FailLiveTopologyAfterDetachStopped,
+                    guard_id: GuardId::FailLiveTopologyAfterDetachStoppedGuard2,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::InteractionStreamAttached)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamAttachedStopped,
+                guard_id: GuardId::InteractionStreamAttachedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::InteractionStreamClosedEarly)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamClosedEarlyStopped,
+                guard_id: GuardId::InteractionStreamClosedEarlyStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::InteractionStreamCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamCompletedStopped,
+                guard_id: GuardId::InteractionStreamCompletedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::InteractionStreamExpired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::InteractionStreamExpiredStopped,
+                guard_id: GuardId::InteractionStreamExpiredStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::InteractionStreamReserved)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedStopped,
+                guard_id: GuardId::InteractionStreamReservedStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::InteractionStreamReservedStopped,
+                guard_id: GuardId::InteractionStreamReservedStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::MarkLiveTopologyDetached)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedStopped,
+                guard_id: GuardId::MarkLiveTopologyDetachedStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedStopped,
+                guard_id: GuardId::MarkLiveTopologyDetachedStoppedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::MarkLiveTopologyDetachedStopped,
+                guard_id: GuardId::MarkLiveTopologyDetachedStoppedGuard3,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::McpServerConnectPending)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectPendingStopped,
+                guard_id: GuardId::McpServerConnectPendingStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::McpServerConnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerConnectedStopped,
+                guard_id: GuardId::McpServerConnectedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::McpServerDisconnected)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerDisconnectedStopped,
+                guard_id: GuardId::McpServerDisconnectedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::McpServerFailed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerFailedStopped,
+                guard_id: GuardId::McpServerFailedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::McpServerReload)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::McpServerReloadStopped,
+                guard_id: GuardId::McpServerReloadStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::NotifyDrainExited)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::NotifyDrainExitedStopped,
+                guard_id: GuardId::NotifyDrainExitedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerRequestReceived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestReceivedStopped,
+                guard_id: GuardId::PeerRequestReceivedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerRequestSent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestSentStopped,
+                guard_id: GuardId::PeerRequestSentStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerRequestTimedOut)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerRequestTimedOutStopped,
+                guard_id: GuardId::PeerRequestTimedOutStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerResponseProgressArrived)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseProgressArrivedStopped,
+                guard_id: GuardId::PeerResponseProgressArrivedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerResponseReplied)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PeerResponseRepliedStopped,
+                guard_id: GuardId::PeerResponseRepliedStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PeerResponseTerminalArrived)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedStopped,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedCompletedStopped,
+                    guard_id: GuardId::PeerResponseTerminalArrivedCompletedStoppedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedStopped,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PeerResponseTerminalArrivedFailedStopped,
+                    guard_id: GuardId::PeerResponseTerminalArrivedFailedStoppedGuard2,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProductOutputStarted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromAwaitingStopped,
+                guard_id: GuardId::ProductOutputStartedFromAwaitingStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductOutputStartedFromCommittedStopped,
+                guard_id: GuardId::ProductOutputStartedFromCommittedStoppedGuard1,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProductTurnCommitted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromAwaitingStopped,
+                guard_id: GuardId::ProductTurnCommittedFromAwaitingStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnCommittedFromOutputStopped,
+                guard_id: GuardId::ProductTurnCommittedFromOutputStoppedGuard1,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProductTurnInFlight)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnInFlightStopped,
+                guard_id: GuardId::ProductTurnInFlightStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProductTurnInterrupted)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromPreemptibleStopped,
+                guard_id: GuardId::ProductTurnInterruptedFromPreemptibleStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ProductTurnInterruptedFromOutputStopped,
+                guard_id: GuardId::ProductTurnInterruptedFromOutputStoppedGuard1,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProductTurnTerminal)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProductTurnTerminalStopped,
+                guard_id: GuardId::ProductTurnTerminalStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ProjectRealtimeIntent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ProjectRealtimeIntentStopped,
+                guard_id: GuardId::ProjectRealtimeIntentStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PublishCommittedVisibleSet)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetStopped,
+                    guard_id: GuardId::PublishCommittedVisibleSetStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetStopped,
+                    guard_id: GuardId::PublishCommittedVisibleSetStoppedGuard2,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetStopped,
+                    guard_id: GuardId::PublishCommittedVisibleSetStoppedGuard3,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::PublishCommittedVisibleSetStopped,
+                    guard_id: GuardId::PublishCommittedVisibleSetStoppedGuard4,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PublishEvent)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::PublishEventStopped,
+                guard_id: GuardId::PublishEventStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::PublishRealtimeSignal)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalStopped,
+                guard_id: GuardId::PublishRealtimeSignalStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalStopped,
+                guard_id: GuardId::PublishRealtimeSignalStoppedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::PublishRealtimeSignalStopped,
+                guard_id: GuardId::PublishRealtimeSignalStoppedGuard3,
+            },
+        ],
+        (
+            Phase::Stopped,
+            TriggerDiscriminant::Input(InputKind::RealtimeProjectionAdvanceObserved),
+        ) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnStopped,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceDuringTurnStopped,
+                guard_id: GuardId::RealtimeProjectionAdvanceDuringTurnStoppedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleStopped,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionAdvanceWhileIdleStopped,
+                guard_id: GuardId::RealtimeProjectionAdvanceWhileIdleStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::RealtimeProjectionRefreshed)) => {
+            vec![
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedStopped,
+                    guard_id: GuardId::RealtimeProjectionRefreshedStoppedGuard1,
+                },
+                GuardRejection {
+                    transition_id: TransitionId::RealtimeProjectionRefreshedStopped,
+                    guard_id: GuardId::RealtimeProjectionRefreshedStoppedGuard2,
+                },
+            ]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::RealtimeProjectionReset)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RealtimeProjectionResetStopped,
+                guard_id: GuardId::RealtimeProjectionResetStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::ReplaceRealtimeBinding)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingStopped,
+                guard_id: GuardId::ReplaceRealtimeBindingStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::ReplaceRealtimeBindingStopped,
+                guard_id: GuardId::ReplaceRealtimeBindingStoppedGuard2,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::RequestDeferredTools)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequestDeferredToolsStopped,
+                guard_id: GuardId::RequestDeferredToolsStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::RequireRealtimeReattach)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RequireRealtimeReattachStopped,
+                guard_id: GuardId::RequireRealtimeReattachStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::RevokeSupervisor)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorStopped,
+                guard_id: GuardId::RevokeSupervisorStoppedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorStopped,
+                guard_id: GuardId::RevokeSupervisorStoppedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RevokeSupervisorStopped,
+                guard_id: GuardId::RevokeSupervisorStoppedGuard3,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::SetPeerIngressContext)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetPeerIngressContextStopped,
+                guard_id: GuardId::SetPeerIngressContextStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::SetSilentIntents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SetSilentIntentsStopped,
+                guard_id: GuardId::SetSilentIntentsStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::StagePersistentFilter)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StagePersistentFilterStopped,
+                guard_id: GuardId::StagePersistentFilterStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::UnregisterSession)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::UnregisterSessionStopped,
+                guard_id: GuardId::UnregisterSessionStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::Wait)) => vec![GuardRejection {
+            transition_id: TransitionId::WaitStopped,
+            guard_id: GuardId::WaitStoppedGuard1,
+        }],
+        _ => Vec::new(),
+    }
 }

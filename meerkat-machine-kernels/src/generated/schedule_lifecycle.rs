@@ -18,7 +18,14 @@ type Authority = substrate::ScheduleLifecycleMachineAuthority;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
-    inner: InnerState,
+    pub revision: u64,
+    pub trigger_key: String,
+    pub target_binding_key: String,
+    pub misfire_policy: substrate::MisfirePolicy,
+    pub overlap_policy: substrate::OverlapPolicy,
+    pub missing_target_policy: substrate::MissingTargetPolicy,
+    pub planning_cursor_utc_ms: Option<u64>,
+    pub next_occurrence_ordinal: u64,
 }
 
 impl Default for State {
@@ -29,7 +36,7 @@ impl Default for State {
 
 impl State {
     pub fn into_inner(self) -> InnerState {
-        self.inner
+        state_to_inner(&self)
     }
 }
 
@@ -101,7 +108,9 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {}
+pub mod helpers {
+    use super::*;
+}
 
 pub fn initial_state() -> State {
     State::default()
@@ -113,7 +122,7 @@ pub fn transition(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Input(input.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = substrate::ScheduleLifecycleMachineMutator::apply(&mut authority, input)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
     Ok(outcome_from_transition(&authority, transition))
@@ -130,7 +139,28 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        inner,
+        revision: inner.revision.clone(),
+        trigger_key: inner.trigger_key.clone(),
+        target_binding_key: inner.target_binding_key.clone(),
+        misfire_policy: inner.misfire_policy.clone(),
+        overlap_policy: inner.overlap_policy.clone(),
+        missing_target_policy: inner.missing_target_policy.clone(),
+        planning_cursor_utc_ms: inner.planning_cursor_utc_ms.clone(),
+        next_occurrence_ordinal: inner.next_occurrence_ordinal.clone(),
+    }
+}
+
+fn state_to_inner(state: &State) -> InnerState {
+    InnerState {
+        lifecycle_phase: state.phase,
+        revision: state.revision.clone(),
+        trigger_key: state.trigger_key.clone(),
+        target_binding_key: state.target_binding_key.clone(),
+        misfire_policy: state.misfire_policy.clone(),
+        overlap_policy: state.overlap_policy.clone(),
+        missing_target_policy: state.missing_target_policy.clone(),
+        planning_cursor_utc_ms: state.planning_cursor_utc_ms.clone(),
+        next_occurrence_ordinal: state.next_occurrence_ordinal.clone(),
     }
 }
 
@@ -144,8 +174,29 @@ fn map_legacy_error(
             TransitionRefusal::NoMatchingTransition { phase, trigger }
         }
         LegacyTransitionError::GuardRejected { .. } => TransitionRefusal::GuardRejected {
-            rejections: Vec::new(),
+            rejections: guard_rejections_for_trigger(&phase, &trigger),
         },
     };
     TransitionError::Refusal(refusal)
+}
+
+fn guard_rejections_for_trigger(
+    phase: &Phase,
+    trigger: &TriggerDiscriminant,
+) -> Vec<GuardRejection> {
+    match (phase, trigger) {
+        (Phase::Active, TriggerDiscriminant::Input(InputKind::RecordPlanningWindow)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RecordPlanningWindowActive,
+                guard_id: GuardId::RecordPlanningWindowActiveGuard1,
+            }]
+        }
+        (Phase::Paused, TriggerDiscriminant::Input(InputKind::RecordPlanningWindow)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RecordPlanningWindowPaused,
+                guard_id: GuardId::RecordPlanningWindowPausedGuard1,
+            }]
+        }
+        _ => Vec::new(),
+    }
 }

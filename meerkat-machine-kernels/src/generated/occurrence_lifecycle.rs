@@ -18,7 +18,24 @@ type Authority = substrate::OccurrenceLifecycleMachineAuthority;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
-    inner: InnerState,
+    pub occurrence_id: substrate::OccurrenceId,
+    pub schedule_id: substrate::ScheduleId,
+    pub schedule_revision: u64,
+    pub occurrence_ordinal: u64,
+    pub target_binding_key: String,
+    pub due_at_utc_ms: u64,
+    pub claimed_by: Option<String>,
+    pub lease_expires_at_utc_ms: Option<u64>,
+    pub claimed_at_utc_ms: Option<u64>,
+    pub claim_token: Option<substrate::ClaimToken>,
+    pub delivery_correlation_id: Option<String>,
+    pub last_receipt: Option<substrate::DeliveryReceipt>,
+    pub failure_class: Option<substrate::OccurrenceFailureClass>,
+    pub failure_detail: Option<String>,
+    pub dispatched_at_utc_ms: Option<u64>,
+    pub completed_at_utc_ms: Option<u64>,
+    pub attempt_count: u64,
+    pub superseded_by_revision: Option<u64>,
 }
 
 impl Default for State {
@@ -29,7 +46,7 @@ impl Default for State {
 
 impl State {
     pub fn into_inner(self) -> InnerState {
-        self.inner
+        state_to_inner(&self)
     }
 }
 
@@ -101,7 +118,16 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {}
+pub mod helpers {
+    use super::*;
+    pub fn is_live_claim_phase(
+        state: &State,
+        phase: substrate::OccurrenceLifecycleState,
+        _context: &impl Context,
+    ) -> Result<bool, KernelError> {
+        Ok(Authority::is_live_claim_phase(&phase))
+    }
+}
 
 pub fn initial_state() -> State {
     State::default()
@@ -113,7 +139,7 @@ pub fn transition(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Input(input.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = substrate::OccurrenceLifecycleMachineMutator::apply(&mut authority, input)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
     Ok(outcome_from_transition(&authority, transition))
@@ -130,7 +156,48 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        inner,
+        occurrence_id: inner.occurrence_id.clone(),
+        schedule_id: inner.schedule_id.clone(),
+        schedule_revision: inner.schedule_revision.clone(),
+        occurrence_ordinal: inner.occurrence_ordinal.clone(),
+        target_binding_key: inner.target_binding_key.clone(),
+        due_at_utc_ms: inner.due_at_utc_ms.clone(),
+        claimed_by: inner.claimed_by.clone(),
+        lease_expires_at_utc_ms: inner.lease_expires_at_utc_ms.clone(),
+        claimed_at_utc_ms: inner.claimed_at_utc_ms.clone(),
+        claim_token: inner.claim_token.clone(),
+        delivery_correlation_id: inner.delivery_correlation_id.clone(),
+        last_receipt: inner.last_receipt.clone(),
+        failure_class: inner.failure_class.clone(),
+        failure_detail: inner.failure_detail.clone(),
+        dispatched_at_utc_ms: inner.dispatched_at_utc_ms.clone(),
+        completed_at_utc_ms: inner.completed_at_utc_ms.clone(),
+        attempt_count: inner.attempt_count.clone(),
+        superseded_by_revision: inner.superseded_by_revision.clone(),
+    }
+}
+
+fn state_to_inner(state: &State) -> InnerState {
+    InnerState {
+        lifecycle_phase: state.phase,
+        occurrence_id: state.occurrence_id.clone(),
+        schedule_id: state.schedule_id.clone(),
+        schedule_revision: state.schedule_revision.clone(),
+        occurrence_ordinal: state.occurrence_ordinal.clone(),
+        target_binding_key: state.target_binding_key.clone(),
+        due_at_utc_ms: state.due_at_utc_ms.clone(),
+        claimed_by: state.claimed_by.clone(),
+        lease_expires_at_utc_ms: state.lease_expires_at_utc_ms.clone(),
+        claimed_at_utc_ms: state.claimed_at_utc_ms.clone(),
+        claim_token: state.claim_token.clone(),
+        delivery_correlation_id: state.delivery_correlation_id.clone(),
+        last_receipt: state.last_receipt.clone(),
+        failure_class: state.failure_class.clone(),
+        failure_detail: state.failure_detail.clone(),
+        dispatched_at_utc_ms: state.dispatched_at_utc_ms.clone(),
+        completed_at_utc_ms: state.completed_at_utc_ms.clone(),
+        attempt_count: state.attempt_count.clone(),
+        superseded_by_revision: state.superseded_by_revision.clone(),
     }
 }
 
@@ -144,8 +211,17 @@ fn map_legacy_error(
             TransitionRefusal::NoMatchingTransition { phase, trigger }
         }
         LegacyTransitionError::GuardRejected { .. } => TransitionRefusal::GuardRejected {
-            rejections: Vec::new(),
+            rejections: guard_rejections_for_trigger(&phase, &trigger),
         },
     };
     TransitionError::Refusal(refusal)
+}
+
+fn guard_rejections_for_trigger(
+    phase: &Phase,
+    trigger: &TriggerDiscriminant,
+) -> Vec<GuardRejection> {
+    match (phase, trigger) {
+        _ => Vec::new(),
+    }
 }

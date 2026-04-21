@@ -20,7 +20,23 @@ type Authority = substrate::MobMachineAuthority;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     pub phase: Phase,
-    inner: InnerState,
+    pub live_runtime_ids: std::collections::BTreeSet<substrate::AgentRuntimeId>,
+    pub externally_addressable_runtime_ids: std::collections::BTreeSet<substrate::AgentRuntimeId>,
+    pub runtime_fence_tokens:
+        std::collections::BTreeMap<substrate::AgentRuntimeId, substrate::FenceToken>,
+    pub active_run_count: u64,
+    pub pending_spawn_count: u64,
+    pub coordinator_bound: bool,
+    pub member_state_markers:
+        std::collections::BTreeMap<substrate::AgentRuntimeId, substrate::MobMemberState>,
+    pub wiring_edges: std::collections::BTreeSet<substrate::WiringEdge>,
+    pub identity_to_runtime:
+        std::collections::BTreeMap<substrate::AgentIdentity, substrate::AgentRuntimeId>,
+    pub tasks: std::collections::BTreeMap<substrate::TaskId, substrate::MobTask>,
+    pub in_progress_task_ids: std::collections::BTreeSet<substrate::TaskId>,
+    pub completed_task_ids: std::collections::BTreeSet<substrate::TaskId>,
+    pub member_realtime_bindings:
+        std::collections::BTreeMap<substrate::AgentIdentity, substrate::SessionId>,
 }
 
 impl Default for State {
@@ -31,7 +47,7 @@ impl Default for State {
 
 impl State {
     pub fn into_inner(self) -> InnerState {
-        self.inner
+        state_to_inner(&self)
     }
 }
 
@@ -104,7 +120,9 @@ pub struct EmptyContext;
 
 impl Context for EmptyContext {}
 
-pub mod helpers {}
+pub mod helpers {
+    use super::*;
+}
 
 pub fn initial_state() -> State {
     State::default()
@@ -116,7 +134,7 @@ pub fn transition(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Input(input.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = substrate::MobMachineMutator::apply(&mut authority, input)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
     Ok(outcome_from_transition(&authority, transition))
@@ -128,7 +146,7 @@ pub fn transition_signal(
     _context: &impl Context,
 ) -> Result<Outcome, TransitionError> {
     let trigger = TriggerDiscriminant::Signal(signal.kind());
-    let mut authority = Authority::from_state(state.inner.clone());
+    let mut authority = Authority::from_state(state_to_inner(state));
     let transition = authority
         .apply_signal(signal)
         .map_err(|error| map_legacy_error(error, state.phase, trigger.clone()))?;
@@ -146,7 +164,38 @@ fn outcome_from_transition(authority: &Authority, transition: LegacyTransition) 
 fn state_from_inner(inner: InnerState) -> State {
     State {
         phase: inner.phase(),
-        inner,
+        live_runtime_ids: inner.live_runtime_ids.clone(),
+        externally_addressable_runtime_ids: inner.externally_addressable_runtime_ids.clone(),
+        runtime_fence_tokens: inner.runtime_fence_tokens.clone(),
+        active_run_count: inner.active_run_count.clone(),
+        pending_spawn_count: inner.pending_spawn_count.clone(),
+        coordinator_bound: inner.coordinator_bound.clone(),
+        member_state_markers: inner.member_state_markers.clone(),
+        wiring_edges: inner.wiring_edges.clone(),
+        identity_to_runtime: inner.identity_to_runtime.clone(),
+        tasks: inner.tasks.clone(),
+        in_progress_task_ids: inner.in_progress_task_ids.clone(),
+        completed_task_ids: inner.completed_task_ids.clone(),
+        member_realtime_bindings: inner.member_realtime_bindings.clone(),
+    }
+}
+
+fn state_to_inner(state: &State) -> InnerState {
+    InnerState {
+        lifecycle_phase: state.phase,
+        live_runtime_ids: state.live_runtime_ids.clone(),
+        externally_addressable_runtime_ids: state.externally_addressable_runtime_ids.clone(),
+        runtime_fence_tokens: state.runtime_fence_tokens.clone(),
+        active_run_count: state.active_run_count.clone(),
+        pending_spawn_count: state.pending_spawn_count.clone(),
+        coordinator_bound: state.coordinator_bound.clone(),
+        member_state_markers: state.member_state_markers.clone(),
+        wiring_edges: state.wiring_edges.clone(),
+        identity_to_runtime: state.identity_to_runtime.clone(),
+        tasks: state.tasks.clone(),
+        in_progress_task_ids: state.in_progress_task_ids.clone(),
+        completed_task_ids: state.completed_task_ids.clone(),
+        member_realtime_bindings: state.member_realtime_bindings.clone(),
     }
 }
 
@@ -160,8 +209,383 @@ fn map_legacy_error(
             TransitionRefusal::NoMatchingTransition { phase, trigger }
         }
         LegacyTransitionError::GuardRejected { .. } => TransitionRefusal::GuardRejected {
-            rejections: Vec::new(),
+            rejections: guard_rejections_for_trigger(&phase, &trigger),
         },
     };
     TransitionError::Refusal(refusal)
+}
+
+fn guard_rejections_for_trigger(
+    phase: &Phase,
+    trigger: &TriggerDiscriminant,
+) -> Vec<GuardRejection> {
+    match (phase, trigger) {
+        (Phase::Completed, TriggerDiscriminant::Input(InputKind::SubscribeAgentEvents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SubscribeAgentEventsCompleted,
+                guard_id: GuardId::SubscribeAgentEventsCompletedGuard1,
+            }]
+        }
+        (Phase::Completed, TriggerDiscriminant::Signal(SignalKind::CompleteFlow)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteFlowRunning,
+                guard_id: GuardId::CompleteFlowRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteFlowRunningZero,
+                guard_id: GuardId::CompleteFlowRunningZeroGuard1,
+            },
+        ],
+        (Phase::Completed, TriggerDiscriminant::Signal(SignalKind::ObserveRuntimeDestroyed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ObserveRuntimeDestroyed,
+                guard_id: GuardId::ObserveRuntimeDestroyedGuard1,
+            }]
+        }
+        (Phase::Destroyed, TriggerDiscriminant::Input(InputKind::SubscribeAgentEvents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SubscribeAgentEventsDestroyed,
+                guard_id: GuardId::SubscribeAgentEventsDestroyedGuard1,
+            }]
+        }
+        (Phase::Destroyed, TriggerDiscriminant::Signal(SignalKind::ObserveRuntimeDestroyed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ObserveRuntimeDestroyed,
+                guard_id: GuardId::ObserveRuntimeDestroyedGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::CancelAllWork)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CancelAllWorkRunning,
+                guard_id: GuardId::CancelAllWorkRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CancelAllWorkRunning,
+                guard_id: GuardId::CancelAllWorkRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Respawn)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RespawnRunning,
+                guard_id: GuardId::RespawnRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RespawnRunning,
+                guard_id: GuardId::RespawnRunningGuard2,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Retire)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningReleasing,
+                guard_id: GuardId::RetireRunningReleasingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningReleasing,
+                guard_id: GuardId::RetireRunningReleasingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningReleasing,
+                guard_id: GuardId::RetireRunningReleasingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningReleasing,
+                guard_id: GuardId::RetireRunningReleasingGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningPreservingBinding,
+                guard_id: GuardId::RetireRunningPreservingBindingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningPreservingBinding,
+                guard_id: GuardId::RetireRunningPreservingBindingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningPreservingBinding,
+                guard_id: GuardId::RetireRunningPreservingBindingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningPreservingBinding,
+                guard_id: GuardId::RetireRunningPreservingBindingGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningNoBinding,
+                guard_id: GuardId::RetireRunningNoBindingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningNoBinding,
+                guard_id: GuardId::RetireRunningNoBindingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningNoBinding,
+                guard_id: GuardId::RetireRunningNoBindingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireRunningNoBinding,
+                guard_id: GuardId::RetireRunningNoBindingGuard4,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::RunFlow)) => vec![GuardRejection {
+            transition_id: TransitionId::RunFlowRunning,
+            guard_id: GuardId::RunFlowRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Spawn)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningFresh,
+                guard_id: GuardId::SpawnRunningFreshGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningFresh,
+                guard_id: GuardId::SpawnRunningFreshGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningFresh,
+                guard_id: GuardId::SpawnRunningFreshGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningReplacing,
+                guard_id: GuardId::SpawnRunningReplacingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningReplacing,
+                guard_id: GuardId::SpawnRunningReplacingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SpawnRunningReplacing,
+                guard_id: GuardId::SpawnRunningReplacingGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::Stop)) => vec![GuardRejection {
+            transition_id: TransitionId::StopRunning,
+            guard_id: GuardId::StopRunningGuard1,
+        }],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::SubmitWork)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningExternal,
+                guard_id: GuardId::SubmitWorkRunningExternalGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningExternal,
+                guard_id: GuardId::SubmitWorkRunningExternalGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningExternal,
+                guard_id: GuardId::SubmitWorkRunningExternalGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningExternal,
+                guard_id: GuardId::SubmitWorkRunningExternalGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningInternal,
+                guard_id: GuardId::SubmitWorkRunningInternalGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningInternal,
+                guard_id: GuardId::SubmitWorkRunningInternalGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::SubmitWorkRunningInternal,
+                guard_id: GuardId::SubmitWorkRunningInternalGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::SubscribeAgentEvents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SubscribeAgentEventsRunning,
+                guard_id: GuardId::SubscribeAgentEventsRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::TaskCreate)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::TaskCreateRunning,
+                guard_id: GuardId::TaskCreateRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Input(InputKind::TaskUpdate)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningPending,
+                guard_id: GuardId::TaskUpdateRunningPendingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningPending,
+                guard_id: GuardId::TaskUpdateRunningPendingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningPending,
+                guard_id: GuardId::TaskUpdateRunningPendingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningInProgress,
+                guard_id: GuardId::TaskUpdateRunningInProgressGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningInProgress,
+                guard_id: GuardId::TaskUpdateRunningInProgressGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningInProgress,
+                guard_id: GuardId::TaskUpdateRunningInProgressGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningCompleted,
+                guard_id: GuardId::TaskUpdateRunningCompletedGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningCompleted,
+                guard_id: GuardId::TaskUpdateRunningCompletedGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningCancelled,
+                guard_id: GuardId::TaskUpdateRunningCancelledGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningCancelled,
+                guard_id: GuardId::TaskUpdateRunningCancelledGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::TaskUpdateRunningCancelled,
+                guard_id: GuardId::TaskUpdateRunningCancelledGuard3,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::CompleteFlow)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::CompleteFlowRunning,
+                guard_id: GuardId::CompleteFlowRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::CompleteFlowRunningZero,
+                guard_id: GuardId::CompleteFlowRunningZeroGuard1,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::CompleteSpawn)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CompleteSpawnRunning,
+                guard_id: GuardId::CompleteSpawnRunningGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::FinishRun)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::FinishRunRunning,
+                guard_id: GuardId::FinishRunRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FinishRunRunningZero,
+                guard_id: GuardId::FinishRunRunningZeroGuard1,
+            },
+        ],
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::MarkCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::MarkCompleted,
+                guard_id: GuardId::MarkCompletedGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ObserveRuntimeDestroyed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ObserveRuntimeDestroyed,
+                guard_id: GuardId::ObserveRuntimeDestroyedGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::ObserveRuntimeRetired)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ObserveRuntimeRetired,
+                guard_id: GuardId::ObserveRuntimeRetiredGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::RetireMember)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::RetireMember,
+                guard_id: GuardId::RetireMemberGuard1,
+            }]
+        }
+        (Phase::Running, TriggerDiscriminant::Signal(SignalKind::StartFlow)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::StartFlowRunning,
+                guard_id: GuardId::StartFlowRunningGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::Retire)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedReleasing,
+                guard_id: GuardId::RetireStoppedReleasingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedReleasing,
+                guard_id: GuardId::RetireStoppedReleasingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedReleasing,
+                guard_id: GuardId::RetireStoppedReleasingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedReleasing,
+                guard_id: GuardId::RetireStoppedReleasingGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedPreservingBinding,
+                guard_id: GuardId::RetireStoppedPreservingBindingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedPreservingBinding,
+                guard_id: GuardId::RetireStoppedPreservingBindingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedPreservingBinding,
+                guard_id: GuardId::RetireStoppedPreservingBindingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedPreservingBinding,
+                guard_id: GuardId::RetireStoppedPreservingBindingGuard4,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedNoBinding,
+                guard_id: GuardId::RetireStoppedNoBindingGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedNoBinding,
+                guard_id: GuardId::RetireStoppedNoBindingGuard2,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedNoBinding,
+                guard_id: GuardId::RetireStoppedNoBindingGuard3,
+            },
+            GuardRejection {
+                transition_id: TransitionId::RetireStoppedNoBinding,
+                guard_id: GuardId::RetireStoppedNoBindingGuard4,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Input(InputKind::SubscribeAgentEvents)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::SubscribeAgentEventsStopped,
+                guard_id: GuardId::SubscribeAgentEventsStoppedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Signal(SignalKind::CompleteSpawn)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::CompleteSpawnRunning,
+                guard_id: GuardId::CompleteSpawnRunningGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Signal(SignalKind::FinishRun)) => vec![
+            GuardRejection {
+                transition_id: TransitionId::FinishRunRunning,
+                guard_id: GuardId::FinishRunRunningGuard1,
+            },
+            GuardRejection {
+                transition_id: TransitionId::FinishRunRunningZero,
+                guard_id: GuardId::FinishRunRunningZeroGuard1,
+            },
+        ],
+        (Phase::Stopped, TriggerDiscriminant::Signal(SignalKind::MarkCompleted)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::MarkCompleted,
+                guard_id: GuardId::MarkCompletedGuard1,
+            }]
+        }
+        (Phase::Stopped, TriggerDiscriminant::Signal(SignalKind::ObserveRuntimeDestroyed)) => {
+            vec![GuardRejection {
+                transition_id: TransitionId::ObserveRuntimeDestroyed,
+                guard_id: GuardId::ObserveRuntimeDestroyedGuard1,
+            }]
+        }
+        _ => Vec::new(),
+    }
 }

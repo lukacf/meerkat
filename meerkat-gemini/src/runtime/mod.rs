@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, Provider};
+use meerkat_core::{AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
 use meerkat_llm_core::LlmClient;
@@ -66,6 +66,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
         &self,
         backend: &BackendProfile,
         auth: &AuthProfile,
+        policy: &BindingPolicy,
     ) -> Result<ValidatedBinding, ProviderBindingError> {
         if backend.provider != Provider::Gemini || auth.provider != Provider::Gemini {
             return Err(ProviderBindingError::ProviderMismatch);
@@ -87,7 +88,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
             auth: NormalizedAuthMethod::Google(auth_method),
             backend_profile: Arc::new(backend.clone()),
             auth_profile: Arc::new(auth.clone()),
-            policy: Default::default(),
+            policy: policy.clone(),
         })
     }
 

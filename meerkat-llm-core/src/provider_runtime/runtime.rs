@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use meerkat_core::{AuthProfile, BackendProfile, Provider};
+use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy, Provider};
 
 use crate::LlmClient;
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -26,10 +26,19 @@ pub trait ProviderRuntime: Send + Sync {
 
     /// Normalize backend + auth strings into typed enums and verify the
     /// combination is listed in the runtime's `ALLOWED_BINDINGS` table.
+    ///
+    /// `policy` carries the binding's declared auth policy
+    /// (`allow_auth_override`, metadata requirements). Implementations
+    /// MUST populate `ValidatedBinding.policy` from this argument — the
+    /// policy is a contract fact about the binding, not an injectable
+    /// default. Dogma §16 (binding policy flows through resolution):
+    /// dropping it at validation silently substitutes the wrong policy
+    /// and bleeds defaults across bindings that declared otherwise.
     fn validate_binding(
         &self,
         backend: &BackendProfile,
         auth: &AuthProfile,
+        policy: &BindingPolicy,
     ) -> Result<ValidatedBinding, ProviderBindingError>;
 
     /// Resolve credential material per `CredentialSourceSpec` and wrap in a
@@ -71,6 +80,7 @@ mod tests {
             &self,
             _backend: &BackendProfile,
             _auth: &AuthProfile,
+            _policy: &BindingPolicy,
         ) -> Result<ValidatedBinding, ProviderBindingError> {
             Err(ProviderBindingError::ProviderMismatch)
         }

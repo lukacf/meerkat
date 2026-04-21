@@ -1087,7 +1087,7 @@ impl SessionRuntime {
             provider,
             self_hosted_server_id,
             provider_params: build_config.provider_params.clone(),
-            connection_ref: None,
+            connection_ref: build_config.connection_ref.clone(),
         })
     }
 
@@ -1190,12 +1190,21 @@ impl SessionRuntime {
             None
         };
 
+        // Dogma §10 inherit/set: `None` on the override preserves the
+        // session's existing binding, `Some(...)` sets a new one
+        // explicitly for this turn. Prevents cross-realm credential
+        // bleed when the override is the only changed field.
+        let connection_ref = ov
+            .connection_ref
+            .clone()
+            .or_else(|| current.connection_ref.clone());
+
         Ok(SessionLlmIdentity {
             model,
             provider,
             self_hosted_server_id,
             provider_params,
-            connection_ref: None,
+            connection_ref,
         })
     }
 
@@ -1207,6 +1216,7 @@ impl SessionRuntime {
         build_config.provider = Some(identity.provider);
         build_config.self_hosted_server_id = identity.self_hosted_server_id.clone();
         build_config.provider_params = identity.provider_params.clone();
+        build_config.connection_ref = identity.connection_ref.clone();
     }
 
     async fn current_materialized_llm_identity(
@@ -1409,7 +1419,7 @@ impl SessionRuntime {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
             provider_params: ov.provider_params.clone(),
-            connection_ref: None,
+            connection_ref: ov.connection_ref.clone(),
         };
 
         if !self.runtime_adapter.contains_session(session_id).await
@@ -1837,7 +1847,7 @@ impl SessionRuntime {
                 provider_params: overrides.as_ref().and_then(|ov| ov.provider_params.clone()),
                 render_metadata: None,
                 execution_kind: None,
-                connection_ref: None,
+                connection_ref: overrides.as_ref().and_then(|ov| ov.connection_ref.clone()),
             },
         );
 
@@ -2184,7 +2194,10 @@ impl SessionRuntime {
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             // Hot-swap LLM client if model/provider overrides are present.
             if let Some(ref ov) = overrides
-                && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+                && (ov.model.is_some()
+                    || ov.provider.is_some()
+                    || ov.provider_params.is_some()
+                    || ov.connection_ref.is_some())
             {
                 self.hot_swap_llm_client(session_id, ov).await?;
             }
@@ -5361,6 +5374,98 @@ mod tests {
             resolved.self_hosted_server_id.as_deref(),
             Some("local"),
             "provider-param overrides must preserve the pinned self-hosted server binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_override_connection_ref_propagates_to_resolved_identity() {
+        // Dogma §10 (inherit/set) + Wave 3 row 15: an explicit
+        // `connection_ref` override on a turn must flow through
+        // `resolve_target_llm_identity` onto the resolved identity —
+        // NOT be silently dropped to None. Guards against the earlier
+        // bug where hot-swap inherited stale binding even when the
+        // caller asked for a different realm.
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm_id: "tenant_a".into(),
+                binding_id: "anthropic_default".into(),
+            }),
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm_id: "tenant_b".into(),
+                binding_id: "anthropic_vip".into(),
+            }),
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("connection_ref override should resolve");
+
+        assert_eq!(
+            resolved
+                .connection_ref
+                .as_ref()
+                .map(|c| c.realm_id.as_str()),
+            Some("tenant_b"),
+            "explicit connection_ref override must win over the session's current binding"
+        );
+        assert_eq!(
+            resolved
+                .connection_ref
+                .as_ref()
+                .map(|c| c.binding_id.as_str()),
+            Some("anthropic_vip"),
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_without_connection_ref_override_preserves_current_binding() {
+        // Dogma §10 inherit semantics: `None` on the override does
+        // NOT mean "clear the binding" — it means "keep the current
+        // one". The earlier bug returned None either way, breaking
+        // multi-tenant sessions whose next turn happened to set
+        // another override (model/provider_params) alongside no
+        // explicit connection_ref.
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm_id: "tenant_a".into(),
+                binding_id: "anthropic_default".into(),
+            }),
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(serde_json::json!({ "temperature": 0.1 })),
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("resolve must succeed");
+
+        assert_eq!(
+            resolved
+                .connection_ref
+                .as_ref()
+                .map(|c| c.realm_id.as_str()),
+            Some("tenant_a"),
+            "absent connection_ref override must inherit the session's current binding, not drop it"
         );
     }
 

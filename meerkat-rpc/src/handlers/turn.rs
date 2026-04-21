@@ -134,6 +134,7 @@ impl TurnOverrides {
             && self.output_schema.is_none()
             && self.structured_output_retries.is_none()
             && self.provider_params.is_none()
+            && self.connection_ref.is_none()
     }
 }
 

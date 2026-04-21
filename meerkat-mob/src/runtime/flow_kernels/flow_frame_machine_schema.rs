@@ -605,7 +605,7 @@ pub fn flow_frame_machine() -> MachineSchema {
         version: 3,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "generated::flow_frame".into(),
+            module: "runtime::flow_kernels::flow_frame".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

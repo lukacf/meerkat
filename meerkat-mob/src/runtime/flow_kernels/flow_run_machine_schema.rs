@@ -12,7 +12,7 @@ pub fn flow_run_machine() -> MachineSchema {
         version: 5,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "generated::flow_run".into(),
+            module: "runtime::flow_kernels::flow_run".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

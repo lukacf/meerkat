@@ -314,18 +314,27 @@ fn get_pending_body_frame_loops_from_run_state(flow_state: &KernelState) -> Vec<
     }
 }
 
-/// Recovery adds missing pending_body_frame_loops entries for loops in Running
-/// phase with active_body_frame_id = None.
+/// Recovery adds missing pending_body_frame_loops entries for loops in
+/// `Running/AwaitingBodyFrame` with `active_body_frame_id = None`.
 #[test]
 fn test_recovery_adds_missing_pending_body_frame_loops() {
     let mut run = minimal_run_with_schema_v2();
 
-    // A LoopSnapshot in Running phase with active_body_frame_id = None
+    // A LoopSnapshot in Running/AwaitingBodyFrame with active_body_frame_id = None
     // → should be added to pending_body_frame_loops.
     let loop_snap = LoopSnapshot {
         kernel_state: KernelState {
             phase: "Running".into(),
-            fields: BTreeMap::from([("active_body_frame_id".into(), KernelValue::None)]),
+            fields: BTreeMap::from([
+                (
+                    "stage".into(),
+                    KernelValue::NamedVariant {
+                        enum_name: "LoopIterationStage".into(),
+                        variant: "AwaitingBodyFrame".into(),
+                    },
+                ),
+                ("active_body_frame_id".into(), KernelValue::None),
+            ]),
         },
     };
     run.loops
@@ -339,6 +348,40 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
     assert!(
         pending.contains(&"loop-inst-1".to_string()),
         "Missing loop-inst-1 should be added to pending_body_frame_loops; got: {pending:?}"
+    );
+}
+
+/// Recovery must not re-queue a loop that is waiting for until-feedback after a
+/// completed body frame. `Running/AwaitingUntil/active_body_frame_id=None` is a
+/// distinct crash window from `AwaitingBodyFrame`.
+#[test]
+fn test_recovery_does_not_requeue_awaiting_until_loop() {
+    let mut run = minimal_run_with_schema_v2();
+
+    let loop_snap = LoopSnapshot {
+        kernel_state: KernelState {
+            phase: "Running".into(),
+            fields: BTreeMap::from([
+                (
+                    "stage".into(),
+                    KernelValue::NamedVariant {
+                        enum_name: "LoopIterationStage".into(),
+                        variant: "AwaitingUntil".into(),
+                    },
+                ),
+                ("active_body_frame_id".into(), KernelValue::None),
+            ]),
+        },
+    };
+    run.loops
+        .insert(LoopInstanceId::from("loop-awaiting-until"), loop_snap);
+
+    reconcile_run_state(&mut run).expect("reconcile");
+
+    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
+    assert!(
+        !pending.contains(&"loop-awaiting-until".to_string()),
+        "AwaitingUntil loop must not be requeued as pending body-frame work; got: {pending:?}"
     );
 }
 

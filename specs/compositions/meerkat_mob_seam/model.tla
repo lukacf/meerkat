@@ -943,7 +943,7 @@ meerkat_NotifyDrainExitedIdle(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedIdle"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "Drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedIdle"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "NotifyDrainExitedIdle", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -962,7 +962,7 @@ meerkat_NotifyDrainExitedAttached(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedAttached"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "Drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "NotifyDrainExitedAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -981,7 +981,7 @@ meerkat_NotifyDrainExitedRunning(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "Drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "NotifyDrainExitedRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1000,7 +1000,7 @@ meerkat_NotifyDrainExitedRetired(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedRetired"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "Drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedRetired"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "NotifyDrainExitedRetired", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Retired"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1019,7 +1019,7 @@ meerkat_NotifyDrainExitedStopped(arg_reason) ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedStopped"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "drain exited", kind |-> "Drain"], effect_id |-> (model_step_count + 1), source_transition |-> "NotifyDrainExitedStopped"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "NotifyDrainExitedStopped", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1278,7 +1278,7 @@ meerkat_Reset ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime reset", kind |-> "reset"], effect_id |-> (model_step_count + 1), source_transition |-> "Reset"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime reset", kind |-> "Reset"], effect_id |-> (model_step_count + 1), source_transition |-> "Reset"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "Reset", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Idle"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1298,7 +1298,7 @@ meerkat_StopRuntimeExecutorUnbound ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorUnbound"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorUnbound"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "StopRuntimeExecutorUnbound", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Stopped"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1316,7 +1316,7 @@ meerkat_StopRuntimeExecutorAttached ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorAttached"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorAttached"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "StopRuntimeExecutorAttached", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Attached"]}
        /\ model_step_count' = model_step_count + 1
 
@@ -1334,7 +1334,7 @@ meerkat_StopRuntimeExecutorRunning ==
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorRunning"] }
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "meerkat", variant |-> "RuntimeNotice", payload |-> [detail |-> "runtime executor stopped", kind |-> "Stop"], effect_id |-> (model_step_count + 1), source_transition |-> "StopRuntimeExecutorRunning"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "meerkat", transition |-> "StopRuntimeExecutorRunning", actor |-> "meerkat_kernel", step |-> (model_step_count + 1), from_phase |-> meerkat_phase, to_phase |-> "Running"]}
        /\ model_step_count' = model_step_count + 1
 

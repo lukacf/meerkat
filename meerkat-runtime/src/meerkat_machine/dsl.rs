@@ -1022,6 +1022,36 @@ pub enum PreRunPhase {
     Retired,
 }
 
+/// Typed runtime notice classifier for the `RuntimeNotice` effect. Closed set
+/// of per-transition runtime lifecycle markers (drain exited, runtime reset,
+/// executor stopped/exited, runtime recovered) emitted by the runtime-control
+/// plane. Replaces the former literal-string `kind` field on `RuntimeNotice`
+/// so the shell dispatcher matches exhaustively on a typed discriminant
+/// instead of comparing string literals. `detail` stays `String` — it's a
+/// free-form diagnostic message that accompanies the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeNoticeKind {
+    #[default]
+    Drain,
+    Reset,
+    Stop,
+    Exit,
+    Recover,
+}
+
+/// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
+/// cancellation-observation origins emitted when a turn's cancellation
+/// request lands at an observable boundary. Replaces the former literal-
+/// string `reason` field on `TurnRunCancelled`. Only one origin is emitted
+/// today (`Observed`, fired by the `CancellationObserved` transition), but
+/// this remains a closed classifier not a free-form message — future
+/// cancellation origins extend the enum rather than reintroducing strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnCancellationReason {
+    #[default]
+    Observed,
+}
+
 /// Typed base lifecycle state for an external tool surface. Closed mirror of
 /// [`meerkat_core::tool_scope::ExternalToolSurfaceBaseState`] — replaces the
 /// former literal-string values in `surface_base_state`.
@@ -1946,14 +1976,24 @@ machine! {
             RuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
             TurnRunStarted { run_id: RunId },
             TurnBoundaryApplied { run_id: RunId, boundary_sequence: u64 },
-            TurnRunCompleted { run_id: RunId, outcome: String },
+            TurnRunCompleted { run_id: RunId, outcome: Enum<TurnTerminalOutcome> },
+            // `error` is a free-form error message paired with a terminal
+            // outcome; it is not a closed classifier (its values include
+            // variable error strings bubbled up from extraction / LLM
+            // failures via `TurnFailed { error }`). Kept as `String`.
             TurnRunFailed { run_id: RunId, error: String },
-            TurnRunCancelled { run_id: RunId, reason: String },
+            TurnRunCancelled { run_id: RunId, reason: Enum<TurnCancellationReason> },
             TurnCheckCompaction,
             RequestCancellationAtBoundary,
             WakeInterrupt,
             CommittedVisibleSetPublished { revision: u64 },
-            RuntimeNotice { kind: String, detail: String },
+            // `kind` is a closed classifier of runtime lifecycle markers;
+            // `detail` stays `String` because it's a free-form diagnostic
+            // message paired with the kind (e.g. "runtime executor stopped",
+            // "runtime recovered"). Detail strings are not matched on by
+            // consumers — they surface through structured logging / traces
+            // as human-readable context.
+            RuntimeNotice { kind: Enum<RuntimeNoticeKind>, detail: String },
             // Absorbed effects
             ResolveAdmission,
             SubmitAdmittedIngressEffect,
@@ -1982,15 +2022,26 @@ machine! {
             CollectCompletedResult,
             EnqueueClassifiedEntry,
             SpawnDrainTask,
+            // `surface_id` stays `String`: it's an opaque surface identity,
+            // not a closed classifier. `operation` is the same typed
+            // discriminant used on `EmitExternalToolDelta` and on the
+            // `surface_last_delta_operation` state map.
             ScheduleSurfaceCompletion {
                 surface_id: String,
-                operation: String,
+                operation: Enum<ExternalToolSurfaceDeltaOperation>,
                 pending_task_sequence: u64,
                 staged_intent_sequence: u64,
                 applied_at_turn: u64,
             },
             RefreshVisibleSurfaceSet,
-            EmitExternalToolDelta { surface_id: String, operation: String, phase: String },
+            // `surface_id` stays `String` (opaque surface identity). Both
+            // `operation` and `phase` are closed classifiers mirrored from
+            // `meerkat-core::tool_scope`.
+            EmitExternalToolDelta {
+                surface_id: String,
+                operation: Enum<ExternalToolSurfaceDeltaOperation>,
+                phase: Enum<ExternalToolSurfaceDeltaPhase>,
+            },
             CloseSurfaceConnection { surface_id: String },
             RejectSurfaceCall { surface_id: String, reason: String },
             // Realtime-attachment effects.
@@ -2381,7 +2432,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             update {}
             to Idle
-            emit RuntimeNotice { kind: "drain", detail: "drain exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "drain exited" }
         }
 
         // 10. InterruptCurrentRun: Attached + Running self-loops
@@ -2563,7 +2614,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
-            emit RuntimeNotice { kind: "reset", detail: "runtime reset" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Reset, detail: "runtime reset" }
         }
 
         // 16. StopRuntimeExecutor: different behavior per phase
@@ -2581,7 +2632,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
         // Attached → Attached (self-loop)
         transition StopRuntimeExecutorAttached {
@@ -2591,7 +2642,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Attached
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
         // Running → Running (self-loop)
         transition StopRuntimeExecutorRunning {
@@ -2601,7 +2652,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Running
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
 
         // RuntimeExecutorExited: async finalization of the stop-runtime path.
@@ -2618,7 +2669,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
         }
         transition RuntimeExecutorExitedFromRunning {
             on input RuntimeExecutorExited
@@ -2629,7 +2680,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
         }
         transition RuntimeExecutorExitedFromIdle {
             on input RuntimeExecutorExited
@@ -2638,7 +2689,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
         }
         transition RuntimeExecutorExitedFromRetired {
             on input RuntimeExecutorExited
@@ -2649,7 +2700,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "exit", detail: "runtime executor exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Exit, detail: "runtime executor exited" }
         }
         transition RuntimeExecutorExitedFromStopped {
             on input RuntimeExecutorExited
@@ -2685,35 +2736,35 @@ machine! {
             guard { self.lifecycle_phase == Phase::Initializing }
             update {}
             to Initializing
-            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
         transition RecoverIdle {
             on input Recover
             guard { self.lifecycle_phase == Phase::Idle }
             update {}
             to Idle
-            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
         transition RecoverAttached {
             on input Recover
             guard { self.lifecycle_phase == Phase::Attached }
             update {}
             to Attached
-            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
         transition RecoverRetired {
             on input Recover
             guard { self.lifecycle_phase == Phase::Retired }
             update {}
             to Retired
-            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
         transition RecoverStopped {
             on input Recover
             guard { self.lifecycle_phase == Phase::Stopped }
             update {}
             to Stopped
-            emit RuntimeNotice { kind: "recover", detail: "runtime recovered" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "runtime recovered" }
         }
 
         // =====================================================================
@@ -3366,7 +3417,7 @@ machine! {
             }
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
-            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
             emit TurnCheckCompaction
         }
 
@@ -3479,7 +3530,7 @@ machine! {
             }
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
-            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
             emit TurnCheckCompaction
         }
 
@@ -3511,7 +3562,7 @@ machine! {
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
-            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: "Completed" }
+            emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
             emit TurnCheckCompaction
         }
 
@@ -3617,7 +3668,7 @@ machine! {
                 self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
             }
             to Running
-            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: "observed" }
+            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
         }
 
         transition AcknowledgeTerminal {

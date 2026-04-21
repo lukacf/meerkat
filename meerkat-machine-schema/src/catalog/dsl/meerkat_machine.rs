@@ -327,7 +327,10 @@ machine! {
             RequestCancellationAtBoundary,
             WakeInterrupt,
             CommittedVisibleSetPublished { revision: u64 },
-            RuntimeNotice { kind: String, detail: String },
+            // `kind` is a closed classifier of runtime lifecycle markers;
+            // `detail` stays `String` because it's a free-form diagnostic
+            // message paired with the kind.
+            RuntimeNotice { kind: Enum<RuntimeNoticeKind>, detail: String },
             // Absorbed effects
             ResolveAdmission,
             SubmitAdmittedIngressEffect,
@@ -726,7 +729,7 @@ machine! {
             guard "session_registered" { self.session_id != None }
             update {}
             to Idle
-            emit RuntimeNotice { kind: "drain", detail: "drain exited" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Drain, detail: "drain exited" }
         }
 
         // 10. InterruptCurrentRun: Attached + Running self-loops
@@ -908,7 +911,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Idle
-            emit RuntimeNotice { kind: "reset", detail: "runtime reset" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Reset, detail: "runtime reset" }
         }
 
         // 16. StopRuntimeExecutor: different behavior per phase
@@ -926,7 +929,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Stopped
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
         // Attached → Attached (self-loop)
         transition StopRuntimeExecutorAttached {
@@ -936,7 +939,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Attached
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
         // Running → Running (self-loop)
         transition StopRuntimeExecutorRunning {
@@ -946,7 +949,7 @@ machine! {
                 self.silent_intent_overrides = EmptySet;
             }
             to Running
-            emit RuntimeNotice { kind: "stop", detail: "runtime executor stopped" }
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
         }
 
         // 17. Destroy: from all non-Destroyed → Destroyed
@@ -2587,6 +2590,21 @@ pub enum WorkOrigin {
     /// Canonical admission entrypoint fired by the runtime control plane
     /// with no surface-level transport or work-lane label.
     Ingest,
+}
+
+/// Typed runtime notice classifier for the `RuntimeNotice` effect (catalog
+/// DSL twin). Closed set of per-transition runtime lifecycle markers
+/// emitted by the runtime-control plane so the shell dispatcher matches
+/// exhaustively on a typed discriminant instead of comparing string
+/// literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeNoticeKind {
+    #[default]
+    Drain,
+    Reset,
+    Stop,
+    Exit,
+    Recover,
 }
 
 // =====================================================================

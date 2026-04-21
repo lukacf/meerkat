@@ -159,7 +159,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequestCancellationAtBoundary`
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
-- `RuntimeNotice`(kind: String, detail: String)
+- `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
 - `ResolveAdmission`
 - `SubmitAdmittedIngressEffect`
 - `SubmitRunPrimitive`

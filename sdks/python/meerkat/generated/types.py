@@ -710,13 +710,13 @@ WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retir
 WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
 
 # Target for a public realtime channel.
-# 
+#
 # Two variants, one for each addressing mode:
-# 
+#
 # - `SessionTarget` — standalone sessions (no mob-member continuity). The
 #   session id is pinned for the channel's lifetime; when that session
 #   ends, the channel ends.
-# 
+#
 # - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
 #   canonical anchor, and the server resolves the current bridge session
 #   on every tick from the MobMachine's `member_realtime_bindings` map.
@@ -772,13 +772,13 @@ WireToolResultContent = str | list[dict[str, Any]]
 WireModelTier = str
 
 # Typed wire request for `comms/send`.
-# 
+#
 # Variants are serde-tagged on `kind` and validated structurally at the
 # deserialization boundary. Required fields per kind are enforced by the
 # type system; invalid discriminators (`source`, `stream`, `handling_mode`,
 # `status`) become serde deserialization errors rather than runtime
 # string-match failures.
-# 
+#
 # Cross-field invariants that cannot be expressed structurally (e.g.
 # `handling_mode` is forbidden on `Accepted` peer responses) are checked
 # in [`CommsCommandRequest::into_command`].

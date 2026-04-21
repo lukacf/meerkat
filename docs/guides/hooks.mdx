@@ -66,9 +66,13 @@ Background hooks on post-points publish patches via `HookPatchEnvelope` (contain
     Write the handler that receives a `HookInvocation` and returns a `RuntimeHookResponse` with an optional decision and patches.
   </Step>
   <Step title="Test with overrides">
-    Use `HookRunOverrides` to test your hook in isolation before committing the config.
+    Use `HookRunOverrides` to test your hook in isolation through RPC, REST, MCP, or embedded builders before committing the config.
   </Step>
 </Steps>
+
+<Note>
+The docs below show run-scoped hook overrides conceptually, but the current CLI does not expose `--hooks-override-json` / `--hooks-override-file` in normal builds. For now, use RPC, REST, MCP, or the SDK/embedded surfaces when you want per-run hook overrides.
+</Note>
 
 ## Runtimes
 
@@ -200,8 +204,10 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 - **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
 - **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
 - **`HookToolCall`**: `tool_use_id`, `name`, `args`
-- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `is_error`
+- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `is_error`, `has_images`
 </Accordion>
+
+`HookToolResult.content` is always the text projection of the tool result. If the original result also contains image blocks, `has_images` is set so hook authors know multimodal content exists. A `HookPatch::ToolResult` rewrite preserves those image blocks and replaces only the text projection plus optional `is_error`.
 
 ## Priority ordering and deny short-circuiting
 

@@ -211,7 +211,7 @@ validation happens inside the DSL guard, not in shell pre-checks.
   `turn_phase ∈ {Ready, DrainingBoundary, ...}`. Catalog doesn't model
   `turn_phase` and is a strict over-approximation; TLC-proven
   invariants still hold in production.
-- **OpenAI Realtime only**: `gpt-realtime` is the only production
+- **OpenAI Realtime only**: `gpt-realtime-1.5` is the canonical production
   realtime-capable model today. Gemini `*-live*` models are reserved
   in the capability derivation but have no production entries.
 

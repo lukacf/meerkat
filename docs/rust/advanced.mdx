@@ -45,12 +45,13 @@ If you are embedding Meerkat into an application, start with `SessionService`. R
 ```rust
 use meerkat::AgentBuilder;
 
-let agent = AgentBuilder::new()
+let mut agent = AgentBuilder::new()
     .model("claude-sonnet-4-6")
     .system_prompt("You are a helpful assistant.")
     .max_tokens_per_turn(4096)
     .temperature(0.7)
-    .build(llm_client, tool_dispatcher, session_store);
+    .build(llm_client, tool_dispatcher, session_store)
+    .await;
 ```
 
 <Accordion title="All builder methods">

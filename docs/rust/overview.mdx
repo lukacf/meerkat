@@ -382,8 +382,7 @@ let user = Message::User(UserMessage {
         ContentBlock::Text { text: "What is in this image?".to_string() },
         ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: base64_data,
-            source_path: None,
+            data: ImageData::Inline { data: base64_data },
         },
     ],
 });
@@ -404,8 +403,7 @@ let prompt = ContentInput::Blocks(vec![
     ContentBlock::Text { text: "Describe this image.".to_string() },
     ContentBlock::Image {
         media_type: "image/jpeg".to_string(),
-        data: base64_data,
-        source_path: None,
+        data: ImageData::Inline { data: base64_data },
     },
 ]);
 ```

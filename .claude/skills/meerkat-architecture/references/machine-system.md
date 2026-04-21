@@ -2,18 +2,19 @@
 
 Load this reference when working on DSL definitions, schema catalog, generated kernels, TLC verification, or authority cutover.
 
-## The 4-machine target
+## The 5-machine target
 
-The final system has exactly four canonical machines:
+The final system has exactly five canonical machines:
 
 - **MeerkatMachine** — session-scoped execution kernel (absorbs input lifecycle, runtime ingress, ops lifecycle, turn execution, comms drain, peer comms, external tool surface, session turn admission)
 - **MobMachine** — mob-scoped orchestration (absorbs mob lifecycle, member bootstrap, member lifecycle, wiring, roster, orchestrator, flow, loop iteration)
 - **ScheduleLifecycleMachine** — perimeter scheduler
 - **OccurrenceLifecycleMachine** — perimeter occurrence lifecycle
+- **AuthMachine** — auth/session authorization lifecycle
 
 Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
 
-Catalog authoritative file: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these four machine DSLs.
+Catalog authoritative file: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these five machine DSLs.
 
 Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, no `*_authority.rs` files should remain for absorbed domains — shell code routes through the host machine's DSL via handle traits (see "Cross-crate DSL access" below).
 
@@ -23,11 +24,12 @@ The DSL is a single source that produces two artifacts:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  DSL SOURCE (single source of truth, 4 files)                      │
+│  DSL SOURCE (single source of truth, 5 files)                      │
 │  meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs         │
 │  meerkat-machine-schema/src/catalog/dsl/mob_machine.rs             │
 │  meerkat-machine-schema/src/catalog/dsl/schedule_lifecycle.rs      │
 │  meerkat-machine-schema/src/catalog/dsl/occurrence_lifecycle.rs    │
+│  meerkat-machine-schema/src/catalog/dsl/auth_machine.rs            │
 │                                                                    │
 │  machine_dsl! {                                                    │
 │    state { <fields> }                                              │

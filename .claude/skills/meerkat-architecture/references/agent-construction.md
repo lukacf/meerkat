@@ -26,7 +26,7 @@ The factory validates `bindings.session_id == session.id()` for `SessionOwned` b
 
 ## Multimodal Content
 
-- `ContentBlock` (meerkat-core): `Text { text }` or `Image { media_type, data, source_path }`
+- `ContentBlock` (meerkat-core): `Text { text }`, `Image { media_type, ... }`, or `Video { media_type, duration_ms, ... }`
 - `ContentInput` (meerkat-core): `Text(String)` or `Blocks(Vec<ContentBlock>)`
 - `ToolOutput` (meerkat-tools): `Json(Value)` or `Blocks(Vec<ContentBlock>)`
 

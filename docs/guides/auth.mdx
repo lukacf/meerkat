@@ -12,6 +12,10 @@ login` or the REST/RPC surfaces, and pass `--connection-ref
 <realm>:<binding>` to scope a session or mob member to that specific
 binding.
 
+<Note>
+Today, CLI `rkat auth login` is primarily a convenience bootstrap flow for the default `dev:*` credential namespace. If you need explicit realm/profile-targeted auth persistence such as `prod:openai`, use the REST/RPC auth surfaces or manage the realm config entries directly.
+</Note>
+
 Both paths route through the same `ProviderRuntimeRegistry`. There's no
 hidden magic path: the env fallback is a synthesized realm with
 `CredentialSourceSpec::Env`, resolved by the same code that handles
@@ -90,6 +94,8 @@ rkat auth login anthropic
 rkat auth login openai --non-interactive --secret "$OPENAI_KEY"
 ```
 
+The current CLI login flow is convenient for local setup, but it does not yet let you choose an arbitrary target realm/profile name at login time. It seeds the runtime-managed default `dev:*` identities and is best thought of as the easiest way to get persisted credentials into Meerkat quickly.
+
 ### Use the binding
 
 ```bash
@@ -138,16 +144,17 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Anthropic | `anthropic_api`     | `api_key`, `static_bearer` | Direct to api.anthropic.com |
 | Anthropic | `anthropic_api`     | `claude_ai_oauth`       | Claude Pro/Max OAuth (PKCE, S256) |
 | Anthropic | `anthropic_api`     | `oauth_to_api_key`      | Console OAuth → provisions api_key |
-| Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws` | AWS SigV4 / env-bearer |
+| Anthropic | `anthropic_api`     | `external_authorizer`   | Host-resolved auth injection |
+| Anthropic | `bedrock`           | `bedrock_bearer`, `bedrock_aws_sigv4` | AWS SigV4 / env-bearer |
 | Anthropic | `vertex`            | `vertex_google_auth`    | GoogleAuth / Vertex AI |
 | Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad` | Azure AI Foundry |
-| OpenAI    | `openai_api`        | `api_key`, `static_bearer` | Direct to api.openai.com |
+| OpenAI    | `openai_api`        | `api_key`, `static_bearer`, `external_authorizer` | Direct to api.openai.com or host-resolved auth |
 | OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
 | OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
-| Google    | `google_genai`      | `api_key`, `bearer_api_key` | Direct to Google GenAI |
+| Google    | `google_genai`      | `api_key`, `bearer_api_key`, `external_authorizer` | Direct to Google GenAI or host-resolved auth |
 | Google    | `vertex_ai`         | `api_key_express`       | Vertex API Express key |
 | Google    | `vertex_ai`         | `adc`, `compute_adc`    | ADC / compute metadata |
-| Google    | `code_assist`       | `google_oauth`          | Gemini Code Assist OAuth |
+| Google    | `google_code_assist` | `google_oauth`         | Gemini Code Assist OAuth |
 
 External commands (`CredentialSourceSpec::Command`) and file
 descriptors (`CredentialSourceSpec::FileDescriptor`) let host
@@ -156,21 +163,27 @@ applications inject tokens without going through OAuth.
 ## Credential sources
 
 The `source` field on an auth profile declares *where* credentials
-come from. Five shapes are supported:
+come from.
 
 | Kind | Description |
 |------|-------------|
 | `InlineSecret { secret }` | Secret stored inline in the TOML (use only for dev/local) |
 | `Env { env, fallback }` | Read env var at resolve time via `ResolverEnvironment::env_lookup` |
-| `ManagedStore { profile }` | Resolve via the `TokenStore` (set by `rkat auth login`) |
+| `ManagedStore { profile }` | Resolve via the `TokenStore`; in current provider runtimes, persisted lookup is tied to the active auth-profile identity/binding path |
+| `PlatformDefault` | Use the host platform's default credential chain where supported |
 | `ExternalResolver { handle }` | Host-registered JS callback (WASM) or Rust resolver (embedded) |
 | `Command { program, args, ... }` | Run an external binary; cache stdout for `refresh_interval_ms` |
+| `FileDescriptor { fd, scope_override }` | Read credentials from a host-supplied file descriptor |
 
 <Warning>
 Storing api keys inline in config files works but shouldn't be
 checked into git. Prefer `ManagedStore` (which writes to the OS
 keychain or a 0o600 file) or `Env`.
 </Warning>
+
+<Note>
+`FileDescriptor` is a host-integration seam rather than a plain standalone resolver path. It requires a host-scoped reader/injection path, so treat it as an advanced embedding surface rather than a generic CLI config trick.
+</Note>
 
 ## Hot-swap mid-session
 
@@ -200,16 +213,16 @@ binding — no env-default fallback, no cross-realm credential bleed.
 ## Per-mob-member override
 
 Mob members default to env-default / config-realm fallback credentials.
-Pass `connection_ref` on `mob_spawn_member` to scope a member to a
+Pass `connection_ref` on the host-side mob spawn surface to scope a member to a
 specific binding:
 
 ```json
 {
-  "tool": "mob_spawn_member",
-  "args": {
+  "method": "mob/spawn",
+  "params": {
     "mob_id": "research",
     "profile": "analyst",
-    "member_id": "a1",
+    "agent_identity": "a1",
     "connection_ref": "prod:openai"
   }
 }

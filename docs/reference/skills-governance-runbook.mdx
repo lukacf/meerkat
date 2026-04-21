@@ -20,7 +20,7 @@ Every source identity record must include:
 - `display_name`
 - `transport_kind`
 - locator `fingerprint`
-- `status` (`active` or `retired`)
+- `status` (`active`, `disabled`, or `retired`)
 
 ## Governance Checks
 
@@ -37,6 +37,12 @@ Startup rejects:
 1. Add lineage event `rotate` from old UUID to new UUID.
 2. Add remap rows for all affected skills (`old_uuid/skill` -> `new_uuid/skill`).
 3. Deploy config and verify canonicalization tests pass.
+
+### Rename or relocate (same logical source, new UUID/path binding)
+
+1. Add lineage event `rename_or_relocate` from old UUID to new UUID.
+2. Add remap rows for all affected skills.
+3. Verify canonicalization still resolves the same semantic skills under the new source identity.
 
 ### Split (one source to many)
 

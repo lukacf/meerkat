@@ -39,14 +39,16 @@ second surface-local execution loop.
 | `meerkat_run` | Start a new agent session |
 | `meerkat_resume` | Continue a session or provide tool results |
 | `meerkat_read` | Read a session's state |
-| `meerkat_history` | Read a session's committed transcript history |
+| `meerkat_history` | Read a session's committed history |
 | `meerkat_sessions` | List sessions in the active realm |
+| `meerkat_blob_get` | Fetch a blob payload by id |
 | `meerkat_interrupt` | Interrupt an in-flight turn |
 | `meerkat_archive` | Archive (remove) a session |
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
 | `meerkat_models_catalog` | List available models with provider profiles and capabilities |
 | `meerkat_skills` | List or inspect available skills |
+| `meerkat_schedule_*` tools | Agent-facing schedule create/get/list/update/pause/resume/delete/occurrences tools |
 | `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
 | `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
 | `meerkat_mcp_reload` | Stage a live MCP server reload on an active session |
@@ -69,6 +71,10 @@ second surface-local execution loop.
 | `meerkat_realtime_capabilities` | Read product-layer realtime capabilities for a target (realtime feature) |
 
 <Note>
+Default `rkat-mcp` builds are driven by the crate feature set. The base/default tool surface includes the core session/config/history/blob/skills surface plus schedule tools. Mob and realtime MCP tools are feature-gated and appear only when the `mob` feature is compiled in.
+</Note>
+
+<Note>
 When the `mob` feature is enabled, the public MCP host surface uses typed
 `meerkat_mob_*` control-plane tools. Inside running sessions, mob capability is
 still agent-side and comes from composing a mob tools factory into
@@ -80,10 +86,10 @@ model. Public host MCP surfaces should not re-export that raw dispatcher.
 **Realtime attachment over MCP.** Realtime transport is driven by
 `ModelCapabilities.realtime` on the session's model; it attaches
 automatically when the session runs a realtime-capable model (e.g.
-`gpt-realtime`). The public MCP tool set exposes only the product-layer
+`gpt-realtime-1.5`). The public MCP tool set exposes only the product-layer
 bootstrap and status surfaces (`meerkat_realtime_open_info`,
 `meerkat_realtime_status`, `meerkat_realtime_capabilities`) — there is
-no MCP attach/detach tool. See the [Realtime voice
+no MCP attach/detach tool. See the [Realtime
 guide](/guides/realtime) for the capability-driven model and the full
 attachment state machine.
 </Note>

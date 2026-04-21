@@ -20,6 +20,8 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
     # Ensure target/release/rkat-rpc is on your $PATH
     ```
 
+    By default the SDK can also auto-resolve and download `rkat-rpc` for the current platform, so a manual binary install is optional unless you want to control the binary path yourself.
+
     You also need an API key for at least one LLM provider (e.g. `ANTHROPIC_API_KEY`).
   </Step>
   <Step title="Configure tsconfig">
@@ -71,7 +73,7 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `listSessions()` | List active sessions |
 | `readSession(sessionId)` | Read typed session metadata (`SessionInfo`) |
 | `readSessionHistory(sessionId, options?)` | Read committed session transcript history |
-| `sendExternalEvent(sessionId, payload, options?)` | Inject a canonical external event into a session |
+| `sendExternalEvent(sessionId, eventType, payload, options?)` | Inject a canonical external event into a session |
 | `injectContext(sessionId, text, options?)` | Append runtime system context |
 | `getModelsCatalog()` | Read config-backed model catalog |
 | `createSchedule/getSchedule/listSchedules/updateSchedule/pauseSchedule/resumeSchedule/deleteSchedule/listScheduleOccurrences/listScheduleTools/callScheduleTool` | Schedule API wrappers |
@@ -81,6 +83,24 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
+
+### Realtime and auth wrappers
+
+The SDK also exposes the runtime/product realtime helpers and auth-profile wrappers from the RPC surface:
+
+- `runtimeRealtimeAttachmentStatus(...)`
+- `runtimeRealtimeAttachmentStatuses(...)`
+- `realtimeOpenInfo(...)`
+- `realtimeStatus(...)`
+- `realtimeCapabilities(...)`
+- `authProfileList(...)`, `authProfileGet(...)`, `authProfileCreate(...)`, `authProfileDelete(...)`, `authProfileTest(...)`
+- `authLoginStart(...)`, `authLoginComplete(...)`, `authLoginDeviceStart(...)`, `authLoginDeviceComplete(...)`, `authLoginProvisionApiKey(...)`
+- `authStatusGet(...)`, `authLogout(...)`
+- `realmList(...)`, `realmGet(...)`
+- `sendPeerResponseTerminal(...)`
+- `mcpAdd(...)`, `mcpRemove(...)`, `mcpReload(...)`
+- `getBlob(...)`, `listSkills()`, `inspectSkill(...)`
+- `runtimeState(...)`, `runtimeAccept(...)`, `runtimeRetire(...)`, `runtimeReset(...)`, `inputState(...)`, `inputList(...)`
 
 ### Capability methods
 
@@ -160,7 +180,7 @@ export interface ConnectOptions {
 }
 ```
 
-`realmId` and `isolated` are mutually exclusive. If `realmId` is omitted and `isolated` is not set, sessions are stored in the default realm. Reuse `realmId` to share sessions and config across processes or surfaces.
+`realmId` and `isolated` are mutually exclusive. If `realmId` is omitted and `isolated` is not set, the spawned `rkat-rpc` process uses its normal isolated-mode default rather than a shared default realm. Reuse `realmId` explicitly to share sessions and config across processes or surfaces.
 
 ### createSession()
 

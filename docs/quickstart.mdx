@@ -17,21 +17,29 @@ meerkat = "0.6.0"
     ```bash
     pip install meerkat-sdk
     ```
-    <Note>Requires the `rkat-rpc` binary on your PATH.</Note>
+    <Note>
+    The SDK resolves `rkat-rpc` automatically by default and downloads it when needed. Install the standalone binary only if you want to manage it yourself.
+    </Note>
   </Tab>
   <Tab title="TypeScript">
     ```bash
     npm install @rkat/sdk
     ```
-    <Note>Requires the `rkat-rpc` binary on your PATH.</Note>
+    <Note>
+    The SDK resolves `rkat-rpc` automatically by default and downloads it when needed. Install the standalone binary only if you want to manage it yourself.
+    </Note>
   </Tab>
   <Tab title="CLI">
     ```bash
-    cargo install --path meerkat-cli
+    cargo install rkat
     ```
-    <Note>`rkat-mini` ships as an official slim binary in release artifacts. For source builds, see [Mini surfaces](/guides/mini-surfaces).</Note>
+    <Note>`rkat-mini` ships as an official slim binary in release artifacts. For source builds or slim custom builds, see [Mini surfaces](/guides/mini-surfaces).</Note>
   </Tab>
 </Tabs>
+
+<Note>
+Before your first run, set up provider credentials. The fastest path is environment variables; for realm-scoped bindings and OAuth flows, see [Auth](/guides/auth) and [Providers](/concepts/providers).
+</Note>
 
 ## Run an agent
 
@@ -49,18 +57,22 @@ meerkat = "0.6.0"
     let factory = AgentFactory::new(store_dir.clone());
     let client = Arc::new(AnthropicClient::new(api_key)?);
     let llm = factory.build_llm_adapter(client, "claude-sonnet-4-6").await;
-    let store = Arc::new(StoreAdapter::new(Arc::new(JsonlStore::new(store_dir))));
+    let store = Arc::new(JsonlStore::new(store_dir));
+    store.init().await?;
+    let store = Arc::new(StoreAdapter::new(store));
     let tools = Arc::new(meerkat_tools::EmptyToolDispatcher);
 
     let mut agent = AgentBuilder::new()
         .model("claude-sonnet-4-6")
-        .system_prompt("You are a helpful assistant.")
+        .system_prompt("You are a helpful assistant. Be concise in your responses.")
         .max_tokens_per_turn(1024)
         .build(Arc::new(llm), tools, store)
         .await;
 
-    let result = agent.run("What is the capital of France?".to_string()).await?;
-    println!("{}", result.text);
+    let result = agent
+        .run("What is the capital of France? Answer in one sentence.".into())
+        .await?;
+    println!("Response: {}", result.text);
     ```
   </Tab>
   <Tab title="Python">
@@ -130,6 +142,11 @@ The agent completes its current turn when a limit is hit, then stops.
 ## What's next
 
 - [Examples](/examples/sessions) -- every feature shown across surfaces
+- [Auth](/guides/auth) -- environment vars, realms, bindings, and OAuth flows
 - [Mini surfaces](/guides/mini-surfaces) -- shipped slim binaries and custom-build guidance
 - [Providers](/concepts/providers) -- model tables and provider parameters
 - [Rust SDK](/rust/overview) / [Python SDK](/sdks/python/overview) / [TypeScript SDK](/sdks/typescript/overview) -- full API reference
+
+<Note>
+For a maintained repository starter, see the Rust example in the Meerkat repository under `meerkat/examples/simple.rs`.
+</Note>

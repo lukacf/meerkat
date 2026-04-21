@@ -11,7 +11,9 @@ Meerkat is realm-first. A `realm_id` is the only identity key for sharing or iso
 1. Same `realm_id` means shared sessions, config, and runtime metadata.
 2. Different `realm_id` means strict isolation, even from the same folder.
 3. Backend (`sqlite` or `jsonl`) is pinned once per realm via `realm_manifest.json`.
-4. Realms are opaque strings. Reuse the same value to collaborate across surfaces.
+4. Realm IDs are user-chosen stable identifiers with syntax constraints. Reuse the same value to collaborate across surfaces.
+
+Realm IDs must be 1-64 characters, start with an ASCII alphanumeric character, and may contain only ASCII alphanumerics, `_`, and `-`. They cannot contain whitespace or `:`, and UUID-like opaque values are rejected for explicit user-facing realm IDs.
 
 ## Surface defaults
 
@@ -72,9 +74,12 @@ Existing realms stay pinned to the backend recorded in their manifest. Changing 
 
 Config is realm-scoped and generation-based.
 
-- `config/get` returns: `config`, `generation`, `realm_id`, `instance_id`, `backend`, `resolved_paths`.
+- `config/get` returns the core envelope fields `config`, `generation`, `realm_id`, `instance_id`, and `backend`.
+- Some surfaces may also include diagnostic fields such as `resolved_paths`, but those should be treated as optional.
 - `config/set` and `config/patch` accept optional `expected_generation`.
 - Stale writes fail deterministically with generation conflict.
+
+`resolved_paths` should be treated as a diagnostic/admin field rather than a guaranteed universal field on every public config envelope.
 
 ## Why this solves multi-surface concurrency
 

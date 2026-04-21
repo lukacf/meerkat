@@ -24,12 +24,17 @@ Use [realms](/concepts/realms) to choose whether state is shared or isolated.
 
 ## Effective precedence
 
-For a given realm, effective settings are:
+For a given realm, effective persisted configuration is:
 
 1. Built-in defaults
 2. Realm `config.toml`
-3. Environment overrides (secrets and supported runtime env overrides)
-4. Per-request runtime parameters (for example model/system prompt/tool toggles on create/resume calls)
+3. Per-request runtime parameters (for example model/system prompt/tool toggles on create/resume calls)
+
+Environment variables still matter, but they are primarily part of **runtime credential resolution**, not a general config layer that mutates the loaded realm config. In practice:
+
+- realm config remains the canonical persisted settings surface
+- provider credentials can still come from `RKAT_*` or provider-native env vars at resolve time
+- bindings and auth profiles decide how those credentials are used at runtime
 
 ## Config APIs and CAS
 
@@ -40,7 +45,8 @@ RPC, REST, and MCP all expose the same config envelope:
 - `realm_id`
 - `instance_id`
 - `backend`
-- `resolved_paths`
+
+Some surfaces also expose `resolved_paths` in diagnostic/admin contexts. Treat that field as optional rather than universal across all public config envelopes.
 
 Writes support optimistic concurrency:
 
@@ -53,7 +59,7 @@ This gives deterministic behavior when multiple clients or processes update conf
 
 Meerkat uses two distinct update models:
 
-1. Layered config loading (`defaults -> file -> env -> runtime`) uses **field-wise merge**:
+1. Layered config loading (`defaults -> file -> runtime`) uses **field-wise merge**:
   - scalar/option values: last non-default wins
   - section values (for example `providers`, `store`, `comms`, `compaction`): replace whole section
   - hook entries: append/extend

@@ -81,8 +81,8 @@ call_timeout_secs = 600
 
 `api_style` chooses the upstream API shape:
 
-- `responses` for Ollama and LM Studio style servers
-- `chat_completions` for vLLM style deployments
+- `chat_completions` is the safest default for Ollama, LM Studio, and vLLM in current Meerkat docs and examples
+- `responses` should be treated as an advanced/server-specific path you validate explicitly before depending on it
 
 For Gemma 4, prefer `chat_completions` unless you have verified a server-specific `responses` workflow you want to use.
 
@@ -129,17 +129,9 @@ Project servers override user servers with the same name.
 |------|---------|
 | 0 | Success |
 | 1 | Internal error |
-| 2 | Budget exhausted (CLI) or invalid params (contracts) |
-| 10 | Session not found |
-| 11 | Session busy |
-| 12 | Session not running |
-| 20 | Provider error |
-| 21 | Budget exhausted |
-| 22 | Hook denied |
-| 30 | Agent error |
-| 40 | Capability unavailable |
-| 41 | Skill not found |
-| 42 | Skill resolution failed |
+| 2 | Budget exhausted |
+
+Most richer session/provider/runtime failures are reported through structured error payloads and stderr text rather than a large exit-code taxonomy. In particular, session persistence/compaction disabled conditions are informational at the CLI transport layer and do not map to dedicated non-zero exit codes.
 
 ## See also
 

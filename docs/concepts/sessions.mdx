@@ -16,7 +16,7 @@ Sessions are realm-scoped. A session is visible across surfaces only when they u
 | `read` | Return session state + usage |
 | `read_history` | Return committed transcript messages with optional pagination |
 | `list` | List sessions in the active realm |
-| `archive` | Remove from runtime (and persistent store when supported) |
+| `archive` | Remove the live runtime handle and hide the session from normal listing while preserving committed history for later reads |
 
 ## Realm visibility rules
 
@@ -51,6 +51,8 @@ Public surfaces now expose full transcript history separately from lightweight m
 - TypeScript SDK: `readSessionHistory()`, `Session.history()`, `DeferredSession.history()`
 
 History responses return committed messages oldest-to-newest and support `offset` / `limit` pagination. They do not expose in-flight partial output.
+
+Archived sessions still keep their committed transcript history on the normal runtime-backed path. Archiving retires the live runtime handle, blocks further mutation, and can still leave committed state readable depending on the surface/service implementation. It is a lifecycle visibility change, not a history wipe.
 
 ## Persistence and backend pinning
 

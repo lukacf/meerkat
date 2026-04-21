@@ -266,7 +266,7 @@ Send a collaboration message to a peer.
   Delivery mode. Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
 </ParamField>
 
-**Response**: `{"status": "sent"}`
+**Response**: `{"status": "sent", "kind": "peer_message"}`
 </Accordion>
 
 <Accordion title="send_request">
@@ -288,7 +288,7 @@ Send a structured ask to a peer when you want explicit `intent + params` and a c
   Delivery mode. Use `"queue"` for ordinary delivery or `"steer"` for immediate steer processing on runtime-backed sessions.
 </ParamField>
 
-**Response**: `{"status": "sent"}`
+**Response**: `{"status": "sent", "kind": "peer_request"}`
 
 <Note>
 Use `send_message` by default for ordinary collaboration. `send_request` is for structured ask/reply semantics only. It is not task tracking, a stronger delivery mode, or a reserved response channel.
@@ -314,7 +314,15 @@ Send a response to a previously received request.
   Response result data. Defaults to `null`.
 </ParamField>
 
-**Response**: `{"status": "sent"}`
+<ParamField path="handling_mode" type="string">
+  Optional delivery mode override. Use `"queue"` for normal delivery or `"steer"` when you need immediate steer processing on runtime-backed sessions.
+</ParamField>
+
+**Response**: `{"status": "sent", "kind": "peer_response"}`
+
+<Note>
+The LLM-facing comms tools return lightweight tool receipts. Host-side `comms/send` returns richer typed receipts such as `peer_message_sent`, `peer_request_sent`, and `peer_response_sent`, with identifiers and ACK-related data for application code.
+</Note>
 </Accordion>
 
 <Accordion title="peers">

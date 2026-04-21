@@ -177,27 +177,37 @@ Spawning is deferred — `create_session()` registers the member without running
 
 ## Mob tools
 
-When mob capability is enabled on a session, the agent gets these tools:
+When mob capability is enabled on a session, the agent gets agent-side `mob_*` tools inside that session:
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `spawn_member` | `profile`, `member_id`, `initial_message?`, `backend?`, `runtime_mode?` | Spawn one member |
-| `spawn_many_members` | `specs[]` | Spawn multiple members concurrently |
-| `retire_member` | `member_id` | Remove a member |
-| `force_cancel_member` | `member_id` | Force-cancel a member |
-| `member_status` | `member_id` | Get member status |
-| `list_members` | none | List members and state |
-| `wire_members` | `member_id`, `peer_member_id` | Wire a comms channel between two members |
-| `unwire_members` | `member_id`, `peer_member_id` | Unwire a comms channel |
+| `mob_create` | `definition` | Create a mob from a definition |
+| `mob_list` | optional filters | List mobs or inspect one |
+| `mob_lifecycle` | `mob_id`, `action` | Stop, resume, complete, destroy, or reset a mob |
+| `mob_events` | `mob_id`, `after_cursor?`, `limit?` | Read mob event history |
+| `mob_spawn_member` | `mob_id`, `specs[]` | Spawn one or more members |
+| `mob_retire_member` | `mob_id`, `agent_identity` | Remove a member |
+| `mob_respawn_member` | `mob_id`, `agent_identity`, `initial_message?` | Respawn a member with a fresh runtime |
+| `mob_force_cancel_member` | `mob_id`, `agent_identity` | Force-cancel a member's active work |
+| `mob_member_status` | `mob_id`, `agent_identity` | Get canonical member status |
+| `mob_list_members` | `mob_id` | List members and state |
+| `mob_wire` | `mob_id`, `agent_identity`, `peer`, `action` | Wire or unwire a comms edge |
 | `mob_run_flow` | `flow_id`, `params?` | Execute a DAG flow |
 | `mob_flow_status` | `run_id` | Check flow run status |
 | `mob_cancel_flow` | `run_id` | Cancel a running flow |
+| `mob_wait_kickoff` | `mob_id`, `member_ids?`, `timeout_ms?` | Wait for kickoff completion |
+| `mob_wait_ready` | `mob_id`, `member_ids?`, `timeout_ms?` | Wait until members are bound/ready |
 | `mob_task_create` | `subject`, `description`, `blocked_by?` | Create a shared task |
 | `mob_task_list` | none | List shared tasks |
 | `mob_task_update` | `task_id`, `status`, `owner?` | Update a task's status |
 | `mob_task_get` | `task_id` | Get task details |
 
-These tools are available on **every surface** — CLI, RPC, REST, MCP, Python SDK, TypeScript SDK. The agent orchestrates the mob by calling these tools in response to natural language instructions.
+These are the **in-agent** tools. Public host surfaces use typed control planes instead:
+
+- JSON-RPC and SDKs: explicit `mob/*` methods such as `mob/create`, `mob/spawn`, `mob/wire`, and `mob/flow_run`
+- JSON-RPC and SDKs also expose richer host-side lifecycle and work-lane methods such as `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/destroy`, `mob/submit_work`, `mob/cancel_work`, `mob/cancel_all_work`, `mob/wait_kickoff`, and `mob/wait_ready`
+- Public MCP hosts: typed `meerkat_mob_*` tools
+- CLI: helper-oriented commands such as `spawn-helper`, `fork-helper`, `run-flow`, `member-status`, `respawn`, and `wait-kickoff`
 
 ---
 
@@ -263,6 +273,15 @@ In addition to tool-driven orchestration (where an agent calls mob tools), there
   </Tab>
 </Tabs>
 
+### Work lane vs member send
+
+There are two different host-side delivery models:
+
+- `mob/member_send` for ordinary content delivery to a member session
+- `mob/submit_work` / `mob/cancel_work` / `mob/cancel_all_work` for tracked, cancellable work-lane operations
+
+Use the work lane when your application needs server-issued work references, cancellation by handle, or explicit tracked work state. Use `member_send` for plain direct content delivery.
+
 ---
 
 ## Topology
@@ -302,11 +321,11 @@ Wildcard `"*"` matches any role.
 
 ## Realtime attachment
 
-Each mob member runs in its own session, so realtime is enabled per-member by pointing a profile at a realtime-capable model (for example `gpt-realtime`). The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no per-member attach/detach RPC. Use `runtime/realtime_attachment_statuses` to observe all members' attachment state in one round trip. See the [Realtime voice guide](/guides/realtime) for the capability-driven model, state machine, and live-topology reconfigure flow.
+Each mob member runs in its own session, so realtime is enabled per-member by pointing a profile at a realtime-capable model (for example `gpt-realtime-1.5`). The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no per-member attach/detach RPC. Use `runtime/realtime_attachment_statuses` to observe all members' attachment state in one round trip. See the [Realtime guide](/guides/realtime) for the capability-driven model, state machine, and live-topology reconfigure flow.
 
 ## See also
 
-- [Realtime voice guide](/guides/realtime) — per-member realtime audio attachment
+- [Realtime guide](/guides/realtime) — per-member realtime audio attachment
 - [Examples: Mobs](/examples/mobs) — code examples across all surfaces
 - [Examples: Mobpack](/examples/mobpack) — portable deployment
 - [Examples: WASM](/examples/wasm) — browser deployment

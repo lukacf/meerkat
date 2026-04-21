@@ -14,7 +14,7 @@ This page is a quick-lookup index. For current session/runtime semantics, see [S
 | `AgentBuilder` | `meerkat_core` | Builder pattern for agent construction |
 | `Session` | `meerkat_core` | Conversation state container |
 | `SessionId` | `meerkat_core` | Unique session identifier (UUIDv7) |
-| `Message` | `meerkat_core` | Conversation message enum (`System`, `User`, `Assistant`, `BlockAssistant`, `ToolResults`) |
+| `Message` | `meerkat_core` | Conversation message enum (`System`, `SystemNotice`, `User`, `Assistant`, `BlockAssistant`, `ToolResults`, with runtime notices carried through `SystemNotice`) |
 | `ToolDef` | `meerkat_core` | Tool definition (name, description, JSON Schema) |
 | `ToolCall` | `meerkat_core` | Tool invocation request from the model |
 | `ToolCallView` | `meerkat_core` | Zero-allocation borrowed view of a tool call |
@@ -271,12 +271,16 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireUsage` | Token/cost usage breakdown |
 | `ContractVersion` | Semver version (`0.6.0` currently) |
 | `CoreCreateParams` | Session creation parameters |
-| `StructuredOutputParams` | Schema + retry count |
+| `OutputSchema` + `structured_output_retries` | Structured-output schema and retry settings carried directly on session/turn request surfaces |
 | `CommsParams` | Keep-alive + comms identity parameters |
 | `HookParams` | Hook override entries |
 | `SkillsParams` | Skill enablement + references |
 
 ## Error code reference
+
+This table describes the higher-level canonical `ErrorCode`/wire envelope view.
+It is not identical to the lower-level `SessionError` transport mapping used by
+the session service adapters.
 
 Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI exit code:
 
@@ -290,10 +294,14 @@ Every `ErrorCode` maps to a stable string, JSON-RPC code, HTTP status, and CLI e
 | Hook denied | `HOOK_DENIED` | -32012 | 403 | 22 |
 | Agent error | `AGENT_ERROR` | -32013 | 500 | 30 |
 | Capability unavailable | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | 40 |
+| Duplicate input | `DUPLICATE_INPUT` | -32004 | 409 | 13 |
+| Request cancelled | `REQUEST_CANCELLED` | -32005 | 499 | 14 |
 | Skill not found | `SKILL_NOT_FOUND` | -32021 | 404 | 41 |
 | Skill resolution failed | `SKILL_RESOLUTION_FAILED` | -32022 | 422 | 42 |
 | Invalid params | `INVALID_PARAMS` | -32602 | 400 | 2 |
 | Internal error | `INTERNAL_ERROR` | -32603 | 500 | 1 |
+
+For session-service transport behavior specifically, see the [Capability matrix](/reference/capability-matrix#error-codes).
 
 ## Provider clients
 

@@ -1,211 +1,104 @@
 ---
 title: "Mobs"
-description: "Multi-agent orchestration with roles, wiring, flows, and lifecycle management."
+description: "Create mobs, spawn members, wire peers, send work, and run flows through the current host control plane."
 icon: "users"
 ---
 
 For the full guide, see [Mobs](/guides/mobs).
 
-## Mob definition
-
-A mob definition declares profiles (agent templates), wiring rules, and flows. Definitions can be JSON or TOML.
-
-```json
-{
-  "id": "release-triage",
-  "profiles": {
-    "lead": {
-      "model": "claude-opus-4-6",
-      "peer_description": "Coordinates triage, assigns issues",
-      "tools": { "builtins": true, "comms": true, "mob": true, "mob_tasks": true },
-      "skills": ["triage-workflow"],
-      "runtime_mode": "autonomous_host"
-    },
-    "analyst": {
-      "model": "claude-sonnet-4-6",
-      "peer_description": "Investigates assigned issues",
-      "tools": { "builtins": true, "shell": true, "comms": true },
-      "runtime_mode": "autonomous_host"
-    }
-  },
-  "wiring": {
-    "auto_wire_orchestrator": false,
-    "role_wiring": [
-      { "a": "lead", "b": "analyst" }
-    ]
-  },
-  "flows": {
-    "triage": {
-      "description": "Triage incoming issues",
-      "steps": {
-        "scan": {
-          "role": "lead",
-          "message": "Scan the issue tracker and prioritize"
-        },
-        "investigate": {
-          "role": "analyst",
-          "message": "Investigate the top priority issue",
-          "depends_on": ["scan"],
-          "dispatch_mode": "fan_out"
-        },
-        "summarize": {
-          "role": "lead",
-          "message": "Summarize findings and recommend actions",
-          "depends_on": ["investigate"],
-          "depends_on_mode": "all"
-        }
-      }
-    }
-  },
-  "limits": {
-    "max_flow_duration_ms": 300000,
-    "max_step_retries": 2,
-    "max_orphaned_turns": 10
-  }
-}
-```
-
-### Profile fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `model` | string | LLM model name |
-| `skills` | string[] | Skill references to load |
-| `tools` | object | Tool categories: `builtins`, `shell`, `comms`, `memory`, `mob`, `mob_tasks`, `mcp` (server names) |
-| `peer_description` | string | Visible to peers in comms discovery |
-| `runtime_mode` | string | `"autonomous_host"` (default) or `"turn_driven"` |
-| `external_addressable` | bool | Visible for cross-mob comms |
-| `output_schema` | object | JSON Schema for structured output extraction |
-
-### Flow step fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `role` | string | Profile name to execute this step |
-| `message` | string | Prompt sent to the member |
-| `depends_on` | string[] | Step IDs that must complete first |
-| `depends_on_mode` | string | `"all"` (default) or `"any"` |
-| `dispatch_mode` | string | `"fan_out"` (default), `"one_to_one"`, `"fan_in"` |
-| `condition` | object | Guard expression (`eq`, `in`, `gt`, `lt`, `and`, `or`, `not`) |
-| `branch` | string | Branch label for conditional routing |
-| `timeout_ms` | number | Step-level timeout |
-| `allowed_tools` / `blocked_tools` | string[] | Per-step tool overlay |
-
----
-
-## Agent-side mob tools reference
-
-When `enable_mob` is set, the running agent gets these in-session tools:
-
-| Tool | Parameters | Description |
-|------|-----------|-------------|
-| `mob_create` | `definition` (JSON) | Create a mob from definition |
-| `mob_list` | `mob_id?` | List mobs, or get status of one |
-| `mob_lifecycle` | `mob_id`, `action` (stop/resume/complete/destroy) | Control mob state |
-| `mob_events` | `mob_id`, `after_cursor?`, `limit?` | Read mob event log |
-| `mob_run_flow` | `mob_id`, `flow_id`, `params?` | Execute a DAG flow |
-| `mob_flow_status` | `mob_id`, `run_id` | Check flow run status |
-| `mob_cancel_flow` | `mob_id`, `run_id` | Cancel a running flow |
-| `mob_spawn_member` | `mob_id`, `specs` (array of `{profile, agent_identity, runtime_mode?, initial_message?}`) | Spawn members (batch) |
-| `mob_retire_member` | `mob_id`, `agent_identity` | Remove a member |
-| `mob_wire` | `mob_id`, `agent_identity`, `peer`, `action` | Establish or remove a trusted comms channel |
-| `mob_list_members` | `mob_id` | List mob members and their state |
-
 <Note>
-These are the agent-side `mob_*` tools. Public host surfaces use typed control
-planes instead:
+There are two different mob surfaces:
 
-- JSON-RPC / SDKs: explicit `mob/*` methods
-- Public MCP hosts: typed `meerkat_mob_*` tools
-- REST: typed mob endpoints where available, rather than agent-side `mob_*`
+- **Host APIs**: typed `mob/*` methods over JSON-RPC and the SDK-backed `Mob` classes
+- **Agent-side tools**: `mob_*` tools exposed inside a running agent session
+
+This page focuses on the host control plane. It does **not** treat agent-side `mob_*` tools as if they were the public RPC/SDK API.
 </Note>
-
----
 
 ## Create a mob
 
 <Tabs>
-  <Tab title="CLI">
-    ```bash
-    # From a definition file
-    rkat mob create --definition ./mobs/triage/definition.json
-    ```
-  </Tab>
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 1,
-      "method": "session/create",
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "mob/create",
       "params": {
-        "prompt": "Create a coding swarm mob, spawn all members, wire them, and report status.",
-        "enable_builtins": true,
-        "enable_mob": true
+        "definition": {
+          "id": "release-triage",
+          "profiles": {
+            "lead": {
+              "model": "claude-opus-4-6",
+              "peer_description": "Coordinates triage"
+            },
+            "analyst": {
+              "model": "claude-sonnet-4-6",
+              "peer_description": "Investigates issues"
+            }
+          },
+          "flows": {
+            "triage": {
+              "steps": {
+                "scan": { "role": "lead", "message": "Prioritize incoming issues." }
+              }
+            }
+          }
+        }
       }
     }
     ```
   </Tab>
-  <Tab title="REST">
-    ```bash
-    curl -X POST http://localhost:8080/sessions \
-      -H "Content-Type: application/json" \
-      -d '{"prompt":"Create a coding swarm mob, spawn and wire all members.","enable_builtins":true,"enable_mob":true}'
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {"name": "meerkat_run", "arguments": {
-      "prompt": "Create a coding swarm mob, spawn all members, wire them.",
-      "enable_builtins": true,
-      "enable_mob": true
-    }}
-    ```
-  </Tab>
   <Tab title="Python">
     ```python
-    session = await client.create_session(
-        prompt="Create a coding swarm, spawn all members, wire them.",
-        enable_builtins=True,
-        enable_mob=True,
+    mob = await client.create_mob(
+        definition={
+            "id": "release-triage",
+            "profiles": {
+                "lead": {
+                    "model": "claude-opus-4-6",
+                    "peer_description": "Coordinates triage",
+                },
+                "analyst": {
+                    "model": "claude-sonnet-4-6",
+                    "peer_description": "Investigates issues",
+                },
+            },
+        }
     )
+    print(mob.id)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession("Create a coding swarm, spawn all members, wire them.", {
-      enableBuiltins: true,
-      enableMob: true,
+    const mob = await client.createMob({
+      definition: {
+        id: "release-triage",
+        profiles: {
+          lead: {
+            model: "claude-opus-4-6",
+            peer_description: "Coordinates triage",
+          },
+          analyst: {
+            model: "claude-sonnet-4-6",
+            peer_description: "Investigates issues",
+          },
+        },
+      },
     });
+    console.log(mob.mobId);
     ```
   </Tab>
   <Tab title="Rust">
     ```rust
-    let definition = MobDefinition::from_toml(r#"
-    [mob]
-    id = "coding_swarm"
-    orchestrator = "lead"
+    let definition = MobDefinition::from_json(json!({
+        "id": "release-triage",
+        "profiles": {
+            "lead": { "model": "claude-opus-4-6" },
+            "analyst": { "model": "claude-sonnet-4-6" }
+        }
+    }))?;
 
-    [profiles.lead]
-    model = "claude-opus-4-6"
-    external_addressable = true
-
-    [profiles.lead.tools]
-    builtins = true
-    comms = true
-    mob = true
-    mob_tasks = true
-
-    [profiles.worker]
-    model = "claude-sonnet-4-6"
-
-    [profiles.worker.tools]
-    builtins = true
-    shell = true
-    comms = true
-    mob_tasks = true
-
-    [wiring]
-    auto_wire_orchestrator = true
-    "#)?;
     let handle = MobBuilder::new(definition, MobStorage::in_memory())
         .with_session_service(service)
         .allow_ephemeral_sessions(true)
@@ -219,43 +112,64 @@ planes instead:
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    rkat mob spawn-helper my-mob "join as lead-1" --profile lead --agent-identity lead-1
-    rkat mob spawn-helper my-mob "join as worker-1" --profile worker --agent-identity worker-1
-    rkat mob spawn-helper my-mob "join as worker-2" --profile worker --agent-identity worker-2
-    ```
+    The CLI currently exposes helper-oriented mob commands such as `spawn-helper`, `fork-helper`, `run-flow`, `member-status`, `respawn`, and `wait-kickoff`. It does not expose the raw host-side `mob/spawn` lifecycle directly.
   </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_spawn_member` tool:
     ```json
-    {"mob_id": "my-mob", "specs": [
-      {"profile": "lead", "agent_identity": "lead-1"},
-      {"profile": "worker", "agent_identity": "worker-1"},
-      {"profile": "worker", "agent_identity": "worker-2", "runtime_mode": "turn_driven"}
-    ]}
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "mob/spawn",
+      "params": {
+        "mob_id": "release-triage",
+        "profile": "lead",
+        "agent_identity": "lead-1"
+      }
+    }
+    ```
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "mob/spawn_many",
+      "params": {
+        "mob_id": "release-triage",
+        "specs": [
+          { "profile": "analyst", "agent_identity": "analyst-1" },
+          { "profile": "analyst", "agent_identity": "analyst-2", "runtime_mode": "turn_driven" }
+        ]
+      }
+    }
     ```
   </Tab>
-  <Tab title="REST">
-    Agent calls `mob_spawn_member` tool (same JSON as RPC — mob ops are tool-driven on all session surfaces).
-  </Tab>
-  <Tab title="MCP">
-    Agent calls `mob_spawn_member` tool (same JSON as RPC).
-  </Tab>
   <Tab title="Python">
-    Agent calls `mob_spawn_member` tool (same JSON as RPC).
+    ```python
+    await mob.spawn(profile="lead", agent_identity="lead-1")
+    await mob.spawn_many([
+        {"profile": "analyst", "agent_identity": "analyst-1"},
+        {"profile": "analyst", "agent_identity": "analyst-2", "runtime_mode": "turn_driven"},
+    ])
+    ```
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_spawn_member` tool (same JSON as RPC).
+    ```typescript
+    await mob.spawn({ profile: "lead", agentIdentity: "lead-1" });
+    await mob.spawnMany([
+      { profile: "analyst", agentIdentity: "analyst-1" },
+      { profile: "analyst", agentIdentity: "analyst-2", runtimeMode: "turn_driven" },
+    ]);
+    ```
   </Tab>
   <Tab title="Rust">
     ```rust
-    use meerkat_mob::{AgentIdentity, SpawnMemberSpec};
+    handle
+        .spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1")))
+        .await?;
 
-    handle.spawn_spec(SpawnMemberSpec::new("lead", AgentIdentity::from("lead-1"))).await?;
-    let mut spec = SpawnMemberSpec::new("worker", AgentIdentity::from("worker-1"));
-    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
-    handle.spawn_spec(spec).await?;
-    handle.spawn_spec(SpawnMemberSpec::new("worker", AgentIdentity::from("worker-2"))).await?;
+    let mut analyst = SpawnMemberSpec::new("analyst", AgentIdentity::from("analyst-2"));
+    analyst.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(analyst).await?;
     ```
   </Tab>
 </Tabs>
@@ -263,360 +177,208 @@ planes instead:
 ## Wire and unwire peers
 
 <Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob wire my-mob lead-1 worker-1
-    rkat mob unwire my-mob lead-1 worker-2
-    ```
-  </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_wire` tool:
     ```json
-    {"mob_id": "my-mob", "agent_identity": "lead-1", "peer": {"local": "worker-1"}, "action": "wire"}
+    {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "mob/wire",
+      "params": {
+        "mob_id": "release-triage",
+        "agent_identity": "lead-1",
+        "peer": "analyst-1"
+      }
+    }
     ```
-  </Tab>
-  <Tab title="REST">
-    Agent calls `mob_wire` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="MCP">
-    Agent calls `mob_wire` tool (same JSON as RPC).
+
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "method": "mob/unwire",
+      "params": {
+        "mob_id": "release-triage",
+        "agent_identity": "lead-1",
+        "peer": "analyst-1"
+      }
+    }
+    ```
   </Tab>
   <Tab title="Python">
-    Agent calls `mob_wire` tool (same JSON as RPC).
+    ```python
+    await mob.wire("lead-1", "analyst-1")
+    await mob.unwire("lead-1", "analyst-1")
+    ```
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_wire` tool (same JSON as RPC).
+    ```typescript
+    await mob.wire("lead-1", "analyst-1");
+    await mob.unwire("lead-1", "analyst-1");
+    ```
   </Tab>
   <Tab title="Rust">
     ```rust
-    handle.wire("lead-1", "worker-1").await?;
-    handle.unwire("lead-1", "worker-2").await?;
+    handle
+        .wire(AgentIdentity::from("lead-1"), AgentIdentity::from("analyst-1"))
+        .await?;
+    handle
+        .unwire(AgentIdentity::from("lead-1"), AgentIdentity::from("analyst-1"))
+        .await?;
     ```
   </Tab>
 </Tabs>
 
-## Retire a member
+## Send work to a member
+
+Use the host control plane when an application needs to deliver content directly to a member session.
 
 <Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob respawn my-mob worker-2 --initial-message "resume with fresh runtime"
-    ```
-  </Tab>
   <Tab title="JSON-RPC">
-    Agent calls `mob_retire_member` tool:
     ```json
-    {"mob_id": "my-mob", "agent_identity": "worker-2"}
+    {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "method": "mob/member_send",
+      "params": {
+        "mob_id": "release-triage",
+        "agent_identity": "lead-1",
+        "content": "Decompose the task and assign work to the analysts.",
+        "handling_mode": "queue"
+      }
+    }
     ```
-  </Tab>
-  <Tab title="REST">
-    Agent calls `mob_retire_member` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="MCP">
-    Agent calls `mob_retire_member` tool (same JSON as RPC).
   </Tab>
   <Tab title="Python">
-    Agent calls `mob_retire_member` tool (same JSON as RPC).
+    ```python
+    lead = mob.member("lead-1")
+    await lead.send(
+        "Decompose the task and assign work to the analysts.",
+        handling_mode="queue",
+    )
+    ```
   </Tab>
   <Tab title="TypeScript">
-    Agent calls `mob_retire_member` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    handle.retire("worker-2").await?;
+    ```typescript
+    const lead = mob.member("lead-1");
+    await lead.send(
+      "Decompose the task and assign work to the analysts.",
+      { handlingMode: "queue" },
+    );
     ```
   </Tab>
 </Tabs>
 
-## Send a turn
+## Submit tracked work
 
-Send a message directly to a specific mob member, triggering an LLM turn.
+Use the work lane when you need a cancellable work reference rather than plain content delivery.
 
 <Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat run "send a message to mob member lead-1 in my-mob: Decompose the task and assign to workers."
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": 8,
+      "method": "mob/submit_work",
+      "params": {
+        "mob_id": "release-triage",
+        "agent_identity": "lead-1",
+        "content": "Review the flaky test history and summarize the top failure modes."
+      }
+    }
     ```
   </Tab>
-  <Tab title="JSON-RPC">
-    Agent-to-agent interaction stays on comms tools. Direct member delivery is reserved for host/runtime control-plane APIs.
-  </Tab>
-  <Tab title="REST">
-    Agent-to-agent interaction stays on comms tools. Direct member delivery is reserved for host/runtime control-plane APIs.
-  </Tab>
-  <Tab title="MCP">
-    Agent-to-agent interaction stays on comms tools. Direct member delivery is reserved for host/runtime control-plane APIs.
-  </Tab>
   <Tab title="Python">
-    Agent-to-agent interaction stays on comms tools. Direct member delivery is reserved for host/runtime control-plane APIs.
+    ```python
+    work = await client.submit_mob_work(
+        "release-triage",
+        "lead-1",
+        "Review the flaky test history and summarize the top failure modes.",
+    )
+    ```
   </Tab>
   <Tab title="TypeScript">
-    Agent-to-agent interaction stays on comms tools. Direct member delivery is reserved for host/runtime control-plane APIs.
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    use meerkat_core::types::HandlingMode;
-
-    let lead = handle.member(&"lead-1".into()).await?;
-    lead.send("Decompose the task and assign to workers.", HandlingMode::Queue, None).await?;
+    ```typescript
+    const work = await client.submitMobWork(
+      "release-triage",
+      "lead-1",
+      "Review the flaky test history and summarize the top failure modes.",
+    );
     ```
   </Tab>
 </Tabs>
 
 ## Run a flow
 
-Execute a named DAG flow. Steps execute in dependency order with configured dispatch modes.
-
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat mob run-flow my-mob --flow triage --params '{"pr": 42}'
-    rkat mob run-flow my-mob --flow triage --stream --stream-view mux
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    Agent calls `mob_run_flow` tool:
-    ```json
-    {"mob_id": "my-mob", "flow_id": "triage", "params": {"pr": 42}}
-    ```
-  </Tab>
-  <Tab title="REST">
-    Agent calls `mob_run_flow` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="MCP">
-    Agent calls `mob_run_flow` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="Python">
-    Agent calls `mob_run_flow` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="TypeScript">
-    Agent calls `mob_run_flow` tool (same JSON as RPC).
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let run_id = handle.run_flow("triage".into(), json!({"pr": 42})).await?;
-    ```
-  </Tab>
-</Tabs>
-
-## Check status
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob status my-mob
-    rkat mob list
-    rkat mob flows my-mob
-    rkat mob flow-status my-mob <run_id>
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    Host calls typed methods such as `mob/list`, `mob/status`, and
-    `mob/flow_status`:
-    ```json
-    {"mob_id": "my-mob"}
-    {"mob_id": "my-mob", "run_id": "01936f8a-..."}
-    ```
-  </Tab>
-  <Tab title="REST">
-    Use the typed mob/member status routes documented in the REST API. REST does
-    not re-export the agent-side `mob_*` dispatcher.
-  </Tab>
-  <Tab title="MCP">
-    Host calls `meerkat_mob_list`, `meerkat_mob_status`, and
-    `meerkat_mob_flow_status`.
-  </Tab>
-  <Tab title="Python">
-    Use the typed client methods: `await client.list_mobs()`,
-    `await client.mob_status("my-mob")`, and
-    `await client.get_mob_flow_status("my-mob", run_id)`.
-  </Tab>
-  <Tab title="TypeScript">
-    Use the typed client methods: `await client.listMobs()`,
-    `await client.mobStatus("my-mob")`, and
-    `await client.getMobFlowStatus("my-mob", runId)`.
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let status = handle.status().await?;
-    let flow_run = handle.flow_status(run_id).await?;
-    ```
-  </Tab>
-</Tabs>
-
-## Mob events
-
-Read the structural event log (spawns, retires, wires, flow transitions).
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob events my-mob
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    Host calls typed `mob/events`:
-    ```json
-    {"mob_id": "my-mob", "after_cursor": 0, "limit": 50}
-    ```
-  </Tab>
-  <Tab title="REST">
-    Use the typed `/mob/{id}/events` stream route.
-  </Tab>
-  <Tab title="MCP">
-    Use `meerkat_mob_events` for history and `meerkat_mob_event_stream_*` for
-    streaming.
-  </Tab>
-  <Tab title="Python">
-    Use `await client.subscribe_mob_events("my-mob")`.
-  </Tab>
-  <Tab title="TypeScript">
-    Use `await client.subscribeMobEvents("my-mob")`.
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let events_view = handle.events();
-    // Use events_view to read the structural event log
-    ```
-  </Tab>
-</Tabs>
-
-## Lifecycle
-
-Control mob state transitions.
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat mob stop my-mob       # pause all members
-    rkat mob resume my-mob     # restart members
-    rkat mob complete my-mob   # mark as done
-    rkat mob destroy my-mob    # tear down all resources
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    Host calls typed `mob/lifecycle`:
-    ```json
-    {"mob_id": "my-mob", "action": "stop"}
-    {"mob_id": "my-mob", "action": "resume"}
-    {"mob_id": "my-mob", "action": "complete"}
-    {"mob_id": "my-mob", "action": "destroy"}
-    ```
-  </Tab>
-  <Tab title="REST">
-    Use JSON-RPC, MCP, or the SDKs for general mob lifecycle control; REST does
-    not expose the full lifecycle surface.
-  </Tab>
-  <Tab title="MCP">
-    Host calls `meerkat_mob_lifecycle`.
-  </Tab>
-  <Tab title="Python">
-    Use `await client.mob_lifecycle("my-mob", "stop")` and related actions.
-  </Tab>
-  <Tab title="TypeScript">
-    Use `await client.mobLifecycle("my-mob", "stop")` and related actions.
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    handle.stop().await?;
-    handle.resume().await?;
-    handle.complete().await?;
-    handle.destroy().await?;
-    ```
-  </Tab>
-</Tabs>
-
-## Tool-driven mob usage
-
-The primary pattern across all surfaces: enable mob tools and let the agent orchestrate everything from a natural language request.
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat run --tools full "Create a research team with a lead and 3 analysts. \
-      Wire them, then run the synthesis flow."
+    rkat mob run-flow release-triage --flow triage --params '{"severity":"high"}'
+    rkat mob run-flow release-triage --flow triage --stream
     ```
   </Tab>
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 1,
-      "method": "session/create",
+      "jsonrpc": "2.0",
+      "id": 7,
+      "method": "mob/flow_run",
       "params": {
-        "prompt": "Create a research team with a lead and 3 analysts, then run the synthesis flow.",
-        "enable_builtins": true,
-        "enable_mob": true
+        "mob_id": "release-triage",
+        "flow_id": "triage",
+        "params": { "severity": "high" }
       }
     }
     ```
   </Tab>
-  <Tab title="REST">
-    ```bash
-    curl -X POST http://localhost:8080/sessions \
-      -H "Content-Type: application/json" \
-      -d '{"prompt":"Create a research team and run the synthesis flow","enable_builtins":true,"enable_mob":true}'
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {"name": "meerkat_run", "arguments": {
-      "prompt": "Create a research team and run the synthesis flow",
-      "enable_builtins": true,
-      "enable_mob": true
-    }}
-    ```
-  </Tab>
   <Tab title="Python">
     ```python
-    session = await client.create_session(
-        prompt="Create a research team and run the synthesis flow",
-        enable_builtins=True,
-        enable_mob=True,
-    )
+    run_id = await mob.run_flow("triage", {"severity": "high"})
+    status = await mob.flow_status(run_id)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession("Create a research team and run the synthesis flow", {
-      enableBuiltins: true,
-      enableMob: true,
-    });
+    const runId = await mob.runFlow("triage", { severity: "high" });
+    const status = await mob.flowStatus(runId);
     ```
   </Tab>
   <Tab title="Rust">
     ```rust
-    let factory = AgentFactory::new(root)
-        .builtins(true)
-        .mob(true);
-    let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
-    let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-6".into(),
-        prompt: "Create a research team and run the synthesis flow".into(),
-        system_prompt: None,
-        max_tokens: None,
-        event_tx: None,
-        skill_references: None,
-        initial_turn: InitialTurnPolicy::RunImmediately,
-        build: None,
-        labels: None,
-    }).await?;
+    let run_id = handle.run_flow("triage".into(), json!({"severity": "high"})).await?;
+    let status = handle.flow_status(&run_id).await?;
     ```
   </Tab>
 </Tabs>
 
-## Runtime modes
+## Helper-oriented CLI flows
 
-| Mode | Behavior | Use case |
-|------|----------|----------|
-| `autonomous_host` (default) | Member runs a long-lived runtime-backed loop: admit inbox work → process → respond → sleep | Long-lived agents that react to messages |
-| `turn_driven` | Member only executes when driven by host/runtime control-plane delivery or flow dispatch | Controlled execution, deterministic ordering |
+The current CLI is strongest for helper-style workflows on an existing mob:
 
-Set per-profile in the definition:
-```json
-{"model": "claude-sonnet-4-6", "runtime_mode": "turn_driven", "tools": {"comms": true}}
-```
-
-Or per-spawn:
 ```bash
-rkat mob spawn-helper my-mob "join as worker-1" --profile worker --agent-identity worker-1
+rkat mob spawn-helper release-triage "Join as lead-1 and summarize the release status." --profile lead --agent-identity lead-1
+rkat mob fork-helper release-triage lead-1 "Investigate the flaky test history." --profile analyst
+rkat mob member-status release-triage lead-1 --json
+rkat mob respawn release-triage analyst-2 --initial-message "Resume with a fresh runtime."
+rkat mob wait-kickoff release-triage --json
 ```
+
+## Events and subscriptions
+
+```python
+events = await mob.subscribe_member_events("lead-1")
+async for event in events:
+    print(event)
+```
+
+```typescript
+const events = await mob.subscribeMemberEvents("lead-1");
+for await (const event of events) {
+  console.log(event);
+}
+```
+
+## See also
+
+- [Mobs guide](/guides/mobs)
+- [Realtime guide](/guides/realtime)
+- [Mobpack examples](/examples/mobpack)

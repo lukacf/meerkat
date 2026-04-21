@@ -4,7 +4,7 @@ description: "Provider-agnostic: same tools, same sessions across Anthropic, Ope
 icon: "server"
 ---
 
-Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration work identically across Anthropic, OpenAI, Gemini, and configured self-hosted models. Switch providers by changing the model name. If you register a self-hosted alias such as `gemma-4-31b`, it behaves like any other model ID in the runtime.
+Meerkat is provider-agnostic at the session/config/runtime model level. You can switch providers by changing the model name, and a configured self-hosted alias such as `gemma-4-31b` behaves like any other model ID in the runtime. Tool visibility and multimodal behavior still depend on model capabilities, so provider/model differences can affect the effective tool surface.
 
 ## Provider setup
 
@@ -16,7 +16,6 @@ Meerkat is provider-agnostic. Your tools, sessions, hooks, and configuration wor
 
     | Model | Context | Max output | Best for |
     |-------|---------|------------|----------|
-    | `claude-opus-4-6` | 200K / 1M (beta) | 128K | Complex reasoning, highest quality |
     | `claude-opus-4-7` | 1M | 128K | Default Anthropic recommendation |
     | `claude-opus-4-6` | 1M | 128K | Supported Opus fallback |
     | `claude-sonnet-4-6` | 1M | 64K | Balanced performance and cost |
@@ -144,7 +143,7 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
   <Tab title="OpenAI">
     | Parameter | Values | Description |
     |-----------|--------|-------------|
-    | `reasoning_effort` | `low`, `medium`, `high` | Reasoning effort for o-series models |
+    | `reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` | Reasoning effort for GPT-5-era OpenAI models and other compatible OpenAI reasoning surfaces |
     | `seed` | Integer | Seed for deterministic outputs |
 
     ```bash
@@ -165,7 +164,7 @@ Provider-specific options can be passed via the `--param` CLI flag or `provider_
 
 ## Model catalog
 
-The `meerkat-models` crate maintains the curated built-in catalog. At runtime, Meerkat merges that catalog with any configured self-hosted aliases into one effective model registry used for capability detection, provider resolution, and catalog responses.
+Meerkat ships a curated built-in model catalog and merges it with any configured self-hosted aliases into one effective runtime registry used for capability detection, provider resolution, and catalog responses. The compatibility `meerkat-models` crate re-exports that catalog surface for consumers that still depend on the older crate boundary.
 
 Query the catalog programmatically from any surface:
 
@@ -183,7 +182,7 @@ For Gemma 4 specifically, prefer `chat_completions` as the default OpenAI-compat
 The provider is automatically inferred from the model name:
 
 - `claude-*` models use Anthropic
-- `gpt-*`, `o1-*`, `o3-*`, `chatgpt-*` models use OpenAI
+- `gpt-*`, `chatgpt-*` models use OpenAI
 - `gemini-*` models use Gemini
 
 Configured self-hosted aliases are resolved by exact model ID match before prefix inference. That means an alias such as `gemma-4-31b` works without `--provider`.

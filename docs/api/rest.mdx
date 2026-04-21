@@ -56,18 +56,60 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `GET` | `/sessions` | List sessions |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
+| `POST` | `/sessions/{id}/system_context` | Append staged runtime system context |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
+| `POST` | `/sessions/{id}/peer-response-terminal` | Queue a typed peer terminal response event |
 | `POST` | `/sessions/{id}/interrupt` | Interrupt an in-flight turn |
 | `DELETE` | `/sessions/{id}` | Archive (remove) a session |
 | `GET` | `/sessions/{id}/events` | SSE stream for real-time updates |
+| `GET` | `/schedule/tools` | List schedule tool definitions |
+| `POST` | `/schedule/call` | Call a schedule tool directly |
+| `POST` | `/schedules` | Create a schedule |
+| `GET` | `/schedules` | List schedules |
+| `GET` | `/schedules/{id}` | Fetch one schedule |
+| `PATCH` | `/schedules/{id}` | Update a schedule |
+| `DELETE` | `/schedules/{id}` | Delete a schedule |
+| `POST` | `/schedules/{id}/pause` | Pause a schedule |
+| `POST` | `/schedules/{id}/resume` | Resume a schedule |
+| `GET` | `/schedules/{id}/occurrences` | List schedule occurrences |
 | `POST` | `/sessions/{id}/mcp/add` | Stage live MCP server addition (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/remove` | Stage live MCP server removal (mcp feature) |
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
-| `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
+| `POST` | `/realtime/open_info` | Issue a realtime websocket bootstrap token |
+| `POST` | `/realtime/status` | Read product-layer realtime status |
+| `POST` | `/realtime/capabilities` | Read product-layer realtime capabilities |
+| `GET` | `/runtime/{id}/state` | Read runtime state |
 | `GET` | `/runtime/{id}/realtime_attachment_status` | Read the runtime-owned realtime attachment status for a session |
+| `POST` | `/runtime/{id}/accept` | Admit runtime input explicitly |
+| `POST` | `/runtime/{id}/retire` | Retire a runtime |
+| `POST` | `/runtime/{id}/reset` | Reset a runtime |
+| `GET` | `/input/{id}/list` | List runtime input state entries |
+| `GET` | `/input/{session_id}/{input_id}` | Read one runtime input state |
+| `GET` | `/auth/profiles` | List auth profiles |
+| `POST` | `/auth/profiles` | Create an auth profile |
+| `GET` | `/auth/profiles/{id}` | Read an auth profile |
+| `DELETE` | `/auth/profiles/{id}` | Delete an auth profile |
+| `POST` | `/auth/profiles/{id}/test` | Test an auth profile binding |
+| `POST` | `/auth/login/start` | Start interactive auth login |
+| `POST` | `/auth/login/complete` | Complete interactive auth login |
+| `POST` | `/auth/login/device/start` | Start device-code login |
+| `POST` | `/auth/login/device/complete` | Complete device-code login |
+| `GET` | `/auth/status/{id}` | Read auth status |
+| `POST` | `/auth/logout/{id}` | Log out an auth profile |
+| `GET` | `/realms` | List configured realms |
+| `GET` | `/realms/{id}` | Read one realm |
+| `GET` | `/mob/{id}/events` | Mob event SSE stream (mob feature) |
+| `POST` | `/mob/{id}/spawn-helper` | Spawn a helper into a mob (mob feature) |
+| `POST` | `/mob/{id}/fork-helper` | Fork a helper from an existing member (mob feature) |
+| `POST` | `/mob/{id}/wait-kickoff` | Wait for kickoff completion (mob feature) |
+| `GET` | `/mob/{id}/members/{agent_identity}/status` | Read member status (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/realtime/attach` | Compatibility route present but unavailable; realtime is session-scoped (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/realtime/detach` | Compatibility route present but unavailable; realtime is session-scoped (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/cancel` | Force-cancel a member (mob feature) |
+| `POST` | `/mob/{id}/members/{agent_identity}/respawn` | Respawn a member (mob feature) |
 | `GET` | `/skills` | List skills with provenance |
 | `GET` | `/skills/{id}` | Inspect a skill's full content |
 | `GET` | `/health` | Liveness check |
@@ -105,9 +147,9 @@ Cancellation only affects uncommitted work:
 <Accordion title="Server configuration details">
   REST configuration is realm-scoped:
 
-  - macOS: `~/Library/Application Support/meerkat/rest/realms/<realm>/config.toml`
-  - Linux: `~/.local/share/meerkat/rest/realms/<realm>/config.toml`
-  - Windows: `%APPDATA%\\meerkat\\rest\\realms\\<realm>\\config.toml`
+  - macOS: `~/Library/Application Support/meerkat/realms/<realm>/config.toml`
+  - Linux: `~/.local/share/meerkat/realms/<realm>/config.toml`
+  - Windows: `%APPDATA%\\meerkat\\realms\\<realm>\\config.toml`
 
   Each realm also has `realm_manifest.json` (backend pinning) and `config_state.json` (generation CAS state).
 
@@ -851,19 +893,19 @@ List discoverable peers for a session. Requires the `comms` feature.
 
 Realtime is a delivery mode of the session's LLM, driven by
 `ModelCapabilities.realtime`. To enable realtime audio on a session,
-create it with a realtime-capable model (for example `gpt-realtime`):
+create it with a realtime-capable model (for example `gpt-realtime-1.5`):
 
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Ready for voice.","model":"gpt-realtime","provider":"openai"}'
+  -d '{"prompt":"Ready for voice.","model":"gpt-realtime-1.5","provider":"openai"}'
 ```
 
 The runtime attaches the OpenAI Realtime transport automatically and
 the status endpoint below reports `binding_ready` once the provider
 confirms. There is no caller-initiated attach/detach endpoint — swap
 the session's model (or choose a realtime-capable default) to control
-whether the session runs in realtime mode. See the [Realtime voice
+whether the session runs in realtime mode. See the [Realtime
 guide](/guides/realtime) for the full capability-driven model, state
 machine, and reconfigure flow.
 
@@ -882,7 +924,7 @@ Read the runtime-owned realtime attachment status projection for a session.
 }
 ```
 
-Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime voice guide](/guides/realtime#attachment-states) for the full state table and transition diagram.
+Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime guide](/guides/realtime#attachment-states) for the full state table and transition diagram.
 
 ## Error responses
 

@@ -5,7 +5,7 @@ description: "Comprehensive guide for building applications with the Meerkat age
 
 # Meerkat Platform Guide
 
-Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, state is realm-scoped, and 0.5 semantics are runtime-backed by default.
+Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfaces. The execution pipeline is shared, state is realm-scoped, and the current runtime-backed semantics are the default product path.
 
 If the request is about upgrading older integrations or mental models, load:
 
@@ -101,7 +101,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
-- Public realtime attachment capability is named `realtime`, not `voice`: surfaces should describe `ModelCapabilities.realtime`, `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime`) and the runtime manages attach/detach automatically.
+- Public realtime attachment capability is named `realtime`, not `voice`: surfaces should describe `ModelCapabilities.realtime`, `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-1.5`) and the runtime manages attach/detach automatically.
 - OpenAI realtime integration is an internal runtime-backed companion, not a
   public protocol authority: host/facade composition wires it, and RPC/REST
   surfaces expose only the `runtime/realtime_attachment_status(es)` status
@@ -111,7 +111,7 @@ For detailed mob behavior across all surfaces, load: `references/mobs.md`.
 
 Realtime is a delivery mode of the session's LLM, not a separate
 subsystem. Enable it by pointing the session at a realtime-capable
-model (currently only `gpt-realtime`); the runtime reads
+model (currently `gpt-realtime-1.5`, with `gpt-realtime` as a compatibility alias); the runtime reads
 `ModelCapabilities.realtime` and attaches an OpenAI Realtime transport
 automatically. The session retains a single canonical history; audio
 commits into it at turn boundaries.
@@ -123,19 +123,19 @@ Internal architecture reference: `.claude/skills/meerkat-architecture/references
 
 | Surface | Enable realtime | Observe status | Open audio channel |
 |---------|-----------------|----------------|---------------------|
-| JSON-RPC | `session/create` (or profile default) with `model: "gpt-realtime"` | `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
-| REST | `POST /sessions` with `{"model":"gpt-realtime"}` | `GET /runtime/{id}/realtime_attachment_status` | `realtime/open_info` via RPC |
+| JSON-RPC | `session/create` (or profile default) with `model: "gpt-realtime-1.5"` | `runtime/realtime_attachment_status`, `runtime/realtime_attachment_statuses`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
+| REST | `POST /sessions` with `{"model":"gpt-realtime-1.5"}` | `GET /runtime/{id}/realtime_attachment_status` | `realtime/open_info` via RPC |
 | MCP (public) | (set model via host composition) | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
-| Python SDK | `client.create_session(model="gpt-realtime", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
-| TypeScript SDK | `client.createSession({ model: "gpt-realtime", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
-| Rust | `SessionBuildOptions { model: Some("gpt-realtime".into()), ... }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-client` |
+| Python SDK | `client.create_session(model="gpt-realtime-1.5", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
+| TypeScript SDK | `client.createSession({ model: "gpt-realtime-1.5", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
+| Rust | `SessionBuildOptions { model: Some("gpt-realtime-1.5".into()), ... }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-client` |
 
 There is **no** caller-initiated attach/detach RPC. Transport lifecycle
 is a function of the session's resolved model capability.
 
 **Capability source.** `ModelCapabilities.realtime: bool` is set per
 model in `meerkat-models`. OpenAI capability derivation matches any
-model name containing `realtime` (production: only `gpt-realtime`).
+model name containing `realtime` (production: canonical `gpt-realtime-1.5`; `gpt-realtime` remains a compatibility alias).
 Gemini derivation matches `*-live*` (no production entries today).
 Anthropic and self-hosted default to `false`.
 
@@ -165,7 +165,7 @@ and `FailLiveTopologyAfterDetach` (post-detach failure, binding gone,
 reattach required).
 
 **Known limitations:**
-- `gpt-realtime` is the only production realtime-capable model today.
+- `gpt-realtime-1.5` is the canonical production realtime-capable model today (`gpt-realtime` remains a compatibility alias).
 - Single realtime binding per session; per-member realtime in mobs is
   achieved by spawning members on realtime-capable profiles.
 - Idle sessions cannot host a binding — the transport is brought up as
@@ -182,19 +182,15 @@ rkat run "create a mob with a lead and workers, then wire and report status"
 rkat run --resume <session_id> "retire worker-2 and add worker-4"
 ```
 
-Where needed, direct lifecycle commands are available as operational compatibility surface:
+Where needed, the current helper-oriented CLI mob surface is:
 
 ```bash
-rkat mob create --definition <path>
-rkat mob list
-rkat mob status <mob_id>
 rkat mob spawn-helper <mob_id> <prompt> [--agent-identity <id>] [--profile <profile>]
+rkat mob fork-helper <mob_id> <source_member> <prompt> [--agent-identity <id>] [--profile <profile>]
 rkat mob member-status <mob_id> <agent_identity>
 rkat mob respawn <mob_id> <agent_identity> [--message <msg>]
-rkat mob wire <mob_id> <a> <b>
-rkat mob unwire <mob_id> <a> <b>
-rkat mob force-cancel <mob_id> <agent_identity>
 rkat mob run-flow <mob_id> --flow <flow_id> [--params <json>]
+rkat mob flow-status <mob_id> <run_id>
 rkat mob wait-kickoff <mob_id> [--member <agent_identity>...]
 ```
 
@@ -261,7 +257,7 @@ await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
 - Session lifecycle (EphemeralSessionService)
 - Mob orchestration (MobBuilder, MobActor, FlowEngine, FlowFrameEngine, in-memory storage)
 - Comms (inproc — InprocRegistry, Ed25519 signing, peer discovery)
-- Tool dispatch (task tools, utility builtins like `wait`/`datetime`/`apply_patch`, comms tools, skill tools — no shell)
+- Tool dispatch (task tools, `datetime`, comms tools, skill tools — no shell and no filesystem-mutating builtins)
 - Skills (embedded + memory sources from mobpack)
 - Hooks (in-process + HTTP — no command hooks)
 - Config (in-memory, programmatic)
@@ -273,7 +269,7 @@ await mob.spawn([{ profile: 'worker', agent_identity: 'w1' }]);
 - MCP protocol client (rmcp blocked by tokio/mio)
 - Network comms (TCP/UDS sockets — inproc only)
 
-**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. Key additions in 0.5: `runtime_version()`, `register_tool_callback()`, `clear_tool_callbacks()`, `create_session_simple()`, per-provider base URLs on all config types.
+**WASM API surface:** See the meerkat-wasm skill (`references/api_surface.md`) for the complete export table. The 0.5 notes in `references/migration_0_5.md` are legacy migration context, not the current release contract.
 
 **Build:**
 ```bash
@@ -334,12 +330,13 @@ Each schedule produces `Occurrence` instances (individual fires) projected withi
 
 | Tool | Description |
 |------|-------------|
-| `schedule_create` | Create a schedule with trigger + target |
-| `schedule_list` | List schedules with optional filters |
-| `schedule_read` | Read a schedule and its occurrences |
-| `schedule_update` | Update trigger, target, or policies |
-| `schedule_pause` / `schedule_resume` | Pause/resume a schedule |
-| `schedule_delete` | Delete a schedule |
+| `meerkat_schedule_create` | Create a schedule with trigger + target |
+| `meerkat_schedule_get` | Read one schedule |
+| `meerkat_schedule_list` | List schedules |
+| `meerkat_schedule_update` | Update trigger, target, or policies |
+| `meerkat_schedule_pause` / `meerkat_schedule_resume` | Pause/resume a schedule |
+| `meerkat_schedule_delete` | Delete a schedule |
+| `meerkat_schedule_occurrences` | Read schedule occurrences |
 
 Tools are available across all surfaces (CLI, REST, RPC, MCP) via `ScheduleToolDispatcher` (implements `AgentToolDispatcher`), wired as a first-class surface capability. WASM uses `DisabledScheduleStore`.
 
@@ -401,8 +398,8 @@ git diff | rkat run "Review these changes" --tools safe
 cat data.csv | rkat run "Extract entities" | rkat run "Write a story about them"
 # Live streaming: --keep-alive --stdin reads stdin line-by-line as events
 tail -f app.log | rkat run --keep-alive --stdin lines "Monitor and alert on anomalies"
-rkat mob create --definition ./mobs/coding-swarm.toml
-rkat mob list
+rkat mob spawn-helper coding-swarm "Join as lead-1 and summarize the current plan." --profile lead --agent-identity lead-1
+rkat mob run-flow coding-swarm --flow triage --params '{"severity":"high"}'
 ```
 
 ### Python SDK
@@ -515,10 +512,10 @@ Key facts:
   tracing event (deferral §5). REST/RPC login/logout emit matching
   events for user-initiated actions.
 
-The provider-runtime + OAuth + auth-store + authorizer modules live
-in the separately-published `meerkat-providers` crate. The `meerkat`
-facade and `meerkat-client` crate re-export the necessary types;
-surfaces import `meerkat_providers::*` directly.
+Provider-runtime/auth compatibility shims live in `meerkat-providers` and
+`meerkat-client`, but the concrete provider implementations now live in the
+provider-specific crates such as `meerkat-openai`, `meerkat-anthropic`, and
+`meerkat-gemini`.
 
 See `docs/guides/auth.mdx` for the full walkthrough and
 `docs/architecture/meerkat-runtime-dogma.md` for the §1/§10/§12
@@ -530,13 +527,13 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.5"
+meerkat = "0.6.0"
 
 # Single provider, minimal
-meerkat = { version = "0.5", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.0", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms
-meerkat = { version = "0.5", features = [
+meerkat = { version = "0.6.0", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills"
 ] }
@@ -554,7 +551,7 @@ Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`)
 
 ### Model catalog
 
-The `meerkat-models` crate provides a curated model catalog queryable from all surfaces:
+The compatibility `meerkat-models` crate re-exports the curated model catalog queryable from all surfaces:
 
 - CLI: `rkat models`
 - RPC: `models/catalog`
@@ -689,8 +686,8 @@ Surface availability:
 | Surface | Live MCP | Tool filter | Status |
 |---------|----------|-------------|--------|
 | JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via session runtime | Fully wired |
-| REST | `POST /sessions/{id}/mcp/*` | — | Routes registered (placeholder) |
-| CLI | `rkat mcp add/remove --session --live-server-url` | — | Delegates to REST |
+| REST | `POST /sessions/{id}/mcp/*` | — | Fully wired |
+| CLI | `rkat mcp reload --session --live-server-url` | — | Host-managed live reload flow |
 
 ### Memory
 

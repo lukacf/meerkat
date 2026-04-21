@@ -12,9 +12,11 @@ Skills are discovered from multiple sources, in precedence order:
 
 1. **Project/runtime root** (`<runtime-root>/.rkat/skills/`) — highest precedence
 2. **User** (`~/.rkat/skills/`)
-3. **Git repositories** — cloned to local cache, refreshed on TTL
-4. **HTTP endpoints** — fetched from remote skill servers
-5. **Embedded** (builtin skills from component crates)
+3. **Configured filesystem sources**
+4. **Git repositories** — cloned to local cache, refreshed on TTL
+5. **HTTP endpoints** — fetched from remote skill servers
+6. **Stdio sources**
+7. **Embedded** (builtin skills from component crates)
 
 <Note>
 A project skill with the same ID as a builtin skill overrides the builtin (first-source-wins).
@@ -27,7 +29,8 @@ Configured in skills settings (typically in realm `config.toml`). Uses gitoxide 
 ```toml
 [[repositories]]
 name = "company"
-transport = "git"
+source_uuid = "11111111-1111-1111-1111-111111111111"
+type = "git"
 url = "https://github.com/company/meerkat-skills.git"
 git_ref = "main"
 ref_type = "branch"    # "branch", "tag", or "commit"
@@ -41,10 +44,29 @@ depth = 1              # shallow clone depth
 ```toml
 [[repositories]]
 name = "remote"
-transport = "http"
+source_uuid = "22222222-2222-2222-2222-222222222222"
+type = "http"
 url = "https://skills.example.com/api"
-# auth_bearer = "${SKILLS_API_KEY}"
-cache_ttl_seconds = 300
+auth_token = "${SKILLS_API_KEY}"
+refresh_seconds = 300
+timeout_seconds = 15
+```
+
+### Filesystem and stdio sources
+
+```toml
+[[repositories]]
+name = "local-shared"
+source_uuid = "33333333-3333-3333-3333-333333333333"
+type = "filesystem"
+path = "/opt/meerkat-skills"
+
+[[repositories]]
+name = "generated"
+source_uuid = "44444444-4444-4444-4444-444444444444"
+type = "stdio"
+command = "my-skill-server"
+args = ["--json"]
 ```
 
 ## SKILL.md format
@@ -53,12 +75,12 @@ Each skill is a markdown file with YAML frontmatter:
 
 ```markdown
 ---
-name: Shell Patterns
+name: shell-patterns
 description: "Background job workflows: patterns and tips"
 requires_capabilities: [builtins, shell]
 ---
 
-# Shell Patterns
+# shell-patterns
 
 When running background jobs...
 ```
@@ -67,7 +89,7 @@ When running background jobs...
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | `String` | Yes | Display name for the skill |
+| `name` | `String` | Yes | Canonical lowercase slug name for the skill |
 | `description` | `String` | Yes | One-line description |
 | `requires_capabilities` | `Vec<String>` | No (default `[]`) | Capability IDs that must be available |
 
@@ -84,16 +106,13 @@ Skills are filtered by their `requires_capabilities` field before being shown or
 
 The resolver supports two reference formats:
 
-1. **Slash-prefix ID**: `/skill-id` -- matches against `SkillDescriptor.id`.
-2. **Exact name match** (case-insensitive): `"Shell Patterns"` or `"shell patterns"` -- matches against `SkillDescriptor.name`.
-
-Resolution returns `SkillError::NotFound` if no match, or `SkillError::Ambiguous` if multiple skills match.
+1. **Slash-prefix ID**: `/skill-id` -- current slash activation path.
 
 Resolution mode:
 
 | Mode | Behavior |
 |------|----------|
-| `Explicit` | Only explicit `/skill-id` or exact name matches |
+| `Explicit` | Only explicit `/skill-id` matches |
 
 ## Rendering
 
@@ -158,6 +177,7 @@ The following skills are embedded in component crates:
 | `memory-retrieval` | Memory Retrieval | `meerkat-memory` | `memory_store` |
 | `session-management` | Session Management | `meerkat-session` | `session_store` |
 | `multi-agent-comms` | Multi-Agent Comms | `meerkat-comms` | `comms` |
+| `mob-communication` | Mob Communication | `meerkat` | `comms` |
 
 ## Configuration reference
 
@@ -183,12 +203,12 @@ The following skills are embedded in component crates:
 
     ```markdown
     ---
-    name: Deployment Guide
+    name: my-deployment
     description: Project-specific deployment procedures
     requires_capabilities: []
     ---
 
-    # Deployment Guide
+    # my-deployment
 
     1. Run `make build` to create the release binary.
     2. Deploy via `./deploy.sh production`.
@@ -217,15 +237,15 @@ In collection mode (when there are more than 12 skills), the system prompt shows
 
 Skills can be activated in three ways:
 
-### 1. Slash reference in user message
+### 1. Legacy slash reference compatibility
 
-Include `/skill-id` at the start of a message:
+Some host surfaces still accept legacy slash references as boundary compatibility input:
 
 ```
 /extraction/email Extract the sender from this email
 ```
 
-The agent detects the reference, resolves the skill, and injects its body before running the LLM.
+Treat this as compatibility behavior rather than the primary model. The recommended current path is explicit `skill_refs`, because the canonical runtime identity for a skill is `SkillKey { source_uuid, skill_name }`.
 
 ### 2. Programmatic typed `skill_refs` (per-turn, recommended)
 
@@ -263,7 +283,7 @@ Pass `preload_skills` to inject skills into the system prompt at session creatio
 }
 ```
 
-See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers.
+See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. CLI `--skill` is the preload-oriented path for runtime-local skill loading; it is not the same surface as typed per-turn `skill_refs`.
 
 ## Skill introspection
 
@@ -344,7 +364,8 @@ inventory_threshold = 12       # flat listing below, collection mode above
 
 [[repositories]]
 name = "company"
-transport = "git"
+source_uuid = "55555555-5555-5555-5555-555555555555"
+type = "git"
 url = "https://github.com/company/skills.git"
 ```
 

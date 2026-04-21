@@ -61,18 +61,19 @@ Load `references/realtime-attachment.md` when touching realtime
 attachment state, the live-topology reconfigure flow, or the DSL
 authority epoch model.
 
-## The 4-machine target
+## The 5-machine target
 
-Exactly four canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
+Exactly five canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
 - **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification, **realtime attachment authority, live-topology reconfigure phase**.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member voice intent was removed — realtime is driven by each member's session-level `ModelCapabilities.realtime`.)
+- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent was removed — realtime is driven by each member's session-level `ModelCapabilities.realtime`.)
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
+- **AuthMachine** — auth/session authorization state that must remain machine-owned.
 
 Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
 
-**Zero handwritten `*_authority.rs` state machines exist outside the catalog.** Shell helpers that retain `_authority.rs` naming are pure data projections (`roster`), planning helpers (`mob_wiring`), or DSL adapter plumbing (`dsl_authority`) — none contain `fn apply(input) -> Result<Transition, Error>` match tables.
+**Primary semantic authority should live in the catalog-generated machines.** Handwritten `*_authority.rs` helpers that still exist should be treated as transitional or adapter-level mechanics, not competing semantic owners.
 
 Detailed architecture, DSL ↔ schema ↔ kernel ↔ TLA+ flow, the field-driven design principle, signals vs inputs, and the cross-crate handle trait pattern: **load `references/machine-system.md`**.
 
@@ -86,7 +87,7 @@ Stable per-member identity is separate from per-runtime binding:
 - **`Generation`** — mob-member generation counter; increments on respawn.
 
 When adding state or effects keyed on member identity, choose
-`AgentIdentity` if the fact survives respawn (voice intent,
+`AgentIdentity` if the fact survives respawn (realtime attachment preferences,
 wiring preferences), `AgentRuntimeId` if it's per-binding (ops
 registry membership, live bridge).
 
@@ -94,10 +95,13 @@ registry membership, live bridge).
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
-| `meerkat-models` | Model catalog, provider profiles, parameter schemas (leaf; no meerkat deps) | — |
+| `meerkat-models` | Compatibility shim that re-exports `meerkat_core::model_profile` | — |
 | `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle` |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
-| `meerkat-client` | LLM providers (Anthropic, OpenAI, Gemini), **realtime (OpenAI) transport** | Implements `AgentLlmClient` |
+| `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
+| `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, cloud authorizers | — |
+| `meerkat-providers` | Compatibility provider-runtime/auth shim surface | — |
+| `meerkat-anthropic` / `meerkat-openai` / `meerkat-gemini` | Provider-specific client/runtime implementations | Implements `AgentLlmClient` via provider-specific crates |
 | `meerkat-store` | Session-store implementations and adapters (SQLite, Jsonl, Memory) | Implements `SessionStore` |
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router (routes to `ExternalToolSurfaceHandle`) | — |
@@ -138,7 +142,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 For comprehensive file lists, see the matching reference. This is a minimal pointer index for the most common landmarks.
 
-- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 4 machines)
+- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 5 canonical machines)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter

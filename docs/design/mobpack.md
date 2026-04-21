@@ -1,6 +1,8 @@
 # Mobpack: Portable Multi-Agent Deployment
 
 > Status: **Design proposal** | Author: Luka + Claude | Date: 2026-02-24
+>
+> **Implementation status note:** today the shipped CLI supports `rkat mob pack`, `inspect`, `validate`, `deploy`, and `web build`. Command families such as `embed`, `compile`, `publish`, `web serve`, and `web publish` described below are proposal-only and should not be treated as current product surface.
 
 ## Overview
 
@@ -67,7 +69,7 @@ description = "Automated release triage with code review and changelog generatio
 authors = ["team@example.com"]
 
 [requires]
-meerkat = ">=0.5.0"
+meerkat = ">=0.6.0"
 credentials = ["anthropic_api_key"]       # declared, never stored
 capabilities = ["comms", "shell"]         # what the mob needs from the runtime
 
@@ -397,7 +399,7 @@ description = "Browser-deployed release triage mob"
 authors = ["team@example.com"]
 
 [requires]
-meerkat = ">=0.5.0"
+meerkat = ">=0.6.0"
 browser_features = ["web_workers", "indexeddb", "fetch"]
 credentials = ["oauth:jira", "oauth:salesforce"]
 

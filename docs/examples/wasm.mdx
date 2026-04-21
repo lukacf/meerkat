@@ -36,7 +36,7 @@ await init();
 init_runtime(
   mobpackBytes,
   JSON.stringify({
-    api_key: "sk-ant-...",
+    anthropic_api_key: "sk-ant-...",
     model: "claude-sonnet-4-6",
   })
 );
@@ -46,7 +46,6 @@ init_runtime(
 
 ```javascript
 const handle = create_session(mobpackBytes, JSON.stringify({
-  api_key: "sk-ant-...",
   model: "claude-sonnet-4-6",
 }));
 
@@ -111,7 +110,12 @@ Wire ambassadors across mobs for inter-faction communication. The `wire_cross_mo
 
 ```javascript
 // Wire ambassadors between two mobs
-await wire_cross_mob(mobIdNorth, "ambassador-north", "ambassador-south");
+await wire_cross_mob(
+  mobIdNorth,
+  "ambassador-north",
+  mobIdSouth,
+  "ambassador-south",
+);
 
 // Send work to a member through the canonical member path
 await mob_member_send(

@@ -8,7 +8,7 @@ The Python SDK (`meerkat-sdk`) is a runtime-backed client over `rkat-rpc`.
 
 - **Contract version:** `0.6.0`
 - **Python:** `>=3.10`
-- **Runtime dependencies:** none
+- **Runtime dependencies:** `websockets>=12,<16`
 
 ## Install
 
@@ -63,8 +63,8 @@ asyncio.run(main())
 
 - `await client.inject_context(session_id, text, source=None, idempotency_key=None)`
 - `await session.inject_context(...)`
-- `await client.send_external_event(session_id, payload, source=None)`
-- `await session.send_external_event(...)`
+- `await client.send_external_event(session_id, event_type, payload, blocks=None)`
+- `await session.send_external_event(event_type, payload, blocks=None)`
 
 ### Turn APIs
 
@@ -117,6 +117,16 @@ All config APIs return a **config envelope** (`config`, `generation`, realm meta
 - `await client.list_mob_profiles()`
 - `await client.update_mob_profile(name, profile, expected_revision=...)`
 - `await client.delete_mob_profile(name, expected_revision=...)`
+
+### Additional wrappers
+
+The Python client also exposes:
+
+- realm helpers: `list_realms()`, `get_realm(...)`
+- auth helpers: `list_auth_profiles(...)`, `get_auth_profile(...)`, `create_auth_profile(...)`, `delete_auth_profile(...)`, `test_auth_profile(...)`, `auth_login_*`, `auth_provision_api_key(...)`, `auth_status(...)`, `auth_logout(...)`
+- realtime/runtime helpers: `runtime_realtime_attachment_status(...)`, `runtime_realtime_attachment_statuses(...)`, `realtime_open_info(...)`, `realtime_status(...)`, `realtime_capabilities(...)`
+- blob/skill/MCP helpers: `get_blob(...)`, `list_skills()`, `inspect_skill(...)`, `mcp_add(...)`, `mcp_remove(...)`, `mcp_reload(...)`
+- typed ingress helpers: `send_peer_response_terminal(...)`
 
 ## Typed session metadata
 

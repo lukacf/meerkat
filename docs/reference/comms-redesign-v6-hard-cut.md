@@ -6,7 +6,8 @@
 > time of implementation was `0.4.x`. Public `comms/stream_*`, MCP comms-stream
 > tools, and SDK `send_and_stream` / `open_comms_stream` helpers were removed
 > before merge; remaining mentions below are historical only. See the current
-> session, agent, and mob observation APIs for the supported public model.
+> session, agent, and mob observation APIs for the supported public model. Do
+> not use the command/type names in this file as current API reference.
 
 ## Unified TDD Master Plan V6: Hard-Cut Comms Redesign (Final)
 

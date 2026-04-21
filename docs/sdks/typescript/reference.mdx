@@ -55,6 +55,19 @@ import type {
 } from "@rkat/sdk";
 ```
 
+## Additional client wrappers
+
+The package exports more than the core session lifecycle. The `MeerkatClient` also exposes:
+
+- realtime helpers: `runtimeRealtimeAttachmentStatus`, `runtimeRealtimeAttachmentStatuses`, `realtimeOpenInfo`, `realtimeStatus`, `realtimeCapabilities`
+- auth-profile helpers: `authProfileList`, `authProfileGet`, `authProfileCreate`, `authProfileDelete`, `authProfileTest`
+- auth-login helpers: `authLoginStart`, `authLoginComplete`, `authLoginDeviceStart`, `authLoginDeviceComplete`, `authLoginProvisionApiKey`, `authStatusGet`, `authLogout`
+- realm helpers: `realmList`, `realmGet`
+- typed ingress helper: `sendPeerResponseTerminal`
+- MCP live-op helpers: `mcpAdd`, `mcpRemove`, `mcpReload`
+- blob/skill helpers: `getBlob`, `listSkills`, `inspectSkill`
+- runtime/input helpers: `runtimeState`, `runtimeAccept`, `runtimeRetire`, `runtimeReset`, `inputState`, `inputList`
+
 ---
 
 ## Core types

@@ -30,27 +30,30 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 
 ## Error codes
 
-Deterministic error codes across all surfaces. The canonical mapping is defined in
-`meerkat-contracts` (`ErrorCode`). Every `SessionError` variant maps to a stable
-string code and a transport-specific representation:
+Two layers matter here:
+
+- **Session transport mapping**: how `SessionError` is projected by session-facing transports
+- **Canonical wire `ErrorCode` mapping**: the higher-level `meerkat-contracts` envelope model used across public protocol surfaces
+
+The table below is the current **session transport** mapping:
 
 | `SessionError` | Code | JSON-RPC | REST | MCP | CLI |
 |----------------|------|----------|------|-----|-----|
-| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 10 |
-| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 11 |
-| `NotRunning` | `SESSION_NOT_RUNNING` | -32003 | 409 | tool error | exit 12 |
-| `PersistenceDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
-| `CompactionDisabled` | `CAPABILITY_UNAVAILABLE` | -32020 | 501 | tool error | exit 40 |
-| `Store` | `INTERNAL_ERROR` | -32603 | 500 | tool error | exit 1 |
-| `Agent` | `AGENT_ERROR` | -32013 | 500 | tool error | exit 30 |
+| `NotFound` | `SESSION_NOT_FOUND` | -32001 | 404 | tool error | exit 1 |
+| `Busy` | `SESSION_BUSY` | -32002 | 409 | tool error | exit 1 |
+| `PersistenceDisabled` | `SESSION_PERSISTENCE_DISABLED` | -32003 | 501 | tool error | exit 0 |
+| `CompactionDisabled` | `SESSION_COMPACTION_DISABLED` | -32004 | 501 | tool error | exit 0 |
+| `NotRunning` | `SESSION_NOT_RUNNING` | -32005 | 409 | tool error | exit 1 |
+| `Store` | `SESSION_STORE_ERROR` | -32006 | 500 | tool error | exit 1 |
+| `Unsupported` | `SESSION_UNSUPPORTED` | -32007 | 501 | tool error | exit 1 |
+| `Agent` | `AGENT_ERROR` | -32000 | 500 | tool error | exit 1 |
 
 ### Transport error mapping summary
 
-- **JSON-RPC**: Custom error codes in the -32000..-32099 range. The `code` field of the
-  JSON-RPC error object carries the string code (e.g. `SESSION_NOT_FOUND`).
+- **JSON-RPC**: Custom numeric transport codes in the -32000..-32099 range.
 - **REST**: HTTP status codes (404, 409, 500, 501). Error body includes `{ "code": "...", "message": "..." }`.
 - **MCP Server**: Tool calls return `is_error: true` with the error message and code in the content.
-- **CLI**: Non-zero exit codes. Each `ErrorCode` maps to a stable exit code (see [CLI exit codes](/cli/configuration#exit-codes)). Error details printed to stderr.
+- **CLI**: `SessionError` transport projection is intentionally coarse: most failures collapse to exit 1, while persistence/compaction-disabled remain informational (exit 0). Error details are printed to stderr.
 
 ## Pick only what you need
 
@@ -84,7 +87,7 @@ meerkat = { version = "0.6.0", features = ["all-providers", "session-store", "se
 
 These fields are set in the model catalog (`meerkat-models`) and exposed via `ModelProfile`. They control:
 
-- **`view_image` tool visibility** -- hidden via `ToolScope` when either `vision` or `image_tool_results` is `false`.
+- **`view_image` tool visibility** -- currently hidden via `ToolScope` when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.
 - **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.

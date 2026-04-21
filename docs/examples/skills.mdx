@@ -8,7 +8,7 @@ For the full guide, see [Skills](/guides/skills).
 
 ## List available skills
 
-Discover all skills from every source (project, user, git, HTTP, embedded) with provenance and shadowing info.
+Discover all skills from every source (project, user, filesystem, git, HTTP, stdio, embedded) with provenance and shadowing info.
 
 <Tabs>
   <Tab title="CLI">
@@ -142,14 +142,14 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
 
 ## Inject skills on session create
 
-Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces, to resolve and inject skill content into the system prompt when a session starts.
+Use the CLI `--skill` flag for preload-oriented local skill loading, or pass typed `skill_refs` through API surfaces to resolve and inject skill content when a session starts.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
     rkat run "Extract emails" \
-      --skill /email-extractor \
-      --skill /formatting/markdown
+      --skill email-extractor \
+      --skill markdown-formatter
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -159,7 +159,16 @@ Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces,
       "method": "session/create",
       "params": {
         "prompt": "Extract emails",
-        "skill_references": ["/email-extractor", "/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
@@ -170,7 +179,16 @@ Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces,
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Extract emails",
-        "skill_references": ["/email-extractor", "/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }'
     ```
   </Tab>
@@ -180,7 +198,16 @@ Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces,
       "name": "meerkat_run",
       "arguments": {
         "prompt": "Extract emails",
-        "skill_references": ["/email-extractor", "/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
@@ -189,14 +216,32 @@ Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces,
     ```python
     result = await client.create_session(
         "Extract emails",
-        skill_refs=["/email-extractor", "/formatting/markdown"],
+        skill_refs=[
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="email-extractor",
+            ),
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="markdown-formatter",
+            ),
+        ],
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await client.createSession("Extract emails", {
-      skillRefs: ["/email-extractor", "/formatting/markdown"],
+      skillRefs: [
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "email-extractor",
+        },
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "markdown-formatter",
+        },
+      ],
     });
     ```
   </Tab>
@@ -208,11 +253,19 @@ Use the CLI `--skill` flag, or pass `skill_references` through the API surfaces,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
+        render_metadata: None,
         skill_references: Some(vec![
-            "/email-extractor".parse()?,
-            "/formatting/markdown".parse()?,
+            SkillKey {
+                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                skill_name: SkillName::parse("email-extractor")?,
+            },
+            SkillKey {
+                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                skill_name: SkillName::parse("markdown-formatter")?,
+            },
         ]),
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     };
@@ -294,13 +347,13 @@ Preloaded skills are resolved and injected into the system prompt before the fir
 
 ## Per-turn skill injection
 
-Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only.
+Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; the typed per-turn surface is `skill_refs`.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
     rkat run --resume <session-id> "Now format the output" \
-      --skill formatting/markdown
+      --skill markdown-formatter
     ```
   </Tab>
   <Tab title="JSON-RPC">
@@ -311,7 +364,12 @@ Inject skills into a specific turn on an existing session. The skill content is 
       "params": {
         "session_id": "019467d9-7e3a-7000-8000-000000000000",
         "prompt": "Now format the output",
-        "skill_references": ["/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
@@ -322,7 +380,12 @@ Inject skills into a specific turn on an existing session. The skill content is 
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Now format the output",
-        "skill_references": ["/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }'
     ```
   </Tab>
@@ -333,23 +396,38 @@ Inject skills into a specific turn on an existing session. The skill content is 
       "arguments": {
         "session_id": "019467d9-7e3a-7000-8000-000000000000",
         "prompt": "Now format the output",
-        "skill_references": ["/formatting/markdown"]
+        "skill_refs": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
   </Tab>
   <Tab title="Python">
     ```python
-    result = session.turn(
+    result = await session.turn(
         "Now format the output",
-        skill_refs=["/formatting/markdown"],
+        skill_refs=[
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="markdown-formatter",
+            )
+        ],
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await session.turn("Now format the output", {
-      skillRefs: ["/formatting/markdown"],
+      skillRefs: [
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "markdown-formatter",
+        },
+      ],
     });
     ```
   </Tab>
@@ -361,7 +439,10 @@ Inject skills into a specific turn on an existing session. The skill content is 
         render_metadata: None,
         handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: Some(vec!["/formatting/markdown".parse()?]),
+        skill_references: Some(vec![SkillKey {
+            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+            skill_name: SkillName::parse("markdown-formatter")?,
+        }]),
         flow_tool_overlay: None,
         additional_instructions: None,
     }).await?;

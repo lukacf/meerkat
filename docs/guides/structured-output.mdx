@@ -18,7 +18,7 @@ When `output_schema` is configured on an agent, the execution flow is:
     An additional LLM call is made with no tools, temperature `0.0` for deterministic output, and a prompt asking for valid JSON matching the schema.
   </Step>
   <Step title="Validation">
-    The response is parsed as JSON and validated against the schema using the `jsonschema` crate's `Validator`.
+    The response is parsed as JSON and, when the `jsonschema` feature is enabled, validated against the schema using the `jsonschema` crate's `Validator`.
   </Step>
   <Step title="On success">
     `RunResult.structured_output` contains the parsed `serde_json::Value`.
@@ -48,7 +48,7 @@ pub struct OutputSchema {
 |-------|------|---------|-------------|
 | `schema` | `MeerkatSchema` | (required) | The JSON schema definition |
 | `name` | `Option<String>` | `None` | Optional schema name (used by some providers) |
-| `strict` | `bool` | `false` | Whether to enforce strict schema validation |
+| `strict` | `bool` | `false` | Whether to request stricter provider-side lowering / constrained decoding behavior where supported |
 | `compat` | `SchemaCompat` | `Lossy` | Compatibility mode for provider lowering |
 | `format` | `SchemaFormat` | `MeerkatV1` | Schema format version |
 
@@ -179,7 +179,11 @@ The extraction turn logic:
 4. LLM is called with **no tools** and **temperature 0.0**.
 5. Response text is trimmed, then markdown code fences are stripped (handles `` ```json `` and `` ``` `` wrappers).
 6. Parsed as JSON via `serde_json::from_str`.
-7. Validated against the compiled schema via `jsonschema::Validator`.
+7. Validated against the compiled schema via `jsonschema::Validator` when the `jsonschema` feature is enabled.
+
+<Note>
+If Meerkat is built without the `jsonschema` feature, structured output still parses JSON and returns it, but schema validation is skipped.
+</Note>
 
 ### On success
 
@@ -263,7 +267,7 @@ Schema warnings are collected during compilation and included in `RunResult.sche
   </Tab>
   <Tab title="REST API">
     ```bash
-    curl -X POST http://localhost:8080/v1/run \
+    curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Analyze this code",
@@ -284,12 +288,19 @@ Schema warnings are collected during compilation and included in `RunResult.sche
 
 ## Wire parameters
 
-Structured output is passed per-request via `StructuredOutputParams`:
+Structured output is passed directly on the normal per-request session surfaces:
 
 ```rust
-pub struct StructuredOutputParams {
+pub struct CreateSessionRequest {
+    pub prompt: ContentInput,
+    // ...
+    pub build: Option<SessionBuildOptions>,
+}
+
+pub struct SessionBuildOptions {
     pub output_schema: Option<OutputSchema>,
-    pub structured_output_retries: Option<u32>,
+    pub structured_output_retries: u32,
+    // ...
 }
 ```
 
@@ -329,7 +340,7 @@ let schema = OutputSchema::new(json!({
 }))?;
 
 // Configure via AgentBuildConfig
-let mut build_config = AgentBuildConfig::default();
+let mut build_config = AgentBuildConfig::new("claude-sonnet-4-6");
 build_config.output_schema = Some(schema);
 build_config.structured_output_retries = 3;
 ```

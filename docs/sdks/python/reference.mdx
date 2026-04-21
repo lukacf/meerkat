@@ -133,11 +133,21 @@ await session.inject_context(text, source=None, idempotency_key=None)
 ### `send_external_event`
 
 ```python
-await client.send_external_event(session_id, payload, source=None)
-await session.send_external_event(payload, source=None)
+await client.send_external_event(session_id, event_type, payload, blocks=None)
+await session.send_external_event(event_type, payload, blocks=None)
 ```
 
 Returns `ExternalEventOutcome` (runtime admission outcome payload).
+
+## Additional client wrappers
+
+The Python SDK also exposes:
+
+- realm helpers: `list_realms()`, `get_realm(...)`
+- auth helpers: `list_auth_profiles(...)`, `get_auth_profile(...)`, `create_auth_profile(...)`, `delete_auth_profile(...)`, `test_auth_profile(...)`, `auth_login_*`, `auth_provision_api_key(...)`, `auth_status(...)`, `auth_logout(...)`
+- realtime/runtime helpers: `runtime_realtime_attachment_status(...)`, `runtime_realtime_attachment_statuses(...)`, `realtime_open_info(...)`, `realtime_status(...)`, `realtime_capabilities(...)`
+- blob/skill/MCP helpers: `get_blob(...)`, `list_skills()`, `inspect_skill(...)`, `mcp_add(...)`, `mcp_remove(...)`, `mcp_reload(...)`
+- typed ingress helper: `send_peer_response_terminal(...)`
 
 ## Mob profile and events surfaces
 

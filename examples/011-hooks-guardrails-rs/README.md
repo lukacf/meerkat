@@ -1,10 +1,10 @@
 # 011 — Hooks & Guardrails (Rust)
 
-Intercept and control agent behavior at 7 defined hook points. Use hooks for
+Intercept and control agent behavior at 8 defined hook points. Use hooks for
 audit logging, content filtering, approval gates, cost tracking, and more.
 
 ## Concepts
-- `HookPoint` — 7 interception points in the agent loop
+- `HookPoint` — 8 interception points in the agent loop
 - `HookCapability` — observe (read-only) or gate (Allow/Deny/Rewrite)
 - `HookExecutionMode` — foreground (blocking) or background (async)
 - `HookRuntimeConfig` — command, HTTP, or in-process execution

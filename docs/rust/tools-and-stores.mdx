@@ -43,6 +43,7 @@ The `AgentToolDispatcher` trait connects your tools to the agent:
 use async_trait::async_trait;
 use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
 use meerkat::error::ToolError;
+use meerkat_core::ops::ToolDispatchOutcome;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -66,15 +67,15 @@ impl AgentToolDispatcher for MyToolDispatcher {
         ].into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "search" => {
                 #[derive(serde::Deserialize)]
                 struct Args { query: String }
 
                 let args: Args = call.parse_args()
-                    .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
-                Ok(ToolResult::success(call.id, format!("Results for: {}", args.query)))
+                    .map_err(|e| ToolError::invalid_arguments("search", e.to_string()))?;
+                Ok(ToolResult::new(call.id.to_string(), format!("Results for: {}", args.query), false).into())
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -90,41 +91,37 @@ use meerkat::ToolRegistry;
 
 let mut registry = ToolRegistry::new();
 
-registry.register(tool_def, Box::new(|args| {
-    Box::pin(async move {
-        Ok("result".to_string())
-    })
-}));
+registry.register(tool_def);
 
-let tools = registry.tools();
+let weather = registry.get("get_weather");
+let tools = registry.list();
 ```
 </Accordion>
 
 ### Multimodal tool results
 
-Built-in tools return `ToolOutput`, which supports both JSON and multimodal content:
+Tool results can carry either plain text or multimodal content blocks:
 
 ```rust
-use meerkat::ToolOutput;
-use meerkat::ContentBlock;
+use meerkat::ToolResult;
+use meerkat_core::{ContentBlock, ImageData};
 
-// Standard JSON result
-let output = ToolOutput::Json(json!({"status": "ok", "count": 42}));
+// Standard text result
+let output = ToolResult::new("tool-1".into(), "{\"status\":\"ok\",\"count\":42}".into(), false);
 
 // Multimodal result with image content
-let output = ToolOutput::Blocks(vec![
+let output = ToolResult::with_blocks("tool-2".into(), vec![
     ContentBlock::Text { text: "Screenshot captured:".to_string() },
     ContentBlock::Image {
         media_type: "image/png".to_string(),
-        data: base64_encoded_png,
-        source_path: Some("/path/to/screenshot.png".into()),
+        data: ImageData::Inline { data: base64_encoded_png },
     },
-]);
+], false);
 ```
 
-`ToolOutput::Json` is serialized into a text content block in the tool result. `ToolOutput::Blocks` passes content blocks directly into `ToolResult.content`, enabling tools to return images and other rich content to vision-capable models.
+`ToolResult::new(...)` creates a text-only result. `ToolResult::with_blocks(...)` passes content blocks directly into `ToolResult.content`, enabling tools to return images and other rich content to vision-capable models.
 
-The built-in `view_image` tool uses this mechanism to read image files from disk and return them as `ContentBlock::Image` blocks. It is automatically hidden from models that lack vision or image tool result support.
+The built-in `view_image` tool uses the same content-block mechanism to read image files from disk and return them as `ContentBlock::Image` blocks. It is automatically hidden from models that lack vision or image tool result support.
 
 ---
 
@@ -164,55 +161,36 @@ Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{
-    AgentFactory, Config, SessionStore, SessionFilter, StoreError, Session, SessionId,
-    build_persistent_service, open_realm_persistence_in,
-};
+use meerkat::{SessionFilter, SessionId, SessionStore, SessionStoreError};
+use meerkat_core::{Session, SessionMeta};
 use meerkat_core::SessionMeta;
-use meerkat_store::RealmBackend;
 use std::sync::Arc;
 
 struct BigQueryStore { /* your storage backend */ }
 
 #[async_trait]
 impl SessionStore for BigQueryStore {
-    async fn save(&self, session: &Session) -> Result<(), StoreError> {
+    async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         // Persist session to BigQuery
         Ok(())
     }
 
-    async fn load(&self, id: &SessionId) -> Result<Option<Session>, StoreError> {
+    async fn load(&self, id: &SessionId) -> Result<Option<Session>, SessionStoreError> {
         // Load session by ID
         Ok(None)
     }
 
-    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
+    async fn list(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, SessionStoreError> {
         Ok(vec![])
     }
 
-    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+    async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
         Ok(())
     }
 }
 
-// Wire into AgentFactory — all factory features (comms, hooks, skills, etc.) work unchanged
+// Use as a custom store implementation boundary
 let store: Arc<dyn SessionStore> = Arc::new(BigQueryStore { /* ... */ });
-let realms_root = std::env::current_dir()?.join(".rkat").join("realms");
-let (_manifest, persistence) = open_realm_persistence_in(
-    &realms_root,
-    "team-alpha",
-    Some(RealmBackend::Sqlite),
-    None,
-).await?;
-let factory = AgentFactory::new(realms_root.clone())
-    .runtime_root(realms_root)
-    .session_store(store)
-    .builtins(true)
-    .shell(true);
-
-let config = Config::load().await?;
-let service = build_persistent_service(factory, config, 64, persistence);
-// Sessions created through `service` now persist through BigQuery
 ```
 
 <Note>
@@ -220,6 +198,12 @@ Prefer `SessionStore` + `session_store()` over implementing `AgentSessionStore` 
 `SessionStore` is the richer trait (with `list`, `delete`, `exists`) and `AgentFactory`
 automatically wraps it via `StoreAdapter`. Implementing `AgentSessionStore` directly
 bypasses the factory and loses runtime-backed session orchestration.
+
+For runtime-backed persistent services, realm persistence still flows through the
+`PersistenceBundle` opened for that realm. Treat custom `SessionStore`
+implementations as a storage seam for custom builders or direct agent/store
+integration, not as a drop-in replacement for the entire runtime persistence
+bundle.
 </Note>
 </Accordion>
 
@@ -245,9 +229,10 @@ let config = McpServerConfig::stdio(
 router.add_server(config).await?;
 
 // Add HTTP/SSE-based MCP server
-let config = McpServerConfig::http(
+let config = McpServerConfig::streamable_http(
     "remote-server",
     "https://mcp.example.com/sse".to_string(),
+    HashMap::new(),
 );
 router.add_server(config).await?;
 

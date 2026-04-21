@@ -12,17 +12,7 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    rkat run "Summarize this repo" --hooks-override-json '{
-      "entries": [{
-        "id": "audit-log",
-        "point": "post_tool_execution",
-        "mode": "background",
-        "command": ["python3", "hooks/log_tool.py"],
-        "timeout_ms": 3000
-      }]
-    }'
-    ```
+    Run-scoped hook override flags are not currently exposed on the normal `rkat run` surface. Use the JSON-RPC, REST, MCP, or SDK examples below for per-run hook override testing.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -36,7 +26,12 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
             "id": "audit-log",
             "point": "post_tool_execution",
             "mode": "background",
-            "command": ["python3", "hooks/log_tool.py"],
+            "capability": "observe",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/log_tool.py"]
+            },
             "timeout_ms": 3000
           }]
         }
@@ -55,7 +50,12 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
             "id": "audit-log",
             "point": "post_tool_execution",
             "mode": "background",
-            "command": ["python3", "hooks/log_tool.py"],
+            "capability": "observe",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/log_tool.py"]
+            },
             "timeout_ms": 3000
           }]
         }
@@ -74,7 +74,12 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
             "id": "audit-log",
             "point": "post_tool_execution",
             "mode": "background",
-            "command": ["python3", "hooks/log_tool.py"],
+            "capability": "observe",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/log_tool.py"]
+            },
             "timeout_ms": 3000
           }]
         }
@@ -91,7 +96,12 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
                 "id": "audit-log",
                 "point": "post_tool_execution",
                 "mode": "background",
-                "command": ["python3", "hooks/log_tool.py"],
+                "capability": "observe",
+                "runtime": {
+                    "type": "command",
+                    "command": "python3",
+                    "args": ["hooks/log_tool.py"],
+                },
                 "timeout_ms": 3000,
             }]
         },
@@ -106,7 +116,12 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
           id: "audit-log",
           point: "post_tool_execution",
           mode: "background",
-          command: ["python3", "hooks/log_tool.py"],
+          capability: "observe",
+          runtime: {
+            type: "command",
+            command: "python3",
+            args: ["hooks/log_tool.py"],
+          },
           timeoutMs: 3000,
         }],
       },
@@ -115,23 +130,13 @@ A `post_tool_execution` background hook that logs every tool call to a file. Bac
   </Tab>
 </Tabs>
 
-## Guardrail hook (blocking)
+## Guardrail hook (foreground)
 
-A `pre_tool_execution` blocking hook that must approve each tool call before it runs. If the hook returns `deny`, the tool call is skipped.
+A `pre_tool_execution` foreground hook that must approve each tool call before it runs. If the hook returns `deny`, the tool call is skipped.
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    rkat run "Delete old logs" --hooks-override-json '{
-      "entries": [{
-        "id": "safety-gate",
-        "point": "pre_tool_execution",
-        "mode": "blocking",
-        "command": ["python3", "hooks/approve_tool.py"],
-        "timeout_ms": 5000
-      }]
-    }'
-    ```
+    Run-scoped hook override flags are not currently exposed on the normal `rkat run` surface. Use the JSON-RPC, REST, MCP, or SDK examples below for per-run hook override testing.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -144,8 +149,13 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
           "entries": [{
             "id": "safety-gate",
             "point": "pre_tool_execution",
-            "mode": "blocking",
-            "command": ["python3", "hooks/approve_tool.py"],
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/approve_tool.py"]
+            },
             "timeout_ms": 5000
           }]
         }
@@ -163,8 +173,13 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
           "entries": [{
             "id": "safety-gate",
             "point": "pre_tool_execution",
-            "mode": "blocking",
-            "command": ["python3", "hooks/approve_tool.py"],
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/approve_tool.py"]
+            },
             "timeout_ms": 5000
           }]
         }
@@ -182,8 +197,13 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
           "entries": [{
             "id": "safety-gate",
             "point": "pre_tool_execution",
-            "mode": "blocking",
-            "command": ["python3", "hooks/approve_tool.py"],
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "command",
+              "command": "python3",
+              "args": ["hooks/approve_tool.py"]
+            },
             "timeout_ms": 5000
           }]
         }
@@ -199,8 +219,13 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
             "entries": [{
                 "id": "safety-gate",
                 "point": "pre_tool_execution",
-                "mode": "blocking",
-                "command": ["python3", "hooks/approve_tool.py"],
+                "mode": "foreground",
+                "capability": "guardrail",
+                "runtime": {
+                    "type": "command",
+                    "command": "python3",
+                    "args": ["hooks/approve_tool.py"],
+                },
                 "timeout_ms": 5000,
             }]
         },
@@ -214,8 +239,13 @@ A `pre_tool_execution` blocking hook that must approve each tool call before it 
         entries: [{
           id: "safety-gate",
           point: "pre_tool_execution",
-          mode: "blocking",
-          command: ["python3", "hooks/approve_tool.py"],
+          mode: "foreground",
+          capability: "guardrail",
+          runtime: {
+            type: "command",
+            command: "python3",
+            args: ["hooks/approve_tool.py"],
+          },
           timeoutMs: 5000,
         }],
       },
@@ -257,17 +287,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
 
 <Tabs>
   <Tab title="CLI">
-    ```bash
-    rkat run "Analyze quarterly data" --hooks-override-json '{
-      "entries": [{
-        "id": "policy-server",
-        "point": "pre_llm_request",
-        "mode": "blocking",
-        "url": "https://hooks.example.com/policy",
-        "timeout_ms": 10000
-      }]
-    }'
-    ```
+    Run-scoped hook override flags are not currently exposed on the normal `rkat run` surface. Use the JSON-RPC, REST, MCP, or SDK examples below for per-run hook override testing.
   </Tab>
   <Tab title="JSON-RPC">
     ```json
@@ -280,8 +300,13 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
           "entries": [{
             "id": "policy-server",
             "point": "pre_llm_request",
-            "mode": "blocking",
-            "url": "https://hooks.example.com/policy",
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "http",
+              "url": "https://hooks.example.com/policy",
+              "method": "POST"
+            },
             "timeout_ms": 10000
           }]
         }
@@ -299,8 +324,13 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
           "entries": [{
             "id": "policy-server",
             "point": "pre_llm_request",
-            "mode": "blocking",
-            "url": "https://hooks.example.com/policy",
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "http",
+              "url": "https://hooks.example.com/policy",
+              "method": "POST"
+            },
             "timeout_ms": 10000
           }]
         }
@@ -318,8 +348,13 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
           "entries": [{
             "id": "policy-server",
             "point": "pre_llm_request",
-            "mode": "blocking",
-            "url": "https://hooks.example.com/policy",
+            "mode": "foreground",
+            "capability": "guardrail",
+            "runtime": {
+              "type": "http",
+              "url": "https://hooks.example.com/policy",
+              "method": "POST"
+            },
             "timeout_ms": 10000
           }]
         }
@@ -335,8 +370,13 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
             "entries": [{
                 "id": "policy-server",
                 "point": "pre_llm_request",
-                "mode": "blocking",
-                "url": "https://hooks.example.com/policy",
+                "mode": "foreground",
+                "capability": "guardrail",
+                "runtime": {
+                    "type": "http",
+                    "url": "https://hooks.example.com/policy",
+                    "method": "POST",
+                },
                 "timeout_ms": 10000,
             }]
         },
@@ -350,8 +390,13 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
         entries: [{
           id: "policy-server",
           point: "pre_llm_request",
-          mode: "blocking",
-          url: "https://hooks.example.com/policy",
+          mode: "foreground",
+          capability: "guardrail",
+          runtime: {
+            type: "http",
+            url: "https://hooks.example.com/policy",
+            method: "POST",
+          },
           timeoutMs: 10000,
         }],
       },
@@ -374,7 +419,7 @@ A hook that POSTs the invocation payload to a remote URL. Useful for centralized
 | `run_failed` | post | After a run fails with an error |
 
 <Note>
-Pre-point hooks in `blocking` mode halt the agent loop until they return. Pre-point hooks in `background` mode are limited to observe-only capability.
+Pre-point hooks in `foreground` mode halt the agent loop until they return. Pre-point hooks in `background` mode are limited to observe-only capability.
 </Note>
 
 ## Disable a hook

@@ -265,12 +265,11 @@ rkat run --resume <session_id> "Retire worker-2 and add worker-4, then summarize
 ### CLI direct commands (explicit operational)
 
 ```bash
-rkat mob create --definition mob.toml
-rkat mob spawn team-mob lead lead-1
-rkat mob wire team-mob lead-1 worker-1
-rkat mob status team-mob
+rkat mob spawn-helper team-mob "Join as lead-1" --profile lead --agent-identity lead-1
+rkat mob fork-helper team-mob lead-1 "Investigate the failing test cluster." --profile worker
+rkat mob member-status team-mob lead-1
 rkat mob respawn team-mob worker-1 --message "restart"
-rkat mob events team-mob --member worker-1
+rkat mob run-flow team-mob --flow triage
 ```
 
 ### CLI artifact + web deployment

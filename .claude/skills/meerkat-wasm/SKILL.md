@@ -123,7 +123,7 @@ Clippy: `cargo clippy -p meerkat-web-runtime --target wasm32-unknown-unknown -- 
 
 ## Subsystem Availability on wasm32
 
-Full: agent loop, LLM providers (browser fetch), sessions (ephemeral), comms (inproc), mob orchestration (in-memory), tools (non-shell utility/task/comms/skill surfaces, including `view_image` for vision-capable models), tool scoping (`ToolScope` + per-turn overlays), skills (embedded), hooks (in-process), config (in-memory), compaction, multimodal content (`ContentInput`/`ContentBlock` parsing at WASM bridge).
+Full: agent loop, LLM providers (browser fetch), sessions (ephemeral), comms (inproc), mob orchestration (in-memory), tools (task tools + `datetime` + comms/skill surfaces; no shell and no filesystem-mutating builtins), tool scoping (`ToolScope` + per-turn overlays), skills (embedded), hooks (in-process), config (in-memory), compaction, multimodal content (`ContentInput`/`ContentBlock` parsing at WASM bridge).
 
 Excluded: shell tools, filesystem-mutating builtins such as `apply_patch`, filesystem persistence, MCP client (rmcp), network comms (TCP/UDS).
 

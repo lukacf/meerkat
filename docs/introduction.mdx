@@ -9,8 +9,8 @@ It's a set of modular Rust crates that handle the hard parts of agentic systems:
 
 ## Why Meerkat
 
-- **Fast.** Rust from the ground up. Single 5MB binary, &lt;10ms cold start, ~20MB memory. No runtime, no garbage collector, no dependency tree to manage.
-- **Provider-agnostic.** Same code, same tools, same sessions across Anthropic, OpenAI, and Gemini. Switch models with a config change.
+- **Fast.** Rust from the ground up. Lean native binaries and embeddable libraries, &lt;10ms cold start in the core path, and no VM/runtime dependency stack.
+- **Provider-agnostic.** Same session/config model across Anthropic, OpenAI, and Gemini, with capability-gated differences where model support diverges.
 - **Modular.** A workspace of focused crates, all opt-in. Need just the agent loop? Pull in `meerkat-core`. Need session persistence? Add `meerkat-store`. Need inter-agent comms? Add `meerkat-comms`. Your binary includes only what you use. Disabled features return typed errors, not panics.
 - **Stable.** Deterministic state machine with defined transitions. Typed errors with compile-time guarantees. Every error code maps to a stable string across JSON-RPC, REST, and CLI exit codes.
 - **Controlled.** Hard budget limits on tokens, wall-clock time, and tool calls. Eight hook points for guardrails, audit, and content rewriting. Shell security with allow/deny lists.
@@ -55,11 +55,17 @@ Those tools excel at interactive development with rich terminal UIs. Meerkat has
 
 ## Get started
 
-<CardGroup cols={2}>
+<CardGroup cols={4}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
     Install and run your first agent in under a minute.
   </Card>
+  <Card title="Auth setup" icon="key" href="/guides/auth">
+    Configure provider credentials, realms, bindings, and OAuth flows.
+  </Card>
+  <Card title="Hello examples" icon="play" href="/examples/gallery">
+    Start with the Rust, Python, or TypeScript hello-world examples.
+  </Card>
   <Card title="Examples" icon="code" href="/examples/gallery">
-    Functional apps and feature walkthroughs you can copy and run.
+    Start with hello-world examples, then move into larger production patterns.
   </Card>
 </CardGroup>

@@ -4,7 +4,7 @@ description: "Enable low-latency audio on a session by choosing a realtime-capab
 icon: "microphone"
 ---
 
-Realtime in Meerkat is **a delivery mode of the session's LLM, not a separate subsystem**. To use realtime audio on a session, pick a realtime-capable model (for example `gpt-realtime`). The runtime attaches an OpenAI Realtime transport automatically when the resolved model advertises `ModelCapabilities.realtime == true`, and detaches automatically when a reconfigure swaps the session onto a non-realtime model. There is no caller-initiated attach RPC.
+Realtime in Meerkat is **a delivery mode of the session's LLM, not a separate subsystem**. To use realtime audio on a session, pick a realtime-capable model (for example `gpt-realtime-1.5`). The runtime attaches an OpenAI Realtime transport automatically when the resolved model advertises `ModelCapabilities.realtime == true`, and detaches automatically when a reconfigure swaps the session onto a non-realtime model. There is no caller-initiated attach RPC.
 
 This guide covers the capability-driven model, how to enable realtime on a session, how to observe the attachment status, and the live-topology reconfigure flow for swapping the session's model while a realtime binding is active.
 
@@ -14,7 +14,7 @@ Public API surfaces describe `realtime`, not `voice`. The converged vocabulary i
 
 ## Mental model
 
-A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.2`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
+A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.2`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime-1.5`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
 
 ```text
         +--------------------------+
@@ -22,7 +22,7 @@ A session has exactly one conversation history. The session's LLM client is the 
         |   tools, context)        |
         +--------------------------+
                      |
-                     | session.model = "gpt-realtime"
+                     | session.model = "gpt-realtime-1.5"
                      v
         +--------------------------+
         | OpenAI Realtime binding  |  audio ingress/egress,
@@ -41,7 +41,7 @@ Key invariants:
 
 `ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`). Capability is derived from the model family:
 
-- **OpenAI**: any model whose name contains `realtime` (currently **only `gpt-realtime`**; the legacy `gpt-4o-realtime-preview` was the predecessor and is now superseded).
+- **OpenAI**: any model whose name contains `realtime` (currently **`gpt-realtime-1.5`** as the canonical realtime model; `gpt-realtime` remains a legacy compatibility alias, and `gpt-4o-realtime-preview` is superseded).
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.
 - **Anthropic**: no realtime-capable models today.
 - **Self-hosted**: `realtime = false` by default.
@@ -64,7 +64,7 @@ Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
   "method": "session/create",
   "params": {
     "prompt": "Let's talk.",
-    "model": "gpt-realtime",
+    "model": "gpt-realtime-1.5",
     "provider": "openai"
   }
 }
@@ -73,7 +73,7 @@ Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
 ```bash REST
 curl -X POST http://127.0.0.1:8080/sessions \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Let'"'"'s talk.","model":"gpt-realtime","provider":"openai"}'
+  -d '{"prompt":"Let'"'"'s talk.","model":"gpt-realtime-1.5","provider":"openai"}'
 ```
 
 ```python Python SDK
@@ -83,7 +83,7 @@ async with MeerkatClient() as client:
     await client.connect(realm_id="team-alpha")
     session = await client.create_session(
         prompt="Let's talk.",
-        model="gpt-realtime",
+        model="gpt-realtime-1.5",
         provider="openai",
     )
 ```
@@ -93,7 +93,7 @@ The runtime resolves the model, sees `ModelCapabilities.realtime == true`, and b
 
 ### Configuration defaults
 
-The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime"` makes realtime the default for the whole install. See the [Configuration guide](/concepts/configuration).
+The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime-1.5"` makes realtime the default for the whole install. See the [Configuration guide](/concepts/configuration).
 
 ### Mid-session: swap to a realtime-capable model
 
@@ -176,8 +176,13 @@ These are emitted by `rkat-rpc`'s realtime WebSocket listener. Callers typically
 
 1. Create or resume a session on a realtime-capable model.
 2. Poll `runtime/realtime_attachment_status` until it reports `binding_ready`.
-3. Call `realtime/open_info` to obtain a bootstrap token.
-4. Open a WebSocket to the bootstrap URL to exchange audio chunks.
+3. Ensure the host actually exposes the realtime websocket bootstrap service.
+4. Call `realtime/open_info` to obtain a bootstrap token.
+5. Open a WebSocket to the bootstrap URL to exchange audio chunks.
+
+<Warning>
+`binding_ready` means the runtime's realtime attachment is live. It does **not** by itself guarantee that `realtime/open_info` is available on the current host. The bootstrap methods require a host that wires in the realtime websocket service (`RealtimeWsHost` in the RPC host path).
+</Warning>
 
 ## Authority token
 
@@ -270,7 +275,7 @@ async with MeerkatClient() as client:
     # 1. Create a session on a realtime-capable model — transport attaches automatically.
     session = await client.create_session(
         prompt="Ready for voice.",
-        model="gpt-realtime",
+        model="gpt-realtime-1.5",
         provider="openai",
     )
 
@@ -298,16 +303,16 @@ Each mob member has its own session, so realtime attachment is per-member by con
 id = "voice-demo"
 
 [profiles.host]
-model = "gpt-realtime"
+model = "gpt-realtime-1.5"
 provider = "openai"
 peer_description = "Realtime host"
 ```
 
-Every member spawned under that profile is initialized on `gpt-realtime` and its session gets a realtime binding automatically. Use `runtime/realtime_attachment_statuses` with the member session IDs to observe attachment state across the whole mob in one round trip.
+Every member spawned under that profile is initialized on `gpt-realtime-1.5` and its session gets a realtime binding automatically. Use `runtime/realtime_attachment_statuses` with the member session IDs to observe attachment state across the whole mob in one round trip.
 
 ## Limitations and known gaps
 
-- **OpenAI Realtime only.** The shipped provider integration is OpenAI Realtime (`gpt-realtime`). Other providers are not yet wired into the realtime transport layer.
+- **OpenAI Realtime only.** The shipped provider integration is OpenAI Realtime (`gpt-realtime-1.5`, with `gpt-realtime` kept as a compatibility alias). Other providers are not yet wired into the realtime transport layer.
 - **Single realtime binding per session.** A session has at most one realtime attachment at a time. To attach multiple members, spawn them as separate mob members — each has its own session.
 - **Idle sessions cannot host a new binding.** The realtime transport is brought up as part of the executor binding; sessions that have never run a turn have no binding to attach to. Start a turn first (even a trivial prompt) or spawn via a mob to bring the executor online.
 - **No remote-callable reconfigure RPC.** Host code can call `reconfigure_live_topology` via `SessionLlmReconfigureHost`; there is no JSON-RPC or REST method that triggers a model swap from a remote caller today. Applications that need mid-session swaps should integrate at the host trait level.

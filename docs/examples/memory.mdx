@@ -6,6 +6,10 @@ icon: "brain"
 
 For the full guide, see [Memory](/guides/memory).
 
+<Note>
+The runtime toggles shown below still depend on a memory-enabled build. If the binary was compiled without the relevant memory features, `enable_memory` and `--tools full` do not magically add semantic memory on their own.
+</Note>
+
 ## Enable semantic memory
 
 When memory is enabled, discarded conversation turns are indexed into a semantic store. The agent gains a `memory_search` tool to recall past context on demand.
@@ -170,7 +174,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
   <Tab title="CLI">
     ```bash
     rkat run "Research this topic" \
-      --max-total-tokens 10000 \
+      --max-tokens 10000 \
       --max-duration 30s \
       --max-tool-calls 5
     ```
@@ -183,8 +187,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
       "params": {
         "prompt": "Research this topic",
         "budget_limits": {
-          "max_total_tokens": 10000,
-          "max_duration_ms": 30000,
+          "max_tokens": 10000,
           "max_tool_calls": 5
         }
       }
@@ -198,8 +201,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
       -d '{
         "prompt": "Research this topic",
         "budget_limits": {
-          "max_total_tokens": 10000,
-          "max_duration_ms": 30000,
+          "max_tokens": 10000,
           "max_tool_calls": 5
         }
       }'
@@ -214,7 +216,6 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
         "enable_builtins": true,
         "budget_limits": {
           "max_tokens": 10000,
-          "max_duration_secs": 30,
           "max_tool_calls": 5
         }
       }
@@ -226,8 +227,7 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
     result = await client.create_session(
         "Research this topic",
         budget_limits={
-            "max_total_tokens": 10000,
-            "max_duration_ms": 30000,
+            "max_tokens": 10000,
             "max_tool_calls": 5,
         },
     )
@@ -237,9 +237,8 @@ Cap resource usage per session with token, time, and tool-call limits. When a bu
     ```typescript
     const result = await client.createSession("Research this topic", {
       budgetLimits: {
-        maxTotalTokens: 10000,
-        maxDurationMs: 30000,
-        maxToolCalls: 5,
+        max_tokens: 10000,
+        max_tool_calls: 5,
       },
     });
     ```
@@ -265,7 +264,7 @@ When consumption nears a limit, a warning event is emitted before the budget is 
 ```json
 {
   "type": "budget_warning",
-  "budget_type": "max_tokens",
+  "budget_type": "tokens",
   "used": 8500,
   "limit": 10000,
   "percent": 85.0

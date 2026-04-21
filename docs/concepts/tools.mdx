@@ -30,12 +30,12 @@ impl AgentToolDispatcher for MathTools {
         })].into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "add" => {
                 let args: AddArgs = call.parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
-                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false))
+                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false).into())
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -65,6 +65,7 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 | Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image` | `enable_builtins` |
 | Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
 | Memory | `memory_search` | `enable_memory` |
+| Scheduler | `meerkat_schedule_*` | `enable_schedule` |
 | Comms | `send_message`, `send_request`, `send_response`, `peers` | `enable_comms` |
 | Mob orchestration | `mob_*`, `meerkat_*` | `enable_mob` |
 
@@ -74,7 +75,7 @@ Shell tools support allow/deny list security policies. Runtime tool visibility c
 
 Tool visibility can change during a session without restarting the agent. Changes are **staged** then **atomically applied** at the turn boundary — the LLM never sees a tool list change mid-stream.
 
-**External filters.** Callers can stage an allow-list or deny-list filter via the session API (RPC `mcp/add`, `mcp/remove`, REST endpoints, or programmatically through `ToolScopeHandle`). The filter is persisted in session metadata and survives resume.
+**External filters.** Callers can stage an allow-list or deny-list filter programmatically through `ToolScopeHandle`. This is distinct from MCP server lifecycle management.
 
 **Per-turn overlays.** Mob flow steps can restrict tools for a single turn via `TurnToolOverlay` (allow + deny). The overlay is ephemeral — it's cleared after the turn completes.
 
@@ -106,27 +107,29 @@ All mutations are staged and applied at the next turn boundary. Set `persisted: 
 
 | Surface | Live MCP | External tool filter |
 |---------|----------|---------------------|
-| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via `ToolScopeHandle` on session runtime |
-| CLI | `rkat mcp add --session --live-server-url` | Delegates to REST |
-| REST | Route stubs registered | -- |
+| JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Via in-process `ToolScopeHandle` on the session runtime |
+| CLI | `rkat mcp reload --session --live-server-url ...` and related host-managed flows | No standalone public CLI surface today |
+| REST | `POST /sessions/{id}/mcp/add`, `remove`, `reload` | No standalone public REST filter surface today |
 
 See the [built-in tools reference](/reference/builtin-tools) for the mechanical details of factory flags and per-build overrides.
 
 ## Multimodal tool results
 
-Tools can return rich content beyond plain text. The `ToolOutput` enum controls what gets injected into the conversation as a tool result:
+Tools can return rich content beyond plain text. The injected runtime shape is `ToolResult.content: Vec<ContentBlock>`, with helper constructors for text-only or multimodal output.
 
-- **`ToolOutput::Json(Value)`** -- the standard path. The JSON value is serialized to a text `ContentBlock` in the tool result.
-- **`ToolOutput::Blocks(Vec<ContentBlock>)`** -- returns one or more content blocks directly, including images. Used by tools like `view_image` to pass image data to vision-capable models.
+- **`ToolResult::new(...)`** -- the standard text-only path. The string becomes a single text content block.
+- **`ToolResult::with_blocks(...)`** -- returns one or more content blocks directly, including images and video.
+- Built-in tools that expose richer output may internally use `ToolOutput::Blocks(...)`, but the persisted/runtime-facing result shape is still `ToolResult.content`.
 
-`ContentBlock` has two variants:
+`ContentBlock` currently has three variants:
 
 - `ContentBlock::Text { text }` -- plain text content.
-- `ContentBlock::Image { media_type, data, source_path }` -- base64-encoded image with MIME type. The `source_path` field is domain-only metadata (stripped from wire types).
+- `ContentBlock::Image { media_type, ... }` -- inline or blob-backed image content.
+- `ContentBlock::Video { media_type, duration_ms, ... }` -- inline video content.
 
-The built-in `view_image` tool reads an image file from disk and returns a `ToolOutput::Blocks` containing a single `ContentBlock::Image`. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via `ToolScope` capability gating based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
+The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 
-Custom tools can return multimodal content by implementing `BuiltinTool::call()` and returning `ToolOutput::Blocks(...)` with the appropriate content blocks.
+Custom tools can return multimodal content by returning `ToolResult::with_blocks(...)` with the appropriate content blocks.
 
 ## Composition
 

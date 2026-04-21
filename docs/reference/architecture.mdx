@@ -14,9 +14,10 @@ The architecture working dump under `docs/architecture/two-kernel-research/` was
 
 ```mermaid
 graph TD
-    SURFACES["CLI / REST / RPC / MCP / Rust / SDKs"] --> SERVICE["SessionService"]
-    SERVICE --> MACHINE["MeerkatMachine"]
-    MACHINE --> FACTORY["AgentFactory::build_agent()"]
+    SURFACES["CLI / REST / RPC / MCP / Rust / SDKs"] --> MACHINE["MeerkatMachine"]
+    MACHINE --> BINDINGS["prepare_bindings(session_id)"]
+    BINDINGS --> SERVICE["SessionService::create_session / start_turn"]
+    SERVICE --> FACTORY["AgentFactory::build_agent()"]
     FACTORY --> AGENT["Agent loop"]
 
     AGENT --> PROVIDERS["LLM adapters"]
@@ -27,11 +28,11 @@ graph TD
     MACHINE --> SCHEDULE["Schedule runtime"]
 ```
 
-Runtime-backed surfaces route through `SessionService`, then bind into
-`MeerkatMachine`, which owns runtime semantics such as keep-alive, admission,
-realtime attachment state, and recovery-safe turn execution. `AgentFactory`
-hydrates the session-scoped agent with the resolved provider, tool surface,
-memory/hooks/skills, and optional mob tooling.
+Runtime-backed surfaces prepare session-owned runtime bindings through
+`MeerkatMachine`, then hand those bindings into `SessionService` via
+`RuntimeBuildMode::SessionOwned(...)`. `AgentFactory` hydrates the
+session-scoped agent with the resolved provider, tool surface, memory/hooks/skills,
+and optional mob tooling.
 
 ## Architectural rules
 
@@ -80,12 +81,20 @@ Generated specs for the machine and composition surfaces live under
 | `meerkat-contracts` | Wire types, error codes, public protocol schemas, contract version |
 | `meerkat-runtime` | `MeerkatMachine`, runtime control plane, session binding/recovery, realtime transport orchestration |
 | `meerkat-session` | Persistent and ephemeral `SessionService` implementations |
+| `meerkat-store` | Session and realm persistence backends (`sqlite`, `jsonl`, schedule store helpers) |
 | `meerkat-tools` | Builtin tools, tool scoping, MCP live-surface integration points |
 | `meerkat-mcp` | MCP client/router used to consume external tool servers |
+| `meerkat-mcp-server` | Meerkat-as-MCP host surface |
 | `meerkat-mob` | Mob runtime, storage, flow engine, member lifecycle |
+| `meerkat-mob-pack` | Mobpack archive/signing/trust primitives |
 | `meerkat-mob-mcp` | Public mob control-plane tools plus agent-side mob tool surfaces |
 | `meerkat-schedule` | Schedule and occurrence services |
+| `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, cloud authorizers |
+| `meerkat-client` | Compatibility client crate that re-exports provider client surfaces |
+| `meerkat-providers` | Compatibility provider-runtime crate for auth/LLM provider resolution seams |
+| `meerkat-memory` | Semantic memory store and retrieval tooling |
 | `meerkat-models` | Compatibility shim that re-exports `meerkat_core::model_profile` |
+| `meerkat-web-runtime` | Browser/WASM runtime surface |
 | `meerkat` | Facade crate that wires the runtime-backed build path together |
 
 ## Canonical references

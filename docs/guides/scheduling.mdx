@@ -1,142 +1,250 @@
 ---
 title: Scheduling
-description: Automate agent tasks with cron and interval triggers
+description: Automate durable session and mob work with once, interval, and calendar schedules.
 icon: "clock"
 ---
 
 # Scheduling
 
-Meerkat's scheduler lets you define recurring agent tasks that run automatically. Schedules are durable, authority-backed, and integrated across all surfaces.
+Meerkat's scheduler persists **schedules** and projects concrete **occurrences** from them.
 
-## How it works
+- A **schedule** is the durable rule: trigger + target + policies.
+- An **occurrence** is one planned delivery produced from that rule.
+- The **driver** claims due occurrences and delivers them to the target at runtime.
 
-A **schedule** defines a trigger (when to fire) and a target (what to run). The scheduler projects **occurrences** from the trigger spec, and a **driver** claims and delivers them at the right time.
-
-```
+```text
 Schedule (trigger + target + policies)
-  → Occurrence projection (planning horizon)
-  → Driver tick loop claims due occurrences
-  → Delivery: creates session, runs prompt
-  → Occurrence marked completed/skipped/failed
+  -> projected occurrences
+  -> driver claims due work
+  -> runtime delivery
+  -> completed / skipped / misfired / delivery_failed
 ```
 
-## Creating a schedule
+## Host APIs vs agent tools
+
+Use the typed host APIs when your application is managing schedules directly:
+
+- JSON-RPC: `schedule/create`, `schedule/list`, `schedule/get`, `schedule/update`, `schedule/pause`, `schedule/resume`, `schedule/delete`, `schedule/occurrences`
+- REST: `POST /schedules`, `GET /schedules`, `GET /schedules/{id}`, `PATCH /schedules/{id}`, `POST /schedules/{id}/pause`, `POST /schedules/{id}/resume`, `DELETE /schedules/{id}`, `GET /schedules/{id}/occurrences`
+
+Inside an agent session, the scheduler is exposed through typed schedule tools such as `meerkat_schedule_create`, `meerkat_schedule_get`, and `meerkat_schedule_occurrences`.
+
+## Create a schedule
 
 <Tabs>
-  <Tab title="CLI">
-    Schedules are managed through agent tools. The agent can create, update, and manage schedules using the built-in `schedule_*` tools:
-
-    ```bash
-    rkat run "Create a schedule that runs every hour to check system health"
-    ```
-  </Tab>
-  <Tab title="Rust SDK">
-    ```rust
-    use meerkat_schedule::{
-        ScheduleService, MemoryScheduleStore, CreateScheduleRequest,
-        TriggerSpec, IntervalTriggerSpec, TargetBinding, SessionTargetBinding,
-    };
-    use std::sync::Arc;
-    use chrono::Duration;
-
-    let store = Arc::new(MemoryScheduleStore::new());
-    let service = ScheduleService::new(store);
-
-    let schedule = service.create(CreateScheduleRequest {
-        display_name: "hourly-health-check".into(),
-        trigger: TriggerSpec::Interval(IntervalTriggerSpec {
-            every: Duration::hours(1).to_std().unwrap(),
-        }),
-        target: TargetBinding::Session(SessionTargetBinding {
-            model: "claude-sonnet-4-6".into(),
-            prompt: "Check system health and report anomalies".into(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }).await?;
-    ```
-  </Tab>
-  <Tab title="RPC">
+  <Tab title="JSON-RPC">
     ```json
     {
-      "method": "tool/call",
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "schedule/create",
       "params": {
-        "name": "schedule_create",
-        "arguments": {
-          "display_name": "hourly-health-check",
-          "trigger": {
-            "type": "interval",
-            "every_seconds": 3600
-          },
-          "target": {
-            "type": "session",
+        "name": "hourly-health-check",
+        "trigger": {
+          "type": "interval",
+          "start_at_utc": "2026-04-21T09:00:00Z",
+          "every_seconds": 3600
+        },
+        "target": {
+          "target_kind": "session",
+          "type": "materialize_on_demand_session",
+          "create": {
             "model": "claude-sonnet-4-6",
-            "prompt": "Check system health and report anomalies"
+            "system_prompt": "You are a health-check assistant."
+          },
+          "action": {
+            "type": "prompt",
+            "prompt": "Check system health and report anomalies."
           }
-        }
+        },
+        "misfire_policy": { "type": "skip" },
+        "overlap_policy": "skip_if_running",
+        "missing_target_policy": "mark_misfired"
       }
     }
     ```
   </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://localhost:8080/schedules \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "hourly-health-check",
+        "trigger": {
+          "type": "interval",
+          "start_at_utc": "2026-04-21T09:00:00Z",
+          "every_seconds": 3600
+        },
+        "target": {
+          "target_kind": "session",
+          "type": "materialize_on_demand_session",
+          "create": {
+            "model": "claude-sonnet-4-6",
+            "system_prompt": "You are a health-check assistant."
+          },
+          "action": {
+            "type": "prompt",
+            "prompt": "Check system health and report anomalies."
+          }
+        },
+        "misfire_policy": { "type": "skip" },
+        "overlap_policy": "skip_if_running",
+        "missing_target_policy": "mark_misfired"
+      }'
+    ```
+  </Tab>
+  <Tab title="Rust SDK">
+    ```rust
+    use chrono::Utc;
+    use meerkat_schedule::{
+        CreateScheduleRequest, IntervalTriggerSpec, MissingTargetPolicy,
+        MisfirePolicy, OverlapPolicy, ScheduleService, SessionMaterializationSpec,
+        SessionTargetBinding, TriggerSpec, TargetBinding, ScheduledSessionAction,
+    };
+    use std::collections::BTreeMap;
+
+    let schedule = service.create(CreateScheduleRequest {
+        name: Some("hourly-health-check".into()),
+        description: None,
+        trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+            start_at_utc: Utc::now(),
+            every_seconds: 3600,
+            end_at_utc: None,
+        }),
+        target: TargetBinding::session(SessionTargetBinding::materialize_on_demand(
+            SessionMaterializationSpec {
+                model: "claude-sonnet-4-6".into(),
+                system_prompt: Some("You are a health-check assistant.".into()),
+                ..Default::default()
+            },
+            ScheduledSessionAction::Prompt {
+                prompt: "Check system health and report anomalies.".into(),
+                system_prompt: None,
+                render_metadata: None,
+                skill_references: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        )),
+        misfire_policy: MisfirePolicy::Skip,
+        overlap_policy: OverlapPolicy::SkipIfRunning,
+        missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        labels: BTreeMap::new(),
+        planning_horizon_days: None,
+        planning_horizon_occurrences: None,
+    }).await?;
+    ```
+  </Tab>
 </Tabs>
 
-## Triggers
+## Trigger types
 
-### Cron triggers
+### Once
 
-Fire at specific calendar times using cron-style field specs:
+Fire one time at an exact UTC timestamp.
 
 ```json
 {
-  "type": "cron",
-  "minute": { "values": [0] },
-  "hour": { "values": [9, 17] },
-  "day_of_week": { "range": { "from": 1, "to": 5 } },
-  "timezone": "America/New_York"
+  "type": "once",
+  "due_at_utc": "2026-04-21T15:00:00Z"
 }
 ```
 
-Each field supports:
-- `"all"` — every value (default)
-- `{ "values": [1, 15, 30] }` — specific values
-- `{ "range": { "from": 0, "to": 59, "step": 5 } }` — range with optional step
+### Interval
 
-### Interval triggers
-
-Fire at fixed intervals:
+Fire repeatedly at a fixed cadence.
 
 ```json
 {
   "type": "interval",
+  "start_at_utc": "2026-04-21T09:00:00Z",
   "every_seconds": 3600
 }
 ```
 
-## Targets
-
-### Session target
-
-Creates a new agent session for each occurrence:
+Add `end_at_utc` to stop the schedule automatically:
 
 ```json
 {
-  "type": "session",
-  "model": "claude-sonnet-4-6",
-  "prompt": "Generate the daily report",
-  "system_prompt": "You are a reporting agent.",
-  "provider": "anthropic"
+  "type": "interval",
+  "start_at_utc": "2026-04-21T09:00:00Z",
+  "every_seconds": 3600,
+  "end_at_utc": "2026-04-22T09:00:00Z"
 }
 ```
 
-### Mob target
+### Calendar
 
-Runs a mob for each occurrence:
+Fire at named wall-clock times in a timezone. Omitted fields default to `{"kind":"any"}`.
 
 ```json
 {
-  "type": "mob",
-  "action": "create_and_run",
-  "definition": { ... }
+  "type": "calendar",
+  "timezone": "Europe/Stockholm",
+  "minute": { "kind": "values", "values": [0] },
+  "hour": { "kind": "values", "values": [9] },
+  "day_of_week": { "kind": "values", "values": [1, 2, 3, 4, 5] }
+}
+```
+
+That means “09:00 every weekday in Stockholm”.
+
+## Target types
+
+### Session targets
+
+`target_kind` must be `"session"` with one of these `type` variants:
+
+- `exact_session`: deliver to one specific existing session
+- `resumable_session`: deliver to a specific session that may be idle/suspended
+- `materialize_on_demand_session`: create a session on first fire, then reuse it
+
+Example exact-session prompt delivery:
+
+```json
+{
+  "target_kind": "session",
+  "type": "exact_session",
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "action": {
+    "type": "prompt",
+    "prompt": "Run the daily follow-up."
+  }
+}
+```
+
+Example event delivery:
+
+```json
+{
+  "target_kind": "session",
+  "type": "resumable_session",
+  "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+  "action": {
+    "type": "event",
+    "event_type": "deploy_complete",
+    "payload": { "environment": "prod" }
+  }
+}
+```
+
+### Mob targets
+
+`target_kind` must be `"mob"` with one of these `type` variants:
+
+- `member`: deliver content to a specific mob member
+- `flow`: run a named mob flow
+- `spawn_helper`: create a helper in a mob and wait for it
+- `fork_helper`: fork from an existing member and wait for it
+
+Example flow target:
+
+```json
+{
+  "target_kind": "mob",
+  "type": "flow",
+  "mob_id": "release-triage",
+  "flow_id": "triage",
+  "params": { "severity": "high" }
 }
 ```
 
@@ -144,75 +252,76 @@ Runs a mob for each occurrence:
 
 ### Misfire policy
 
-What to do when an occurrence fires late (e.g., after a restart):
+What happens when an occurrence is materially late:
 
-| Policy | Behavior |
-|--------|----------|
-| `execute` | Run anyway (default) |
-| `skip` | Skip the missed occurrence |
-| `skip_if_older_than` | Skip if overdue by more than the specified duration |
+- `{"type":"skip"}`: skip overdue work after the grace window
+- `{"type":"catch_up_within","window_seconds":300}`: catch up if still within the lateness window
 
 ### Overlap policy
 
-What to do when a previous occurrence is still running:
+What happens when the next occurrence fires while previous work is still active:
 
-| Policy | Behavior |
-|--------|----------|
-| `allow` | Run concurrently (default) |
-| `skip` | Skip until previous completes |
+- `skip_if_running` (recommended)
+- `allow_concurrent`
 
 ### Missing target policy
 
-What to do when the target doesn't exist:
+What happens when the target is missing at fire time:
 
-| Policy | Behavior |
-|--------|----------|
-| `skip` | Skip the occurrence |
-| `fail` | Mark as failed |
-| `create` | Create the target automatically (default) |
+- `mark_misfired` (recommended)
+- `skip`
 
-## Schedule tools
+## Recommended defaults
 
-Agents can manage schedules through built-in tools:
+For most recurring jobs, start with:
 
-| Tool | Description |
-|------|-------------|
-| `schedule_create` | Create a new schedule |
-| `schedule_list` | List schedules with optional filters |
-| `schedule_read` | Read schedule details and occurrences |
-| `schedule_update` | Update trigger, target, or policies |
-| `schedule_pause` | Pause a schedule |
-| `schedule_resume` | Resume a paused schedule |
-| `schedule_delete` | Delete a schedule |
-
-These tools are available across CLI, REST, RPC, and MCP surfaces. WASM environments use a disabled store and return capability-unavailable errors.
+```json
+{
+  "misfire_policy": { "type": "skip" },
+  "overlap_policy": "skip_if_running",
+  "missing_target_policy": "mark_misfired"
+}
+```
 
 ## Schedule lifecycle
 
-```
-Active ──pause──→ Paused ──resume──→ Active
-  │                                    │
-  ├──cancel──→ Cancelled               │
-  │                                    ├──cancel──→ Cancelled
-  └──(max_occurrences reached)──→ Completed
-```
+Schedule phase is intentionally small:
 
-## Occurrence lifecycle
+- `active`
+- `paused`
+- `deleted`
 
-```
-Pending ──claim──→ Claimed ──deliver──→ Delivering
-                                          │
-                                ┌─────────┼─────────┐
-                                ↓         ↓         ↓
-                           Completed   Skipped    Failed
-```
+Occurrence phase is more detailed:
 
-Occurrences can also be **superseded** when a schedule is updated and new occurrences replace planned ones.
+- `pending`
+- `claimed`
+- `dispatching`
+- `awaiting_completion`
+- `completed`
+- `skipped`
+- `misfired`
+- `superseded`
+- `delivery_failed`
 
-## Persistence
+Use `schedule/occurrences` or `GET /schedules/{id}/occurrences` to inspect what actually fired and why.
 
-Schedule stores are per-realm. Multiple processes can share a store safely through `atomic_plan_mutation()`, which provides store-level atomicity for multi-step planning changes.
+## Agent-side schedule tools
 
-Available backends:
-- **SQLite** — durable, multi-process safe (default for persistent realms)
-- **Memory** — testing and WASM
+When scheduling is exposed inside a running agent, the canonical tool names are:
+
+- `meerkat_schedule_create`
+- `meerkat_schedule_get`
+- `meerkat_schedule_list`
+- `meerkat_schedule_update`
+- `meerkat_schedule_pause`
+- `meerkat_schedule_resume`
+- `meerkat_schedule_delete`
+- `meerkat_schedule_occurrences`
+
+These are distinct from the host APIs (`schedule/*` over RPC and `/schedules/*` over REST).
+
+## See also
+
+- [JSON-RPC API](/api/rpc)
+- [REST API](/api/rest)
+- [Builtin tools reference](/reference/builtin-tools)

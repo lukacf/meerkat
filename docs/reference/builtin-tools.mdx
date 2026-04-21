@@ -19,18 +19,26 @@ icon: "wrench"
 | `memory_search` | Memory | N/A | `memory-store-session` | Search semantic memory |
 | `datetime` | Utility | Yes | -- | Get current date/time |
 | `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
-| `view_image` | Utility | Yes | vision | Read an image file and return base64 content |
+| `view_image` | Utility | Yes | `image_tool_results` | Read an image file and return base64 content |
 | `send_message` | Comms | Yes | `comms` | Send a collaboration message to a peer |
 | `send_request` | Comms | Yes | `comms` | Send a structured request to a peer |
 | `send_response` | Comms | Yes | `comms` | Send a response to a peer request |
 | `peers` | Comms | Yes | `comms` | List discoverable peers (trusted + inproc) |
-| `schedule_create` | Schedule | Yes | `schedule` | Create a new schedule |
-| `schedule_list` | Schedule | Yes | `schedule` | List schedules with optional filters |
-| `schedule_read` | Schedule | Yes | `schedule` | Read a schedule and its occurrences |
-| `schedule_update` | Schedule | Yes | `schedule` | Update trigger, target, or policies |
-| `schedule_pause` | Schedule | Yes | `schedule` | Pause a schedule |
-| `schedule_resume` | Schedule | Yes | `schedule` | Resume a paused schedule |
-| `schedule_delete` | Schedule | Yes | `schedule` | Delete a schedule |
+| `browse_skills` | Skills | Yes | `skills` | Browse skill collections and search skills |
+| `load_skill` | Skills | Yes | `skills` | Load a skill's full instructions into the conversation |
+| `skill_list_resources` | Skills | Yes | `skills` | List skill-owned resources |
+| `skill_read_resource` | Skills | Yes | `skills` | Read a specific skill-owned resource |
+| `skill_invoke_function` | Skills | Yes | `skills` | Invoke a skill-defined function |
+| `tool_catalog_search` | Control plane | Yes | `builtins` | Search deferred tool-catalog entries |
+| `tool_catalog_load` | Control plane | Yes | `builtins` | Load deferred tool-catalog entries into visibility |
+| `meerkat_schedule_create` | Schedule | Yes | `schedule` | Create a new schedule |
+| `meerkat_schedule_get` | Schedule | Yes | `schedule` | Read one schedule |
+| `meerkat_schedule_list` | Schedule | Yes | `schedule` | List schedules |
+| `meerkat_schedule_update` | Schedule | Yes | `schedule` | Update trigger, target, or policies |
+| `meerkat_schedule_pause` | Schedule | Yes | `schedule` | Pause a schedule |
+| `meerkat_schedule_resume` | Schedule | Yes | `schedule` | Resume a paused schedule |
+| `meerkat_schedule_delete` | Schedule | Yes | `schedule` | Delete a schedule |
+| `meerkat_schedule_occurrences` | Schedule | Yes | `schedule` | List occurrences for a schedule |
 
 ## Enabling and disabling tools
 
@@ -42,6 +50,7 @@ icon: "wrench"
 | `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`datetime`, `apply_patch`, `view_image`) |
 | `enable_shell` | `.shell(bool)` | `false` | All shell tools (`shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`) |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
+| `enable_schedule` | `.schedule(bool)` | `false` | Scheduler tools (`meerkat_schedule_*`) |
 | `enable_comms` | `.comms(bool)` | `false` | All comms tools (requires `comms` feature) |
 | `enable_mob` | `.mob(bool)` | `false` | Mob orchestration tools (`mob_*`, `meerkat_*`) |
 
@@ -55,12 +64,13 @@ Each `AgentBuildConfig` can override factory-level flags for a single agent buil
 
 | Override Field | Type | Effect |
 |---------------|------|--------|
-| `override_builtins` | `Option<bool>` | Takes precedence over `enable_builtins` when `Some` |
-| `override_shell` | `Option<bool>` | Takes precedence over `enable_shell` when `Some` |
-| `override_memory` | `Option<bool>` | Takes precedence over `enable_memory` when `Some` |
-| `override_mob` | `Option<bool>` | Takes precedence over `enable_mob` when `Some` |
+| `override_builtins` | `ToolCategoryOverride` | Explicit `enable`, `disable`, or `inherit` |
+| `override_shell` | `ToolCategoryOverride` | Explicit `enable`, `disable`, or `inherit` |
+| `override_memory` | `ToolCategoryOverride` | Explicit `enable`, `disable`, or `inherit` |
+| `override_schedule` | `ToolCategoryOverride` | Explicit `enable`, `disable`, or `inherit` |
+| `override_mob` | `ToolCategoryOverride` | Explicit `enable`, `disable`, or `inherit` |
 
-All default to `None` (use factory-level setting).
+All default to `inherit` (use the factory-level setting).
 
 **Source:** `meerkat/src/factory.rs` -- `AgentBuildConfig` struct.
 </Accordion>
@@ -105,8 +115,8 @@ MCP servers can be added or removed from a running session. Operations are stage
 | Surface | Method | Status |
 |---------|--------|--------|
 | JSON-RPC | `mcp/add`, `mcp/remove`, `mcp/reload` | Fully wired (staged) |
-| REST | `POST /sessions/{id}/mcp/add\|remove\|reload` | Routes registered (placeholder) |
-| CLI | `rkat mcp add/remove --session <id> --live-server-url <url>` | Delegates to REST |
+| REST | `POST /sessions/{id}/mcp/add\|remove\|reload` | Fully wired |
+| CLI | `rkat mcp reload --session <id> --live-server-url <url>` | Host-managed live reload flow |
 
 Servers being removed transition through `Active → Removing (draining) → Removed` to allow in-flight tool calls to complete before finalization.
 
@@ -126,6 +136,25 @@ TurnToolOverlay {
 Set on `StartTurnRequest.flow_tool_overlay` by the flow engine. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
 
 **Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
+</Accordion>
+
+## Schedule tools
+
+Schedule tools are the agent-facing scheduler surface. They are distinct from the host APIs (`schedule/*` over RPC and `/schedules/*` over REST).
+
+<Accordion title="Schedule tool inventory">
+| Tool | Purpose |
+|------|---------|
+| `meerkat_schedule_create` | Create a durable schedule with trigger, target, and policies |
+| `meerkat_schedule_get` | Read one schedule by `schedule_id` |
+| `meerkat_schedule_list` | List schedules in the active realm |
+| `meerkat_schedule_update` | Update trigger, target, policies, or labels |
+| `meerkat_schedule_pause` | Pause a schedule |
+| `meerkat_schedule_resume` | Resume a paused schedule |
+| `meerkat_schedule_delete` | Delete a schedule |
+| `meerkat_schedule_occurrences` | List occurrences for a schedule |
+
+These tools are provided by `ScheduleToolDispatcher` in `meerkat-schedule` and are gated by the scheduler capability.
 </Accordion>
 
 ## Task tools
@@ -518,7 +547,7 @@ Get the current date and time. Returns ISO 8601 formatted datetime and Unix time
 <Accordion title="view_image">
 Read an image file from the project directory and return its contents as a base64-encoded `ContentBlock::Image`. This enables vision-capable models to analyze images from disk during tool use.
 
-**Default enabled:** Yes (when builtins are on and model supports vision)
+**Default enabled:** Yes (when builtins are on and the model supports image tool results)
 
 <ParamField body="path" type="String" required>
   Path to the image file, relative to the project root.
@@ -528,9 +557,9 @@ Read an image file from the project directory and return its contents as a base6
 
 **Size limit:** 5 MB. Files exceeding this limit return an error.
 
-**Capability gating:** `view_image` is automatically hidden via `ToolScope` when the active model does not support vision (i.e., `ModelProfile.vision == false`). It is also hidden when the model does not support image content in tool results (`ModelProfile.image_tool_results == false`). This means the tool never appears in the tool list sent to models that cannot process image content.
+**Capability gating:** `view_image` is currently hidden via `ToolScope` when the active model does not support image content in tool results (`ModelProfile.image_tool_results == false`).
 
-**Returns:** A `ToolOutput::Blocks` containing a single `ContentBlock::Image` with the base64-encoded image data and detected media type. The `source_path` field is set on the domain type but stripped from the wire representation (`WireContentBlock`).
+**Returns:** A content-block result containing a single `ContentBlock::Image` with the base64-encoded image data and detected media type.
 
 **Source:** `meerkat-tools/src/builtin/utility/view_image.rs`
 </Accordion>

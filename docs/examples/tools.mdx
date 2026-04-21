@@ -30,12 +30,12 @@ impl AgentToolDispatcher for MathTools {
         })].into()
     }
 
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolResult, ToolError> {
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
         match call.name {
             "add" => {
                 let args: AddArgs = call.parse_args()
                     .map_err(|e| ToolError::invalid_arguments("add", e.to_string()))?;
-                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false))
+                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false).into())
             }
             _ => Err(ToolError::not_found(call.name)),
         }
@@ -136,8 +136,17 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
 
     let service = build_ephemeral_service(factory, config, 64); // Queue-only embedded/testing substrate
     let result = service.create_session(CreateSessionRequest {
+        model: "claude-sonnet-4-6".into(),
         prompt: "List files in /tmp".into(),
-        ..Default::default()
+        render_metadata: None,
+        system_prompt: None,
+        max_tokens: None,
+        event_tx: None,
+        skill_references: None,
+        initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
+        build: None,
+        labels: None,
     }).await?;
     ```
   </Tab>

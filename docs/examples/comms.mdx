@@ -1,14 +1,14 @@
 ---
-title: "Comms & mobs"
-description: "Inter-agent messaging, keep-alive sessions, external event injection, and mob orchestration."
+title: "Comms & external events"
+description: "Keep-alive sessions, typed comms commands, peer discovery, and durable external event ingress."
 icon: "tower-broadcast"
 ---
 
-For the full guide, see [Comms](/guides/comms) and the `0.5` mob orchestration architecture notes.
+For the full guide, see [Comms](/guides/comms).
 
-## Keep-alive mode
+## Keep a session alive for inbound work
 
-Enable the comms listener so the agent stays alive after its initial prompt, waiting for incoming messages and external events as future runtime-backed turn work.
+Keep-alive sessions stay resident so later comms or external events can wake them up as future runtime-backed work.
 
 <Tabs>
   <Tab title="CLI">
@@ -19,7 +19,8 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 1,
+      "jsonrpc": "2.0",
+      "id": 1,
       "method": "session/create",
       "params": {
         "prompt": "You are a coordinator.",
@@ -40,16 +41,6 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
       }'
     ```
   </Tab>
-  <Tab title="MCP">
-    ```json
-    {
-      "prompt": "You are a coordinator.",
-      "keep_alive": true,
-      "comms_name": "agent-a"
-    }
-    ```
-    Called via the `meerkat_run` tool.
-  </Tab>
   <Tab title="Python">
     ```python
     session = await client.create_session(
@@ -67,42 +58,25 @@ Enable the comms listener so the agent stays alive after its initial prompt, wai
     });
     ```
   </Tab>
-  <Tab title="Rust">
-    ```rust
-    let result = service.create_session(CreateSessionRequest {
-        model: "claude-sonnet-4-6".into(),
-        prompt: "You are a coordinator.".into(),
-        system_prompt: None,
-        max_tokens: None,
-        render_metadata: None,
-        event_tx: None,
-        skill_references: None,
-        initial_turn: InitialTurnPolicy::RunImmediately,
-        build: Some(SessionBuildOptions {
-            keep_alive: true,
-            comms_name: Some("agent-a".into()),
-            ..Default::default()
-        }),
-        labels: None,
-    }).await?;
-    ```
-  </Tab>
 </Tabs>
 
-## Send a message
+## Send a typed comms command
 
-Push an event into a running session's comms inbox.
+`comms/send` is the typed host-side comms surface. Use it for local input, peer messages, peer requests, and peer responses.
 
 <Tabs>
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 2,
+      "jsonrpc": "2.0",
+      "id": 2,
       "method": "comms/send",
       "params": {
         "session_id": "01936f8a-...",
-        "payload": {"alert": "build failed", "severity": "high"},
-        "source": "ci-pipeline"
+        "kind": "peer_message",
+        "to": "agent-b",
+        "body": "Build failed in CI. Please investigate.",
+        "handling_mode": "queue"
       }
     }
     ```
@@ -111,155 +85,158 @@ Push an event into a running session's comms inbox.
     ```bash
     curl -X POST http://localhost:8080/comms/send \
       -H "Content-Type: application/json" \
-      -d '{"session_id":"01936f8a-...","payload":{"alert":"build failed"},"source":"ci-pipeline"}'
+      -d '{
+        "session_id": "01936f8a-...",
+        "kind": "peer_message",
+        "to": "agent-b",
+        "body": "Build failed in CI. Please investigate.",
+        "handling_mode": "queue"
+      }'
     ```
   </Tab>
   <Tab title="MCP">
     ```json
-    {"name": "meerkat_comms_send", "arguments": {
-      "session_id": "01936f8a-...",
-      "kind": "peer_message",
-      "to": "agent-b",
-      "body": "Hello from agent-a",
-      "handling_mode": "queue"
-    }}
+    {
+      "name": "meerkat_comms_send",
+      "arguments": {
+        "session_id": "01936f8a-...",
+        "kind": "peer_message",
+        "to": "agent-b",
+        "body": "Build failed in CI. Please investigate.",
+        "handling_mode": "queue"
+      }
+    }
     ```
   </Tab>
   <Tab title="Python">
     ```python
-    session = await client.create_session("...", keep_alive=True, comms_name="agent-a")
-    await session.send(payload={"alert": "build failed"}, source="ci-pipeline")
+    receipt = await session.send({
+        "kind": "peer_message",
+        "to": "agent-b",
+        "body": "Build failed in CI. Please investigate.",
+        "handling_mode": "queue",
+    })
+    print(receipt)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const session = await client.createSession("...", { keepAlive: true, commsName: "agent-a" });
-    await session.send({ payload: { alert: "build failed" }, source: "ci-pipeline" });
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let injector = service.event_injector(&session_id).await
-        .expect("comms must be enabled");
-    injector.inject(r#"{"alert": "build failed"}"#.into(), PlainEventSource::Rpc)?;
+    const receipt = await session.send({
+      kind: "peer_message",
+      to: "agent-b",
+      body: "Build failed in CI. Please investigate.",
+      handling_mode: "queue",
+    });
+    console.log(receipt);
     ```
   </Tab>
 </Tabs>
 
-## List peers
+## List discoverable peers
 
-Discover trusted peers visible to a running session.
+Use `comms/peers` to see which trusted peers are currently visible to the session runtime.
 
 <Tabs>
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 3,
+      "jsonrpc": "2.0",
+      "id": 3,
       "method": "comms/peers",
-      "params": { "session_id": "01936f8a-..." }
+      "params": {
+        "session_id": "01936f8a-..."
+      }
     }
     ```
   </Tab>
   <Tab title="REST">
     ```bash
-    curl http://localhost:8080/comms/peers?session_id=01936f8a-...
+    curl "http://localhost:8080/comms/peers?session_id=01936f8a-..."
     ```
   </Tab>
   <Tab title="MCP">
     ```json
-    {"name": "meerkat_comms_peers", "arguments": {
-      "session_id": "01936f8a-..."
-    }}
+    {
+      "name": "meerkat_comms_peers",
+      "arguments": {
+        "session_id": "01936f8a-..."
+      }
+    }
     ```
   </Tab>
   <Tab title="Python">
     ```python
     peers = await session.peers()
-    for p in peers:
-        print(f"{p['name']} @ {p['address']}")
+    for peer in peers:
+        print(peer["name"])
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const peers = await session.peers();
-    peers.forEach(p => console.log(`${p.name} @ ${p.address}`));
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let runtime = service.comms_runtime(&session_id).await
-        .expect("comms must be enabled");
-    let peers = runtime.peers().await;
-    for p in &peers { println!("{} @ {}", p.name, p.address); }
+    peers.forEach((peer) => console.log(peer.name));
     ```
   </Tab>
 </Tabs>
 
-## External event injection
+## Inject a durable external event
 
-Push external events from outside systems into a running agent. Events are queued as runtime-backed external inputs and admitted as future turn work.
+Use `session/external_event` when the event should enter the runtime's external-ingress lane rather than the comms command lane.
 
 <Tabs>
-  <Tab title="CLI">
-    ```bash
-    # Keep-alive with stdin events (pipe or type interactively)
-    rkat run --comms-name monitor --keep-alive --stdin \
-      "You are a monitoring agent."
-    ```
-  </Tab>
   <Tab title="JSON-RPC">
     ```json
     {
-      "jsonrpc": "2.0", "id": 4,
-      "method": "comms/send",
+      "jsonrpc": "2.0",
+      "id": 4,
+      "method": "session/external_event",
       "params": {
         "session_id": "01936f8a-...",
-        "payload": {"event": "deploy_complete", "env": "prod"},
-        "source": "deploy-bot"
+        "kind": "generic_json",
+        "event_type": "deploy_complete",
+        "payload": {
+          "environment": "prod",
+          "release": "2026.04.21"
+        }
       }
     }
     ```
   </Tab>
   <Tab title="REST">
     ```bash
-    curl -X POST http://localhost:8080/comms/send \
+    curl -X POST http://localhost:8080/sessions/01936f8a-.../external-events \
       -H "Content-Type: application/json" \
-      -d '{"session_id":"01936f8a-...","payload":{"event":"deploy_complete","env":"prod"},"source":"deploy-bot"}'
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {"name": "meerkat_comms_send", "arguments": {
-      "session_id": "01936f8a-...",
-      "kind": "event",
-      "body": "{\"event\":\"deploy_complete\",\"env\":\"prod\"}"
-    }}
+      -d '{
+        "kind": "generic_json",
+        "event_type": "deploy_complete",
+        "payload": {
+          "environment": "prod",
+          "release": "2026.04.21"
+        }
+      }'
     ```
   </Tab>
   <Tab title="Python">
     ```python
-    await session.send(payload={"event": "deploy_complete", "env": "prod"}, source="deploy-bot")
+    await session.send_external_event(
+        "deploy_complete",
+        {
+            "environment": "prod",
+            "release": "2026.04.21",
+        },
+    )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    await session.send({ payload: { event: "deploy_complete", env: "prod" }, source: "deploy-bot" });
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let injector = service.event_injector(&session_id).await
-        .expect("comms must be enabled");
-
-    injector.inject(
-        r#"{"event": "deploy_complete"}"#.into(),
-        PlainEventSource::Rpc,
-    )?;
-
+    await session.sendExternalEvent("deploy_complete", {
+      environment: "prod",
+      release: "2026.04.21",
+    });
     ```
   </Tab>
 </Tabs>
 
-## Delegate through mobs
-
-In `0.5`, delegated and multi-agent work routes through mobs rather than a standalone helper-agent tool family. Use mob member refs, flow runs, and peer messaging to coordinate temporary discussion groups or longer-lived orchestration topologies.
+<Note>
+Use `comms/send` for typed inbox and peer communication. Use `session/external_event` when an outside system is appending durable runtime-backed work.
+</Note>

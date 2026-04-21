@@ -13,7 +13,11 @@ This guide uses the four Gemma 4 aliases we recommend for Meerkat:
 - `gemma-4-26b-a4b`
 - `gemma-4-31b`
 
-Gemma 4 is a reasoning-capable family with native `system` role support and native function calling. All four variants support text and image input, while `E2B` and `E4B` also expose native audio support in the model capability tables. For Meerkat, the safest OpenAI-compatible serving default today is `chat_completions`, because that is the path most clearly documented for Gemma 4 tool calling across the serving stacks below.
+Gemma 4 is a reasoning-capable family with native `system` role support and native function calling. All four variants fit well into Meerkat's current self-hosted text, image, and tool-calling path. For Meerkat, the safest OpenAI-compatible serving default today is `chat_completions`, because that is the path most clearly documented for Gemma 4 tool calling across the serving stacks below.
+
+<Warning>
+Upstream Gemma capability tables may advertise audio on some variants, but Meerkat's current self-hosted path does not surface self-hosted Gemma audio as a realtime/audio capability. Treat the current integration as text + image + tools unless and until a dedicated self-hosted realtime/audio path is documented.
+</Warning>
 
 <Warning>
 Treat `supports_thinking` and `supports_reasoning` as transport-facing settings, not raw model facts. Gemma 4 itself is reasoning-capable, but normalized reasoning controls and trace streaming still vary by serving stack.
@@ -246,7 +250,7 @@ Use vLLM when you want a self-managed server and the most control over deploymen
 | `gemma-4-26b-a4b` | Stronger quality on a serious local or remote GPU setup |
 | `gemma-4-31b` | Best quality of the four, usually best on a dedicated server |
 
-`E2B` and `E4B` are also the sizes with native audio support in the upstream capability tables; `26B A4B` and `31B` are text+image models.
+Upstream capability tables may differentiate the smaller variants on audio, but Meerkat's current self-hosted integration treats all four aliases as text/image/tool-capable models rather than a separate self-hosted audio transport surface.
 
 ## Validation checklist
 

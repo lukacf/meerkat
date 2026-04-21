@@ -9,8 +9,8 @@ decides DSL-extend vs. shell-mechanic per the meerkat-architecture skill
 
 ## Inventory of realtime-voice runtime additions that touch machines
 
-Source: `diff cfe85b55a..backup/realtime-voice-pre-259-rebase --
-meerkat-runtime/src/meerkat_machine.rs`.
+Source: historical diff against the pre-split runtime machine implementation
+that now lives under `meerkat-runtime/src/meerkat_machine/`.
 
 ### A. Semantic state (MUST become DSL state)
 
@@ -38,9 +38,9 @@ Status projection: `status() → RealtimeAttachmentStatus` derived from `{bindin
 
 **Dogma verdict:** one semantic fact, one owner. Machines own semantics. This
 is not a projection — it's a state machine with explicit guards and authority
-epochs. It must live in MeerkatMachine DSL. My current implementation
-(`meerkat-runtime/src/meerkat_machine/realtime_attachment.rs` shell module)
-violates the dogma.
+epochs. It must live in MeerkatMachine DSL. The historical note below refers to
+the pre-split runtime shell layout; the current runtime now uses the split
+`meerkat-runtime/src/meerkat_machine/` module tree.
 
 ### B. Commands already in `meerkat_machine_types.rs` (from the squash)
 
@@ -159,12 +159,12 @@ that the model's guards hold. Any guard bug surfaces here.
 
 ### Phase 2 — Rewire shell through DSL
 
-1. **Delete** `meerkat-runtime/src/meerkat_machine/realtime_attachment.rs`
-   (the shell authority struct).
+1. **Delete** the old dedicated realtime-attachment shell authority struct
+   from the runtime machine implementation.
 2. **Remove** `realtime_attachment: RuntimeRealtimeAttachmentAuthority` from
    `RuntimeSessionEntry` in `meerkat-runtime/src/meerkat_machine/mod.rs`.
-3. **Rewrite** the 7 public methods in `session_management.rs` (or a new
-   `realtime_attachment.rs` that is now pure shell-routing) so every mutation
+3. **Rewrite** the 7 public methods in `session_management.rs` (or a pure
+   shell-routing helper under the split runtime machine modules) so every mutation
    routes through `apply_dsl_input`/`stage_session_dsl_input`:
    - `project_realtime_attachment_intent(session_id, present)` → ProjectRealtimeIntent
    - `attach_live(session_id)` → BeginRealtimeBinding, then read DSL state to construct `RealtimeAttachmentSignalAuthority { session_id, authority_epoch: dsl.realtime_binding_authority_epoch.expect("set by transition") }`

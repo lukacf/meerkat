@@ -2,41 +2,31 @@
 //!
 //! When a mob sends a bridge command that requires an already-bound
 //! supervisor (e.g. `AuthorizeSupervisor`) and the member replies with a
-//! `Rejected` that indicates the supervisor state does not match the
-//! mob's own authority (`NotBound`, `StaleSupervisor`, `SenderMismatch`),
-//! the correct recovery is to fall back to a fresh `BindMember` call —
-//! restoring membership by re-running the bootstrap path.
+//! rejection whose [`BridgeRejectionClass`] is
+//! [`BridgeRejectionClass::RecoverableBySupervisorRebind`], the correct
+//! recovery is to fall back to a fresh `BindMember` call — restoring
+//! membership by re-running the bootstrap path.
 //!
-//! Before this helper landed, the same `matches!` pattern was duplicated at
-//! three callsites (`actor.rs` twice, `provisioner.rs` once) and had
-//! previously been implemented via string-matching on `reason.contains(...)`
-//! of the rejection message, which was fragile because any edit to those
-//! strings silently broke rotation fallback (see the H1 review finding).
-//! Consolidating here ensures every callsite uses the same typed predicate.
-//!
-//! Extending the fallback set is intentionally a single-point change: add
-//! the variant here and all callsites pick it up.
+//! Classification authority lives on [`BridgeRejectionCause::class`] in
+//! `meerkat-contracts`, not here. This helper is a thin adapter that
+//! projects the typed class onto a boolean for the callsites that want
+//! exactly the "should I retry via bind?" question. Any future class
+//! variant (e.g. a "retry after backoff" case) is added to the typed
+//! class in contracts, and every callsite picks it up through the
+//! protocol types — the hardcoded cause set that used to live here has
+//! been deleted.
 
-use super::bridge_protocol::BridgeRejectionCause;
+use super::bridge_protocol::{BridgeRejectionCause, BridgeRejectionClass};
 
 /// Returns `true` when a bridge rejection indicates the member's
 /// supervisor state is out of sync with the mob and the mob should
-/// recover by re-running `BindMember`.
-///
-/// The three causes in the fallback set share the property that the
-/// member is reachable and speaking the protocol correctly, but its
-/// supervisor authority is either missing or mismatched relative to the
-/// mob's current authority. Every other cause (`AlreadyBound`,
-/// `UnsupportedProtocolVersion`, `InvalidBootstrapToken`,
-/// `InvalidSupervisorSpec`, `InvalidPeerSpec`, `AddressMismatch`,
-/// `Unsupported`, `Internal`) is a hard failure that a fresh
-/// `BindMember` would not fix, and so must bubble up.
+/// recover by re-running `BindMember`. Branches on the typed
+/// [`BridgeRejectionClass`] from the contracts crate — no cause-set
+/// literal comparison lives in this helper.
 pub(super) fn should_fall_back_to_bind(cause: BridgeRejectionCause) -> bool {
     matches!(
-        cause,
-        BridgeRejectionCause::NotBound
-            | BridgeRejectionCause::StaleSupervisor
-            | BridgeRejectionCause::SenderMismatch,
+        cause.class(),
+        BridgeRejectionClass::RecoverableBySupervisorRebind
     )
 }
 
@@ -46,7 +36,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn falls_back_on_not_bound_stale_and_sender_only() {
+    fn falls_back_on_recoverable_class() {
         assert!(should_fall_back_to_bind(BridgeRejectionCause::NotBound));
         assert!(should_fall_back_to_bind(
             BridgeRejectionCause::StaleSupervisor
@@ -57,8 +47,8 @@ mod tests {
     }
 
     #[test]
-    fn does_not_fall_back_on_hard_failures() {
-        let hard_failures = [
+    fn does_not_fall_back_on_fatal_class() {
+        let fatal = [
             BridgeRejectionCause::AlreadyBound,
             BridgeRejectionCause::InvalidBootstrapToken,
             BridgeRejectionCause::UnsupportedProtocolVersion,
@@ -68,10 +58,46 @@ mod tests {
             BridgeRejectionCause::Unsupported,
             BridgeRejectionCause::Internal,
         ];
-        for cause in hard_failures {
+        for cause in fatal {
             assert!(
                 !should_fall_back_to_bind(cause),
                 "cause {cause:?} must not trigger bind fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn class_partitions_causes_cleanly() {
+        // Defensive regression: every `BridgeRejectionCause` variant must
+        // have a concrete class. If a new variant is added and forgotten
+        // here, the test below will fail to enumerate it.
+        let recoverable = [
+            BridgeRejectionCause::NotBound,
+            BridgeRejectionCause::StaleSupervisor,
+            BridgeRejectionCause::SenderMismatch,
+        ];
+        for cause in recoverable {
+            assert_eq!(
+                cause.class(),
+                BridgeRejectionClass::RecoverableBySupervisorRebind,
+                "cause {cause:?} must be in the recoverable class"
+            );
+        }
+        let fatal = [
+            BridgeRejectionCause::AlreadyBound,
+            BridgeRejectionCause::InvalidBootstrapToken,
+            BridgeRejectionCause::UnsupportedProtocolVersion,
+            BridgeRejectionCause::InvalidSupervisorSpec,
+            BridgeRejectionCause::InvalidPeerSpec,
+            BridgeRejectionCause::AddressMismatch,
+            BridgeRejectionCause::Unsupported,
+            BridgeRejectionCause::Internal,
+        ];
+        for cause in fatal {
+            assert_eq!(
+                cause.class(),
+                BridgeRejectionClass::Fatal,
+                "cause {cause:?} must be in the fatal class"
             );
         }
     }

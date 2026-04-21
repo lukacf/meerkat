@@ -383,30 +383,15 @@ impl MobActor {
                 address,
                 bootstrap_token,
                 ..
-            } => {
-                if let Some(token) = bootstrap_token.as_ref().filter(|token| !token.is_empty()) {
-                    return Ok(token.clone());
-                }
-                let query = address.split_once('?').map(|(_, query)| query).ok_or_else(|| {
+            } => bootstrap_token
+                .as_ref()
+                .filter(|token| !token.is_empty())
+                .cloned()
+                .ok_or_else(|| {
                     MobError::WiringError(format!(
-                        "external runtime binding for '{address}' is missing bridge bootstrap token"
+                        "external runtime binding for '{address}' is missing typed bootstrap_token field"
                     ))
-                })?;
-                for pair in query.split('&') {
-                    let Some((key, value)) = pair.split_once('=') else {
-                        continue;
-                    };
-                    if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-                        && !value.is_empty()
-                    {
-                        return Ok(super::bridge_protocol::BridgeBootstrapToken::new(value));
-                    }
-                }
-                Err(MobError::WiringError(format!(
-                    "external runtime binding for '{address}' is missing bootstrap token ('{}' query param or explicit field)",
-                    super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-                )))
-            }
+                }),
             crate::RuntimeBinding::Session => Err(MobError::Internal(
                 "bridge bootstrap token requested for session binding".to_string(),
             )),
@@ -768,6 +753,29 @@ impl MobActor {
         effects: &[mob_dsl::MobMachineEffect],
     ) {
         let mob_id = &self.definition.id;
+        // DSL session IDs flow through `mob_dsl::SessionId(String)`. They
+        // originate from canonical `SessionId` values at the command seam and
+        // must parse back cleanly. A parse failure here means a non-canonical
+        // string slipped past the shell→DSL boundary — refuse to fabricate a
+        // fresh `SessionId` on the observer event (which would leak an ID
+        // that exists nowhere in machine state) and drop the event with a
+        // structural error log instead.
+        let parse_session_id =
+            |raw: &str, field: &'static str| match meerkat_core::types::SessionId::parse(raw) {
+                Ok(session_id) => Some(session_id),
+                Err(error) => {
+                    tracing::error!(
+                        %mob_id,
+                        %agent_identity,
+                        %field,
+                        raw = %raw,
+                        %error,
+                        "realtime binding effect carries non-canonical SessionId; \
+                         dropping observer event to avoid fabricated ID"
+                    );
+                    None
+                }
+            };
         for effect in effects {
             match effect {
                 mob_dsl::MobMachineEffect::MemberRealtimeBindingSet {
@@ -779,13 +787,15 @@ impl MobActor {
                         bridge_session_id = %bridge_session_id.0,
                         "MemberRealtimeBindingSet"
                     );
+                    let Some(bridge_session_id) =
+                        parse_session_id(&bridge_session_id.0, "bridge_session_id")
+                    else {
+                        continue;
+                    };
                     let event = super::state::MemberRealtimeBindingEvent::Set {
                         mob_id: mob_id.clone(),
                         agent_identity: agent_identity.clone(),
-                        bridge_session_id: meerkat_core::types::SessionId::parse(
-                            &bridge_session_id.0,
-                        )
-                        .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                        bridge_session_id,
                     };
                     // send() fails iff there are no subscribers, which is
                     // normal when the RPC surface isn't consuming events;
@@ -804,13 +814,17 @@ impl MobActor {
                         new_session_id = %new_session_id.0,
                         "MemberRealtimeBindingRotated"
                     );
+                    let (Some(old_session_id), Some(new_session_id)) = (
+                        parse_session_id(&old_session_id.0, "old_session_id"),
+                        parse_session_id(&new_session_id.0, "new_session_id"),
+                    ) else {
+                        continue;
+                    };
                     let event = super::state::MemberRealtimeBindingEvent::Rotated {
                         mob_id: mob_id.clone(),
                         agent_identity: agent_identity.clone(),
-                        old_session_id: meerkat_core::types::SessionId::parse(&old_session_id.0)
-                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
-                        new_session_id: meerkat_core::types::SessionId::parse(&new_session_id.0)
-                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                        old_session_id,
+                        new_session_id,
                     };
                     let _ = self.realtime_binding_tx.send(event);
                 }
@@ -821,11 +835,13 @@ impl MobActor {
                         session_id = %session_id.0,
                         "MemberRealtimeBindingReleased"
                     );
+                    let Some(session_id) = parse_session_id(&session_id.0, "session_id") else {
+                        continue;
+                    };
                     let event = super::state::MemberRealtimeBindingEvent::Released {
                         mob_id: mob_id.clone(),
                         agent_identity: agent_identity.clone(),
-                        session_id: meerkat_core::types::SessionId::parse(&session_id.0)
-                            .unwrap_or_else(|_| meerkat_core::types::SessionId::new()),
+                        session_id,
                     };
                     let _ = self.realtime_binding_tx.send(event);
                 }

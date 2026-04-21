@@ -168,10 +168,10 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/handle.rs` | `set_spawn_policy` | `public-inherent` | `closed` | `MobSpawnPolicySurface` |
 | `meerkat-mob/src/runtime/handle.rs` | `shutdown` | `public-inherent` | `closed` | `MobLifecycleAuthority + SessionBackend runtime bridge` |
 | `meerkat-mob/src/runtime/handle.rs` | `force_cancel_member` | `public-inherent` | `closed` | `SessionBackend runtime bridge + InputLifecycle truth` |
-| `meerkat-mob/src/runtime/handle.rs` | `spawn_helper` | `public-inherent` | `closed` | `MobMemberTerminalClassifier` |
-| `meerkat-mob/src/runtime/handle.rs` | `fork_helper` | `public-inherent` | `closed` | `MobMemberTerminalClassifier` |
-| `meerkat-mob/src/runtime/handle.rs` | `wait_one` | `public-inherent` | `closed` | `MobMemberTerminalClassifier` |
-| `meerkat-mob/src/runtime/handle.rs` | `wait_all` | `public-inherent` | `closed` | `MobMemberTerminalClassifier` |
+| `meerkat-mob/src/runtime/handle.rs` | `spawn_helper` | `public-inherent` | `closed` | `MobMemberLifecycleAuthority` |
+| `meerkat-mob/src/runtime/handle.rs` | `fork_helper` | `public-inherent` | `closed` | `MobMemberLifecycleAuthority` |
+| `meerkat-mob/src/runtime/handle.rs` | `wait_one` | `public-inherent` | `closed` | `MobMemberLifecycleAuthority` |
+| `meerkat-mob/src/runtime/handle.rs` | `wait_all` | `public-inherent` | `closed` | `MobMemberLifecycleAuthority` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_spawn_provisioned_batch` | `manual-callback` | `closed` | `PendingSpawnLineage + RosterAuthority + PendingProvision rollback contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `enqueue_spawn` | `enum-dispatch` | `closed` | `PendingSpawnLineage + MobOrchestratorAuthority + RosterAuthority` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_force_cancel` | `enum-dispatch` | `closed` | `MobLifecycleAuthority active-member gate + SessionBackend::interrupt_member runtime-adapter ownership contract + InputLifecycle cancellation semantics` |

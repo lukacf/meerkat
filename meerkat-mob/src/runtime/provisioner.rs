@@ -1261,31 +1261,14 @@ impl MultiBackendProvisioner {
         address: &str,
         bootstrap_token: Option<&str>,
     ) -> Result<super::bridge_protocol::BridgeBootstrapToken, MobError> {
-        if let Some(token) = bootstrap_token.filter(|token| !token.is_empty()) {
-            return Ok(super::bridge_protocol::BridgeBootstrapToken::new(token));
-        }
-        let query = address
-            .split_once('?')
-            .map(|(_, query)| query)
+        bootstrap_token
+            .filter(|token| !token.is_empty())
+            .map(super::bridge_protocol::BridgeBootstrapToken::new)
             .ok_or_else(|| {
                 MobError::WiringError(format!(
-                    "external runtime binding for '{address}' is missing bridge bootstrap token"
+                    "external runtime binding for '{address}' is missing typed bootstrap_token field"
                 ))
-            })?;
-        for pair in query.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            if key == super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-                && !value.is_empty()
-            {
-                return Ok(super::bridge_protocol::BridgeBootstrapToken::new(value));
-            }
-        }
-        Err(MobError::WiringError(format!(
-            "external runtime binding for '{address}' is missing bootstrap token ('{}' query param or explicit field)",
-            super::bridge_protocol::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM
-        )))
+            })
     }
 
     async fn bridge_supervisor_payload(

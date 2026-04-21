@@ -4825,11 +4825,14 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
 }
 
 #[tokio::test]
-async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
+async fn test_query_string_bootstrap_token_fallback_is_rejected() {
+    // Dogma regression: bind with only a query-string `?mob_supervisor_bootstrap_token=...`
+    // (no typed `bootstrap_token` field) must be rejected. The typed field is the
+    // sole authoritative carrier; the query-string fallback was deleted in Wave 3 E.
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let definition = with_unique_mob_id(
         sample_definition_with_external_backend(),
-        "peer-only-query-bootstrap-rebind",
+        "peer-only-query-bootstrap-rejected",
     );
     let mob_id = definition.id.clone();
     let (handle, _service) = create_test_mob_with_real_comms(definition).await;
@@ -4853,7 +4856,7 @@ async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
         ),
         bootstrap_token: None,
     };
-    handle
+    let err = handle
         .spawn_with_binding(
             ProfileName::from("worker"),
             MeerkatId::from("w-ext"),
@@ -4861,36 +4864,11 @@ async fn test_query_sourced_bootstrap_token_survives_peer_only_rebind() {
             binding,
         )
         .await
-        .expect("spawn live external worker with query-only bootstrap token");
-
-    let entry = handle
-        .get_member(&AgentIdentity::from("w-ext"))
-        .await
-        .expect("spawned query-bootstrap entry");
-    match entry.member_ref {
-        MemberRef::BackendPeer {
-            bootstrap_token: Some(ref token),
-            ..
-        } => assert_eq!(
-            token, &bootstrap_token,
-            "spawn should persist the effective bootstrap token even when it came from the address query"
-        ),
-        ref other => panic!("expected backend peer member ref, got {other:?}"),
-    }
-
-    external.forget_supervisor().await;
-
-    handle
-        .internal_turn(
-            AgentIdentity::from("w-ext"),
-            ContentInput::from("after-query-bootstrap-restart".to_string()),
-        )
-        .await
-        .expect("query-sourced bootstrap token should support rebind fallback");
-    assert_eq!(
-        external.bind_count(),
-        2,
-        "query-sourced bootstrap token should remain available for restart recovery"
+        .expect_err("query-string-only bootstrap token must be rejected");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("typed bootstrap_token field"),
+        "error must name the missing typed field, got: {rendered}"
     );
 }
 

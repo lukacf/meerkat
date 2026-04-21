@@ -233,6 +233,50 @@ impl CoreCommsRuntime for MockCommsRuntime {
 
     async fn send(&self, cmd: CommsCommand) -> Result<SendReceipt, SendError> {
         match cmd {
+            CommsCommand::PeerLifecycle { to, kind, .. } => {
+                let behavior = *self
+                    .behavior
+                    .read()
+                    .expect("poisoned behavior lock in mock runtime");
+                match kind {
+                    meerkat_core::comms::PeerLifecycleKind::PeerAdded
+                        if behavior.fail_send_peer_added =>
+                    {
+                        return Err(SendError::Unsupported(
+                            "mock mob.peer_added notification failure".to_string(),
+                        ));
+                    }
+                    meerkat_core::comms::PeerLifecycleKind::PeerRetired
+                        if behavior.fail_send_peer_retired =>
+                    {
+                        return Err(SendError::Unsupported(
+                            "mock mob.peer_retired notification failure".to_string(),
+                        ));
+                    }
+                    meerkat_core::comms::PeerLifecycleKind::PeerUnwired
+                        if behavior.fail_send_peer_unwired =>
+                    {
+                        return Err(SendError::Unsupported(
+                            "mock mob.peer_unwired notification failure".to_string(),
+                        ));
+                    }
+                    _ => {}
+                }
+
+                let trusted = self.trusted_peers.read().await;
+                if !trusted.values().any(|peer| peer.name == to.as_str()) {
+                    return Err(SendError::PeerNotFound(to.as_string()));
+                }
+                drop(trusted);
+
+                self.sent_intents
+                    .write()
+                    .await
+                    .push(kind.as_str().to_string());
+                Ok(SendReceipt::PeerLifecycleSent {
+                    envelope_id: uuid::Uuid::new_v4(),
+                })
+            }
             CommsCommand::PeerRequest { to, intent, .. } => {
                 let behavior = *self
                     .behavior

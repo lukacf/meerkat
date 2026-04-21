@@ -86,7 +86,6 @@ pub use runtime::bridge_protocol::{
     BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
     BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
-pub use runtime::flow_kernels;
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};

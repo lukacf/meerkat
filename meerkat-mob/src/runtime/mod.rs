@@ -78,6 +78,7 @@ mod flow;
 pub mod flow_frame_engine;
 pub mod flow_frame_kernel;
 mod flow_frame_loop_driver;
+#[doc(hidden)]
 pub mod flow_kernels;
 mod flow_loop_until_evaluation;
 mod flow_run_kernel;

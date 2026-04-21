@@ -9,8 +9,8 @@ use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use meerkat_machine_kernels::{
-    KernelEffect, KernelField, KernelFields, KernelHelperName, KernelState, KernelValue,
-    TransitionOutcome,
+    KernelEffect, KernelEffectVariant, KernelField, KernelFields, KernelHelperName,
+    KernelInputVariant, KernelState, KernelValue, TransitionOutcome,
 };
 use std::sync::Arc;
 
@@ -326,15 +326,15 @@ impl FlowRunKernel {
         let effects = self
             .cas_with_retry(
                 run_id,
-                "ProjectFrameStepStatus",
+                flow_run::input::project_frame_step_status(),
                 kernel_fields([
-                    ("step_id".to_string(), Self::step_id_value(step_id)),
+                    (flow_run::field::step_id(), Self::step_id_value(step_id)),
                     (
-                        "step_status".to_string(),
+                        flow_run::field::step_status(),
                         Self::step_status_value(&step_status),
                     ),
                     (
-                        "append_failure_ledger".to_string(),
+                        flow_run::field::append_failure_ledger(),
                         KernelValue::Bool(requested_failure_ledger_append),
                     ),
                 ]),
@@ -350,8 +350,16 @@ impl FlowRunKernel {
         Ok(Some(FrameStepProjectionEffects {
             step_status: step_status.clone(),
             persist_output: matches!(step_status, crate::run::StepRunStatus::Completed),
-            append_failure_ledger: has_step_effect(&effects, "AppendFailureLedger", step_id)?,
-            escalate_supervisor: has_step_effect(&effects, "EscalateSupervisor", step_id)?,
+            append_failure_ledger: has_step_effect(
+                &effects,
+                flow_run::effect::append_failure_ledger(),
+                step_id,
+            )?,
+            escalate_supervisor: has_step_effect(
+                &effects,
+                flow_run::effect::escalate_supervisor(),
+                step_id,
+            )?,
         }))
     }
 
@@ -362,8 +370,8 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "StepBranchBlocked",
-            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
+            flow_run::helper::step_branch_blocked(),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -375,8 +383,8 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "StepDependencyReady",
-            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
+            flow_run::helper::step_dependency_ready(),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -388,15 +396,15 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "StepDependencyShouldSkip",
-            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
+            flow_run::helper::step_dependency_should_skip(),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
 
     pub async fn ordered_steps(&self, run_id: &RunId) -> Result<Vec<StepId>, MobError> {
         let run = self.require_run(run_id).await?;
-        let seq = match run.flow_state.fields.get("ordered_steps") {
+        let seq = match run.flow_state.field(&flow_run::field::ordered_steps()) {
             Some(KernelValue::Seq(seq)) => seq,
             other => {
                 return Err(MobError::Internal(format!(
@@ -484,8 +492,8 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "CollectionSatisfied",
-            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
+            flow_run::helper::collection_satisfied(),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -497,8 +505,8 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "CollectionFeasible",
-            kernel_fields([("step_id".to_string(), Self::step_id_value(step_id))]),
+            flow_run::helper::collection_feasible(),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -511,9 +519,9 @@ impl FlowRunKernel {
     ) -> Result<bool, MobError> {
         self.helper_bool(
             run_id,
-            "TargetRetryAllowed",
+            flow_run::helper::target_retry_allowed(),
             kernel_fields([(
-                "retry_key".to_string(),
+                flow_run::field::retry_key(),
                 KernelValue::String(Self::retry_key(step_id, target_id)),
             )]),
         )
@@ -522,7 +530,7 @@ impl FlowRunKernel {
 
     pub async fn failure_count(&self, run_id: &RunId) -> Result<u32, MobError> {
         let run = self.require_run(run_id).await?;
-        match run.flow_state.fields.get("failure_count") {
+        match run.flow_state.field(&flow_run::field::failure_count()) {
             Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
                 MobError::Internal(format!("flow_run failure_count out of range for {run_id}"))
             }),
@@ -534,7 +542,10 @@ impl FlowRunKernel {
 
     pub async fn consecutive_failure_count(&self, run_id: &RunId) -> Result<u32, MobError> {
         let run = self.require_run(run_id).await?;
-        match run.flow_state.fields.get("consecutive_failure_count") {
+        match run
+            .flow_state
+            .field(&flow_run::field::consecutive_failure_count())
+        {
             Some(KernelValue::U64(value)) => u32::try_from(*value).map_err(|_| {
                 MobError::Internal(format!(
                     "flow_run consecutive_failure_count out of range for {run_id}"
@@ -552,7 +563,7 @@ impl FlowRunKernel {
         step_id: &StepId,
     ) -> Result<Option<crate::run::StepRunStatus>, MobError> {
         let run = self.require_run(run_id).await?;
-        let map = match run.flow_state.fields.get("step_status") {
+        let map = match run.flow_state.field(&flow_run::field::step_status()) {
             Some(KernelValue::Map(map)) => map,
             other => {
                 return Err(MobError::Internal(format!(
@@ -573,12 +584,11 @@ impl FlowRunKernel {
     fn evaluate_helper_value(
         &self,
         state: &KernelState,
-        helper: &str,
+        helper: KernelHelperName,
         fields: KernelFields,
     ) -> Result<KernelValue, MobError> {
-        let helper_name: KernelHelperName = helper.into();
         flow_run::kernel()
-            .evaluate_helper(state, &helper_name, &fields)
+            .evaluate_helper(state, &helper, &fields)
             .map_err(|error| {
                 MobError::Internal(format!("flow_run helper {helper} refused: {error}"))
             })
@@ -592,12 +602,13 @@ impl FlowRunKernel {
     async fn cas_with_retry(
         &self,
         run_id: &RunId,
-        variant: &str,
+        variant: KernelInputVariant,
         fields: KernelFields,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         for attempt in 0..5u32 {
             let run = self.require_run(run_id).await?;
-            let outcome = self.transition_outcome(&run.flow_state, variant, fields.clone())?;
+            let outcome =
+                self.transition_outcome(&run.flow_state, variant.clone(), fields.clone())?;
             let transitioned = self
                 .run_store
                 .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
@@ -606,7 +617,7 @@ impl FlowRunKernel {
                 return Ok(Some(outcome.effects));
             }
             if attempt < 4 {
-                tracing::debug!(variant, attempt, "CAS contention, retrying");
+                tracing::debug!(variant = %variant, attempt, "CAS contention, retrying");
             }
         }
         Err(MobError::Internal(format!(
@@ -614,11 +625,11 @@ impl FlowRunKernel {
         )))
     }
 
-    fn terminal_variant(target: &TerminalizationTarget) -> &'static str {
+    fn terminal_variant(target: &TerminalizationTarget) -> KernelInputVariant {
         match target {
-            TerminalizationTarget::Completed => "TerminalizeCompleted",
-            TerminalizationTarget::Failed { .. } => "TerminalizeFailed",
-            TerminalizationTarget::Canceled => "TerminalizeCanceled",
+            TerminalizationTarget::Completed => flow_run::input::terminalize_completed(),
+            TerminalizationTarget::Failed { .. } => flow_run::input::terminalize_failed(),
+            TerminalizationTarget::Canceled => flow_run::input::terminalize_canceled(),
         }
     }
 
@@ -637,7 +648,7 @@ impl FlowRunKernel {
                 return Ok(TerminalizationOutcome::Noop);
             }
             let next_state =
-                self.transition_state(&run.flow_state, variant, flow_run::fields([]))?;
+                self.transition_state(&run.flow_state, variant.clone(), flow_run::fields([]))?;
             let transitioned = self
                 .run_store
                 .cas_run_snapshot(
@@ -658,7 +669,7 @@ impl FlowRunKernel {
                     .await;
             }
             if attempt < 4 {
-                tracing::debug!(variant, attempt, "terminalize CAS contention, retrying");
+                tracing::debug!(variant = %variant, attempt, "terminalize CAS contention, retrying");
             }
         }
         Err(MobError::Internal(format!(
@@ -669,7 +680,7 @@ impl FlowRunKernel {
     async fn apply_step_input(
         &self,
         run_id: &RunId,
-        variant: &str,
+        variant: KernelInputVariant,
         step_id: &StepId,
     ) -> Result<bool, MobError> {
         Ok(self
@@ -681,16 +692,13 @@ impl FlowRunKernel {
     async fn apply_step_input_with_effects(
         &self,
         run_id: &RunId,
-        variant: &str,
+        variant: KernelInputVariant,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         self.cas_with_retry(
             run_id,
             variant,
-            kernel_fields([(
-                "step_id".to_string(),
-                KernelValue::String(step_id.to_string()),
-            )]),
+            kernel_fields([(flow_run::field::step_id(), Self::step_id_value(step_id))]),
         )
         .await
     }
@@ -742,10 +750,10 @@ impl FlowRunKernel {
     fn transition_outcome(
         &self,
         state: &KernelState,
-        variant: &str,
+        variant: KernelInputVariant,
         fields: KernelFields,
     ) -> Result<TransitionOutcome, MobError> {
-        flow_run::transition(state, &flow_run::input(variant.into(), fields)).map_err(|error| {
+        flow_run::transition(state, &flow_run::input(variant.clone(), fields)).map_err(|error| {
             MobError::Internal(format!("flow_run {variant} transition refused: {error}"))
         })
     }
@@ -753,7 +761,7 @@ impl FlowRunKernel {
     fn transition_state(
         &self,
         state: &KernelState,
-        variant: &str,
+        variant: KernelInputVariant,
         fields: KernelFields,
     ) -> Result<KernelState, MobError> {
         Ok(self.transition_outcome(state, variant, fields)?.next_state)
@@ -762,11 +770,11 @@ impl FlowRunKernel {
     async fn helper_bool(
         &self,
         run_id: &RunId,
-        helper: &str,
+        helper: KernelHelperName,
         fields: KernelFields,
     ) -> Result<bool, MobError> {
         let run = self.require_run(run_id).await?;
-        match self.evaluate_helper_value(&run.flow_state, helper, fields)? {
+        match self.evaluate_helper_value(&run.flow_state, helper.clone(), fields)? {
             KernelValue::Bool(value) => Ok(value),
             other => Err(MobError::Internal(format!(
                 "flow_run helper {helper} returned non-bool value: {other:?}"
@@ -802,8 +810,11 @@ impl FlowRunMutator for FlowRunKernel {
         if run.status != MobRunStatus::Pending {
             return Ok(false);
         }
-        let next_state =
-            self.transition_state(&run.flow_state, "StartRun", flow_run::fields([]))?;
+        let next_state = self.transition_state(
+            &run.flow_state,
+            flow_run::input::start_run(),
+            flow_run::fields([]),
+        )?;
         self.run_store
             .cas_run_snapshot(
                 run_id,
@@ -818,7 +829,8 @@ impl FlowRunMutator for FlowRunKernel {
 
     async fn dispatch_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
         self.require_run_active(run_id, "dispatch_step").await?;
-        self.apply_step_input(run_id, "DispatchStep", step_id).await
+        self.apply_step_input(run_id, flow_run::input::dispatch_step(), step_id)
+            .await
     }
 
     async fn dispatch_step_effects(
@@ -828,12 +840,13 @@ impl FlowRunMutator for FlowRunKernel {
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         self.require_run_active(run_id, "dispatch_step_effects")
             .await?;
-        self.apply_step_input_with_effects(run_id, "DispatchStep", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::dispatch_step(), step_id)
             .await
     }
 
     async fn complete_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "CompleteStep", step_id).await
+        self.apply_step_input(run_id, flow_run::input::complete_step(), step_id)
+            .await
     }
 
     async fn complete_step_effects(
@@ -841,12 +854,12 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        self.apply_step_input_with_effects(run_id, "CompleteStep", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::complete_step(), step_id)
             .await
     }
 
     async fn record_step_output(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "RecordStepOutput", step_id)
+        self.apply_step_input(run_id, flow_run::input::record_step_output(), step_id)
             .await
     }
 
@@ -855,17 +868,17 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        self.apply_step_input_with_effects(run_id, "RecordStepOutput", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::record_step_output(), step_id)
             .await
     }
 
     async fn condition_passed(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "ConditionPassed", step_id)
+        self.apply_step_input(run_id, flow_run::input::condition_passed(), step_id)
             .await
     }
 
     async fn condition_rejected(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "ConditionRejected", step_id)
+        self.apply_step_input(run_id, flow_run::input::condition_rejected(), step_id)
             .await
     }
 
@@ -874,12 +887,13 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        self.apply_step_input_with_effects(run_id, "ConditionRejected", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::condition_rejected(), step_id)
             .await
     }
 
     async fn fail_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "FailStep", step_id).await
+        self.apply_step_input(run_id, flow_run::input::fail_step(), step_id)
+            .await
     }
 
     async fn fail_step_effects(
@@ -887,12 +901,13 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        self.apply_step_input_with_effects(run_id, "FailStep", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::fail_step(), step_id)
             .await
     }
 
     async fn skip_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "SkipStep", step_id).await
+        self.apply_step_input(run_id, flow_run::input::skip_step(), step_id)
+            .await
     }
 
     async fn skip_step_effects(
@@ -900,12 +915,13 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
-        self.apply_step_input_with_effects(run_id, "SkipStep", step_id)
+        self.apply_step_input_with_effects(run_id, flow_run::input::skip_step(), step_id)
             .await
     }
 
     async fn cancel_step(&self, run_id: &RunId, step_id: &StepId) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "CancelStep", step_id).await
+        self.apply_step_input(run_id, flow_run::input::cancel_step(), step_id)
+            .await
     }
 
     async fn register_targets(
@@ -917,11 +933,11 @@ impl FlowRunMutator for FlowRunKernel {
         let run = self.require_run(run_id).await?;
         let next_state = self.transition_state(
             &run.flow_state,
-            "RegisterTargets",
+            flow_run::input::register_targets(),
             kernel_fields([
-                ("step_id".to_string(), Self::step_id_value(step_id)),
+                (flow_run::field::step_id(), Self::step_id_value(step_id)),
                 (
-                    "target_count".to_string(),
+                    flow_run::field::target_count(),
                     KernelValue::U64(u64::from(target_count)),
                 ),
             ]),
@@ -952,10 +968,13 @@ impl FlowRunMutator for FlowRunKernel {
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         self.cas_with_retry(
             run_id,
-            "RecordTargetSuccess",
+            flow_run::input::record_target_success(),
             kernel_fields([
-                ("step_id".to_string(), Self::step_id_value(step_id)),
-                ("target_id".to_string(), Self::target_id_value(target_id)),
+                (flow_run::field::step_id(), Self::step_id_value(step_id)),
+                (
+                    flow_run::field::target_id(),
+                    Self::target_id_value(target_id),
+                ),
             ]),
         )
         .await
@@ -982,11 +1001,14 @@ impl FlowRunMutator for FlowRunKernel {
         let retry_key = Self::retry_key(step_id, target_id);
         self.cas_with_retry(
             run_id,
-            "RecordTargetFailure",
+            flow_run::input::record_target_failure(),
             kernel_fields([
-                ("step_id".to_string(), Self::step_id_value(step_id)),
-                ("target_id".to_string(), Self::target_id_value(target_id)),
-                ("retry_key".to_string(), KernelValue::String(retry_key)),
+                (flow_run::field::step_id(), Self::step_id_value(step_id)),
+                (
+                    flow_run::field::target_id(),
+                    Self::target_id_value(target_id),
+                ),
+                (flow_run::field::retry_key(), KernelValue::String(retry_key)),
             ]),
         )
         .await
@@ -1012,10 +1034,13 @@ impl FlowRunMutator for FlowRunKernel {
     ) -> Result<Option<Vec<KernelEffect>>, MobError> {
         self.cas_with_retry(
             run_id,
-            "RecordTargetCanceled",
+            flow_run::input::record_target_canceled(),
             kernel_fields([
-                ("step_id".to_string(), Self::step_id_value(step_id)),
-                ("target_id".to_string(), Self::target_id_value(target_id)),
+                (flow_run::field::step_id(), Self::step_id_value(step_id)),
+                (
+                    flow_run::field::target_id(),
+                    Self::target_id_value(target_id),
+                ),
             ]),
         )
         .await
@@ -1026,8 +1051,12 @@ impl FlowRunMutator for FlowRunKernel {
         run_id: &RunId,
         step_id: &StepId,
     ) -> Result<bool, MobError> {
-        self.apply_step_input(run_id, "RecordTargetTerminalFailure", step_id)
-            .await
+        self.apply_step_input(
+            run_id,
+            flow_run::input::record_target_terminal_failure(),
+            step_id,
+        )
+        .await
     }
 
     async fn cancel_dispatched_steps(&self, run_id: &RunId) -> Result<(), MobError> {
@@ -1092,7 +1121,7 @@ fn parse_step_run_status(
 
 fn has_step_effect(
     effects: &[KernelEffect],
-    variant: &str,
+    variant: KernelEffectVariant,
     step_id: &StepId,
 ) -> Result<bool, MobError> {
     let expected = step_id.to_string();
@@ -1100,7 +1129,7 @@ fn has_step_effect(
         if effect.variant != variant {
             continue;
         }
-        match effect.fields.get("step_id") {
+        match effect.field(&flow_run::field::step_id()) {
             Some(KernelValue::String(candidate)) if candidate == &expected => return Ok(true),
             Some(other) => {
                 return Err(MobError::Internal(format!(

@@ -131,9 +131,29 @@ fn mob_machine_inputs_equal_runtime_manifest_exactly() {
     // semantic facts. Exclude them from the exact-parity assertion until
     // the DSL schema is extended to model their composition seams (if
     // ever; they may stay shell-level by design).
+    //
+    // Kickoff lifecycle inputs are also DSL-internal: the actor stages
+    // them directly while reconciling runtime startup callbacks and the
+    // kickoff task, rather than routing them through `MobMachineCommand`.
+    // They are semantic machine inputs, but intentionally not public
+    // runtime command variants.
     const RUNTIME_COMPOSITION_ONLY_COMMANDS: &[&str] =
         &["EnsureMember", "Reconcile", "ListMembersMatching"];
-    let actual = variant_names(&schema.inputs.variants);
+    const DSL_INTERNAL_INPUTS: &[&str] = &[
+        "KickoffMarkPending",
+        "KickoffMarkStarting",
+        "StartupMarkReady",
+        "KickoffResolveStarted",
+        "KickoffResolveCallbackPending",
+        "KickoffResolveFailed",
+        "KickoffResolveCancelled",
+        "KickoffCancelRequested",
+        "KickoffClear",
+    ];
+    let actual: BTreeSet<&str> = variant_names(&schema.inputs.variants)
+        .into_iter()
+        .filter(|name| !DSL_INTERNAL_INPUTS.contains(name))
+        .collect();
     let expected: BTreeSet<&str> = canonical_mob_machine_command_manifest()
         .into_iter()
         .filter(|name| !RUNTIME_COMPOSITION_ONLY_COMMANDS.contains(name))

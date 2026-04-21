@@ -23,6 +23,10 @@ use meerkat_machine_schema::{
     SchedulerRule, SemanticCoverageEntry, TriggerKind, canonical_composition_coverage_manifests,
     canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
 };
+use meerkat_mob::runtime::flow_kernels::{
+    flow_frame as runtime_flow_frame, flow_run as runtime_flow_run,
+    loop_iteration as runtime_loop_iteration,
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Args)]
@@ -1037,6 +1041,7 @@ impl CanonicalRegistry {
     pub fn validate(&self) -> Result<()> {
         let by_name = self.machine_map();
         self.validate_coverages()?;
+        validate_runtime_local_flow_kernels()?;
 
         for machine in &self.machines {
             machine
@@ -1219,6 +1224,23 @@ impl CanonicalRegistry {
             compositions,
         })
     }
+}
+
+fn runtime_local_flow_kernel_schemas() -> Vec<MachineSchema> {
+    vec![
+        runtime_flow_run::schema(),
+        runtime_flow_frame::schema(),
+        runtime_loop_iteration::schema(),
+    ]
+}
+
+fn validate_runtime_local_flow_kernels() -> Result<()> {
+    for schema in runtime_local_flow_kernel_schemas() {
+        schema
+            .validate()
+            .with_context(|| format!("validate runtime-local flow kernel {}", schema.machine))?;
+    }
+    Ok(())
 }
 
 fn validate_machine_semantic_coverage(
@@ -2113,6 +2135,9 @@ fn expected_mapping_document(path: &Path, title: &str, generated: &str) -> Resul
 }
 
 fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineSchema> {
+    // Only canonical machines generate `meerkat-machine-kernels/src/generated/*.rs`
+    // exports. Runtime-local flow kernels stay in `meerkat-mob::flow_kernels`
+    // and are validated directly via `validate_runtime_local_flow_kernels()`.
     let mut schemas = registry.machines.clone();
     schemas.sort_by(|a, b| a.machine.cmp(&b.machine));
     schemas.dedup_by(|a, b| a.machine == b.machine);
@@ -2120,6 +2145,9 @@ fn generated_kernel_export_schemas(registry: &CanonicalRegistry) -> Vec<MachineS
 }
 
 fn expected_generated_kernel_modules(registry: &CanonicalRegistry) -> BTreeSet<String> {
+    // Keep the canonical generated-kernel boundary strict: runtime-local flow
+    // kernels are validated separately and must not silently expand the
+    // canonical five-machine export set.
     registry
         .machines
         .iter()

@@ -13,6 +13,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `active_run_count`: `u64`
 - `pending_spawn_count`: `u64`
 - `coordinator_bound`: `Bool`
+- `member_startup_binding_requested`: `Set<AgentRuntimeId>`
+- `member_startup_runtime_ready`: `Set<AgentRuntimeId>`
+- `member_startup_ready`: `Set<AgentRuntimeId>`
+- `member_kickoff_pending`: `Set<String>`
+- `member_kickoff_starting`: `Set<String>`
+- `member_kickoff_callback_pending`: `Set<String>`
+- `member_kickoff_started`: `Set<String>`
+- `member_kickoff_failed`: `Set<String>`
+- `member_kickoff_cancelled`: `Set<String>`
+- `member_kickoff_error`: `Map<String, String>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
@@ -59,6 +69,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetSpawnPolicy`
 - `Shutdown`
 - `ForceCancel`
+- `KickoffMarkPending`(member_id: String)
+- `KickoffMarkStarting`(member_id: String)
+- `StartupMarkReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `KickoffResolveStarted`(member_id: String)
+- `KickoffResolveCallbackPending`(member_id: String)
+- `KickoffResolveFailed`(member_id: String, error: String)
+- `KickoffResolveCancelled`(member_id: String)
+- `KickoffCancelRequested`(member_id: String)
+- `KickoffClear`(member_id: String)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -122,6 +141,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdmitPeerInput`
 - `EmitProgressNote`
 - `EmitTaskNotice`
+- `PersistKickoffUpdate`(member_id: String, phase: KickoffPhase)
+- `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
+- `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
 - `MemberRealtimeBindingSet`(agent_identity: AgentIdentity, bridge_session_id: SessionId)
 - `MemberRealtimeBindingRotated`(agent_identity: AgentIdentity, old_session_id: SessionId, new_session_id: SessionId)
 - `MemberRealtimeBindingReleased`(agent_identity: AgentIdentity, session_id: SessionId)
@@ -153,7 +175,213 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ObserveRuntimeReady`
 - From: `Running`
 - On: `ObserveRuntimeReady`(agent_runtime_id, fence_token)
+- Guards:
+  - `current_binding_matches`
 - To: `Running`
+
+### `StartupMarkReadyRunning`
+- From: `Running`
+- On: `StartupMarkReady`(agent_runtime_id, fence_token)
+- Guards:
+  - `current_binding_matches`
+- To: `Running`
+
+### `StartupMarkReadyStopped`
+- From: `Stopped`
+- On: `StartupMarkReady`(agent_runtime_id, fence_token)
+- Guards:
+  - `current_binding_matches`
+- To: `Stopped`
+
+### `StartupMarkReadyCompleted`
+- From: `Completed`
+- On: `StartupMarkReady`(agent_runtime_id, fence_token)
+- Guards:
+  - `current_binding_matches`
+- To: `Completed`
+
+### `KickoffMarkPendingRunning`
+- From: `Running`
+- On: `KickoffMarkPending`(member_id)
+- Guards:
+  - `kickoff_not_started`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffMarkPendingStopped`
+- From: `Stopped`
+- On: `KickoffMarkPending`(member_id)
+- Guards:
+  - `kickoff_not_started`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffMarkPendingCompleted`
+- From: `Completed`
+- On: `KickoffMarkPending`(member_id)
+- Guards:
+  - `kickoff_not_started`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffMarkStartingRunning`
+- From: `Running`
+- On: `KickoffMarkStarting`(member_id)
+- Guards:
+  - `kickoff_pending`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffMarkStartingStopped`
+- From: `Stopped`
+- On: `KickoffMarkStarting`(member_id)
+- Guards:
+  - `kickoff_pending`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffMarkStartingCompleted`
+- From: `Completed`
+- On: `KickoffMarkStarting`(member_id)
+- Guards:
+  - `kickoff_pending`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffResolveStartedRunning`
+- From: `Running`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffResolveStartedStopped`
+- From: `Stopped`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffResolveStartedCompleted`
+- From: `Completed`
+- On: `KickoffResolveStarted`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffResolveCallbackPendingRunning`
+- From: `Running`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffResolveCallbackPendingStopped`
+- From: `Stopped`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffResolveCallbackPendingCompleted`
+- From: `Completed`
+- On: `KickoffResolveCallbackPending`(member_id)
+- Guards:
+  - `kickoff_starting`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffResolveFailedFromStartingRunning`
+- From: `Running`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_active_failed`
+- Emits: `PersistKickoffFailureUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffResolveFailedFromStartingStopped`
+- From: `Stopped`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_active_failed`
+- Emits: `PersistKickoffFailureUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffResolveFailedFromStartingCompleted`
+- From: `Completed`
+- On: `KickoffResolveFailed`(member_id, error)
+- Guards:
+  - `kickoff_active_failed`
+- Emits: `PersistKickoffFailureUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffResolveCancelledRunning`
+- From: `Running`
+- On: `KickoffResolveCancelled`(member_id)
+- Guards:
+  - `kickoff_cancelled`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffResolveCancelledStopped`
+- From: `Stopped`
+- On: `KickoffResolveCancelled`(member_id)
+- Guards:
+  - `kickoff_cancelled`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffResolveCancelledCompleted`
+- From: `Completed`
+- On: `KickoffResolveCancelled`(member_id)
+- Guards:
+  - `kickoff_cancelled`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffCancelRequestedRunning`
+- From: `Running`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_cancellable`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Running`
+
+### `KickoffCancelRequestedStopped`
+- From: `Stopped`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_cancellable`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Stopped`
+
+### `KickoffCancelRequestedCompleted`
+- From: `Completed`
+- On: `KickoffCancelRequested`(member_id)
+- Guards:
+  - `kickoff_cancellable`
+- Emits: `PersistKickoffUpdate`, `EmitKickoffLifecycleNotice`
+- To: `Completed`
+
+### `KickoffClearRunning`
+- From: `Running`
+- On: `KickoffClear`(member_id)
+- To: `Running`
+
+### `KickoffClearStopped`
+- From: `Stopped`
+- On: `KickoffClear`(member_id)
+- To: `Stopped`
+
+### `KickoffClearCompleted`
+- From: `Completed`
+- On: `KickoffClear`(member_id)
+- To: `Completed`
 
 ### `SubmitWorkRunningExternal`
 - From: `Running`

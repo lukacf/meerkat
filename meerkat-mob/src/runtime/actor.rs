@@ -293,7 +293,7 @@ pub(super) struct MobActor {
     pub(super) supervisor_bridge: Arc<super::MobSupervisorBridge>,
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
-    pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
+    pub(super) dsl_authority: Arc<std::sync::Mutex<mob_dsl::MobMachineAuthority>>,
     /// Terminal-phase projection for external observers. Written by the
     /// actor after every DSL phase transition and once more right before
     /// the actor task exits. `MobHandle::status()` falls back to this
@@ -703,18 +703,44 @@ impl MobActor {
     /// for the mob phase; external observers read the same value via
     /// `MobCommand::QueryPhase` (dogma #1, #13, #17).
     fn state(&self) -> MobState {
-        project_dsl_phase(self.dsl_authority.state.lifecycle_phase)
+        project_dsl_phase(self.dsl_state().lifecycle_phase)
+    }
+
+    fn with_dsl_authority<R>(&self, f: impl FnOnce(&mob_dsl::MobMachineAuthority) -> R) -> R {
+        let guard = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&guard)
+    }
+
+    fn with_dsl_authority_mut<R>(
+        &self,
+        f: impl FnOnce(&mut mob_dsl::MobMachineAuthority) -> R,
+    ) -> R {
+        let mut guard = self
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut guard)
+    }
+
+    fn dsl_state(&self) -> mob_dsl::MobMachineState {
+        self.with_dsl_authority(|authority| authority.state.clone())
     }
 
     fn apply_dsl_input(
-        &mut self,
+        &self,
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<(), MobError> {
-        let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
+        let transition = self
+            .with_dsl_authority_mut(|authority| mob_dsl::MobMachineMutator::apply(authority, input))
             .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
             // Publish the projected phase for external observers. This is
             // the sole write seam for the dogma-#13 projection watch.
             let _ = self.phase_watch_tx.send(self.state());
@@ -728,14 +754,17 @@ impl MobActor {
     /// `MemberRealtimeBinding*` events without altering the canonical state
     /// transition semantics.
     fn apply_dsl_input_with_effects(
-        &mut self,
+        &self,
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
-        let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
+        let transition = self
+            .with_dsl_authority_mut(|authority| mob_dsl::MobMachineMutator::apply(authority, input))
             .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
             let _ = self.phase_watch_tx.send(self.state());
         }
         Ok(transition.effects)
@@ -851,16 +880,17 @@ impl MobActor {
     }
 
     fn apply_dsl_signal(
-        &mut self,
+        &self,
         signal: mob_dsl::MobMachineSignal,
         context: &str,
     ) -> Result<(), MobError> {
         let transition = self
-            .dsl_authority
-            .apply_signal(signal)
+            .with_dsl_authority_mut(|authority| authority.apply_signal(signal))
             .map_err(|e| MobError::Internal(format!("DSL authority ({context}): {e}")))?;
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
             let _ = self.phase_watch_tx.send(self.state());
         }
         Ok(())
@@ -872,8 +902,7 @@ impl MobActor {
     /// `AgentRuntimeId::Display` (`"identity:generation"`), which is what
     /// `mob_dsl::AgentRuntimeId::from_domain` produces.
     fn retiring_runtime_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
-        self.dsl_authority
-            .state
+        self.dsl_state()
             .member_state_markers
             .iter()
             .filter_map(|(runtime_id, member_state)| match member_state {
@@ -884,27 +913,20 @@ impl MobActor {
     }
 
     fn pending_kickoff_member_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
-        self.dsl_authority
-            .state
-            .member_kickoff_pending
+        let dsl = self.dsl_state();
+        dsl.member_kickoff_pending
             .iter()
-            .chain(self.dsl_authority.state.member_kickoff_starting.iter())
-            .chain(
-                self.dsl_authority
-                    .state
-                    .member_kickoff_callback_pending
-                    .iter(),
-            )
+            .chain(dsl.member_kickoff_starting.iter())
+            .chain(dsl.member_kickoff_callback_pending.iter())
             .cloned()
             .collect()
     }
 
     fn ready_runtime_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
-        self.dsl_authority
-            .state
-            .member_startup_runtime_ready
+        let dsl = self.dsl_state();
+        dsl.member_startup_runtime_ready
             .iter()
-            .chain(self.dsl_authority.state.member_startup_ready.iter())
+            .chain(dsl.member_startup_ready.iter())
             .map(|runtime_id| runtime_id.0.clone())
             .collect()
     }
@@ -1063,34 +1085,36 @@ impl MobActor {
     }
 
     async fn clear_kickoff_state(&mut self, agent_identity: &MeerkatId) {
-        self.dsl_authority
-            .state
-            .member_kickoff_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_starting
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_callback_pending
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_started
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_failed
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_cancelled
-            .remove(&agent_identity.to_string());
-        self.dsl_authority
-            .state
-            .member_kickoff_error
-            .remove(&agent_identity.to_string());
+        self.with_dsl_authority_mut(|authority| {
+            authority
+                .state
+                .member_kickoff_pending
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_starting
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_callback_pending
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_started
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_failed
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_cancelled
+                .remove(&agent_identity.to_string());
+            authority
+                .state
+                .member_kickoff_error
+                .remove(&agent_identity.to_string());
+        });
         self.roster.write().await.set_kickoff(agent_identity, None);
     }
 
@@ -1126,76 +1150,67 @@ impl MobActor {
         agent_identity: &MeerkatId,
         input: mob_dsl::MobMachineInput,
     ) -> Result<bool, MobError> {
-        if !self
-            .dsl_authority
-            .state
+        let dsl = self.dsl_state();
+        if !dsl
             .member_kickoff_pending
             .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
+            && !dsl
                 .member_kickoff_starting
                 .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
+            && !dsl
                 .member_kickoff_callback_pending
                 .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
+            && !dsl
                 .member_kickoff_started
                 .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
+            && !dsl
                 .member_kickoff_failed
                 .contains(&agent_identity.to_string())
-            && !self
-                .dsl_authority
-                .state
+            && !dsl
                 .member_kickoff_cancelled
                 .contains(&agent_identity.to_string())
             && let Some(current_phase) = self.kickoff_phase_for(agent_identity).await
         {
-            match Self::kickoff_phase_to_dsl(current_phase) {
-                mob_dsl::KickoffPhase::Pending => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_pending
-                        .insert(agent_identity.to_string());
+            self.with_dsl_authority_mut(|authority| {
+                match Self::kickoff_phase_to_dsl(current_phase) {
+                    mob_dsl::KickoffPhase::Pending => {
+                        authority
+                            .state
+                            .member_kickoff_pending
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::Starting => {
+                        authority
+                            .state
+                            .member_kickoff_starting
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::CallbackPending => {
+                        authority
+                            .state
+                            .member_kickoff_callback_pending
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::Started => {
+                        authority
+                            .state
+                            .member_kickoff_started
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::Failed => {
+                        authority
+                            .state
+                            .member_kickoff_failed
+                            .insert(agent_identity.to_string());
+                    }
+                    mob_dsl::KickoffPhase::Cancelled => {
+                        authority
+                            .state
+                            .member_kickoff_cancelled
+                            .insert(agent_identity.to_string());
+                    }
                 }
-                mob_dsl::KickoffPhase::Starting => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_starting
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::CallbackPending => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_callback_pending
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Started => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_started
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Failed => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_failed
-                        .insert(agent_identity.to_string());
-                }
-                mob_dsl::KickoffPhase::Cancelled => {
-                    self.dsl_authority
-                        .state
-                        .member_kickoff_cancelled
-                        .insert(agent_identity.to_string());
-                }
-            }
+            });
             if let Some(error) = self
                 .roster
                 .read()
@@ -1208,14 +1223,18 @@ impl MobActor {
                         .and_then(|snapshot| snapshot.error.clone())
                 })
             {
-                self.dsl_authority
-                    .state
-                    .member_kickoff_error
-                    .insert(agent_identity.to_string(), error);
+                self.with_dsl_authority_mut(|authority| {
+                    authority
+                        .state
+                        .member_kickoff_error
+                        .insert(agent_identity.to_string(), error);
+                });
             }
         }
 
-        let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
+        let transition = match self
+            .with_dsl_authority_mut(|authority| mob_dsl::MobMachineMutator::apply(authority, input))
+        {
             Ok(transition) => transition,
             Err(_) => return Ok(false),
         };
@@ -1275,11 +1294,12 @@ impl MobActor {
         if !self.has_orchestrator {
             return None;
         }
-        let coordinator_bound = self.dsl_authority.state.coordinator_bound;
+        let dsl = self.dsl_state();
+        let coordinator_bound = dsl.coordinator_bound;
         Some(MobOrchestratorSnapshot {
             phase,
             coordinator_bound,
-            pending_spawn_count: self.dsl_authority.state.pending_spawn_count as u32,
+            pending_spawn_count: dsl.pending_spawn_count as u32,
             active_flow_count: self.machine_active_run_count(),
             // topology_revision and supervisor_active are shell diagnostics not
             // tracked by the DSL; project supervisor_active from coordinator_bound
@@ -1292,7 +1312,7 @@ impl MobActor {
     fn machine_coordinator_bound(&self) -> bool {
         // Plain mobs (no orchestrator) are always considered coordinator-bound
         // for the purposes of spawn/run-flow admission checks.
-        !self.has_orchestrator || self.dsl_authority.state.coordinator_bound
+        !self.has_orchestrator || self.dsl_state().coordinator_bound
     }
 
     /// Probe a DSL input against a clone of current state — returns
@@ -1309,7 +1329,7 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         target: MobState,
     ) -> Result<(), MobError> {
-        let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+        let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
         if mob_dsl::MobMachineMutator::apply(&mut probe, input).is_err() {
             return Err(MobError::InvalidTransition {
                 from: self.state(),
@@ -1438,7 +1458,7 @@ impl MobActor {
 
     fn pending_spawn_alignment_violation(&self) -> Option<String> {
         let expected = if self.has_orchestrator {
-            Some(self.dsl_authority.state.pending_spawn_count as usize)
+            Some(self.dsl_state().pending_spawn_count as usize)
         } else {
             None
         };
@@ -1766,8 +1786,7 @@ impl MobActor {
         })?;
 
         if !self
-            .dsl_authority
-            .state
+            .dsl_state()
             .member_startup_ready
             .contains(&startup_marker.0)
         {
@@ -2414,15 +2433,15 @@ impl MobActor {
                 }
                 #[cfg(test)]
                 MobCommand::DslT2Snapshot { reply_tx } => {
-                    let dsl = &self.dsl_authority.state;
+                    let dsl = self.dsl_state();
                     let _ = reply_tx.send(super::state::MobDslT2Snapshot {
-                        member_state_markers: dsl.member_state_markers.clone(),
-                        wiring_edges: dsl.wiring_edges.clone(),
-                        identity_to_runtime: dsl.identity_to_runtime.clone(),
-                        tasks: dsl.tasks.clone(),
-                        in_progress_task_ids: dsl.in_progress_task_ids.clone(),
-                        completed_task_ids: dsl.completed_task_ids.clone(),
-                        member_realtime_bindings: dsl.member_realtime_bindings.clone(),
+                        member_state_markers: dsl.member_state_markers,
+                        wiring_edges: dsl.wiring_edges,
+                        identity_to_runtime: dsl.identity_to_runtime,
+                        tasks: dsl.tasks,
+                        in_progress_task_ids: dsl.in_progress_task_ids,
+                        completed_task_ids: dsl.completed_task_ids,
+                        member_realtime_bindings: dsl.member_realtime_bindings,
                     });
                 }
                 MobCommand::StartupKickoffSnapshot { reply_tx } => {
@@ -2437,8 +2456,7 @@ impl MobActor {
                 } => {
                     let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
                     let binding = self
-                        .dsl_authority
-                        .state
+                        .dsl_state()
                         .member_realtime_bindings
                         .get(&dsl_identity)
                         .and_then(|dsl_session_id| {
@@ -2643,9 +2661,7 @@ impl MobActor {
                     // Reject before side effects like pending-spawn failure if the
                     // DSL authority would not accept Destroy in the current phase.
                     {
-                        let mut probe = mob_dsl::MobMachineAuthority::from_state(
-                            self.dsl_authority.state.clone(),
-                        );
+                        let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
                         if mob_dsl::MobMachineMutator::apply(
                             &mut probe,
                             mob_dsl::MobMachineInput::Destroy,
@@ -4123,8 +4139,7 @@ impl MobActor {
             None => mob_dsl::SessionId::default(),
         };
         let replacing = self
-            .dsl_authority
-            .state
+            .dsl_state()
             .member_realtime_bindings
             .get(&dsl_identity)
             .cloned();
@@ -4508,8 +4523,7 @@ impl MobActor {
         let releasing = if preserve_realtime_binding {
             None
         } else {
-            self.dsl_authority
-                .state
+            self.dsl_state()
                 .member_realtime_bindings
                 .get(&dsl_identity)
                 .cloned()
@@ -5986,8 +6000,7 @@ impl MobActor {
         // binding state (see handle_retire_inner for the guard-split story).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
         let releasing = self
-            .dsl_authority
-            .state
+            .dsl_state()
             .member_realtime_bindings
             .get(&dsl_identity)
             .cloned();
@@ -6189,8 +6202,7 @@ impl MobActor {
             .await
             .map_err(MobDestroyError::from)?;
         {
-            let mut probe =
-                mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+            let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
             if mob_dsl::MobMachineMutator::apply(&mut probe, mob_dsl::MobMachineInput::Destroy)
                 .is_err()
             {
@@ -6261,8 +6273,7 @@ impl MobActor {
             let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
-                let mut probe =
-                    mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+                let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
                 if probe
                     .apply_signal(mob_dsl::MobMachineSignal::StopOrchestrator)
                     .is_ok()
@@ -6655,8 +6666,7 @@ impl MobActor {
             let mut topology_unbound = false;
             // Check if DSL allows StopOrchestrator
             {
-                let mut probe =
-                    mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+                let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
                 if probe
                     .apply_signal(mob_dsl::MobMachineSignal::StopOrchestrator)
                     .is_ok()
@@ -6919,21 +6929,26 @@ impl MobActor {
         // legality: `SubmitWorkRunningExternal` / `SubmitWorkRunningInternal`
         // encode the origin + addressability + live-runtime + phase guards.
         // A rejection is a state-legality violation, not a freshness issue.
-        let transition = mob_dsl::MobMachineMutator::apply(
-            &mut self.dsl_authority,
-            mob_dsl::MobMachineInput::SubmitWork {
-                agent_runtime_id: dsl_runtime_id,
-                fence_token: dsl_fence_token,
-                work_id: dsl_work_id,
-                origin: dsl_origin,
-            },
-        )
-        .map_err(|_| match origin {
-            WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
-            WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
-        })?;
+        let transition = self
+            .with_dsl_authority_mut(|authority| {
+                mob_dsl::MobMachineMutator::apply(
+                    authority,
+                    mob_dsl::MobMachineInput::SubmitWork {
+                        agent_runtime_id: dsl_runtime_id,
+                        fence_token: dsl_fence_token,
+                        work_id: dsl_work_id,
+                        origin: dsl_origin,
+                    },
+                )
+            })
+            .map_err(|_| match origin {
+                WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
+                WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
+            })?;
         if transition.from_phase != transition.to_phase {
-            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            self.with_dsl_authority_mut(|authority| {
+                authority.state.lifecycle_phase = transition.to_phase;
+            });
             let _ = self.phase_watch_tx.send(self.state());
         }
 
@@ -7216,8 +7231,7 @@ impl MobActor {
                 .is_some_and(|run| run.status.is_terminal());
             let _phase = self.state();
             let authorities_expect_completion = {
-                let mut probe =
-                    mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+                let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_state());
                 probe
                     .apply_signal(mob_dsl::MobMachineSignal::CompleteFlow)
                     .is_ok()

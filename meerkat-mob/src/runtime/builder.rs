@@ -140,7 +140,7 @@ struct RuntimeWiring {
     /// resumed members immediately. Boxed so `RuntimeWiring` stays slim
     /// inside the async `resume()` future (the DSL state struct itself is
     /// several hundred bytes worth of maps + sets).
-    dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
+    dsl_authority: Arc<std::sync::Mutex<crate::machines::mob_machine::MobMachineAuthority>>,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
@@ -595,7 +595,7 @@ impl MobBuilder {
         // before the actor spawns. The real actor-side sender replaces
         // this once start_runtime_with_components owns the final pair.
         let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
-        let mut wiring = RuntimeWiring {
+        let wiring = RuntimeWiring {
             roster: roster_state.clone(),
             task_board: task_board_state.clone(),
             initial_phase: resumed_state,
@@ -603,7 +603,7 @@ impl MobBuilder {
             // `reconcile_resume` finalizes the shell roster. The DSL
             // membership state is populated from the finalized roster so
             // MobMachine guards see the resumed members immediately.
-            dsl_authority: Box::new(seed_mob_authority(resumed_state)),
+            dsl_authority: Arc::new(std::sync::Mutex::new(seed_mob_authority(resumed_state))),
             restore_diagnostics: restore_diagnostics.clone(),
             runtime_metadata: storage.runtime_metadata.clone(),
             supervisor_bridge: supervisor_bridge.clone(),
@@ -654,7 +654,14 @@ impl MobBuilder {
         // alive at resume time; replaying those as DSL spawns is what
         // lets MobMachine guards (SubmitWork legality, Retire membership,
         // etc.) see resumed members on the first command.
-        seed_mob_authority_sync_from_roster(&mut wiring.dsl_authority, &roster, &definition);
+        seed_mob_authority_sync_from_roster(
+            &mut wiring
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &roster,
+            &definition,
+        );
         *wiring.roster.write().await = RosterAuthority::from_roster(roster);
         *wiring.task_board.write().await = task_board;
 
@@ -1287,8 +1294,13 @@ impl MobBuilder {
         // Profile lookup is best-effort-sync here — resume paths thread a
         // concrete profile via `start_runtime_with_components`; fresh create
         // paths pass an empty roster so the replay is a no-op either way.
-        let mut dsl_authority = Box::new(seed_mob_authority(initial_state));
-        seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition);
+        let mut seeded_dsl_authority = seed_mob_authority(initial_state);
+        seed_mob_authority_sync_from_roster(
+            &mut seeded_dsl_authority,
+            &initial_roster,
+            &definition,
+        );
+        let dsl_authority = Arc::new(std::sync::Mutex::new(seeded_dsl_authority));
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
@@ -1480,7 +1492,7 @@ impl MobBuilder {
             supervisor_bridge,
             task_board_service,
             spawn_policy,
-            dsl_authority: *dsl_authority,
+            dsl_authority,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,

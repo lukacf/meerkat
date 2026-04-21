@@ -10,14 +10,14 @@ use serde::{Deserialize, Serialize};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Expr, ExprAssign, ExprIf, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, Member,
-    Type,
+    Expr, ExprAssign, ExprField, ExprIf, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemEnum,
+    ItemFn, ItemImpl, ItemStruct, ItemUnion, Member, Type,
 };
 
 use crate::ownership_ledger;
 use crate::ownership_ledger::{OwnershipFinding, OwnershipFindingKey, format_ownership_finding};
 use crate::public_contracts::repo_root;
-use crate::rmat_policy::AuditPolicy;
+use crate::rmat_policy::{AuditPolicy, ForbiddenShellReadKind, ForbiddenShellReadRule};
 
 #[derive(Debug, Clone, Args)]
 pub struct RmatAuditArgs {
@@ -201,6 +201,18 @@ pub fn collect_findings(root: &Path, policy: &AuditPolicy) -> Result<Vec<Finding
         let mut suspicion = SuspicionVisitor::new(&relative, &source);
         suspicion.visit_file(&parsed);
         findings.extend(suspicion.findings);
+
+        let applicable_forbidden_rules: Vec<&ForbiddenShellReadRule> = policy
+            .forbidden_shell_reads
+            .iter()
+            .filter(|rule| relative.ends_with(rule.path_suffix))
+            .collect();
+        if !applicable_forbidden_rules.is_empty() {
+            let mut forbidden =
+                ForbiddenShellReadsVisitor::new(&relative, &source, applicable_forbidden_rules);
+            forbidden.visit_file(&parsed);
+            findings.extend(forbidden.findings);
+        }
     }
 
     findings.extend(route_coverage);
@@ -712,6 +724,181 @@ impl<'ast> Visit<'ast> for SuspicionVisitor<'_> {
             ));
         }
         visit::visit_expr_method_call(self, node);
+    }
+}
+
+struct ForbiddenShellReadsVisitor<'a> {
+    relative: &'a str,
+    source: &'a str,
+    rules: Vec<&'a ForbiddenShellReadRule>,
+    findings: Vec<Finding>,
+}
+
+impl<'a> ForbiddenShellReadsVisitor<'a> {
+    fn new(relative: &'a str, source: &'a str, rules: Vec<&'a ForbiddenShellReadRule>) -> Self {
+        Self {
+            relative,
+            source,
+            rules,
+            findings: Vec::new(),
+        }
+    }
+
+    fn push_finding(
+        &mut self,
+        rule: &ForbiddenShellReadRule,
+        span: proc_macro2::Span,
+        symbol: String,
+        detail: String,
+    ) {
+        let suppressed = has_rmat_allow(self.source, span, "ForbiddenShellAuthorityReads");
+        let hint = rule.hint;
+        let relative = self.relative;
+        self.findings.push(error_finding(
+            "ForbiddenShellAuthorityReads",
+            relative,
+            &symbol,
+            format!("{detail}. Fix: {hint}."),
+            suppressed,
+        ));
+    }
+
+    fn check_struct_fields(&mut self, ident: &str, fields: &syn::Fields) {
+        for field in fields {
+            let Some(field_ident) = &field.ident else {
+                continue;
+            };
+            let field_name = field_ident.to_string();
+            for rule in self.rules.clone() {
+                if let ForbiddenShellReadKind::FieldDeclared { field_name: target } = &rule.kind
+                    && field_name == *target
+                {
+                    self.push_finding(
+                        rule,
+                        field.span(),
+                        format!("{ident}::{field_name}"),
+                        format!(
+                            "shell struct `{ident}` declares shadow semantic field `{field_name}`"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ForbiddenShellReadsVisitor<'_> {
+    fn visit_item_struct(&mut self, node: &'ast ItemStruct) {
+        let ident = node.ident.to_string();
+        self.check_struct_fields(&ident, &node.fields);
+        visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast ItemEnum) {
+        let ident = node.ident.to_string();
+        for variant in &node.variants {
+            self.check_struct_fields(&format!("{ident}::{}", variant.ident), &variant.fields);
+        }
+        visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_union(&mut self, node: &'ast ItemUnion) {
+        let ident = node.ident.to_string();
+        for field in &node.fields.named {
+            let Some(field_ident) = &field.ident else {
+                continue;
+            };
+            let field_name = field_ident.to_string();
+            for rule in self.rules.clone() {
+                if let ForbiddenShellReadKind::FieldDeclared { field_name: target } = &rule.kind
+                    && field_name == *target
+                {
+                    self.push_finding(
+                        rule,
+                        field.span(),
+                        format!("{ident}::{field_name}"),
+                        format!(
+                            "shell union `{ident}` declares shadow semantic field `{field_name}`"
+                        ),
+                    );
+                }
+            }
+        }
+        visit::visit_item_union(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let method_name = node.method.to_string();
+        let receiver_tail = tail_path_ident(&node.receiver);
+        for rule in self.rules.clone() {
+            if let ForbiddenShellReadKind::MethodCall {
+                method,
+                allowed_receivers,
+            } = &rule.kind
+                && method_name == *method
+            {
+                let allowed = receiver_tail
+                    .as_deref()
+                    .is_some_and(|ident| allowed_receivers.contains(&ident));
+                if !allowed {
+                    let symbol = match receiver_tail.as_deref() {
+                        Some(ident) => format!("{ident}.{method_name}()"),
+                        None => format!("<expr>.{method_name}()"),
+                    };
+                    self.push_finding(
+                        rule,
+                        node.span(),
+                        symbol.clone(),
+                        format!("shell call `{symbol}` reads canonical authority state"),
+                    );
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_field(&mut self, node: &'ast ExprField) {
+        let Member::Named(field_ident) = &node.member else {
+            return visit::visit_expr_field(self, node);
+        };
+        let field_name = field_ident.to_string();
+        let base_tail = tail_path_ident(&node.base);
+        for rule in self.rules.clone() {
+            if let ForbiddenShellReadKind::FieldAccess {
+                base_ident,
+                field_name: target_field,
+            } = &rule.kind
+                && field_name == *target_field
+                && base_tail.as_deref() == Some(*base_ident)
+            {
+                let symbol = format!("{base_ident}.{field_name}");
+                self.push_finding(
+                    rule,
+                    node.span(),
+                    symbol.clone(),
+                    format!("shell reads authority classification field `{symbol}`"),
+                );
+            }
+        }
+        visit::visit_expr_field(self, node);
+    }
+}
+
+/// Return the tail identifier of an expression, where "tail" is the rightmost
+/// name that disambiguates the binding being read. For field expressions
+/// (`self.lifecycle_authority`) that's the field name; for paths (`policy`,
+/// `self`, `crate::foo::bar`) it's the final path segment.
+fn tail_path_ident(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Path(path) => path.path.segments.last().map(|seg| seg.ident.to_string()),
+        Expr::Field(field) => match &field.member {
+            Member::Named(ident) => Some(ident.to_string()),
+            Member::Unnamed(_) => None,
+        },
+        Expr::Reference(inner) => tail_path_ident(&inner.expr),
+        Expr::Paren(inner) => tail_path_ident(&inner.expr),
+        Expr::Group(inner) => tail_path_ident(&inner.expr),
+        _ => None,
     }
 }
 

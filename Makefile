@@ -202,20 +202,13 @@ audit-alt:
 	$(CARGO) audit
 
 # Full CI pipeline - runs the required deterministic lanes plus build policy checks
-ci: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
+ci: fmt-check legacy-surface-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint lint-feature-matrix test-unit test-int e2e-fast e2e-system test-minimal test-feature-matrix test-surface-modularity rmat-audit audit
 	@echo "$(GREEN)CI pipeline complete!$(NC)"
 
 # Developer smoke CI pipeline for faster pre-release iteration.
 # Keeps core validation, skips full feature matrix clippy/test expansion.
-ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate rmat-read-seam-lint bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
+ci-smoke: fmt-check legacy-surface-gate deprecated-backend-gate bridge-no-responsestatus-gate verify-version-parity verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging lint test-unit test-int e2e-fast e2e-system test-minimal rmat-audit audit
 	@echo "$(GREEN)CI smoke pipeline complete!$(NC)"
-
-# RMAT read-seam lint: detect shell code that reads authority state to gate
-# authority input delivery. Shells must always call authority.apply() and let
-# the authority reject — never pre-filter inputs by reading authority state.
-rmat-read-seam-lint:
-	@echo "$(GREEN)Running RMAT read-seam lint...$(NC)"
-	@scripts/rmat-read-seam-lint.sh
 
 # Milestone 0 gate: ensure legacy public surface names are either removed
 # or explicitly whitelisted during migration.

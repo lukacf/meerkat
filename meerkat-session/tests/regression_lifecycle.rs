@@ -1451,3 +1451,113 @@ async fn persistent_start_turn_recovers_after_discarding_stale_live_session() {
         "recovered session should be live again after start_turn",
     );
 }
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn persistent_start_turn_rejects_archived_stored_only_session() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let service = PersistentSessionService::new(
+        MockAgentBuilder,
+        4,
+        Arc::clone(&store),
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    );
+
+    let created = service
+        .create_session(create_req_deferred("seed"))
+        .await
+        .expect("create deferred session");
+    let session_id = created.session_id.clone();
+
+    service
+        .archive(&session_id)
+        .await
+        .expect("archive should succeed");
+
+    let err = service
+        .start_turn(&session_id, turn_req("after archive"))
+        .await
+        .expect_err("archived stored-only sessions must stay read-only");
+    assert_eq!(err.code(), "SESSION_NOT_FOUND");
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("live session query should succeed"),
+        "archived session must not be recreated as live",
+    );
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#[tokio::test]
+async fn persistent_concurrent_start_turn_recovery_never_surfaces_duplicate_id() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let service = Arc::new(PersistentSessionService::new(
+        MockAgentBuilder,
+        4,
+        Arc::clone(&store),
+        None,
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    ));
+
+    let created = service
+        .create_session(create_req_deferred("seed"))
+        .await
+        .expect("create deferred session");
+    let session_id = created.session_id.clone();
+
+    let mut stored = store
+        .load(&session_id)
+        .await
+        .expect("load should succeed")
+        .expect("persisted session should exist");
+    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    stored.touch();
+    store.save(&stored).await.expect("save updated session");
+
+    let service_a = Arc::clone(&service);
+    let session_id_a = session_id.clone();
+    let first =
+        tokio::spawn(async move { service_a.start_turn(&session_id_a, turn_req("first")).await });
+
+    let service_b = Arc::clone(&service);
+    let session_id_b = session_id.clone();
+    let second = tokio::spawn(async move {
+        service_b
+            .start_turn(&session_id_b, turn_req("second"))
+            .await
+    });
+
+    let outcomes = [
+        first.await.expect("first start_turn task should join"),
+        second.await.expect("second start_turn task should join"),
+    ];
+    let outcome_codes: Vec<String> = outcomes
+        .iter()
+        .map(|result| match result {
+            Ok(_) => "OK".to_string(),
+            Err(err) => err.code().to_string(),
+        })
+        .collect();
+    let outcome_debug: Vec<String> = outcomes
+        .iter()
+        .map(|result| match result {
+            Ok(run) => format!("OK({})", run.session_id),
+            Err(err) => format!("{err:?}"),
+        })
+        .collect();
+    assert!(
+        outcomes.iter().any(Result::is_ok),
+        "at least one concurrent start_turn should succeed after recovery; got {outcome_codes:?} {outcome_debug:?}",
+    );
+    for result in outcomes {
+        if let Err(err) = result {
+            assert_eq!(
+                err.code(),
+                "SESSION_BUSY",
+                "concurrent recovery must degrade to normal busy semantics; got {outcome_codes:?} {outcome_debug:?}",
+            );
+        }
+    }
+}

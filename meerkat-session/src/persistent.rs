@@ -224,6 +224,10 @@ pub struct PersistentSessionService<B: SessionAgentBuilder> {
     /// archived snapshot -- mutual exclusion prevents a concurrent checkpoint
     /// from overwriting the archived row with a live one.
     checkpointer_gates: Mutex<HashMap<SessionId, Arc<CheckpointerGate>>>,
+    /// Gates lazy live-session recovery and archive against each other so a
+    /// stored-only session is rebuilt at most once and archived snapshots
+    /// cannot become writable again through rehydration races.
+    recovery_gates: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
     /// Optional provider for ops lifecycle registries used during lazy session
     /// rebuilds. When set, lazy-rebuilt sessions bind to the canonical registry
     /// instead of allocating an orphaned fallback.
@@ -480,6 +484,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<bool, SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock().await;
+
         if self.inner.has_live_session(id).await? {
             return Ok(false);
         }
@@ -487,6 +494,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(stored) = self.load_authoritative_session_base(id).await? else {
             return Ok(false);
         };
+        self.reject_if_archived_session(id, &stored)
+            .await
+            .map_err(control_error_into_session_error)?;
 
         let runtime_build_mode = if let Some(provider) = &self.runtime_bindings_provider {
             (provider)(id.clone())
@@ -550,9 +560,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             )))
         })?;
 
-        self.create_session(recovered.into_deferred_create_request())
-            .await?;
-        Ok(true)
+        match self
+            .create_session(recovered.into_deferred_create_request())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(SessionError::Agent(AgentError::InternalError(message)))
+                if message.starts_with("Duplicate session ID generated:")
+                    && self.inner.has_live_session(id).await? =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
@@ -671,6 +691,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             archived_sessions: Mutex::new(IndexMap::new()),
             archived_history_capacity: max_sessions.max(1),
             checkpointer_gates: Mutex::new(HashMap::new()),
+            recovery_gates: Mutex::new(HashMap::new()),
             ops_lifecycle_provider: None,
             runtime_bindings_provider: None,
         }
@@ -758,6 +779,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn existing_gate_for_session(&self, id: &SessionId) -> Option<Arc<CheckpointerGate>> {
         let gates = self.checkpointer_gates.lock().await;
         gates.get(id).cloned()
+    }
+
+    async fn recovery_gate_for_session(&self, id: &SessionId) -> Arc<Mutex<()>> {
+        let mut gates = self.recovery_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     async fn cached_archived_session(&self, id: &SessionId) -> Option<Session> {
@@ -1359,6 +1389,9 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock().await;
+
         let archived_snapshot = match self.export_session_with_labels(id).await {
             Ok(session) => Some(session),
             Err(SessionError::NotFound { .. }) => self.load_authoritative_session_base(id).await?,

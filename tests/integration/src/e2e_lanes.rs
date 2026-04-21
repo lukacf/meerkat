@@ -1258,7 +1258,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
             cargo_bin_env: &[],
             pre_commands: &[
-                &["npm", "ci"],
+                &["npm", "install", "--no-audit", "--no-fund"],
                 &[
                     "cargo",
                     "build",
@@ -1287,7 +1287,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
             cargo_bin_env: &[],
             pre_commands: &[
-                &["npm", "ci"],
+                &["npm", "install", "--no-audit", "--no-fund"],
                 &[
                     "cargo",
                     "build",
@@ -1316,7 +1316,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
             cargo_bin_env: &[],
             pre_commands: &[
-                &["npm", "ci"],
+                &["npm", "install", "--no-audit", "--no-fund"],
                 &[
                     "cargo",
                     "build",
@@ -1348,7 +1348,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
             cargo_bin_env: &[],
             pre_commands: &[
-                &["npm", "ci"],
+                &["npm", "install", "--no-audit", "--no-fund"],
                 &[
                     "cargo",
                     "build",
@@ -1848,7 +1848,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
             cargo_bin_env: &[],
             pre_commands: &[
-                &["npm", "ci"],
+                &["npm", "install", "--no-audit", "--no-fund"],
                 &[
                     "cargo",
                     "build",

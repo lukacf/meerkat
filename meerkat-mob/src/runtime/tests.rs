@@ -20931,7 +20931,7 @@ async fn mob_runtime_parity_snapshot_summary(
     );
     formal_available_fields.insert(
         "member_kickoff_pending".into(),
-        serde_json::to_string(&startup_kickoff.pending_kickoff_member_ids)
+        serde_json::to_string(&startup_kickoff.member_kickoff_pending_ids)
             .expect("serialize member_kickoff_pending"),
     );
     formal_available_fields.insert(
@@ -21028,7 +21028,7 @@ async fn mob_runtime_parity_snapshot_summary(
         member_startup_binding_requested: startup_kickoff.member_startup_binding_requested,
         member_startup_runtime_ready: startup_kickoff.member_startup_runtime_ready,
         member_startup_ready: startup_kickoff.member_startup_ready,
-        member_kickoff_pending: startup_kickoff.pending_kickoff_member_ids,
+        member_kickoff_pending: startup_kickoff.member_kickoff_pending_ids,
         member_kickoff_starting: startup_kickoff.member_kickoff_starting_ids,
         member_kickoff_callback_pending: startup_kickoff.member_kickoff_callback_pending_ids,
         member_kickoff_started: startup_kickoff.member_kickoff_started_ids,

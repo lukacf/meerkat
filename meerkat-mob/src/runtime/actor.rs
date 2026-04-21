@@ -922,6 +922,14 @@ impl MobActor {
             .collect()
     }
 
+    fn member_kickoff_pending_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
+        self.dsl_state()
+            .member_kickoff_pending
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     fn ready_runtime_ids_from_dsl(&self) -> std::collections::BTreeSet<String> {
         let dsl = self.dsl_state();
         dsl.member_startup_runtime_ready
@@ -2462,6 +2470,7 @@ impl MobActor {
                             .iter()
                             .map(|runtime_id| runtime_id.0.clone())
                             .collect(),
+                        member_kickoff_pending_ids: self.member_kickoff_pending_ids_from_dsl(),
                         pending_kickoff_member_ids: self.pending_kickoff_member_ids_from_dsl(),
                         member_kickoff_starting_ids: dsl
                             .member_kickoff_starting

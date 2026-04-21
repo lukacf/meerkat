@@ -223,10 +223,12 @@ fn reconcile_active_counts(run: &mut MobRun) {
 ///
 /// A loop is pending iff it is in Running phase, is specifically waiting for
 /// the next body frame (`stage == AwaitingBodyFrame`), and has no active body
-/// frame (`active_body_frame_id == KernelValue::None`). The `None` (field
-/// absent) arm guards against corrupt snapshots — legitimate Running loops
-/// always initialize this field; if it is missing entirely, we treat the loop
-/// as pending and emit a warning so the anomaly is visible in logs.
+/// frame (`active_body_frame_id == KernelValue::None`).
+///
+/// Recovery keeps a tolerant fallback for legacy or partially-written loop
+/// snapshots: if `stage` is missing entirely, we still treat the loop as
+/// pending and emit a warning so resumed runs do not silently strand a
+/// repeat-until body-frame request.
 fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
     if !snap
         .kernel_state
@@ -234,10 +236,17 @@ fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> 
     {
         return false;
     }
-    let awaiting_body_frame = snap
-        .kernel_state
-        .field(&loop_iteration::field::stage())
-        .is_some_and(|value| value.is_named_variant(&LOOP_STAGE_AWAITING_BODY_FRAME));
+    let awaiting_body_frame = match snap.kernel_state.field(&loop_iteration::field::stage()) {
+        Some(value) => value.is_named_variant(&LOOP_STAGE_AWAITING_BODY_FRAME),
+        None => {
+            tracing::warn!(
+                loop_instance_id = %loop_id,
+                "loop snapshot is missing stage field; treating as pending body frame \
+                 for recovery compatibility"
+            );
+            true
+        }
+    };
     if !awaiting_body_frame {
         return false;
     }

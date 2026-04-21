@@ -128,6 +128,7 @@ pub(crate) struct MobStartupKickoffSnapshot {
     pub member_startup_binding_requested: std::collections::BTreeSet<String>,
     pub member_startup_runtime_ready: std::collections::BTreeSet<String>,
     pub member_startup_ready: std::collections::BTreeSet<String>,
+    pub member_kickoff_pending_ids: std::collections::BTreeSet<String>,
     pub pending_kickoff_member_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_starting_ids: std::collections::BTreeSet<String>,
     pub member_kickoff_callback_pending_ids: std::collections::BTreeSet<String>,

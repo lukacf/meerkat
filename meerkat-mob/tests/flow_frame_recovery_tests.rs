@@ -351,6 +351,31 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
     );
 }
 
+/// Recovery keeps backward-compatible tolerance for persisted loop snapshots
+/// that predate the explicit `stage` field but still represent a pending body
+/// frame request (`Running + active_body_frame_id = None`).
+#[test]
+fn test_recovery_adds_missing_pending_body_frame_loops_when_stage_missing() {
+    let mut run = minimal_run_with_schema_v2();
+
+    let loop_snap = LoopSnapshot {
+        kernel_state: KernelState {
+            phase: "Running".into(),
+            fields: BTreeMap::from([("active_body_frame_id".into(), KernelValue::None)]),
+        },
+    };
+    run.loops
+        .insert(LoopInstanceId::from("loop-inst-legacy"), loop_snap);
+
+    reconcile_run_state(&mut run).expect("reconcile");
+
+    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
+    assert!(
+        pending.contains(&"loop-inst-legacy".to_string()),
+        "Legacy missing-stage loop should still be added to pending_body_frame_loops; got: {pending:?}"
+    );
+}
+
 /// Recovery must not re-queue a loop that is waiting for until-feedback after a
 /// completed body frame. `Running/AwaitingUntil/active_body_frame_id=None` is a
 /// distinct crash window from `AwaitingBodyFrame`.

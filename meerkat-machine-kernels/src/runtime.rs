@@ -1395,7 +1395,8 @@ mod tests {
     };
 
     use super::{
-        GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
+        GeneratedMachineKernel, KernelField, KernelInput, KernelNamedVariant, KernelSignal,
+        KernelState, KernelValue, TransitionRefusal,
     };
 
     #[allow(clippy::expect_used)]
@@ -1572,5 +1573,36 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize kernel value");
 
         assert_eq!(decoded, value);
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn kernel_state_deserializes_legacy_stringly_json() {
+        let encoded = r#"{
+            "phase": "Running",
+            "fields": {
+                "frame_id": { "type": "string", "value": "frame-1" },
+                "frame_scope": {
+                    "type": "named_variant",
+                    "enum_name": "FrameScope",
+                    "variant": "Body"
+                }
+            }
+        }"#;
+
+        let decoded: KernelState =
+            serde_json::from_str(encoded).expect("deserialize legacy kernel state");
+
+        assert_eq!(decoded.phase, "Running");
+        assert_eq!(
+            decoded.fields.get("frame_id"),
+            Some(&KernelValue::String("frame-1".into()))
+        );
+        assert!(
+            decoded
+                .field(&KernelField::from("frame_scope"))
+                .is_some_and(|value| value
+                    .is_named_variant(&KernelNamedVariant::new_static("FrameScope", "Body",)))
+        );
     }
 }

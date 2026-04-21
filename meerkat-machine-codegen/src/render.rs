@@ -311,14 +311,7 @@ pub fn render_composition_mapping_coverage(
 pub fn render_machine_kernel_module(schema: &MachineSchema) -> String {
     let mut out = String::new();
     let module_name = machine_slug(&schema.machine);
-    let catalog_fn = if matches!(
-        module_name.as_str(),
-        "flow_frame" | "flow_run" | "loop_iteration"
-    ) {
-        format!("{module_name}_machine")
-    } else {
-        format!("catalog::dsl::dsl_{module_name}_machine")
-    };
+    let catalog_fn = format!("catalog::dsl::dsl_{module_name}_machine");
 
     pushln!(
         &mut out,

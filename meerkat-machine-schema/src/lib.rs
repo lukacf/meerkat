@@ -1,4 +1,8 @@
 pub mod catalog;
+//
+// Canonical machine schemas live under `catalog`. The former flow/frame/loop
+// compat helpers are no longer exported from this crate; mob-local flow kernel
+// schemas now live with `meerkat_mob::flow_kernels::*_machine_schema`.
 mod composition;
 mod machine;
 pub mod types;

@@ -5,9 +5,9 @@
 
 use crate::definition::{DependencyMode, FlowNodeSpec, FrameSpec};
 use crate::error::MobError;
-use crate::generated::flow_frame;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, RunId, StepId};
 use crate::run::FrameSnapshot;
+use crate::runtime::flow_kernels::flow_frame;
 use crate::store::MobRunStore;
 use meerkat_machine_kernels::{KernelEffect, KernelFields, KernelInput, KernelValue};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

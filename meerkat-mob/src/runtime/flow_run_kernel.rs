@@ -2,9 +2,9 @@ use super::terminalization::{
     FlowTerminalizationAuthority, TerminalizationOutcome, TerminalizationTarget,
 };
 use crate::error::MobError;
-use crate::generated::flow_run;
 use crate::ids::{FlowId, MobId, RunId, StepId};
 use crate::run::{FlowRunConfig, MobRun, MobRunStatus};
+use crate::runtime::flow_kernels::flow_run;
 use crate::store::{MobEventStore, MobRunStore};
 use async_trait::async_trait;
 use indexmap::IndexMap;

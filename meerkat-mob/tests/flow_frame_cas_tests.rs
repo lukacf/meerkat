@@ -7,9 +7,9 @@
 )]
 
 use meerkat_machine_kernels::{KernelInput, KernelState, KernelValue};
-use meerkat_mob::generated::flow_run;
 use meerkat_mob::ids::FrameId;
 use meerkat_mob::run::{FrameSnapshot, MobRun};
+use meerkat_mob::runtime::flow_kernels::flow_run;
 use meerkat_mob::store::MobRunStore;
 use meerkat_mob::{FlowFrameMutator, FlowId, InMemoryMobRunStore, MobId};
 use std::collections::BTreeMap;

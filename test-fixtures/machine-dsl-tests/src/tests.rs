@@ -269,7 +269,7 @@ mod e2e_tla {
                 // Same target phase
                 assert_eq!(
                     format!("{:?}", dsl_out.to_phase),
-                    kernel_out.next_state.phase,
+                    kernel_out.next_state.phase.to_string(),
                     "Phase mismatch on {variant_name}"
                 );
 

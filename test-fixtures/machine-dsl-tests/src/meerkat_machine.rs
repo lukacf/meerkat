@@ -1598,7 +1598,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase.to_string());
             kernel_state = k.next_state.clone();
         }
 
@@ -1637,7 +1637,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase.to_string());
             assert_eq!(d.effects.len(), k.effects.len());
             kernel_state = k.next_state.clone();
         }
@@ -1658,7 +1658,7 @@ mod tests {
             kr.is_ok()
         );
         if let (Ok(d), Ok(k)) = (&dsl_result, &kr) {
-            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase);
+            assert_eq!(format!("{:?}", d.to_phase), k.next_state.phase.to_string());
             kernel_state = k.next_state.clone();
         }
     }

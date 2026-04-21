@@ -365,14 +365,13 @@ impl EphemeralRuntimeDriver {
                 Some(InputTerminalOutcome::Coalesced { aggregate_id: id })
             }
             mm_dsl::InputTerminalKind::Abandoned => {
-                let reason_str = self.dsl.0.state.input_abandon_reason.get(&key)?;
-                let reason = match reason_str.as_str() {
-                    "Retired" => InputAbandonReason::Retired,
-                    "Reset" => InputAbandonReason::Reset,
-                    "Stopped" => InputAbandonReason::Stopped,
-                    "Destroyed" => InputAbandonReason::Destroyed,
-                    "Cancelled" => InputAbandonReason::Cancelled,
-                    "MaxAttemptsExhausted" => {
+                let reason = match self.dsl.0.state.input_abandon_reason.get(&key).copied()? {
+                    mm_dsl::InputAbandonReason::Retired => InputAbandonReason::Retired,
+                    mm_dsl::InputAbandonReason::Reset => InputAbandonReason::Reset,
+                    mm_dsl::InputAbandonReason::Stopped => InputAbandonReason::Stopped,
+                    mm_dsl::InputAbandonReason::Destroyed => InputAbandonReason::Destroyed,
+                    mm_dsl::InputAbandonReason::Cancelled => InputAbandonReason::Cancelled,
+                    mm_dsl::InputAbandonReason::MaxAttemptsExhausted => {
                         let attempts = self
                             .dsl
                             .0
@@ -383,7 +382,6 @@ impl EphemeralRuntimeDriver {
                             .unwrap_or(0) as u32;
                         InputAbandonReason::MaxAttemptsExhausted { attempts }
                     }
-                    _ => return None,
                 };
                 Some(InputTerminalOutcome::Abandoned { reason })
             }
@@ -668,7 +666,7 @@ impl EphemeralRuntimeDriver {
                     .0
                     .state
                     .input_abandon_reason
-                    .insert(key.clone(), format!("{reason:?}"));
+                    .insert(key.clone(), mm_dsl::InputAbandonReason::from(&reason));
                 self.dsl
                     .0
                     .state
@@ -1352,10 +1350,7 @@ impl EphemeralRuntimeDriver {
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {
                         input_id: key.clone(),
-                        reason: format!(
-                            "{:?}",
-                            InputAbandonReason::MaxAttemptsExhausted { attempts }
-                        ),
+                        reason: mm_dsl::InputAbandonReason::MaxAttemptsExhausted,
                         attempt_count: attempts_count,
                     },
                     "AbandonInput(MaxAttemptsExhausted)",
@@ -1380,16 +1375,16 @@ impl EphemeralRuntimeDriver {
                     state.terminal_outcome = Some(outcome.clone());
                     state.updated_at = now;
                 }
-                self.events
-                    .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                self.events.push(
+                    self.make_envelope(RuntimeEvent::InputLifecycle(
                         InputLifecycleEvent::Abandoned {
                             input_id: input_id.clone(),
-                            reason: format!(
-                                "{:?}",
-                                InputAbandonReason::MaxAttemptsExhausted { attempts }
-                            ),
+                            reason: mm_dsl::InputAbandonReason::MaxAttemptsExhausted
+                                .as_str()
+                                .to_string(),
                         },
-                    )));
+                    )),
+                );
             } else {
                 // Still have attempts — rollback to Queued.
                 self.dsl_apply(
@@ -1583,6 +1578,8 @@ impl EphemeralRuntimeDriver {
                 }
             })
             .collect();
+        let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
+        let reason_label = dsl_reason.as_str();
         let mut count = 0;
         for id in &non_terminal_ids {
             let key = Self::dsl_key(id);
@@ -1598,7 +1595,7 @@ impl EphemeralRuntimeDriver {
                 .dsl_apply(
                     mm_dsl::MeerkatMachineInput::AbandonInput {
                         input_id: key.clone(),
-                        reason: format!("{reason:?}"),
+                        reason: dsl_reason,
                         attempt_count,
                     },
                     "AbandonInput",
@@ -1614,7 +1611,7 @@ impl EphemeralRuntimeDriver {
                     timestamp: now,
                     from: from_phase,
                     to: InputLifecycleState::Abandoned,
-                    reason: Some(format!("Abandon({reason:?})")),
+                    reason: Some(format!("Abandon({reason_label})")),
                 });
                 state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
                     reason: reason.clone(),
@@ -1626,7 +1623,7 @@ impl EphemeralRuntimeDriver {
                 .push(self.make_envelope(RuntimeEvent::InputLifecycle(
                     InputLifecycleEvent::Abandoned {
                         input_id: id.clone(),
-                        reason: format!("{reason:?}"),
+                        reason: reason_label.to_string(),
                     },
                 )));
         }

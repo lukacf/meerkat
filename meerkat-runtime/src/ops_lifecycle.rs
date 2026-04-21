@@ -405,19 +405,13 @@ impl ShellState {
     /// Read the DSL operation status for `id`, or `None` if not registered.
     fn status(&self, id: &OperationId) -> Option<OperationStatus> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let status_str = self.dsl.0.state.op_statuses.get(&id_key)?;
-        match status_str.as_str() {
-            "Provisioning" => Some(OperationStatus::Provisioning),
-            "Running" => Some(OperationStatus::Running),
-            "Retiring" => Some(OperationStatus::Retiring),
-            "Completed" => Some(OperationStatus::Completed),
-            "Failed" => Some(OperationStatus::Failed),
-            "Aborted" => Some(OperationStatus::Aborted),
-            "Cancelled" => Some(OperationStatus::Cancelled),
-            "Retired" => Some(OperationStatus::Retired),
-            "Terminated" => Some(OperationStatus::Terminated),
-            _ => None,
-        }
+        self.dsl
+            .0
+            .state
+            .op_statuses
+            .get(&id_key)
+            .copied()
+            .map(OperationStatus::from)
     }
 
     /// Read the DSL operation kind for `id`, or `None` if not registered.
@@ -884,25 +878,10 @@ impl RuntimeOpsLifecycleRegistry {
                 continue;
             }
             let id_key = mm_dsl::OperationId::from_domain(&op_id).0;
-            let status_str: &'static str = match op_state.status {
-                OperationStatus::Completed => "Completed",
-                OperationStatus::Failed => "Failed",
-                OperationStatus::Aborted => "Aborted",
-                OperationStatus::Cancelled => "Cancelled",
-                OperationStatus::Retired => "Retired",
-                OperationStatus::Terminated => "Terminated",
-                // Unreachable: filtered by is_terminal() above.
-                OperationStatus::Absent
-                | OperationStatus::Provisioning
-                | OperationStatus::Running
-                | OperationStatus::Retiring => continue,
-            };
-            shell
-                .dsl
-                .0
-                .state
-                .op_statuses
-                .insert(id_key.clone(), status_str.to_string());
+            shell.dsl.0.state.op_statuses.insert(
+                id_key.clone(),
+                mm_dsl::OperationStatus::from(op_state.status),
+            );
             let kind_str = serde_json::to_string(&op_state.kind).unwrap_or_default();
             shell.dsl.0.state.op_kinds.insert(id_key.clone(), kind_str);
             shell

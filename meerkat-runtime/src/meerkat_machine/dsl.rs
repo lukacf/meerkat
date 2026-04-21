@@ -1212,6 +1212,117 @@ impl From<meerkat_core::comms::InputSource> for WorkOrigin {
     }
 }
 
+/// Typed async-operation lifecycle status. Closed mirror of
+/// [`meerkat_core::ops_lifecycle::OperationStatus`] — replaces the former
+/// literal-string values in the DSL's `op_statuses` map.
+///
+/// The DSL writes these variants directly on each ops lifecycle transition
+/// (`RegisterOp`, `StartOp`, `CompleteOp`, `FailOp`, `CancelOp`, `AbortOp`,
+/// `RetireRequestedOp`, `RetireCompletedOp`, `TerminateOp`). The shell's
+/// `ShellState::status()` reads the typed value directly and maps to the
+/// domain enum via the `From` impl below — no string compares, no string
+/// parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum OperationStatus {
+    #[default]
+    Absent,
+    Provisioning,
+    Running,
+    Retiring,
+    Completed,
+    Failed,
+    Aborted,
+    Cancelled,
+    Retired,
+    Terminated,
+}
+
+impl From<meerkat_core::ops_lifecycle::OperationStatus> for OperationStatus {
+    fn from(status: meerkat_core::ops_lifecycle::OperationStatus) -> Self {
+        match status {
+            meerkat_core::ops_lifecycle::OperationStatus::Absent => Self::Absent,
+            meerkat_core::ops_lifecycle::OperationStatus::Provisioning => Self::Provisioning,
+            meerkat_core::ops_lifecycle::OperationStatus::Running => Self::Running,
+            meerkat_core::ops_lifecycle::OperationStatus::Retiring => Self::Retiring,
+            meerkat_core::ops_lifecycle::OperationStatus::Completed => Self::Completed,
+            meerkat_core::ops_lifecycle::OperationStatus::Failed => Self::Failed,
+            meerkat_core::ops_lifecycle::OperationStatus::Aborted => Self::Aborted,
+            meerkat_core::ops_lifecycle::OperationStatus::Cancelled => Self::Cancelled,
+            meerkat_core::ops_lifecycle::OperationStatus::Retired => Self::Retired,
+            meerkat_core::ops_lifecycle::OperationStatus::Terminated => Self::Terminated,
+        }
+    }
+}
+
+impl From<OperationStatus> for meerkat_core::ops_lifecycle::OperationStatus {
+    fn from(status: OperationStatus) -> Self {
+        match status {
+            OperationStatus::Absent => Self::Absent,
+            OperationStatus::Provisioning => Self::Provisioning,
+            OperationStatus::Running => Self::Running,
+            OperationStatus::Retiring => Self::Retiring,
+            OperationStatus::Completed => Self::Completed,
+            OperationStatus::Failed => Self::Failed,
+            OperationStatus::Aborted => Self::Aborted,
+            OperationStatus::Cancelled => Self::Cancelled,
+            OperationStatus::Retired => Self::Retired,
+            OperationStatus::Terminated => Self::Terminated,
+        }
+    }
+}
+
+/// Typed input-abandonment reason. Closed mirror of the discriminant set of
+/// [`crate::input_state::InputAbandonReason`] — replaces the former
+/// `format!("{reason:?}")` Debug round-trip in the DSL's
+/// `input_abandon_reason` map.
+///
+/// The `MaxAttemptsExhausted` variant's `attempts` payload rides on the
+/// companion `input_abandon_attempt_count: Map<String, u64>` field of the
+/// DSL state; this enum only carries the discriminant. The domain
+/// `InputAbandonReason::MaxAttemptsExhausted { attempts }` is reconstructed
+/// in the driver by pairing the typed discriminant with that companion map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum InputAbandonReason {
+    #[default]
+    Retired,
+    Reset,
+    Stopped,
+    Destroyed,
+    Cancelled,
+    MaxAttemptsExhausted,
+}
+
+impl From<&crate::input_state::InputAbandonReason> for InputAbandonReason {
+    fn from(reason: &crate::input_state::InputAbandonReason) -> Self {
+        match reason {
+            crate::input_state::InputAbandonReason::Retired => Self::Retired,
+            crate::input_state::InputAbandonReason::Reset => Self::Reset,
+            crate::input_state::InputAbandonReason::Stopped => Self::Stopped,
+            crate::input_state::InputAbandonReason::Destroyed => Self::Destroyed,
+            crate::input_state::InputAbandonReason::Cancelled => Self::Cancelled,
+            crate::input_state::InputAbandonReason::MaxAttemptsExhausted { .. } => {
+                Self::MaxAttemptsExhausted
+            }
+        }
+    }
+}
+
+impl InputAbandonReason {
+    /// Stable lowercase label for event wire formats. Mirrors the
+    /// snake-case serde representation of the domain enum for consistency
+    /// with existing consumers.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retired => "retired",
+            Self::Reset => "reset",
+            Self::Stopped => "stopped",
+            Self::Destroyed => "destroyed",
+            Self::Cancelled => "cancelled",
+            Self::MaxAttemptsExhausted => "max_attempts_exhausted",
+        }
+    }
+}
+
 // Ensure we keep the exact generated schema DSL body from the catalog source.
 machine! {
     machine MeerkatMachine {
@@ -1262,7 +1373,7 @@ machine! {
             input_terminal_kind: Map<String, InputTerminalKind>,
             input_superseded_by: Map<String, String>,
             input_aggregate_id: Map<String, String>,
-            input_abandon_reason: Map<String, String>,
+            input_abandon_reason: Map<String, Enum<InputAbandonReason>>,
             input_abandon_attempt_count: Map<String, u64>,
             input_attempt_counts: Map<String, u64>,
             input_run_associations: Map<String, String>,
@@ -1273,7 +1384,7 @@ machine! {
             steer_lane: Set<String>,
 
             // --- Ops lifecycle substate ---
-            op_statuses: Map<String, String>,
+            op_statuses: Map<String, Enum<OperationStatus>>,
             op_completion_seq: Map<String, u64>,
             op_terminal_outcomes: Map<String, String>,
             op_kinds: Map<String, String>,
@@ -1664,7 +1775,7 @@ machine! {
             CoalesceInput { input_id: String, aggregate_id: String },
             AbandonInput {
                 input_id: String,
-                reason: String,
+                reason: Enum<InputAbandonReason>,
                 attempt_count: u64,
             },
             RecordBoundarySeq { input_id: String, seq: u64 },
@@ -4162,7 +4273,7 @@ machine! {
             on input RegisterOp { operation_id, kind }
             guard "not_already_registered" { !self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Provisioning");
+                self.op_statuses.insert(operation_id, OperationStatus::Provisioning);
                 self.op_kinds.insert(operation_id, kind);
                 self.op_peer_ready.insert(operation_id, false);
                 self.op_progress_counts.insert(operation_id, 0);
@@ -4178,7 +4289,7 @@ machine! {
             on input StartOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Running");
+                self.op_statuses.insert(operation_id, OperationStatus::Running);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -4190,7 +4301,7 @@ machine! {
             on input CompleteOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Completed");
+                self.op_statuses.insert(operation_id, OperationStatus::Completed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
                 self.op_completion_seq.insert(operation_id, self.next_completion_seq);
@@ -4207,7 +4318,7 @@ machine! {
             on input FailOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Failed");
+                self.op_statuses.insert(operation_id, OperationStatus::Failed);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
@@ -4222,7 +4333,7 @@ machine! {
             on input CancelOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Cancelled");
+                self.op_statuses.insert(operation_id, OperationStatus::Cancelled);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
@@ -4237,7 +4348,7 @@ machine! {
             on input AbortOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Aborted");
+                self.op_statuses.insert(operation_id, OperationStatus::Aborted);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
@@ -4277,7 +4388,7 @@ machine! {
             on input RetireRequestedOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Retiring");
+                self.op_statuses.insert(operation_id, OperationStatus::Retiring);
             }
             to Idle
             emit SubmitOpEvent { operation_id: operation_id }
@@ -4289,7 +4400,7 @@ machine! {
             on input RetireCompletedOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Retired");
+                self.op_statuses.insert(operation_id, OperationStatus::Retired);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }
@@ -4306,7 +4417,7 @@ machine! {
             on input TerminateOp { operation_id, outcome }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
             update {
-                self.op_statuses.insert(operation_id, "Terminated");
+                self.op_statuses.insert(operation_id, OperationStatus::Terminated);
                 self.op_terminal_outcomes.insert(operation_id, outcome);
                 self.active_op_count -= 1;
             }

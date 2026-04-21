@@ -1,6 +1,4 @@
-#[cfg(not(test))]
-use std::collections::BTreeSet;
-use std::fmt::Write;
+use std::{collections::BTreeSet, fmt::Write};
 
 fn push_fmt(out: &mut String, args: std::fmt::Arguments<'_>) {
     let _ignored = out.write_fmt(args);
@@ -573,13 +571,11 @@ fn render_semantic_mapping_section(
     out.push('\n');
 }
 
-#[cfg(not(test))]
 fn machine_slug(machine_name: &str) -> String {
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
 }
 
-#[cfg(not(test))]
 fn render_kernel_ident_module<'a>(
     out: &mut String,
     module_name: &str,
@@ -593,16 +589,16 @@ fn render_kernel_ident_module<'a>(
             continue;
         }
         let function_name = to_snake_case(name);
+        let literal = rust_string_literal(name);
         pushln!(out, "    #[must_use]");
         pushln!(out, "    pub fn {function_name}() -> super::{type_name} {{");
-        pushln!(out, "        super::{type_name}::new_static(\"{name}\")");
+        pushln!(out, "        super::{type_name}::new_static({literal})");
         pushln!(out, "    }}");
     }
     pushln!(out, "}}");
     pushln!(out);
 }
 
-#[cfg(not(test))]
 fn to_snake_case(value: &str) -> String {
     let mut out = String::new();
     let mut previous_is_sep = true;
@@ -629,6 +625,10 @@ fn to_snake_case(value: &str) -> String {
     }
 
     out.trim_matches('_').to_owned()
+}
+
+fn rust_string_literal(value: &str) -> String {
+    format!("\"{}\"", value.escape_default())
 }
 
 #[cfg(not(test))]
@@ -1121,7 +1121,10 @@ fn tla_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_machine_module;
+    use super::{
+        machine_slug, render_kernel_ident_module, render_machine_module, rust_string_literal,
+        to_snake_case,
+    };
     use meerkat_machine_schema::{
         EffectEmit, EnumSchema, Expr, FieldInit, FieldSchema, InitSchema, InputMatch,
         MachineSchema, RustBinding, StateSchema, TransitionSchema, TriggerKind, TypeRef, Update,
@@ -1309,5 +1312,36 @@ mod tests {
         assert!(rendered.contains(
             "BoundaryApplied([run_id |-> run_id, boundary_sequence |-> boundary_count + 1])"
         ));
+    }
+
+    #[test]
+    fn kernel_ident_module_renders_snake_case_helpers() {
+        let mut rendered = String::new();
+        render_kernel_ident_module(
+            &mut rendered,
+            "input",
+            "KernelInputVariant",
+            ["Awaiting Body Frame"],
+        );
+
+        assert!(rendered.contains("pub fn awaiting_body_frame()"));
+        assert!(rendered.contains("new_static(\"Awaiting Body Frame\")"));
+    }
+
+    #[test]
+    fn helper_to_snake_case_matches_accessor_normalization() {
+        assert_eq!(to_snake_case("Foo-Bar"), "foo_bar");
+        assert_eq!(to_snake_case("Awaiting Body Frame"), "awaiting_body_frame");
+    }
+
+    #[test]
+    fn machine_slug_strips_machine_suffix() {
+        assert_eq!(machine_slug("FlowRunMachine"), "flow_run");
+        assert_eq!(machine_slug("Mob"), "mob");
+    }
+
+    #[test]
+    fn rust_string_literal_escapes_control_characters() {
+        assert_eq!(rust_string_literal("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
     }
 }

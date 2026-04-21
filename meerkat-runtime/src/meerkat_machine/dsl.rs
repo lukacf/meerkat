@@ -1906,6 +1906,7 @@ machine! {
             TerminateOp { operation_id: String, outcome: Enum<OperationTerminalOutcomeKind>, payload: String },
             RequestWaitAll { operation_ids: Set<String> },
             SatisfyWaitAll,
+            CancelWaitAll,
             // Comms drain inputs
             SpawnDrain { mode: DrainMode },
             StopDrain,
@@ -4562,11 +4563,25 @@ machine! {
             emit NotifyOpWatcher { operation_id: operation_id }
         }
 
-        // PeerReadyOp: mark operation's peer as ready (Running|Retiring only).
+        // PeerReadyOp: mark operation's peer as ready.
+        //
+        // The "only MobMemberChild ops expose a peer handoff" and
+        // "only once per op" decisions live in the DSL as guards, not in
+        // the shell. The shell classifies a guard rejection on
+        // `kind_is_mob_member_child` back into
+        // `OpsLifecycleError::PeerNotExpected`, and a rejection on
+        // `not_already_peer_ready` into `OpsLifecycleError::AlreadyPeerReady`
+        // via `classify_peer_ready_rejection`.
         transition PeerReadyOp {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input PeerReadyOp { operation_id }
             guard "op_registered" { self.op_statuses.contains_key(operation_id) }
+            guard "kind_is_mob_member_child" {
+                self.op_kinds.get_copied(operation_id) == Some(OperationKind::MobMemberChild)
+            }
+            guard "not_already_peer_ready" {
+                self.op_peer_ready.get_copied(operation_id) != Some(true)
+            }
             guard "from_status_valid" {
                 self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Running)
                 || self.op_statuses.get_copied(operation_id) == Some(OperationStatus::Retiring)
@@ -4667,17 +4682,48 @@ machine! {
             to Idle
         }
 
-        // SatisfyWaitAll: deactivate wait-all barrier
+        // SatisfyWaitAll: deactivate wait-all barrier once every member of
+        // `wait_operation_ids` has reached a terminal status. The
+        // "all members terminal" decision lives in the DSL guard — the
+        // shell no longer pre-computes the verdict before firing this input.
+        // A guard rejection under `wait_is_active` means the barrier wasn't
+        // active; a rejection under `all_members_terminal` means the shell
+        // fired early. Callers drive satisfaction by firing this input on
+        // each op terminalization; the guard serves as the fixed point.
         transition SatisfyWaitAll {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SatisfyWaitAll
             guard "wait_is_active" { self.wait_active == true }
+            guard "all_members_terminal" {
+                for_all(member_id in self.wait_operation_ids,
+                    self.op_statuses.get_copied(member_id) == Some(OperationStatus::Completed)
+                    || self.op_statuses.get_copied(member_id) == Some(OperationStatus::Failed)
+                    || self.op_statuses.get_copied(member_id) == Some(OperationStatus::Aborted)
+                    || self.op_statuses.get_copied(member_id) == Some(OperationStatus::Cancelled)
+                    || self.op_statuses.get_copied(member_id) == Some(OperationStatus::Retired)
+                    || self.op_statuses.get_copied(member_id) == Some(OperationStatus::Terminated))
+            }
             update {
                 self.wait_active = false;
                 self.wait_operation_ids = EmptySet;
             }
             to Idle
             emit WaitAllSatisfied
+        }
+
+        // CancelWaitAll: clear the wait-all barrier without the terminality
+        // check. Fired by the shell on `wait_all` future drop; the
+        // satisfaction obligation is NOT emitted because no authority
+        // resolved the request. Idempotent on an already-cleared barrier.
+        transition CancelWaitAll {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input CancelWaitAll
+            guard "wait_is_active" { self.wait_active == true }
+            update {
+                self.wait_active = false;
+                self.wait_operation_ids = EmptySet;
+            }
+            to Idle
         }
 
         // =====================================================================

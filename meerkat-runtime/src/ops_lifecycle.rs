@@ -702,28 +702,33 @@ impl ShellState {
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.
     ///
-    /// Barrier membership lives in DSL `wait_operation_ids`; `wait_active`
-    /// signals whether a barrier is pending. `wait_request_id` is the
-    /// shell-owned oneshot correlation id that selects which sender to
-    /// notify; when the DSL barrier satisfies without a live correlation
-    /// (post-recovery, or duplicate resolution), the oneshot simply remains
-    /// pending.
+    /// Barrier membership and the "all members terminal" decision both live
+    /// in the DSL: `wait_operation_ids` carries the set, `wait_active`
+    /// signals a pending barrier, and `SatisfyWaitAll`'s
+    /// `all_members_terminal` guard owns the fixed-point test. The shell
+    /// fires `SatisfyWaitAll` idempotently on every terminal transition and
+    /// lets the DSL guard reject early firings as a no-op. On acceptance
+    /// (transition returns `Ok`), the shell selects the correlated oneshot
+    /// and delivers the `WaitAllSatisfied` obligation token.
+    ///
+    /// `wait_request_id` is the shell-owned oneshot correlation id that
+    /// selects which sender to notify; when the DSL barrier satisfies
+    /// without a live correlation (post-recovery, or duplicate resolution),
+    /// the oneshot simply remains pending.
     fn maybe_satisfy_wait(&mut self) {
-        if !self.wait_active() {
-            return;
-        }
+        // Capture membership *before* applying — `SatisfyWaitAll`'s update
+        // clause resets `wait_operation_ids` to empty, so a post-apply read
+        // would lose the member list carried on the obligation token.
         let ids = self.wait_operation_ids();
-        let all_terminal = ids
-            .iter()
-            .all(|id| self.status(id).is_some_and(OperationStatus::is_terminal));
-        if !all_terminal {
+        if self
+            .dsl_apply_raw(mm_dsl::MeerkatMachineInput::SatisfyWaitAll)
+            .is_err()
+        {
+            // Guard rejection (barrier inactive, or members not all terminal
+            // yet) is an expected idempotent no-op on the satisfaction fixed
+            // point, not a shell/DSL desync. Swallow.
             return;
         }
-        // Reflect barrier resolution in DSL state — clears wait_active + members.
-        let _ = self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-            "SatisfyWaitAll",
-        );
         let wait_id = match self.wait_request_id.take() {
             Some(id) => id,
             None => return,
@@ -1137,12 +1142,15 @@ impl RuntimeOpsLifecycleRegistry {
             Some(active) if active == wait_request_id => {
                 state.wait_request_id = None;
                 state.pending_wait = None;
-                // Clear the DSL barrier — SatisfyWaitAll resets wait_active +
-                // wait_operation_ids. The `wait_is_active` guard ensures this
-                // is a no-op if the barrier was already cleared.
+                // Clear the DSL barrier via the dedicated `CancelWaitAll`
+                // transition. Unlike `SatisfyWaitAll`, it does not require
+                // every member to be terminal (the request was dropped, not
+                // resolved) and does not emit the `WaitAllSatisfied`
+                // obligation. The `wait_is_active` guard keeps it an
+                // idempotent no-op if the barrier was already cleared.
                 let _ = state.dsl_apply(
-                    mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-                    "SatisfyWaitAll(cancel)",
+                    mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                    "CancelWaitAll(cancel)",
                 );
                 Ok(())
             }
@@ -1262,6 +1270,44 @@ fn classify_op_rejection(
     }
 }
 
+/// Classify a `PeerReadyOp` DSL rejection back into the public error surface.
+///
+/// `PeerReadyOp`'s DSL guards layer three distinct rejections onto a single
+/// `GuardRejected` variant. The shell distinguishes them by re-reading the
+/// canonical DSL state under the same write lock that observed the guard
+/// failure — so the classification cannot race with a concurrent mutation.
+///
+/// Priority mirrors the declared guard order in the DSL transition:
+/// 1. `kind_is_mob_member_child` → `PeerNotExpected`
+/// 2. `not_already_peer_ready`   → `AlreadyPeerReady`
+/// 3. `from_status_valid`        → `InvalidTransition`
+fn classify_peer_ready_rejection(
+    state: &ShellState,
+    err: mm_dsl::MeerkatMachineTransitionError,
+    id: &OperationId,
+    status: OperationStatus,
+) -> OpsLifecycleError {
+    match err {
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
+            let kind = state.kind(id);
+            if kind != Some(OperationKind::MobMemberChild) {
+                return OpsLifecycleError::PeerNotExpected(id.clone());
+            }
+            if state.peer_ready(id).unwrap_or(false) {
+                return OpsLifecycleError::AlreadyPeerReady(id.clone());
+            }
+            OpsLifecycleError::InvalidTransition {
+                id: id.clone(),
+                status,
+                action: "peer_ready",
+            }
+        }
+        other => OpsLifecycleError::Internal(format!(
+            "DSL rejected ops transition (peer_ready): {other:?}"
+        )),
+    }
+}
+
 impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
@@ -1358,23 +1404,15 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        let kind = state
-            .kind(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
-        // Shell-owned guards (domain-shape concerns, not transition legality):
-        // peer-ready is only meaningful for MobMemberChild ops, and only once.
-        if kind != OperationKind::MobMemberChild {
-            return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
-        }
-        if state.peer_ready(id).unwrap_or(false) {
-            return Err(OpsLifecycleError::AlreadyPeerReady(id.clone()));
-        }
-
+        // The kind / not-already-peer-ready / status decisions all live in
+        // the DSL's `PeerReadyOp` guards. The shell fires unconditionally
+        // and classifies a guard rejection by re-reading the state under
+        // the same write lock (so no race with the DSL's guard evaluation).
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::PeerReadyOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
         }) {
-            return Err(classify_op_rejection(err, id, status, "peer_ready"));
+            return Err(classify_peer_ready_rejection(&state, err, id, status));
         }
 
         // Shell concern: store the peer handle.
@@ -1589,11 +1627,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // Collect non-terminal op IDs — the shell loop mirrors the old
-        // OwnerTerminated cascade; session lock serialises the batch. The
-        // DSL's `TerminateOp` transition guards on the same non-terminal set,
-        // so guard rejection here indicates a genuine state desync rather
-        // than the common already-terminal no-op.
+        // The shell loop is a mechanical cursor over DSL-owned state; the
+        // "is this op non-terminal?" decision is expressed as a typed read
+        // of the DSL's `op_statuses` map via `OperationStatus::is_terminal`,
+        // not a handwritten branch over stringly-typed state. The DSL's
+        // `TerminateOp` transition guards on the same non-terminal set, so
+        // guard rejection here indicates a genuine state desync rather than
+        // the common already-terminal no-op.
         let to_terminate: Vec<(OperationId, OperationStatus)> = state
             .operation_ids()
             .into_iter()
@@ -1754,11 +1794,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                     if state.pending_wait.is_some() {
                         // Roll back the DSL barrier we just activated so the
                         // registry is not stuck in a wait-active state with
-                        // no correlation oneshot to resolve.
+                        // no correlation oneshot to resolve. `CancelWaitAll`
+                        // is the no-obligation clearer (members need not be
+                        // terminal).
                         state.wait_request_id = None;
                         let _ = state.dsl_apply(
-                            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-                            "SatisfyWaitAll(rollback)",
+                            mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                            "CancelWaitAll(rollback)",
                         );
                         return Box::pin(WaitAllFuture {
                             registry: self,

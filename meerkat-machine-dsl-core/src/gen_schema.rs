@@ -3,6 +3,18 @@ use quote::quote;
 
 use crate::ast::{ExprDef, MachineDef, TransitionDef, UpdateDef};
 
+/// Belt-and-suspenders: emit a `compile_error!` token if a non-literal
+/// arithmetic amount ever reaches codegen. `validate::validate_arithmetic_amount`
+/// already rejects these, but this keeps the codegen total — it never silently
+/// coerces to `1`.
+fn non_literal_amount_compile_error(field: &str, update_kind: &str) -> TokenStream {
+    let msg = format!(
+        "internal error: {update_kind} amount for field `{field}` was not a u64 literal \
+         at schema codegen (validation should have caught this)"
+    );
+    quote! { compile_error!(#msg) }
+}
+
 /// Generate `fn schema() -> meerkat_machine_schema::MachineSchema`.
 ///
 /// This is the backward-compatibility bridge: codegen, RMAT, validation, and
@@ -567,19 +579,24 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                 }
                 UpdateDef::Increment { field, amount } => {
                     let f = field.to_string();
-                    let a = match amount {
-                        crate::ast::ExprDef::U64(v) => *v,
-                        _ => 1, // default increment
-                    };
-                    quote! { Update::Increment { field: #f.into(), amount: #a } }
+                    // `validate::validate_arithmetic_amount` has already rejected
+                    // non-literal amounts. If one slips through, emit a
+                    // `compile_error!` rather than silently coerce to 1.
+                    match amount {
+                        crate::ast::ExprDef::U64(v) => {
+                            quote! { Update::Increment { field: #f.into(), amount: #v } }
+                        }
+                        _ => non_literal_amount_compile_error(&f, "Increment"),
+                    }
                 }
                 UpdateDef::Decrement { field, amount } => {
                     let f = field.to_string();
-                    let a = match amount {
-                        crate::ast::ExprDef::U64(v) => *v,
-                        _ => 1,
-                    };
-                    quote! { Update::Decrement { field: #f.into(), amount: #a } }
+                    match amount {
+                        crate::ast::ExprDef::U64(v) => {
+                            quote! { Update::Decrement { field: #f.into(), amount: #v } }
+                        }
+                        _ => non_literal_amount_compile_error(&f, "Decrement"),
+                    }
                 }
                 UpdateDef::SetInsert { field, value } => {
                     let f = field.to_string();
@@ -605,20 +622,22 @@ fn gen_schema_updates(updates: &[crate::ast::UpdateDef]) -> Vec<TokenStream> {
                 UpdateDef::MapIncrement { field, key, amount } => {
                     let f = field.to_string();
                     let k = gen_schema_expr(key);
-                    let a = match amount {
-                        crate::ast::ExprDef::U64(v) => *v,
-                        _ => 1,
-                    };
-                    quote! { Update::MapIncrement { field: #f.into(), key: #k, amount: #a } }
+                    match amount {
+                        crate::ast::ExprDef::U64(v) => {
+                            quote! { Update::MapIncrement { field: #f.into(), key: #k, amount: #v } }
+                        }
+                        _ => non_literal_amount_compile_error(&f, "MapIncrement"),
+                    }
                 }
                 UpdateDef::MapDecrement { field, key, amount } => {
                     let f = field.to_string();
                     let k = gen_schema_expr(key);
-                    let a = match amount {
-                        crate::ast::ExprDef::U64(v) => *v,
-                        _ => 1,
-                    };
-                    quote! { Update::MapDecrement { field: #f.into(), key: #k, amount: #a } }
+                    match amount {
+                        crate::ast::ExprDef::U64(v) => {
+                            quote! { Update::MapDecrement { field: #f.into(), key: #k, amount: #v } }
+                        }
+                        _ => non_literal_amount_compile_error(&f, "MapDecrement"),
+                    }
                 }
                 UpdateDef::Conditional {
                     condition,

@@ -516,4 +516,156 @@ mod tests {
         assert_eq!(proj.rules[3].phase, "Idle");
         assert!(proj.rules[3].condition.is_none()); // fallback
     }
+
+    /// Non-literal arithmetic amount must be rejected by `validate`
+    /// rather than silently coerced to `1` in schema codegen.
+    pub const COUNTER_NON_LITERAL_INCREMENT: &str = r#"
+machine CounterBad {
+    version: 1,
+    rust: "test" / "counter_bad",
+
+    state {
+        lifecycle_phase: CounterBadPhase,
+        value: u64,
+    }
+
+    init(Idle) {
+    }
+
+    terminal []
+
+    phase CounterBadPhase {
+        Idle,
+    }
+
+    input CounterBadInput {
+        Bump { amount: u64 },
+    }
+
+    effect CounterBadEffect {
+        Bumped,
+    }
+
+    transition BumpIdle {
+        on input Bump { amount }
+        guard { self.lifecycle_phase == Phase::Idle }
+        update {
+            self.value += amount;
+        }
+        to Idle
+    }
+}
+"#;
+
+    #[test]
+    fn validate_rejects_non_literal_increment_amount() {
+        let tokens: proc_macro2::TokenStream =
+            COUNTER_NON_LITERAL_INCREMENT.parse().expect("tokenize");
+        let def = crate::parse::parse_machine(tokens).expect("parse");
+        let err = crate::validate::validate(&def).expect_err("should reject non-literal amount");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a u64 literal"),
+            "expected literal-only error, got: {msg}"
+        );
+    }
+
+    /// Non-literal map-increment amount must likewise be rejected.
+    pub const MAP_NON_LITERAL_INCREMENT: &str = r#"
+machine MapBad {
+    version: 1,
+    rust: "test" / "map_bad",
+
+    state {
+        lifecycle_phase: MapBadPhase,
+        counts: Map<String, u64>,
+        step: u64,
+    }
+
+    init(Idle) {
+        step = 1,
+    }
+
+    terminal []
+
+    phase MapBadPhase {
+        Idle,
+    }
+
+    input MapBadInput {
+        Tick { key: String },
+    }
+
+    effect MapBadEffect {
+        Ticked,
+    }
+
+    transition TickIdle {
+        on input Tick { key }
+        guard { self.lifecycle_phase == Phase::Idle }
+        update {
+            self.counts.increment(key, self.step);
+        }
+        to Idle
+    }
+}
+"#;
+
+    #[test]
+    fn validate_rejects_non_literal_map_increment_amount() {
+        let tokens: proc_macro2::TokenStream = MAP_NON_LITERAL_INCREMENT.parse().expect("tokenize");
+        let def = crate::parse::parse_machine(tokens).expect("parse");
+        let err = crate::validate::validate(&def).expect_err("should reject non-literal amount");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a u64 literal"),
+            "expected literal-only error, got: {msg}"
+        );
+    }
+
+    /// Literal arithmetic amount must parse AND validate.
+    pub const COUNTER_LITERAL_INCREMENT: &str = r#"
+machine CounterOk {
+    version: 1,
+    rust: "test" / "counter_ok",
+
+    state {
+        lifecycle_phase: CounterOkPhase,
+        value: u64,
+    }
+
+    init(Idle) {
+    }
+
+    terminal []
+
+    phase CounterOkPhase {
+        Idle,
+    }
+
+    input CounterOkInput {
+        Bump,
+    }
+
+    effect CounterOkEffect {
+        Bumped,
+    }
+
+    transition BumpIdle {
+        on input Bump
+        guard { self.lifecycle_phase == Phase::Idle }
+        update {
+            self.value += 5;
+        }
+        to Idle
+    }
+}
+"#;
+
+    #[test]
+    fn validate_accepts_literal_increment_amount() {
+        let tokens: proc_macro2::TokenStream = COUNTER_LITERAL_INCREMENT.parse().expect("tokenize");
+        let def = crate::parse::parse_machine(tokens).expect("parse");
+        crate::validate::validate(&def).expect("literal amount should validate");
+    }
 }

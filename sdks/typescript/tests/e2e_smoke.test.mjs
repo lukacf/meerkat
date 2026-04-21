@@ -357,11 +357,9 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         runtimeMode: "turn_driven",
       }));
       assert.equal(lead.agentIdentity, "lead-1");
-      assert.ok(lead.agentRuntimeId);
-      assert.ok(Number.isInteger(lead.fenceToken));
+      assert.ok(lead.memberRef);
       assert.equal(reviewer.agentIdentity, "reviewer-1");
-      assert.ok(reviewer.agentRuntimeId);
-      assert.ok(Number.isInteger(reviewer.fenceToken));
+      assert.ok(reviewer.memberRef);
 
       await withStepTimeout(scenario, "wire lead -> reviewer", mob.wire("lead-1", "reviewer-1"));
       const append = await withStepTimeout(scenario, "append reviewer system context", mob.appendSystemContext(
@@ -388,8 +386,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           ),
         );
         assert.equal(reviewerReceipt.agentIdentity, "reviewer-1");
-        assert.equal(reviewerReceipt.agentRuntimeId, reviewer.agentRuntimeId);
-        assert.equal(reviewerReceipt.fenceToken, reviewer.fenceToken);
+        assert.equal(reviewerReceipt.memberRef, reviewer.memberRef);
         const iterator = subscription[Symbol.asyncIterator]();
         let firstEventTimer = null;
         const firstEvent = await withStepTimeout(scenario, "receive first reviewer event", Promise.race([
@@ -441,14 +438,13 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         "Come back online and say REVIEWER_RESPAWN_44.",
       ));
       assert.equal(respawn.receipt.agentIdentity, "reviewer-1");
-      assert.ok(respawn.receipt.agentRuntimeId);
+      assert.ok(respawn.receipt.memberRef);
       const membersAfterRespawn = await waitFor(
         async () => withStepTimeout(scenario, "poll members after respawn", mob.listMembers()),
         (items) => items.some(
           (member) =>
             member.agentIdentity === "reviewer-1"
-            && member.agentRuntimeId === respawn.receipt.agentRuntimeId
-            && member.fenceToken === respawn.receipt.fenceToken
+            && member.memberRef === respawn.receipt.memberRef
             && member.state === "Active",
         ),
         { timeoutMs: 60000, intervalMs: 200 },
@@ -457,7 +453,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const respawnedReviewer = membersAfterRespawn.find(
         (member) => member.agentIdentity === "reviewer-1",
       );
-      assert.ok(respawnedReviewer?.agentRuntimeId);
+      assert.ok(respawnedReviewer?.memberRef);
       const respawnReceipt = await withStepTimeout(
         scenario,
         "send respawn reviewer turn",
@@ -466,8 +462,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         ),
       );
       assert.equal(respawnReceipt.agentIdentity, "reviewer-1");
-      assert.equal(respawnReceipt.agentRuntimeId, respawn.receipt.agentRuntimeId);
-      assert.equal(respawnReceipt.fenceToken, respawn.receipt.fenceToken);
+      assert.equal(respawnReceipt.memberRef, respawn.receipt.memberRef);
       const respawnedState = await waitFor(
         async () => withStepTimeout(scenario, "poll reviewer status after respawn send", mob.memberStatus("reviewer-1")),
         (state) => (state.outputPreview || "").toLowerCase().includes("reviewer_respawn_44"),
@@ -489,7 +484,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           agentIdentity: "broken-1",
           runtimeMode: "turn_driven",
         }));
-        assert.ok(broken.agentRuntimeId);
+        assert.ok(broken.memberRef);
         await assert.rejects(
           () => withStepTimeout(
             scenario,

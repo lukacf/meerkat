@@ -185,6 +185,15 @@ impl PersistentRuntimeDriver {
         self.inner.absorb_post_admission_effects(effects);
     }
 
+    pub(crate) fn resolve_admission_for_runtime_idle(
+        &self,
+        input: &Input,
+        runtime_idle: bool,
+    ) -> crate::accept::ResolvedAdmission {
+        self.inner
+            .resolve_admission_for_runtime_idle(input, runtime_idle)
+    }
+
     pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
         self.inner.resolve_admission(input)
     }

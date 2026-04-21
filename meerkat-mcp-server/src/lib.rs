@@ -2269,6 +2269,10 @@ fn build_comms_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> Value 
             "envelope_id": envelope_id.to_string(),
             "acked": acked,
         }),
+        meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => json!({
+            "kind": "peer_lifecycle_sent",
+            "envelope_id": envelope_id.to_string(),
+        }),
         meerkat_core::comms::SendReceipt::PeerRequestSent {
             envelope_id,
             interaction_id,

@@ -1099,7 +1099,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             return {
                 "status": "completed",
                 "receipt": {
-                    "agent_identity": "agent-a",
+                    "identity": "agent-a",
                     "member_ref": _make_member_ref("mob-1", "agent-a"),
                 },
             }
@@ -1471,7 +1471,7 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
             return {
                 "status": "completed",
                 "receipt": {
-                    "agent_identity": "agent-a",
+                    "identity": "agent-a",
                     "member_ref": _make_member_ref("mob-1", "agent-a"),
                 },
             }

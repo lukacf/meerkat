@@ -1324,11 +1324,11 @@ class MeerkatClient:
                     "INVALID_RESPONSE",
                     "Invalid mob/respawn response: receipt missing member_ref",
                 )
-            resolved_identity = receipt.get("agent_identity")
+            resolved_identity = receipt.get("identity")
             if not isinstance(resolved_identity, str) or not resolved_identity:
                 raise MeerkatError(
                     "INVALID_RESPONSE",
-                    "Invalid mob/respawn response: receipt missing agent_identity",
+                    "Invalid mob/respawn response: receipt missing identity",
                 )
             result = dict(result)
             result["receipt"] = {

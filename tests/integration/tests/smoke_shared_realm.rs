@@ -19,7 +19,7 @@ use std::process::Stdio;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::time::{Duration, Instant, sleep, timeout};
@@ -104,7 +104,7 @@ fn openai_switch_model() -> String {
         "OPENAI_SMOKE_MODEL_SWITCH",
         "OPENAI_MODEL_SWITCH",
     ])
-    .unwrap_or_else(|| "gpt-4.1-mini".into())
+    .unwrap_or_else(|| "gpt-realtime-1.5".into())
 }
 
 const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
@@ -828,7 +828,7 @@ async fn settle_realtime_turn_after_commit(
         // asking the channel to prove "output started" again is the wrong
         // contract. The remaining authoritative witness is the terminal
         // boundary for the turn that has already visibly begun.
-        collect_realtime_frames_until_turn_completed(receiver, 30).await?
+        collect_realtime_frames_until_turn_completed(receiver, timeout_secs).await?
     } else {
         let mut capture =
             collect_realtime_frames_until_output_settles(receiver, timeout_secs).await?;
@@ -846,12 +846,16 @@ async fn settle_realtime_turn_after_commit(
             // give us a richer canonical turn-readiness contract, the
             // dogma-correct public witness here is the channel's explicit
             // `TurnCompleted` event.
-            capture.merge_from(collect_realtime_frames_until_turn_completed(receiver, 30).await?);
+            capture.merge_from(
+                collect_realtime_frames_until_turn_completed(receiver, timeout_secs).await?,
+            );
         }
         capture
     };
     if !capture.saw_turn_completed {
-        capture.merge_from(collect_realtime_frames_until_turn_completed(receiver, 30).await?);
+        capture.merge_from(
+            collect_realtime_frames_until_turn_completed(receiver, timeout_secs).await?,
+        );
     }
     Ok(capture)
 }
@@ -1584,30 +1588,51 @@ struct RpcProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    stderr: BufReader<ChildStderr>,
+    stderr_buffer: std::sync::Arc<tokio::sync::Mutex<String>>,
+    stderr_task: tokio::task::JoinHandle<()>,
 }
 
 async fn read_available_stderr(process: &mut RpcProcess, budget_ms: u64) -> String {
     let deadline = Instant::now() + Duration::from_millis(budget_ms);
-    let mut collected = String::new();
+    let mut previous_len = None;
     loop {
-        if Instant::now() >= deadline {
-            break;
+        let snapshot = { process.stderr_buffer.lock().await.clone() };
+        if previous_len == Some(snapshot.len()) || Instant::now() >= deadline {
+            return snapshot;
         }
-        let mut line = String::new();
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match timeout(
-            remaining.min(Duration::from_millis(50)),
-            process.stderr.read_line(&mut line),
-        )
-        .await
-        {
-            Ok(Ok(0)) | Err(_) => break,
-            Ok(Ok(_)) => collected.push_str(&line),
-            Ok(Err(_)) => break,
-        }
+        previous_len = Some(snapshot.len());
+        sleep(Duration::from_millis(25)).await;
     }
-    collected
+}
+
+fn spawn_stderr_drain(
+    stderr: ChildStderr,
+) -> (
+    std::sync::Arc<tokio::sync::Mutex<String>>,
+    tokio::task::JoinHandle<()>,
+) {
+    const MAX_CAPTURED_STDERR_BYTES: usize = 256 * 1024;
+
+    let buffer = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
+    let task_buffer = std::sync::Arc::clone(&buffer);
+    let task = tokio::spawn(async move {
+        let mut stderr = BufReader::new(stderr);
+        loop {
+            let mut line = String::new();
+            match stderr.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let mut guard = task_buffer.lock().await;
+                    guard.push_str(&line);
+                    if guard.len() > MAX_CAPTURED_STDERR_BYTES {
+                        let overflow = guard.len() - MAX_CAPTURED_STDERR_BYTES;
+                        guard.drain(..overflow);
+                    }
+                }
+            }
+        }
+    });
+    (buffer, task)
 }
 
 async fn spawn_stdio_process(
@@ -1648,11 +1673,13 @@ async fn spawn_stdio_process(
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
     let stderr = child.stderr.take().ok_or("missing child stderr")?;
+    let (stderr_buffer, stderr_task) = spawn_stderr_drain(stderr);
     Ok(RpcProcess {
         child,
         stdin,
         stdout: BufReader::new(stdout),
-        stderr: BufReader::new(stderr),
+        stderr_buffer,
+        stderr_task,
     })
 }
 
@@ -1680,11 +1707,13 @@ async fn spawn_stdio_process_without_openai(
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
     let stderr = child.stderr.take().ok_or("missing child stderr")?;
+    let (stderr_buffer, stderr_task) = spawn_stderr_drain(stderr);
     Ok(RpcProcess {
         child,
         stdin,
         stdout: BufReader::new(stdout),
-        stderr: BufReader::new(stderr),
+        stderr_buffer,
+        stderr_task,
     })
 }
 
@@ -1760,15 +1789,16 @@ async fn rpc_read_response_line(
         {
             Ok(bytes_read) => bytes_read?,
             Err(_) => {
+                let stderr = read_available_stderr(process, 100).await;
                 return Err(format!(
-                    "timed out waiting for stdio response line after {timeout_secs}s"
+                    "timed out waiting for stdio response line after {timeout_secs}s\nstderr:\n{}",
+                    stderr.trim()
                 )
                 .into());
             }
         };
         if bytes_read == 0 {
-            let mut stderr = String::new();
-            let _ = process.stderr.read_to_string(&mut stderr).await;
+            let stderr = read_available_stderr(process, 100).await;
             return Err(format!(
                 "stdio process reached EOF before response\nstderr:\n{}",
                 stderr.trim()
@@ -1803,14 +1833,16 @@ async fn stdio_read_json_line(
         {
             Ok(bytes_read) => bytes_read?,
             Err(_) => {
-                return Err(
-                    format!("timed out waiting for stdio JSON line after {timeout_secs}s").into(),
-                );
+                let stderr = read_available_stderr(process, 100).await;
+                return Err(format!(
+                    "timed out waiting for stdio JSON line after {timeout_secs}s\nstderr:\n{}",
+                    stderr.trim()
+                )
+                .into());
             }
         };
         if bytes_read == 0 {
-            let mut stderr = String::new();
-            let _ = process.stderr.read_to_string(&mut stderr).await;
+            let stderr = read_available_stderr(process, 100).await;
             return Err(format!(
                 "stdio process reached EOF before JSON payload\nstderr:\n{}",
                 stderr.trim()
@@ -1858,12 +1890,17 @@ async fn rpc_call(
 }
 
 async fn shutdown_stdio_process(mut process: RpcProcess) -> Result<(), Box<dyn std::error::Error>> {
-    drop(process.stdin);
+    let _ = process.stdin.shutdown().await;
     match timeout(Duration::from_secs(20), process.child.wait()).await {
         Ok(status) => {
             let status = status?;
             if !status.success() {
-                return Err(format!("stdio process exited unsuccessfully: {status}").into());
+                let stderr = read_available_stderr(&mut process, 100).await;
+                return Err(format!(
+                    "stdio process exited unsuccessfully: {status}\nstderr:\n{}",
+                    stderr.trim()
+                )
+                .into());
             }
         }
         Err(_) => {
@@ -1877,6 +1914,7 @@ async fn shutdown_stdio_process(mut process: RpcProcess) -> Result<(), Box<dyn s
             let _ = timeout(Duration::from_secs(5), process.child.wait()).await?;
         }
     }
+    process.stderr_task.abort();
     Ok(())
 }
 
@@ -1894,14 +1932,16 @@ async fn rpc_read_json_line(
         {
             Ok(bytes_read) => bytes_read?,
             Err(_) => {
-                return Err(
-                    format!("timed out waiting for stdio JSON line after {timeout_secs}s").into(),
-                );
+                let stderr = read_available_stderr(process, 100).await;
+                return Err(format!(
+                    "timed out waiting for stdio JSON line after {timeout_secs}s\nstderr:\n{}",
+                    stderr.trim()
+                )
+                .into());
             }
         };
         if bytes_read == 0 {
-            let mut stderr = String::new();
-            let _ = process.stderr.read_to_string(&mut stderr).await;
+            let stderr = read_available_stderr(process, 100).await;
             return Err(format!(
                 "stdio process reached EOF before JSON line\nstderr:\n{}",
                 stderr.trim()

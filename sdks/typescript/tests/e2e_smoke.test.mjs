@@ -445,7 +445,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
           (member) =>
             member.agentIdentity === "reviewer-1"
             && member.memberRef === respawn.receipt.memberRef
-            && member.state === "Active",
+            && member.state === "active",
         ),
         { timeoutMs: 60000, intervalMs: 200 },
       );

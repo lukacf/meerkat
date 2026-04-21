@@ -126,17 +126,18 @@ pub fn spawn_comms_drain(
                     PeerInputClass::PeerLifecycleAdded
                     | PeerInputClass::PeerLifecycleRetired
                     | PeerInputClass::PeerLifecycleUnwired => {
-                        // Lifecycle events must be injected as session context
-                        // so the LLM knows when peers connect/disconnect.
-                        // comms_drain is the sole keep-alive inbox consumer.
-                        let input =
-                            classified_interaction_to_runtime_input(&candidate, &runtime_id);
-                        if let Err(err) = adapter.accept_input(&session_id, input).await {
-                            tracing::warn!(
-                                error = %err,
-                                "comms_drain: failed to inject peer lifecycle context"
-                            );
-                        }
+                        // Silent mob lifecycle notices are control-plane
+                        // mechanics, not model-facing work. The canonical
+                        // topology truth already lives in MobMachine + the
+                        // comms trust directory; replaying these as prompt
+                        // text creates shadow semantics and breaks instruction
+                        // following in mixed-provider mobs.
+                        tracing::debug!(
+                            session_id = %session_id,
+                            class = ?candidate.class,
+                            lifecycle_peer = ?candidate.lifecycle_peer,
+                            "comms_drain: consumed silent peer lifecycle notice"
+                        );
                     }
                     PeerInputClass::Response => {
                         // Distinguish progress responses from terminal responses

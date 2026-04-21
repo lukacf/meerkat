@@ -48,7 +48,12 @@ impl MeerkatMachine {
 
                 let (outcome, signal) = {
                     let mut drv = driver.lock().await;
-                    let resolved = drv.resolve_admission(&input);
+                    let runtime_idle = self
+                        .existing_session_runtime_state(&session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed)
+                        .is_idle_or_attached();
+                    let resolved = drv.resolve_admission_for_runtime_idle(&input, runtime_idle);
                     let preview_run_id = RunId::new();
                     self.preview_session_dsl_input(
                         &session_id,

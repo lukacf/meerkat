@@ -259,6 +259,7 @@ impl CommsMessage {
                 intent: MessageIntent::from(intent.as_str()),
                 params: params.clone(),
             },
+            MessageKind::Lifecycle { .. } => return None,
             MessageKind::Response {
                 in_reply_to,
                 status,

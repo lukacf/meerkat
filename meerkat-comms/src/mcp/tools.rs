@@ -247,6 +247,16 @@ async fn dispatch(ctx: &ToolContext, request: CommsCommandRequest) -> Result<Val
                 .map_err(|e| format_router_send_error(to.as_str(), e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
+        CommsCommand::PeerLifecycle { to, kind, params } => {
+            ctx.router
+                .send(
+                    to.as_str(),
+                    crate::types::MessageKind::Lifecycle { kind, params },
+                )
+                .await
+                .map_err(|e| format_router_send_error(to.as_str(), e))?;
+            Ok(json!({ "status": "sent", "kind": cmd_kind }))
+        }
         CommsCommand::PeerRequest {
             to,
             intent,

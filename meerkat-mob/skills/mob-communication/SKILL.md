@@ -12,7 +12,6 @@ other meerkats via the comms system:
 - Use `peers()` to discover other meerkats you are wired to.
 - Send requests via PeerRequest with an intent string and JSON params.
 - Respond to incoming PeerRequests with PeerResponse.
-- You will receive notifications when peers are added (mob.peer_added)
-  or removed (mob.peer_retired). These are informational — do not reply
-  to them. These updates may be compacted/suppressed at scale; use `peers()`
-  to inspect current connectivity on demand.
+- Peer connectivity changes are handled silently by the runtime. Use
+  `peers()` to inspect current connectivity on demand instead of waiting
+  for lifecycle chatter in the transcript.

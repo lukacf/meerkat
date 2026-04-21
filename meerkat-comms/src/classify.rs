@@ -7,6 +7,7 @@ use crate::inproc::InprocRegistry;
 use crate::peer_types::{ContentShape as PeerContentShape, RawPeerKind};
 use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
+use meerkat_core::comms::PeerLifecycleKind;
 use meerkat_core::{PeerIngressKind, PeerInputClass};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -82,6 +83,7 @@ impl PreparedIngressItem {
             RawPeerKind::Request
             | RawPeerKind::PeerLifecycleAdded
             | RawPeerKind::PeerLifecycleRetired
+            | RawPeerKind::PeerLifecycleUnwired
             | RawPeerKind::SilentRequest => PeerIngressKind::Request,
             RawPeerKind::ResponseTerminal | RawPeerKind::ResponseProgress => {
                 PeerIngressKind::Response
@@ -172,6 +174,37 @@ impl IngressClassificationContext {
                             ),
                         }
                     }
+                    MessageKind::Lifecycle { kind, params } => {
+                        let peer = params
+                            .get("peer")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(from_name.as_str())
+                            .to_string();
+                        match kind {
+                            PeerLifecycleKind::PeerAdded => (
+                                RawPeerKind::PeerLifecycleAdded,
+                                PeerInputClass::PeerLifecycleAdded,
+                                Some(peer),
+                                None,
+                                false,
+                            ),
+                            PeerLifecycleKind::PeerRetired => (
+                                RawPeerKind::PeerLifecycleRetired,
+                                PeerInputClass::PeerLifecycleRetired,
+                                Some(peer),
+                                None,
+                                false,
+                            ),
+                            PeerLifecycleKind::PeerUnwired => (
+                                RawPeerKind::PeerLifecycleUnwired,
+                                PeerInputClass::PeerLifecycleUnwired,
+                                Some(peer),
+                                None,
+                                false,
+                            ),
+                        }
+                    }
                     MessageKind::Response {
                         in_reply_to,
                         status,
@@ -223,6 +256,7 @@ impl IngressClassificationContext {
                     MessageKind::Message { body, .. } => {
                         format!("[COMMS MESSAGE from {from_name}]\n{body}")
                     }
+                    MessageKind::Lifecycle { .. } => String::new(),
                     MessageKind::Ack { in_reply_to } => ack_projection(&from_name, *in_reply_to),
                     _ => {
                         CommsMessage::from_external_with_resolved_peer(&envelope, from_name.clone())
@@ -235,6 +269,7 @@ impl IngressClassificationContext {
                     MessageKind::Message { body, blocks, .. } => {
                         content_shape_for_text_and_blocks(body, blocks.as_deref())
                     }
+                    MessageKind::Lifecycle { .. } => PeerContentShape::Text,
                     MessageKind::Request { .. }
                     | MessageKind::Response { .. }
                     | MessageKind::Ack { .. } => PeerContentShape::Text,

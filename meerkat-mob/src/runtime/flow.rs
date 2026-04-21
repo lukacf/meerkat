@@ -1706,17 +1706,17 @@ fn parse_output_value(
 /// Handles ```` ```json ... ``` ````, ```` ``` ... ``` ````, and leading/trailing whitespace.
 fn strip_code_fences(raw: &str) -> String {
     let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        // Skip optional language tag on the opening fence line
-        let after_tag = rest.find('\n').map_or(rest, |i| &rest[i + 1..]);
-        // Strip closing fence
-        let body = after_tag
-            .rfind("```")
-            .map_or(after_tag, |i| &after_tag[..i]);
-        body.trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
+    let Some(open_idx) = trimmed.find("```") else {
+        return trimmed.to_string();
+    };
+
+    let rest = &trimmed[open_idx + 3..];
+    let after_tag = match rest.find('\n') {
+        Some(i) => &rest[i + 1..],
+        None => return trimmed.to_string(),
+    };
+    let body = after_tag.find("```").map_or(after_tag, |i| &after_tag[..i]);
+    body.trim().to_string()
 }
 
 fn aggregate_output(
@@ -2313,5 +2313,12 @@ mod strip_code_fences_tests {
     fn handles_whitespace_around_fences() {
         let input = "  \n```json\n{\"x\":2}\n```\n  ";
         assert_eq!(strip_code_fences(input), r#"{"x":2}"#);
+    }
+
+    #[test]
+    fn extracts_first_fenced_block_even_with_leading_prose() {
+        let input =
+            "Here is the raw JSON response:\n\n```json\n{\"final_message\":\"joined\"}\n```";
+        assert_eq!(strip_code_fences(input), r#"{"final_message":"joined"}"#);
     }
 }

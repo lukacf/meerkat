@@ -48,7 +48,8 @@ impl MeerkatMachine {
                 let run_id_for_dsl = RunId::new();
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
-                    let resolved = driver.resolve_admission(&input);
+                    let runtime_idle = state.is_idle_or_attached();
+                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -67,7 +68,15 @@ impl MeerkatMachine {
                         "AcceptWithCompletion",
                     )
                     .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+                    .map_err(|reason| RuntimeDriverError::ValidationFailed {
+                        reason: format!(
+                            "{reason}; input_kind={}; immediate={}; interrupt_yielding={}; wake_if_idle={}",
+                            input.kind(),
+                            resolved.coarse_flags.request_immediate_processing,
+                            resolved.coarse_flags.interrupt_yielding,
+                            resolved.coarse_flags.wake_if_idle,
+                        ),
+                    })?;
                     let result = match driver
                         .accept_resolved_input(input, resolved.clone())
                         .await
@@ -226,7 +235,8 @@ impl MeerkatMachine {
 
                 let (outcome, accepted_input_id) = {
                     let mut driver = driver.lock().await;
-                    let resolved = driver.resolve_admission(&input);
+                    let runtime_idle = state.is_idle_or_attached();
+                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {

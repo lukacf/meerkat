@@ -15,7 +15,7 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
-use meerkat_core::comms::TrustedPeerSpec;
+use meerkat_core::comms::{PeerLifecycleKind, TrustedPeerSpec};
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -8268,9 +8268,9 @@ impl MobActor {
             ))
         })?;
 
-        let cmd = CommsCommand::PeerRequest {
+        let cmd = CommsCommand::PeerLifecycle {
             to: peer_name,
-            intent: "mob.peer_added".to_string(),
+            kind: PeerLifecycleKind::PeerAdded,
             params: serde_json::json!({
                 "peer": new_peer_id.as_str(),
                 "role": new_peer_entry.role.as_str(),
@@ -8280,8 +8280,6 @@ impl MobActor {
                 "address": new_peer_spec.address,
                 "peer_spec": new_peer_spec,
             }),
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            stream: meerkat_core::comms::InputStreamMode::None,
         };
 
         sender_comms.send(cmd).await?;
@@ -8312,19 +8310,33 @@ impl MobActor {
             ))
         })?;
 
-        let cmd = CommsCommand::PeerRequest {
-            to: peer_name,
-            intent: intent.to_string(),
-            params: serde_json::json!({
-                "peer": other_peer_id.as_str(),
-                "role": other_peer_entry.role.as_str(),
-                "peer_name": other_peer_spec.name,
-                "peer_id": other_peer_spec.peer_id,
-                "address": other_peer_spec.address,
-                "peer_spec": other_peer_spec,
-            }),
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            stream: meerkat_core::comms::InputStreamMode::None,
+        let params = serde_json::json!({
+            "peer": other_peer_id.as_str(),
+            "role": other_peer_entry.role.as_str(),
+            "peer_name": other_peer_spec.name,
+            "peer_id": other_peer_spec.peer_id,
+            "address": other_peer_spec.address,
+            "peer_spec": other_peer_spec,
+        });
+
+        let cmd = match intent {
+            "mob.peer_retired" => CommsCommand::PeerLifecycle {
+                to: peer_name,
+                kind: PeerLifecycleKind::PeerRetired,
+                params,
+            },
+            "mob.peer_unwired" => CommsCommand::PeerLifecycle {
+                to: peer_name,
+                kind: PeerLifecycleKind::PeerUnwired,
+                params,
+            },
+            _ => CommsCommand::PeerRequest {
+                to: peer_name,
+                intent: intent.to_string(),
+                params,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                stream: meerkat_core::comms::InputStreamMode::None,
+            },
         };
 
         sender_comms.send(cmd).await?;

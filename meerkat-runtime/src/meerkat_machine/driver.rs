@@ -104,10 +104,14 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) fn resolve_admission(&self, input: &Input) -> ResolvedAdmission {
+    pub(crate) fn resolve_admission_for_runtime_idle(
+        &self,
+        input: &Input,
+        runtime_idle: bool,
+    ) -> ResolvedAdmission {
         match self {
-            DriverEntry::Ephemeral(d) => d.resolve_admission(input),
-            DriverEntry::Persistent(d) => d.resolve_admission(input),
+            DriverEntry::Ephemeral(d) => d.resolve_admission_for_runtime_idle(input, runtime_idle),
+            DriverEntry::Persistent(d) => d.resolve_admission_for_runtime_idle(input, runtime_idle),
         }
     }
 

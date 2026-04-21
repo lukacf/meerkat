@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::identity::{Keypair, PubKey, Signature};
 use ciborium::value::{CanonicalValue, Value};
+use meerkat_core::comms::PeerLifecycleKind;
 use meerkat_core::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Response status for Request messages.
@@ -58,6 +59,11 @@ pub enum MessageKind {
         params: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
+    },
+    /// A one-way peer lifecycle notification.
+    Lifecycle {
+        kind: PeerLifecycleKind,
+        params: JsonValue,
     },
     /// A response to a previous request.
     Response {

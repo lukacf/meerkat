@@ -13,6 +13,7 @@ pub(crate) enum RawPeerKind {
     Request,
     PeerLifecycleAdded,
     PeerLifecycleRetired,
+    PeerLifecycleUnwired,
     ResponseTerminal,
     ResponseProgress,
     PlainEvent,

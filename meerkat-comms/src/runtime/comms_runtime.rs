@@ -439,6 +439,13 @@ impl CoreCommsRuntime for CommsRuntime {
                     envelope_id,
                     acked: false,
                 }),
+            CommsCommand::PeerLifecycle { to, kind, params } => self
+                .send_peer_command(
+                    to.as_str(),
+                    crate::types::MessageKind::Lifecycle { kind, params },
+                )
+                .await
+                .map(|envelope_id| SendReceipt::PeerLifecycleSent { envelope_id }),
             CommsCommand::PeerRequest {
                 to,
                 intent,
@@ -806,6 +813,12 @@ impl CoreCommsRuntime for CommsRuntime {
                                 let typed_intent = MessageIntent::from(intent.as_str());
                                 meerkat_core::InteractionContent::Request {
                                     intent: typed_intent.to_string(),
+                                    params,
+                                }
+                            }
+                            MessageKind::Lifecycle { kind, params } => {
+                                meerkat_core::InteractionContent::Request {
+                                    intent: kind.to_string(),
                                     params,
                                 }
                             }
@@ -2845,6 +2858,74 @@ mod tests {
         assert!(
             subscriber.is_some(),
             "reserved peer-request stream should correlate via the request envelope id carried in in_reply_to"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_peer_lifecycle_send_stays_typed_and_non_rendered() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("life-sender-{suffix}");
+        let receiver_name = format!("life-receiver-{suffix}");
+
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &sender,
+            TrustedPeerSpec::new(
+                &receiver_name,
+                receiver.public_key().to_peer_id(),
+                format!("inproc://{receiver_name}"),
+            )
+            .expect("valid trusted peer spec"),
+        )
+        .await
+        .expect("sender should trust receiver");
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            TrustedPeerSpec::new(
+                &sender_name,
+                sender.public_key().to_peer_id(),
+                format!("inproc://{sender_name}"),
+            )
+            .expect("valid trusted peer spec"),
+        )
+        .await
+        .expect("receiver should trust sender");
+
+        let receipt = CoreCommsRuntime::send(
+            &sender,
+            CommsCommand::PeerLifecycle {
+                to: PeerName::new(receiver_name).expect("peer_name is valid"),
+                kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                params: serde_json::json!({
+                    "peer": "worker-1",
+                    "role": "worker",
+                    "peer_name": "mob/worker/worker-1",
+                }),
+            },
+        )
+        .await
+        .expect("peer lifecycle send should succeed");
+
+        match receipt {
+            SendReceipt::PeerLifecycleSent { .. } => {}
+            other => panic!("expected PeerLifecycleSent, got {other:?}"),
+        }
+
+        let interactions = receiver
+            .drain_classified_inbox_interactions()
+            .await
+            .expect("classified drain should succeed");
+        assert_eq!(interactions.len(), 1);
+        assert_eq!(
+            interactions[0].class,
+            meerkat_core::PeerInputClass::PeerLifecycleAdded
+        );
+        assert_eq!(interactions[0].lifecycle_peer.as_deref(), Some("worker-1"));
+        assert!(
+            interactions[0].interaction.rendered_text.is_empty(),
+            "silent lifecycle notices must not synthesize prompt text"
         );
     }
 

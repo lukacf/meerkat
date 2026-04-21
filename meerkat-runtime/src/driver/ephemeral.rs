@@ -1660,8 +1660,11 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
-        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+    pub(crate) fn resolve_admission_for_runtime_idle(
+        &self,
+        input: &Input,
+        runtime_idle: bool,
+    ) -> crate::accept::ResolvedAdmission {
         let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
         crate::accept::resolve_admission(
             input,
@@ -1669,6 +1672,11 @@ impl EphemeralRuntimeDriver {
             &self.silent_comms_intents,
             existing_superseded_id,
         )
+    }
+
+    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
+        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+        self.resolve_admission_for_runtime_idle(input, runtime_idle)
     }
 
     pub(crate) async fn accept_resolved_input(
@@ -2085,5 +2093,61 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EphemeralRuntimeDriver;
+    use crate::identifiers::LogicalRuntimeId;
+    use crate::input::{
+        Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
+        PeerInput,
+    };
+    use crate::{RuntimeState, WakeMode};
+    use chrono::Utc;
+    use meerkat_core::lifecycle::{InputId, RunId};
+
+    fn peer_message_input() -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::Message),
+            body: "peer body".into(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        })
+    }
+
+    #[test]
+    fn resolve_admission_for_runtime_idle_uses_explicit_machine_phase_not_control_projection() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("phase-drift"));
+        driver.set_control_projection(
+            RuntimeState::Running,
+            Some(RunId::new()),
+            Some(RuntimeState::Attached),
+        );
+
+        let input = peer_message_input();
+        let projected = driver.resolve_admission(&input);
+        assert_eq!(projected.policy.wake_mode, WakeMode::InterruptYielding);
+        assert!(projected.coarse_flags.interrupt_yielding);
+
+        let machine_owned = driver.resolve_admission_for_runtime_idle(&input, true);
+        assert_eq!(machine_owned.policy.wake_mode, WakeMode::WakeIfIdle);
+        assert!(!machine_owned.coarse_flags.interrupt_yielding);
+        assert!(!machine_owned.coarse_flags.request_immediate_processing);
     }
 }

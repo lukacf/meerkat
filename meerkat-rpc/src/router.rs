@@ -59,6 +59,9 @@ fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::V
         meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
             json!({"kind":"peer_message_sent","envelope_id": envelope_id.to_string(),"acked": acked})
         }
+        meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => {
+            json!({"kind":"peer_lifecycle_sent","envelope_id": envelope_id.to_string()})
+        }
         meerkat_core::comms::SendReceipt::PeerRequestSent {
             envelope_id,
             interaction_id,

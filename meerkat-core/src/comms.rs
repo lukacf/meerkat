@@ -55,6 +55,38 @@ impl From<PeerName> for String {
     }
 }
 
+/// One-way peer lifecycle notification kind.
+///
+/// These notifications are control-plane topology updates, not correlated
+/// peer work requests. They intentionally do not create request/response
+/// lifecycles and must never require an LLM-authored reply.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PeerLifecycleKind {
+    #[serde(rename = "mob.peer_added")]
+    PeerAdded,
+    #[serde(rename = "mob.peer_retired")]
+    PeerRetired,
+    #[serde(rename = "mob.peer_unwired")]
+    PeerUnwired,
+}
+
+impl PeerLifecycleKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PeerAdded => "mob.peer_added",
+            Self::PeerRetired => "mob.peer_retired",
+            Self::PeerUnwired => "mob.peer_unwired",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerLifecycleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Typed wire request for `comms/send`.
 ///
 /// Variants are serde-tagged on `kind` and validated structurally at the
@@ -288,6 +320,12 @@ pub enum CommsCommand {
         blocks: Option<Vec<ContentBlock>>,
         handling_mode: HandlingMode,
     },
+    /// Send a one-way peer lifecycle notification.
+    PeerLifecycle {
+        to: PeerName,
+        kind: PeerLifecycleKind,
+        params: serde_json::Value,
+    },
     /// Send a request to a peer.
     PeerRequest {
         to: PeerName,
@@ -311,6 +349,7 @@ impl CommsCommand {
         match self {
             Self::Input { .. } => "input",
             Self::PeerMessage { .. } => "peer_message",
+            Self::PeerLifecycle { .. } => "peer_lifecycle",
             Self::PeerRequest { .. } => "peer_request",
             Self::PeerResponse { .. } => "peer_response",
         }
@@ -327,6 +366,9 @@ pub enum SendReceipt {
     PeerMessageSent {
         envelope_id: uuid::Uuid,
         acked: bool,
+    },
+    PeerLifecycleSent {
+        envelope_id: uuid::Uuid,
     },
     PeerRequestSent {
         envelope_id: uuid::Uuid,

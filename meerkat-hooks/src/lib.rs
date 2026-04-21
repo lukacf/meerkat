@@ -37,7 +37,8 @@ use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookFailurePolicy, HookId, HookInvocation, HookOutcome, HookPatch,
-    HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HooksConfig,
+    HookPatchEnvelope, HookReasonCode, HookRevision, HookRunOverrides, HookRuntimeKind,
+    HooksConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -369,7 +370,6 @@ impl DefaultHookEngine {
         entry: &HookEntryConfig,
         invocation: HookInvocation,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
-        let runtime_kind = entry.runtime.kind.as_str();
         let runtime_config =
             entry
                 .runtime
@@ -379,8 +379,8 @@ impl DefaultHookEngine {
                     reason: format!("invalid runtime config payload: {err}"),
                 })?;
 
-        match runtime_kind {
-            "in_process" => {
+        match entry.runtime.kind {
+            HookRuntimeKind::InProcess => {
                 let cfg: InProcessRuntimeConfig =
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
@@ -409,7 +409,7 @@ impl DefaultHookEngine {
                         reason,
                     })
             }
-            "command" => {
+            HookRuntimeKind::Command => {
                 let cfg: CommandRuntimeConfig =
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
@@ -420,7 +420,7 @@ impl DefaultHookEngine {
                 self.invoke_command_runtime(entry, &cfg.command, &cfg.args, &cfg.env, invocation)
                     .await
             }
-            "http" => {
+            HookRuntimeKind::Http => {
                 let cfg: HttpRuntimeConfig =
                     serde_json::from_value(runtime_config).map_err(|err| {
                         HookEngineError::ExecutionFailed {
@@ -431,10 +431,6 @@ impl DefaultHookEngine {
                 self.invoke_http_runtime(entry, &cfg.url, &cfg.method, &cfg.headers, invocation)
                     .await
             }
-            other => Err(HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason: format!("unsupported hook runtime '{other}'"),
-            }),
         }
     }
 
@@ -784,7 +780,8 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::{
-        HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig, SessionId,
+        HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig,
+        HookRuntimeKind, SessionId,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -806,8 +803,11 @@ mod tests {
     }
 
     fn runtime_in_process(name: &str) -> HookRuntimeConfig {
-        HookRuntimeConfig::new("in_process", Some(serde_json::json!({"name": name})))
-            .unwrap_or_default()
+        HookRuntimeConfig::new(
+            HookRuntimeKind::InProcess,
+            Some(serde_json::json!({"name": name})),
+        )
+        .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -1367,7 +1367,7 @@ mod tests {
             id: HookId::new("command-hook"),
             point: HookPoint::PreToolExecution,
             runtime: HookRuntimeConfig::new(
-                "command",
+                HookRuntimeKind::Command,
                 Some(serde_json::json!({
                     "command": "sh",
                     "args": ["-c", "cat >/dev/null; printf '{\"patches\":[]}'"],
@@ -1441,7 +1441,7 @@ mod tests {
             id: HookId::new("http-hook"),
             point: HookPoint::PreToolExecution,
             runtime: HookRuntimeConfig::new(
-                "http",
+                HookRuntimeKind::Http,
                 Some(serde_json::json!({
                     "url": format!("http://{}/hook", addr),
                     "method": "POST",

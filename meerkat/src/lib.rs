@@ -74,6 +74,7 @@ pub use meerkat_core::{
     HookRevision,
     HookRunOverrides,
     HookRuntimeConfig,
+    HookRuntimeKind,
     HooksConfig,
     // Interaction types
     InteractionContent,

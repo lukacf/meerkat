@@ -332,7 +332,7 @@ The hook engine emits `AgentEvent` variants during execution:
 ```rust
 use meerkat_hooks::{DefaultHookEngine, InProcessHookHandler, RuntimeHookResponse};
 use meerkat_core::{HooksConfig, HookEntryConfig, HookId, HookPoint,
-                   HookCapability, HookRuntimeConfig};
+                   HookCapability, HookRuntimeConfig, HookRuntimeKind};
 use std::sync::Arc;
 
 let mut config = HooksConfig::default();
@@ -342,7 +342,7 @@ config.entries.push(HookEntryConfig {
     capability: HookCapability::Guardrail,
     priority: 10,
     runtime: HookRuntimeConfig::new(
-        "in_process",
+        HookRuntimeKind::InProcess,
         Some(serde_json::json!({"name": "my-handler"})),
     )?,
     ..Default::default()

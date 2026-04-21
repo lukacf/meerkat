@@ -706,7 +706,7 @@ mod scenario_06_hooks {
                     failure_policy: None,
                     timeout_ms: None,
                     runtime: HookRuntimeConfig::new(
-                        "in_process",
+                        HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "observer"})),
                     )
                     .unwrap(),
@@ -721,7 +721,7 @@ mod scenario_06_hooks {
                     failure_policy: None,
                     timeout_ms: None,
                     runtime: HookRuntimeConfig::new(
-                        "in_process",
+                        HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "guardrail"})),
                     )
                     .unwrap(),
@@ -736,7 +736,7 @@ mod scenario_06_hooks {
                     failure_policy: None,
                     timeout_ms: None,
                     runtime: HookRuntimeConfig::new(
-                        "in_process",
+                        HookRuntimeKind::InProcess,
                         Some(serde_json::json!({"name": "rewriter"})),
                     )
                     .unwrap(),

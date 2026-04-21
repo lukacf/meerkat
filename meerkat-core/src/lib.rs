@@ -103,7 +103,7 @@ pub use completion_feed::{
 pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
     CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
-    HookRunOverrides, HookRuntimeConfig, HooksConfig, LimitsConfig, ModelDefaults,
+    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, LimitsConfig, ModelDefaults,
     PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
     StorageConfig, StoreConfig, ToolsConfig,

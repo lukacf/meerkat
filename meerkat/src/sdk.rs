@@ -659,6 +659,7 @@ mod tests {
     use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::{
         HookCapability, HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig,
+        HookRuntimeKind,
     };
     use std::path::Path;
 
@@ -882,7 +883,7 @@ mod tests {
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
                 runtime: HookRuntimeConfig::new(
-                    "in_process",
+                    HookRuntimeKind::InProcess,
                     Some(serde_json::json!({"name":"sdk_hook"})),
                 )
                 .unwrap_or_default(),
@@ -900,7 +901,7 @@ mod tests {
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Observe,
             runtime: HookRuntimeConfig::new(
-                "command",
+                HookRuntimeKind::Command,
                 Some(serde_json::json!({ "command": command })),
             )
             .unwrap_or_default(),

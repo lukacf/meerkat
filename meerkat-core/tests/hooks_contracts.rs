@@ -3,7 +3,7 @@
 use meerkat_core::{
     AgentEvent, Config, HookCapability, HookDecision, HookEntryConfig, HookExecutionMode, HookId,
     HookInvocation, HookLlmRequest, HookOutcome, HookPatch, HookPoint, HookReasonCode,
-    HookRunOverrides, HookRuntimeConfig, HooksConfig, SessionId,
+    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, SessionId,
 };
 use serde_json::json;
 
@@ -21,7 +21,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
             capability: HookCapability::Guardrail,
             priority: 5,
             runtime: HookRuntimeConfig::new(
-                "in_process",
+                HookRuntimeKind::InProcess,
                 Some(json!({"name": "guard_pre_tool", "config": {"mode": "strict"}})),
             )?,
             ..Default::default()
@@ -164,7 +164,10 @@ fn run_override_schema_roundtrip_contract() -> Result<(), Box<dyn std::error::Er
             mode: HookExecutionMode::Foreground,
             capability: HookCapability::Rewrite,
             priority: 1,
-            runtime: HookRuntimeConfig::new("in_process", Some(json!({"name": "run_patch"})))?,
+            runtime: HookRuntimeConfig::new(
+                HookRuntimeKind::InProcess,
+                Some(json!({"name": "run_patch"})),
+            )?,
             ..Default::default()
         }],
         disable: vec![HookId::new("global-hook")],

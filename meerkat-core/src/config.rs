@@ -1556,21 +1556,63 @@ impl Default for HookEntryConfig {
             priority: 100,
             failure_policy: None,
             timeout_ms: None,
-            runtime: HookRuntimeConfig::new("in_process", Some(serde_json::json!({"name":"noop"})))
-                .unwrap_or_else(|_| HookRuntimeConfig {
-                    kind: "in_process".to_string(),
-                    config: None,
-                }),
+            runtime: HookRuntimeConfig::new(
+                HookRuntimeKind::InProcess,
+                Some(serde_json::json!({"name":"noop"})),
+            )
+            .unwrap_or(HookRuntimeConfig {
+                kind: HookRuntimeKind::InProcess,
+                config: None,
+            }),
         }
+    }
+}
+
+/// Closed set of hook runtime adapters the engine can dispatch to.
+///
+/// Wire format uses snake_case (`in_process`, `command`, `http`) under the
+/// `type` field on [`HookRuntimeConfig`] for backwards compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HookRuntimeKind {
+    InProcess,
+    Command,
+    Http,
+}
+
+impl HookRuntimeKind {
+    /// Canonical wire/logging string for this runtime kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProcess => "in_process",
+            Self::Command => "command",
+            Self::Http => "http",
+        }
+    }
+
+    /// Parse the canonical wire form. Returns `None` for unrecognized strings.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "in_process" => Some(Self::InProcess),
+            "command" => Some(Self::Command),
+            "http" => Some(Self::Http),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for HookRuntimeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 /// Runtime configuration used by hook adapters.
 ///
-/// Core treats this as an opaque payload to avoid adapter-specific coupling.
+/// The dispatch kind is typed; `config` remains an opaque per-kind payload
+/// parsed by the adapter.
 #[derive(Debug, Clone)]
 pub struct HookRuntimeConfig {
-    pub kind: String,
+    pub kind: HookRuntimeKind,
     #[allow(clippy::box_collection)]
     pub config: Option<Box<RawValue>>,
 }
@@ -1584,15 +1626,12 @@ impl PartialEq for HookRuntimeConfig {
 }
 
 impl HookRuntimeConfig {
-    pub fn new(kind: impl Into<String>, config: Option<Value>) -> Result<Self, serde_json::Error> {
+    pub fn new(kind: HookRuntimeKind, config: Option<Value>) -> Result<Self, serde_json::Error> {
         let config = match config {
             Some(value) => Some(raw_json_from_value(value)?),
             None => None,
         };
-        Ok(Self {
-            kind: kind.into(),
-            config,
-        })
+        Ok(Self { kind, config })
     }
 
     pub fn config_value(&self) -> Result<Value, serde_json::Error> {
@@ -1605,8 +1644,12 @@ impl HookRuntimeConfig {
 
 impl Default for HookRuntimeConfig {
     fn default() -> Self {
-        Self::new("in_process", Some(serde_json::json!({"name":"noop"}))).unwrap_or_else(|_| Self {
-            kind: "in_process".to_string(),
+        Self::new(
+            HookRuntimeKind::InProcess,
+            Some(serde_json::json!({"name":"noop"})),
+        )
+        .unwrap_or(Self {
+            kind: HookRuntimeKind::InProcess,
             config: None,
         })
     }
@@ -1618,7 +1661,10 @@ impl Serialize for HookRuntimeConfig {
         S: serde::Serializer,
     {
         let mut map = Map::new();
-        map.insert("type".to_string(), Value::String(self.kind.clone()));
+        map.insert(
+            "type".to_string(),
+            Value::String(self.kind.as_str().to_string()),
+        );
 
         if let Some(raw) = &self.config {
             let parsed: Value =
@@ -1650,12 +1696,15 @@ impl<'de> Deserialize<'de> for HookRuntimeConfig {
             .cloned()
             .ok_or_else(|| serde::de::Error::custom("hook runtime must be an object"))?;
 
-        let kind = obj
+        let kind_str = obj
             .remove("type")
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
             .ok_or_else(|| {
                 serde::de::Error::custom("hook runtime missing required field 'type'")
             })?;
+        let kind = HookRuntimeKind::parse(&kind_str).ok_or_else(|| {
+            serde::de::Error::custom(format!("unsupported hook runtime '{kind_str}'"))
+        })?;
 
         let config_value = if let Some(explicit) = obj.remove("config") {
             if obj.is_empty() {

@@ -20,8 +20,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use meerkat::{
     AgentBuilder, AgentEvent, AgentFactory, AgentToolDispatcher, AnthropicClient, HookCapability,
-    HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HooksConfig, ToolDef,
-    ToolError, ToolResult,
+    HookEntryConfig, HookExecutionMode, HookId, HookPoint, HookRuntimeConfig, HookRuntimeKind,
+    HooksConfig, ToolDef, ToolError, ToolResult,
 };
 use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use meerkat_hooks::{DefaultHookEngine, RuntimeHookResponse};
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
                 runtime: HookRuntimeConfig::new(
-                    "in_process",
+                    HookRuntimeKind::InProcess,
                     Some(serde_json::json!({ "name": "audit-log" })),
                 )
                 .unwrap_or_default(),
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
                 runtime: HookRuntimeConfig::new(
-                    "in_process",
+                    HookRuntimeKind::InProcess,
                     Some(serde_json::json!({ "name": "tool-filter" })),
                 )
                 .unwrap_or_default(),
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mode: HookExecutionMode::Foreground,
                 capability: HookCapability::Observe,
                 runtime: HookRuntimeConfig::new(
-                    "in_process",
+                    HookRuntimeKind::InProcess,
                     Some(serde_json::json!({ "name": "turn-monitor" })),
                 )
                 .unwrap_or_default(),

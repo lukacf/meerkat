@@ -920,19 +920,16 @@ fn references_phase_field(expr: &ExprDef, phase_field_name: &str) -> bool {
 }
 
 /// If `left` and `right` form `self.<phase_field> == Phase::X` (or mirrored),
-/// return `Some("X")`. Otherwise `None`.
+/// return `Some("X")`. Otherwise `None`. Requires one side to reference the
+/// phase field and the other to be a `Phase::X` literal.
 fn phase_eq_literal(left: &ExprDef, right: &ExprDef, phase_field_name: &str) -> Option<String> {
-    if is_phase_field(left, phase_field_name)
-        && let ExprDef::Phase(variant) = right
-    {
-        return Some(variant.to_string());
+    let has_phase_field =
+        is_phase_field(left, phase_field_name) || is_phase_field(right, phase_field_name);
+    if has_phase_field {
+        phase_variant_either_side(left, right)
+    } else {
+        None
     }
-    if is_phase_field(right, phase_field_name)
-        && let ExprDef::Phase(variant) = left
-    {
-        return Some(variant.to_string());
-    }
-    None
 }
 
 /// Extract a `PhaseSet` from a helper body. Helpers are pure functions of
@@ -944,40 +941,30 @@ fn extract_phase_set_from_helper_body(
     all_phases: &[String],
     helper_name: &syn::Ident,
 ) -> PhaseSet {
+    let unsupported = || {
+        PhaseSet::Unanalyzable(format!(
+            "helper `{helper_name}` body must be a disjunction of \
+             `param == Phase::X` equalities"
+        ))
+    };
+
     match expr {
         // p == Phase::X  or  Phase::X == p
-        ExprDef::Eq(left, right) => {
-            if let ExprDef::Phase(variant) = right.as_ref() {
-                PhaseSet::Only(vec![variant.to_string()])
-            } else if let ExprDef::Phase(variant) = left.as_ref() {
-                PhaseSet::Only(vec![variant.to_string()])
-            } else {
-                PhaseSet::Unanalyzable(format!(
-                    "helper `{helper_name}` body must be a disjunction of \
-                     `param == Phase::X` equalities"
-                ))
-            }
-        }
+        ExprDef::Eq(left, right) => match phase_variant_either_side(left, right) {
+            Some(variant) => PhaseSet::Only(vec![variant]),
+            None => unsupported(),
+        },
         // p != Phase::X  →  complement
-        ExprDef::Neq(left, right) => {
-            let variant = if let ExprDef::Phase(v) = right.as_ref() {
-                v.to_string()
-            } else if let ExprDef::Phase(v) = left.as_ref() {
-                v.to_string()
-            } else {
-                return PhaseSet::Unanalyzable(format!(
-                    "helper `{helper_name}` body must be a disjunction of \
-                     `param == Phase::X` equalities"
-                ));
-            };
-            PhaseSet::Only(
+        ExprDef::Neq(left, right) => match phase_variant_either_side(left, right) {
+            Some(variant) => PhaseSet::Only(
                 all_phases
                     .iter()
                     .filter(|p| *p != &variant)
                     .cloned()
                     .collect(),
-            )
-        }
+            ),
+            None => unsupported(),
+        },
         // p == Phase::X || p == Phase::Y || ...
         ExprDef::Or(exprs) => exprs
             .iter()
@@ -993,6 +980,17 @@ fn extract_phase_set_from_helper_body(
              use a disjunction of `param == Phase::X` equalities"
         )),
     }
+}
+
+/// If either side is a `Phase::X` literal, return `Some("X")`.
+fn phase_variant_either_side(left: &ExprDef, right: &ExprDef) -> Option<String> {
+    if let ExprDef::Phase(v) = right {
+        return Some(v.to_string());
+    }
+    if let ExprDef::Phase(v) = left {
+        return Some(v.to_string());
+    }
+    None
 }
 
 /// Derive `from` phases for a transition from its guard expression.

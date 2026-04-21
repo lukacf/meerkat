@@ -642,6 +642,8 @@ async fn e2e_scenario_28_cli_mobpack_deploy_signed_strict_live()
         pack.display().to_string(),
         "--sign".to_string(),
         key_path.display().to_string(),
+        "--signer-id".to_string(),
+        "smoke-ci".to_string(),
     ];
     let pack_refs: Vec<&str> = pack_args.iter().map(String::as_str).collect();
     let pack_out = run_rkat(&rkat, &project_dir, &pack_refs, Some(&api_key)).await?;

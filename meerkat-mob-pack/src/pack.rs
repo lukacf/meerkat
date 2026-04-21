@@ -7,7 +7,7 @@ use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use meerkat_mob::MobDefinition;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackResult {
@@ -24,32 +24,44 @@ pub struct InspectResult {
     pub digest: MobpackDigest,
 }
 
+/// Inputs required to sign a mobpack.
+///
+/// `signer_id` is the semantic identity recorded in `signature.toml` and looked
+/// up against the trust store. `key_path` is key material used to authenticate
+/// that identity; it is deliberately separate because the filesystem layout of
+/// the key file is not a source of identity.
+#[derive(Debug, Clone, Copy)]
+pub struct SigningRequest<'a> {
+    pub signer_id: &'a str,
+    pub key_path: &'a Path,
+}
+
 pub fn pack_directory(
     directory: &Path,
-    signing_key_file: Option<&Path>,
+    signing: Option<SigningRequest<'_>>,
 ) -> Result<PackResult, PackValidationError> {
-    pack_directory_with_excludes(directory, signing_key_file, &[])
+    pack_directory_with_excludes(directory, signing, &[])
 }
 
 pub fn pack_directory_with_excludes(
     directory: &Path,
-    signing_key_file: Option<&Path>,
+    signing: Option<SigningRequest<'_>>,
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
     let mut files = scan_directory(directory)?;
     exclude_paths_from_pack(directory, excluded_paths, &mut files);
-    if let Some(key_path) = signing_key_file {
-        exclude_paths_from_pack(directory, &[key_path], &mut files);
+    if let Some(request) = signing {
+        exclude_paths_from_pack(directory, &[request.key_path], &mut files);
     }
     validate_required_files(&files)?;
 
-    if let Some(key_path) = signing_key_file {
+    if let Some(request) = signing {
         let unsigned_archive = create_targz(&files)?;
         let digest = compute_archive_digest(&unsigned_archive)?;
-        let signing_key = load_signing_key(key_path)?;
+        let signing_key = load_signing_key(request.key_path)?;
         let signature = sign_digest(&signing_key, digest);
         let signature_toml = toml::to_string(&PackSignature {
-            signer_id: signer_id_from_path(key_path),
+            signer_id: request.signer_id.to_string(),
             public_key: hex::encode(signing_key.verifying_key().to_bytes()),
             digest,
             signature: hex::encode(signature.to_bytes()),
@@ -210,31 +222,6 @@ fn load_signing_key(path: &Path) -> Result<SigningKey, PackValidationError> {
     Ok(SigningKey::from_bytes(&secret))
 }
 
-fn signer_id_from_path(path: &Path) -> String {
-    let file_name = path
-        .file_name()
-        .and_then(|v| v.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            tracing::debug!(
-                signing_key = %path.display(),
-                "unable to derive signer_id from key filename; falling back to default"
-            );
-            "signer".to_string()
-        });
-    if let Some(stem) = PathBuf::from(file_name)
-        .file_stem()
-        .and_then(|v| v.to_str())
-    {
-        return stem.to_string();
-    }
-    tracing::debug!(
-        signing_key = %path.display(),
-        "unable to derive signer_id from key filename stem; falling back to default"
-    );
-    "signer".to_string()
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
@@ -305,7 +292,14 @@ mod tests {
         )
         .unwrap();
 
-        let packed = pack_directory(temp.path(), Some(&key_path)).unwrap();
+        let packed = pack_directory(
+            temp.path(),
+            Some(SigningRequest {
+                signer_id: "test-signer",
+                key_path: &key_path,
+            }),
+        )
+        .unwrap();
         let extracted = extract_targz_safe(&packed.archive_bytes).unwrap();
         let signature_toml = extracted.get("signature.toml").expect("signature.toml");
         let signature: PackSignature =
@@ -313,6 +307,7 @@ mod tests {
         let recomputed = compute_archive_digest(&packed.archive_bytes).unwrap();
         assert_eq!(recomputed, packed.digest);
         assert_eq!(signature.digest, packed.digest);
+        assert_eq!(signature.signer_id, "test-signer");
 
         let vk_bytes: [u8; 32] = hex::decode(signature.public_key)
             .unwrap()

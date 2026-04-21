@@ -1775,8 +1775,14 @@ enum MobCommands {
         dir: PathBuf,
         #[arg(short = 'o', long)]
         output: PathBuf,
-        #[arg(long)]
+        /// Path to an Ed25519 signing key (hex-encoded).
+        /// Requires --signer-id.
+        #[arg(long, requires = "signer_id")]
         sign: Option<PathBuf>,
+        /// Semantic signer identity recorded in the pack signature
+        /// (e.g. "team@example.com"). Required when --sign is set.
+        #[arg(long, requires = "sign")]
+        signer_id: Option<String>,
     },
     /// Inspect a .mobpack archive.
     Inspect { pack: PathBuf },
@@ -7962,8 +7968,23 @@ async fn wait_for_terminal_flow_run(
 
 #[cfg(feature = "mob")]
 async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyhow::Result<()> {
-    if let MobCommands::Pack { dir, output, sign } = &command {
-        println!("{}", execute_mob_pack(dir, output, sign.as_deref()).await?);
+    if let MobCommands::Pack {
+        dir,
+        output,
+        sign,
+        signer_id,
+    } = &command
+    {
+        let signing = match (sign.as_deref(), signer_id.as_deref()) {
+            (Some(key_path), Some(id)) => Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: id,
+                key_path,
+            }),
+            (None, None) => None,
+            // clap `requires` already enforces both-or-neither at parse time.
+            _ => unreachable!("clap enforces --sign and --signer-id together"),
+        };
+        println!("{}", execute_mob_pack(dir, output, signing).await?);
         return Ok(());
     }
 
@@ -8363,9 +8384,9 @@ fn format_inspect_output(info: &meerkat_mob_pack::pack::InspectResult) -> String
 async fn execute_mob_pack(
     dir: &std::path::Path,
     output: &std::path::Path,
-    sign: Option<&std::path::Path>,
+    signing: Option<meerkat_mob_pack::pack::SigningRequest<'_>>,
 ) -> anyhow::Result<String> {
-    let result = pack_directory_with_excludes(dir, sign, &[output])
+    let result = pack_directory_with_excludes(dir, signing, &[output])
         .map_err(|err| anyhow::anyhow!("mob pack failed: {err}"))?;
     tokio::fs::write(output, &result.archive_bytes)
         .await
@@ -9415,7 +9436,7 @@ fn resolve_cli_provider(config: &Config, model: &str, explicit: Option<Provider>
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
@@ -10701,19 +10722,72 @@ mod tests {
             "./out.mobpack",
             "--sign",
             "./signing.key",
+            "--signer-id",
+            "team@example.com",
         ])
         .expect("mob pack command should parse");
 
         match cli.command {
             Commands::Mob {
-                command: MobCommands::Pack { dir, output, sign },
+                command:
+                    MobCommands::Pack {
+                        dir,
+                        output,
+                        sign,
+                        signer_id,
+                    },
             } => {
                 assert_eq!(dir, PathBuf::from("./example-mob"));
                 assert_eq!(output, PathBuf::from("./out.mobpack"));
                 assert_eq!(sign, Some(PathBuf::from("./signing.key")));
+                assert_eq!(signer_id.as_deref(), Some("team@example.com"));
             }
             _ => unreachable!("expected mob pack command"),
         }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_cli_mob_pack_requires_signer_id_with_sign() {
+        let Err(err) = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "pack",
+            "./example-mob",
+            "-o",
+            "./out.mobpack",
+            "--sign",
+            "./signing.key",
+        ]) else {
+            panic!("--sign without --signer-id should be rejected");
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("signer-id") || rendered.contains("signer_id"),
+            "expected signer-id requirement error, got: {rendered}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_cli_mob_pack_requires_sign_with_signer_id() {
+        let Err(err) = Cli::try_parse_from([
+            "rkat",
+            "mob",
+            "pack",
+            "./example-mob",
+            "-o",
+            "./out.mobpack",
+            "--signer-id",
+            "team@example.com",
+        ]) else {
+            panic!("--signer-id without --sign should be rejected");
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("sign"),
+            "expected sign requirement error, got: {rendered}"
+        );
     }
 
     #[cfg(feature = "mob")]
@@ -11875,9 +11949,16 @@ capabilities = ["definitely_missing_capability"]
             "0707070707070707070707070707070707070707070707070707070707070707",
         )
         .expect("write signing key");
-        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
-            .await
-            .expect("signed pack succeeds");
+        execute_mob_pack(
+            &mob_dir,
+            &pack_out,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci-test",
+                key_path: &signing_key,
+            }),
+        )
+        .await
+        .expect("signed pack succeeds");
 
         let archive_bytes = tokio::fs::read(&pack_out).await.expect("read archive");
         let files = extract_targz_safe(&archive_bytes).expect("extract archive");
@@ -11967,9 +12048,16 @@ capabilities = ["definitely_missing_capability"]
         )
         .expect("write signing key");
 
-        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
-            .await
-            .expect("signed pack should succeed");
+        execute_mob_pack(
+            &mob_dir,
+            &pack_out,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci-test",
+                key_path: &signing_key,
+            }),
+        )
+        .await
+        .expect("signed pack should succeed");
 
         let archive_bytes = tokio::fs::read(&pack_out)
             .await
@@ -12064,9 +12152,16 @@ capabilities = ["definitely_missing_capability"]
             "0505050505050505050505050505050505050505050505050505050505050505",
         )
         .expect("write signing key");
-        execute_mob_pack(&mob_dir, &pack_out, Some(&signing_key))
-            .await
-            .expect("signed pack should succeed");
+        execute_mob_pack(
+            &mob_dir,
+            &pack_out,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci-test",
+                key_path: &signing_key,
+            }),
+        )
+        .await
+        .expect("signed pack should succeed");
 
         let err = execute_mob_deploy(
             &scope,
@@ -12099,9 +12194,16 @@ capabilities = ["definitely_missing_capability"]
             "0404040404040404040404040404040404040404040404040404040404040404",
         )
         .expect("write signing key");
-        execute_mob_pack(&mob_dir, &signed_pack, Some(&signing_key))
-            .await
-            .expect("signed pack should succeed");
+        execute_mob_pack(
+            &mob_dir,
+            &signed_pack,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci-test",
+                key_path: &signing_key,
+            }),
+        )
+        .await
+        .expect("signed pack should succeed");
 
         let signed_bytes = tokio::fs::read(&signed_pack)
             .await
@@ -12171,9 +12273,16 @@ capabilities = ["definitely_missing_capability"]
             "0606060606060606060606060606060606060606060606060606060606060606",
         )
         .expect("write signing key");
-        execute_mob_pack(&mob_dir, &signed_pack, Some(&signing_key))
-            .await
-            .expect("signed pack should succeed");
+        execute_mob_pack(
+            &mob_dir,
+            &signed_pack,
+            Some(meerkat_mob_pack::pack::SigningRequest {
+                signer_id: "ci-test",
+                key_path: &signing_key,
+            }),
+        )
+        .await
+        .expect("signed pack should succeed");
 
         let signed_bytes = tokio::fs::read(&signed_pack)
             .await

@@ -33,6 +33,8 @@ fn stored_accepted(state: InputState) -> StoredInputState {
 struct FailPersistInputStore {
     inner: Arc<InMemoryRuntimeStore>,
     fail_persist_input_state: AtomicBool,
+    fail_atomic_apply: AtomicBool,
+    fail_atomic_lifecycle_commit: AtomicBool,
 }
 
 impl FailPersistInputStore {
@@ -40,6 +42,26 @@ impl FailPersistInputStore {
         Self {
             inner,
             fail_persist_input_state: AtomicBool::new(true),
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_atomic_apply_once(inner: Arc<InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_persist_input_state: AtomicBool::new(false),
+            fail_atomic_apply: AtomicBool::new(true),
+            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_atomic_lifecycle_commit_once(inner: Arc<InMemoryRuntimeStore>) -> Self {
+        Self {
+            inner,
+            fail_persist_input_state: AtomicBool::new(false),
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_atomic_lifecycle_commit: AtomicBool::new(true),
         }
     }
 }
@@ -75,6 +97,11 @@ impl RuntimeStore for FailPersistInputStore {
         input_updates: Vec<StoredInputState>,
         session_store_key: Option<meerkat_core::types::SessionId>,
     ) -> Result<(), RuntimeStoreError> {
+        if self.fail_atomic_apply.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic atomic_apply failure".into(),
+            ));
+        }
         self.inner
             .atomic_apply(
                 runtime_id,
@@ -153,6 +180,14 @@ impl RuntimeStore for FailPersistInputStore {
         runtime_state: RuntimeState,
         input_states: &[StoredInputState],
     ) -> Result<(), RuntimeStoreError> {
+        if self
+            .fail_atomic_lifecycle_commit
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic atomic_lifecycle_commit failure".into(),
+            ));
+        }
         self.inner
             .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
             .await
@@ -408,6 +443,45 @@ async fn boundary_applied_persists_atomically() {
 }
 
 #[tokio::test]
+async fn boundary_apply_failure_restores_staged_state() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> =
+        Arc::new(FailPersistInputStore::fail_atomic_apply_once(inner.clone()));
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
+
+    let input = make_prompt("hello");
+    let input_id = input.id().clone();
+    driver.accept_input(input).await.unwrap();
+
+    let run_id = RunId::new();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
+    driver.stage_input(&input_id, &run_id).unwrap();
+
+    let receipt = RunBoundaryReceipt {
+        run_id: run_id.clone(),
+        boundary: RunApplyBoundary::RunStart,
+        contributing_input_ids: vec![input_id.clone()],
+        conversation_digest: None,
+        message_count: 1,
+        sequence: 0,
+    };
+    let err = driver
+        .boundary_applied(run_id, receipt, Some(b"session-data".to_vec()))
+        .await
+        .expect_err("atomic apply should fail");
+    assert!(
+        err.to_string().contains("synthetic atomic_apply failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        driver.inner_ref().input_phase(&input_id),
+        Some(meerkat_runtime::input_state::InputLifecycleState::Staged),
+        "failed boundary apply must restore the staged lifecycle",
+    );
+}
+
+#[tokio::test]
 async fn durable_runtime_input_externalizes_inline_images_before_ack() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let rid = LogicalRuntimeId::new("test");
@@ -496,6 +570,40 @@ async fn durable_accept_failure_restores_canonical_ingress_state() {
     assert!(
         outcome.is_accepted(),
         "retry after failed durable admission should succeed cleanly"
+    );
+}
+
+#[tokio::test]
+async fn recycle_failure_restores_canonical_ingress_state() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
+    );
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
+
+    let input = make_prompt("hello");
+    let input_id = input.id().clone();
+    driver.accept_input(input).await.unwrap();
+
+    let err = driver
+        .recycle_preserving_work(RuntimeState::Idle)
+        .await
+        .expect_err("recycle persist should fail");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        driver.inner_ref().input_phase(&input_id),
+        Some(meerkat_runtime::input_state::InputLifecycleState::Queued),
+        "failed recycle must restore the queued lifecycle",
+    );
+    assert_eq!(
+        driver.dequeue_next().map(|(id, _)| id),
+        Some(input_id),
+        "failed recycle must restore the queue projection",
     );
 }
 

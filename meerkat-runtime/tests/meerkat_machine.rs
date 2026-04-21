@@ -287,6 +287,34 @@ async fn persistent_adapter_accept() {
 }
 
 #[tokio::test]
+async fn cold_reregister_preserves_destroyed_runtime_state() {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    adapter.register_session(sid.clone()).await;
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed before adapter restart");
+    drop(adapter);
+
+    let restarted = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    restarted.register_session(sid.clone()).await;
+    assert_eq!(
+        restarted.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Destroyed,
+        "cold re-registration must preserve the stored destroyed phase",
+    );
+}
+
+#[tokio::test]
 async fn unregistered_session_errors() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let sid = SessionId::new();

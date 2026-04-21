@@ -34,9 +34,8 @@ use meerkat::{
 };
 use meerkat::surface::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, accepted_scheduled_input_from_runtime_outcome,
-    build_dispatch_from_accepted, schedule_attempt_idempotency_key, schedule_host_supported,
-    spawn_schedule_host,
+    SurfaceScheduleSessionHost, dispatch_from_admission, project_runtime_admission,
+    schedule_attempt_idempotency_key, schedule_host_supported, spawn_schedule_host,
 };
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
@@ -350,9 +349,9 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        Ok(build_dispatch_from_accepted(
+        Ok(dispatch_from_admission(
             occurrence,
-            accepted_scheduled_input_from_runtime_outcome(outcome, handle),
+            project_runtime_admission(outcome, handle),
             dispatch.materialized_session_id,
         ))
     }
@@ -397,9 +396,9 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
-        Ok(build_dispatch_from_accepted(
+        Ok(dispatch_from_admission(
             occurrence,
-            accepted_scheduled_input_from_runtime_outcome(outcome, handle),
+            project_runtime_admission(outcome, handle),
             materialized_session_id,
         ))
     }

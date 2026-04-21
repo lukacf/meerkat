@@ -44,12 +44,22 @@ pub enum AdmissionPlan {
     },
 }
 
+/// Coarse accept flags used by the MeerkatMachine DSL's
+/// `AcceptWithCompletion` branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoarseAdmissionFlags {
+    pub request_immediate_processing: bool,
+    pub interrupt_yielding: bool,
+    pub wake_if_idle: bool,
+}
+
 /// Machine-owned resolution of an accepted input's semantic admission path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdmission {
     pub policy: PolicyDecision,
     pub handling_mode: HandlingMode,
     pub admission_plan: AdmissionPlan,
+    pub coarse_flags: CoarseAdmissionFlags,
 }
 
 /// Typed reason why an input was rejected at the accept boundary.
@@ -250,11 +260,21 @@ pub fn resolve_admission(
     crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
     let handling_mode = handling_mode_from_policy(&policy);
     let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
+    let request_immediate_processing = requests_immediate_processing(input);
+    let interrupt_yielding = !request_immediate_processing
+        && matches!(policy.wake_mode, crate::WakeMode::InterruptYielding);
+    let wake_if_idle =
+        !request_immediate_processing && matches!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
 
     ResolvedAdmission {
         policy,
         handling_mode,
         admission_plan,
+        coarse_flags: CoarseAdmissionFlags {
+            request_immediate_processing,
+            interrupt_yielding,
+            wake_if_idle,
+        },
     }
 }
 

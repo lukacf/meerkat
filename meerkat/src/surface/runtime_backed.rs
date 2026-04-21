@@ -416,7 +416,7 @@ mod tests {
         let session = Session::new();
         let session_id = session.id().clone();
 
-        let error = materialize_session(
+        let error = Box::pin(materialize_session(
             &service,
             &adapter,
             session,
@@ -429,7 +429,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect_err("invalid build settings must fail");
 
@@ -460,7 +460,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
 
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -470,7 +470,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("create session with shared default executor");
 
@@ -548,7 +548,7 @@ mod tests {
     async fn persistent_runtime_executor_stop_discards_and_unregisters() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -558,7 +558,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -592,7 +592,7 @@ mod tests {
     async fn persistent_runtime_executor_cancel_surfaces_no_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -602,7 +602,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -629,7 +629,7 @@ mod tests {
     async fn persistent_runtime_executor_cancel_after_boundary_surfaces_no_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -639,7 +639,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -672,7 +672,7 @@ mod tests {
             CommsRuntime::inproc_only("surface-peer-ingress").expect("create inproc comms runtime"),
         );
         let (service, adapter) = build_test_service_with_runtime(&temp, Some(shared_runtime)).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -686,7 +686,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -707,7 +707,7 @@ mod tests {
             CommsRuntime::inproc_only("surface-keep-alive").expect("create inproc comms runtime"),
         );
         let (service, adapter) = build_test_service_with_runtime(&temp, Some(shared_runtime)).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -721,7 +721,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -758,7 +758,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -768,7 +768,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
 
@@ -924,7 +924,7 @@ mod tests {
     async fn runtime_backed_openai_live_orchestrator_routes_tool_calls_through_service_host() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
-        let result = materialize_session(
+        let result = Box::pin(materialize_session(
             &service,
             &adapter,
             Session::new(),
@@ -934,7 +934,7 @@ mod tests {
                 let adapter = Arc::clone(&adapter);
                 move |session_id| default_persistent_executor(service, adapter, session_id)
             },
-        )
+        ))
         .await
         .expect("materialize session");
         let session_id = result.session_id.clone();

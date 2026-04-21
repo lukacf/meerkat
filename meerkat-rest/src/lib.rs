@@ -2844,7 +2844,7 @@ async fn create_session(
 ) -> Result<Json<SessionResponse>, ApiError> {
     let req_ctx = extract_request_context(&headers, &state.request_executor)?;
     let executor = state.request_executor.clone();
-    let outcome = create_session_inner(&state, req, req_ctx.clone()).await;
+    let outcome = Box::pin(create_session_inner(&state, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
 }
 
@@ -3573,7 +3573,7 @@ async fn continue_session(
 ) -> Result<Json<SessionResponse>, ApiError> {
     let req_ctx = extract_request_context(&headers, &state.request_executor)?;
     let executor = state.request_executor.clone();
-    let outcome = continue_session_inner(&state, &id, req, req_ctx.clone()).await;
+    let outcome = Box::pin(continue_session_inner(&state, &id, req, req_ctx.clone())).await;
     with_request_lifecycle(&executor, req_ctx, outcome).await
 }
 

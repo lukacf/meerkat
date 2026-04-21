@@ -412,14 +412,47 @@ impl ShellState {
         mm_dsl::MeerkatMachineMutator::apply(&mut self.dsl.0, input).map(|_transition| ())
     }
 
-    /// Serialize the provided terminal outcome for DSL storage.
+    /// Split a domain terminal outcome into a `(discriminant, payload)` pair
+    /// suitable for the DSL's typed `op_terminal_outcomes` +
+    /// `op_terminal_payload` fields.
     ///
-    /// Terminal outcomes carry caller-provided payloads (error strings,
-    /// cancellation reasons, operation results) that the DSL tracks as
-    /// opaque strings. Serialisation is lossless JSON; the shell rehydrates
-    /// typed outcomes via [`Self::terminal_outcome`].
-    fn encode_outcome(outcome: &OperationTerminalOutcome) -> String {
-        serde_json::to_string(outcome).unwrap_or_default()
+    /// The discriminant is a typed DSL enum mirror; the payload is the JSON
+    /// encoding of the outcome's *inner* payload (e.g., the `OperationResult`
+    /// for `Completed`, the error string for `Failed`, the optional reason
+    /// for `Aborted` / `Cancelled`, the reason string for `Terminated`). For
+    /// `Retired` the payload is empty — it carries no data.
+    ///
+    /// The shell rehydrates the typed domain outcome via
+    /// [`Self::terminal_outcome`], pairing the DSL discriminant with the
+    /// companion payload entry.
+    fn split_outcome(
+        outcome: &OperationTerminalOutcome,
+    ) -> (mm_dsl::OperationTerminalOutcomeKind, String) {
+        match outcome {
+            OperationTerminalOutcome::Completed(result) => (
+                mm_dsl::OperationTerminalOutcomeKind::Completed,
+                serde_json::to_string(result).unwrap_or_default(),
+            ),
+            OperationTerminalOutcome::Failed { error } => (
+                mm_dsl::OperationTerminalOutcomeKind::Failed,
+                serde_json::to_string(error).unwrap_or_default(),
+            ),
+            OperationTerminalOutcome::Aborted { reason } => (
+                mm_dsl::OperationTerminalOutcomeKind::Aborted,
+                serde_json::to_string(reason).unwrap_or_default(),
+            ),
+            OperationTerminalOutcome::Cancelled { reason } => (
+                mm_dsl::OperationTerminalOutcomeKind::Cancelled,
+                serde_json::to_string(reason).unwrap_or_default(),
+            ),
+            OperationTerminalOutcome::Retired => {
+                (mm_dsl::OperationTerminalOutcomeKind::Retired, String::new())
+            }
+            OperationTerminalOutcome::Terminated { reason } => (
+                mm_dsl::OperationTerminalOutcomeKind::Terminated,
+                serde_json::to_string(reason).unwrap_or_default(),
+            ),
+        }
     }
 
     /// Read the DSL operation status for `id`, or `None` if not registered.
@@ -437,11 +470,13 @@ impl ShellState {
     /// Read the DSL operation kind for `id`, or `None` if not registered.
     fn kind(&self, id: &OperationId) -> Option<OperationKind> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let serialized = self.dsl.0.state.op_kinds.get(&id_key)?;
-        if serialized.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<OperationKind>(serialized).ok()
+        self.dsl
+            .0
+            .state
+            .op_kinds
+            .get(&id_key)
+            .copied()
+            .map(OperationKind::from)
     }
 
     /// Read the peer-ready flag for `id`.
@@ -461,14 +496,55 @@ impl ShellState {
             .map(|v| (*v).min(u32::MAX as u64) as u32)
     }
 
-    /// Read the terminal outcome for `id`, deserialising the stored JSON.
+    /// Read the terminal outcome for `id` by pairing the DSL's typed
+    /// discriminant with the companion payload JSON. Returns `None` when the
+    /// op has no recorded terminal discriminant.
     fn terminal_outcome(&self, id: &OperationId) -> Option<OperationTerminalOutcome> {
         let id_key = mm_dsl::OperationId::from_domain(id).0;
-        let serialized = self.dsl.0.state.op_terminal_outcomes.get(&id_key)?;
-        if serialized.is_empty() {
-            return None;
+        let kind = self
+            .dsl
+            .0
+            .state
+            .op_terminal_outcomes
+            .get(&id_key)
+            .copied()?;
+        let payload = self
+            .dsl
+            .0
+            .state
+            .op_terminal_payload
+            .get(&id_key)
+            .map(String::as_str)
+            .unwrap_or("");
+        match kind {
+            mm_dsl::OperationTerminalOutcomeKind::Completed => {
+                let result = serde_json::from_str::<OperationResult>(payload).ok()?;
+                Some(OperationTerminalOutcome::Completed(result))
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Failed => {
+                let error = serde_json::from_str::<String>(payload).unwrap_or_default();
+                Some(OperationTerminalOutcome::Failed { error })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Aborted => {
+                let reason = serde_json::from_str::<Option<String>>(payload)
+                    .ok()
+                    .flatten();
+                Some(OperationTerminalOutcome::Aborted { reason })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Cancelled => {
+                let reason = serde_json::from_str::<Option<String>>(payload)
+                    .ok()
+                    .flatten();
+                Some(OperationTerminalOutcome::Cancelled { reason })
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Retired => {
+                Some(OperationTerminalOutcome::Retired)
+            }
+            mm_dsl::OperationTerminalOutcomeKind::Terminated => {
+                let reason = serde_json::from_str::<String>(payload).unwrap_or_default();
+                Some(OperationTerminalOutcome::Terminated { reason })
+            }
         }
-        serde_json::from_str::<OperationTerminalOutcome>(serialized).ok()
     }
 
     /// Whether the operation is currently tracked in DSL state.
@@ -598,6 +674,7 @@ impl ShellState {
                 self.dsl.0.state.op_peer_ready.remove(&evicted_key);
                 self.dsl.0.state.op_progress_counts.remove(&evicted_key);
                 self.dsl.0.state.op_terminal_outcomes.remove(&evicted_key);
+                self.dsl.0.state.op_terminal_payload.remove(&evicted_key);
                 self.dsl.0.state.op_completion_seq.remove(&evicted_key);
                 self.records.remove(&evicted);
             }
@@ -625,28 +702,33 @@ impl ShellState {
 
     /// Check whether a pending barrier wait is now satisfied and resolve it.
     ///
-    /// Barrier membership lives in DSL `wait_operation_ids`; `wait_active`
-    /// signals whether a barrier is pending. `wait_request_id` is the
-    /// shell-owned oneshot correlation id that selects which sender to
-    /// notify; when the DSL barrier satisfies without a live correlation
-    /// (post-recovery, or duplicate resolution), the oneshot simply remains
-    /// pending.
+    /// Barrier membership and the "all members terminal" decision both live
+    /// in the DSL: `wait_operation_ids` carries the set, `wait_active`
+    /// signals a pending barrier, and `SatisfyWaitAll`'s
+    /// `all_members_terminal` guard owns the fixed-point test. The shell
+    /// fires `SatisfyWaitAll` idempotently on every terminal transition and
+    /// lets the DSL guard reject early firings as a no-op. On acceptance
+    /// (transition returns `Ok`), the shell selects the correlated oneshot
+    /// and delivers the `WaitAllSatisfied` obligation token.
+    ///
+    /// `wait_request_id` is the shell-owned oneshot correlation id that
+    /// selects which sender to notify; when the DSL barrier satisfies
+    /// without a live correlation (post-recovery, or duplicate resolution),
+    /// the oneshot simply remains pending.
     fn maybe_satisfy_wait(&mut self) {
-        if !self.wait_active() {
-            return;
-        }
+        // Capture membership *before* applying — `SatisfyWaitAll`'s update
+        // clause resets `wait_operation_ids` to empty, so a post-apply read
+        // would lose the member list carried on the obligation token.
         let ids = self.wait_operation_ids();
-        let all_terminal = ids
-            .iter()
-            .all(|id| self.status(id).is_some_and(OperationStatus::is_terminal));
-        if !all_terminal {
+        if self
+            .dsl_apply_raw(mm_dsl::MeerkatMachineInput::SatisfyWaitAll)
+            .is_err()
+        {
+            // Guard rejection (barrier inactive, or members not all terminal
+            // yet) is an expected idempotent no-op on the satisfaction fixed
+            // point, not a shell/DSL desync. Swallow.
             return;
         }
-        // Reflect barrier resolution in DSL state — clears wait_active + members.
-        let _ = self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-            "SatisfyWaitAll",
-        );
         let wait_id = match self.wait_request_id.take() {
             Some(id) => id,
             None => return,
@@ -902,8 +984,12 @@ impl RuntimeOpsLifecycleRegistry {
                 id_key.clone(),
                 mm_dsl::OperationStatus::from(op_state.status),
             );
-            let kind_str = serde_json::to_string(&op_state.kind).unwrap_or_default();
-            shell.dsl.0.state.op_kinds.insert(id_key.clone(), kind_str);
+            shell
+                .dsl
+                .0
+                .state
+                .op_kinds
+                .insert(id_key.clone(), mm_dsl::OperationKind::from(op_state.kind));
             shell
                 .dsl
                 .0
@@ -917,13 +1003,19 @@ impl RuntimeOpsLifecycleRegistry {
                 .op_progress_counts
                 .insert(id_key.clone(), op_state.progress_count as u64);
             if let Some(outcome) = op_state.terminal_outcome.as_ref() {
-                let outcome_str = ShellState::encode_outcome(outcome);
+                let (kind, payload) = ShellState::split_outcome(outcome);
                 shell
                     .dsl
                     .0
                     .state
                     .op_terminal_outcomes
-                    .insert(id_key.clone(), outcome_str);
+                    .insert(id_key.clone(), kind);
+                shell
+                    .dsl
+                    .0
+                    .state
+                    .op_terminal_payload
+                    .insert(id_key.clone(), payload);
             }
             retained_ids.insert(op_id);
         }
@@ -1050,12 +1142,15 @@ impl RuntimeOpsLifecycleRegistry {
             Some(active) if active == wait_request_id => {
                 state.wait_request_id = None;
                 state.pending_wait = None;
-                // Clear the DSL barrier — SatisfyWaitAll resets wait_active +
-                // wait_operation_ids. The `wait_is_active` guard ensures this
-                // is a no-op if the barrier was already cleared.
+                // Clear the DSL barrier via the dedicated `CancelWaitAll`
+                // transition. Unlike `SatisfyWaitAll`, it does not require
+                // every member to be terminal (the request was dropped, not
+                // resolved) and does not emit the `WaitAllSatisfied`
+                // obligation. The `wait_is_active` guard keeps it an
+                // idempotent no-op if the barrier was already cleared.
                 let _ = state.dsl_apply(
-                    mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-                    "SatisfyWaitAll(cancel)",
+                    mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                    "CancelWaitAll(cancel)",
                 );
                 Ok(())
             }
@@ -1175,6 +1270,44 @@ fn classify_op_rejection(
     }
 }
 
+/// Classify a `PeerReadyOp` DSL rejection back into the public error surface.
+///
+/// `PeerReadyOp`'s DSL guards layer three distinct rejections onto a single
+/// `GuardRejected` variant. The shell distinguishes them by re-reading the
+/// canonical DSL state under the same write lock that observed the guard
+/// failure — so the classification cannot race with a concurrent mutation.
+///
+/// Priority mirrors the declared guard order in the DSL transition:
+/// 1. `kind_is_mob_member_child` → `PeerNotExpected`
+/// 2. `not_already_peer_ready`   → `AlreadyPeerReady`
+/// 3. `from_status_valid`        → `InvalidTransition`
+fn classify_peer_ready_rejection(
+    state: &ShellState,
+    err: mm_dsl::MeerkatMachineTransitionError,
+    id: &OperationId,
+    status: OperationStatus,
+) -> OpsLifecycleError {
+    match err {
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
+            let kind = state.kind(id);
+            if kind != Some(OperationKind::MobMemberChild) {
+                return OpsLifecycleError::PeerNotExpected(id.clone());
+            }
+            if state.peer_ready(id).unwrap_or(false) {
+                return OpsLifecycleError::AlreadyPeerReady(id.clone());
+            }
+            OpsLifecycleError::InvalidTransition {
+                id: id.clone(),
+                status,
+                action: "peer_ready",
+            }
+        }
+        other => OpsLifecycleError::Internal(format!(
+            "DSL rejected ops transition (peer_ready): {other:?}"
+        )),
+    }
+}
+
 impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn register_operation(&self, spec: OperationSpec) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
@@ -1199,7 +1332,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         state.dsl_apply(
             mm_dsl::MeerkatMachineInput::RegisterOp {
                 operation_id: mm_dsl::OperationId::from_domain(&operation_id).0,
-                kind: mm_dsl::OperationKind::from_domain(&kind).0,
+                kind: mm_dsl::OperationKind::from_domain(&kind),
             },
             "RegisterOp",
         )?;
@@ -1246,11 +1379,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
@@ -1270,23 +1404,15 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let status = state
             .status(id)
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
-        let kind = state
-            .kind(id)
-            .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
-        // Shell-owned guards (domain-shape concerns, not transition legality):
-        // peer-ready is only meaningful for MobMemberChild ops, and only once.
-        if kind != OperationKind::MobMemberChild {
-            return Err(OpsLifecycleError::PeerNotExpected(id.clone()));
-        }
-        if state.peer_ready(id).unwrap_or(false) {
-            return Err(OpsLifecycleError::AlreadyPeerReady(id.clone()));
-        }
-
+        // The kind / not-already-peer-ready / status decisions all live in
+        // the DSL's `PeerReadyOp` guards. The shell fires unconditionally
+        // and classifies a guard rejection by re-reading the state under
+        // the same write lock (so no race with the DSL's guard evaluation).
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::PeerReadyOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
         }) {
-            return Err(classify_op_rejection(err, id, status, "peer_ready"));
+            return Err(classify_peer_ready_rejection(&state, err, id, status));
         }
 
         // Shell concern: store the peer handle.
@@ -1349,11 +1475,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CompleteOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "complete_operation"));
         }
@@ -1371,11 +1498,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
@@ -1397,11 +1525,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::AbortOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
         }
@@ -1423,11 +1552,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CancelOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "cancel_operation"));
         }
@@ -1460,11 +1590,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             .ok_or_else(|| OpsLifecycleError::NotFound(id.clone()))?;
 
         let terminal_outcome = OperationTerminalOutcome::Retired;
-        let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+        let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireCompletedOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
-            outcome: outcome_serialized,
+            outcome: outcome_kind,
+            payload: outcome_payload,
         }) {
             return Err(classify_op_rejection(err, id, status, "mark_retired"));
         }
@@ -1496,11 +1627,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
     fn terminate_owner(&self, reason: String) -> Result<(), OpsLifecycleError> {
         let mut state = self.write_state()?;
 
-        // Collect non-terminal op IDs — the shell loop mirrors the old
-        // OwnerTerminated cascade; session lock serialises the batch. The
-        // DSL's `TerminateOp` transition guards on the same non-terminal set,
-        // so guard rejection here indicates a genuine state desync rather
-        // than the common already-terminal no-op.
+        // The shell loop is a mechanical cursor over DSL-owned state; the
+        // "is this op non-terminal?" decision is expressed as a typed read
+        // of the DSL's `op_statuses` map via `OperationStatus::is_terminal`,
+        // not a handwritten branch over stringly-typed state. The DSL's
+        // `TerminateOp` transition guards on the same non-terminal set, so
+        // guard rejection here indicates a genuine state desync rather than
+        // the common already-terminal no-op.
         let to_terminate: Vec<(OperationId, OperationStatus)> = state
             .operation_ids()
             .into_iter()
@@ -1512,11 +1645,12 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
                 reason: reason.clone(),
             };
-            let outcome_serialized = ShellState::encode_outcome(&terminal_outcome);
+            let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
 
             if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::TerminateOp {
                 operation_id: mm_dsl::OperationId::from_domain(op_id).0,
-                outcome: outcome_serialized,
+                outcome: outcome_kind,
+                payload: outcome_payload,
             }) {
                 return Err(classify_op_rejection(
                     err,
@@ -1551,6 +1685,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             state.dsl.0.state.op_peer_ready.remove(&id_key);
             state.dsl.0.state.op_progress_counts.remove(&id_key);
             state.dsl.0.state.op_terminal_outcomes.remove(&id_key);
+            state.dsl.0.state.op_terminal_payload.remove(&id_key);
             state.dsl.0.state.op_completion_seq.remove(&id_key);
             state.records.remove(&id);
             if let Some(outcome) = outcome {
@@ -1659,11 +1794,13 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                     if state.pending_wait.is_some() {
                         // Roll back the DSL barrier we just activated so the
                         // registry is not stuck in a wait-active state with
-                        // no correlation oneshot to resolve.
+                        // no correlation oneshot to resolve. `CancelWaitAll`
+                        // is the no-obligation clearer (members need not be
+                        // terminal).
                         state.wait_request_id = None;
                         let _ = state.dsl_apply(
-                            mm_dsl::MeerkatMachineInput::SatisfyWaitAll,
-                            "SatisfyWaitAll(rollback)",
+                            mm_dsl::MeerkatMachineInput::CancelWaitAll,
+                            "CancelWaitAll(rollback)",
                         );
                         return Box::pin(WaitAllFuture {
                             registry: self,

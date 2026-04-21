@@ -1335,7 +1335,10 @@ pub async fn handle_tools_call(
     tool_name: &str,
     arguments: &Value,
 ) -> Result<Value, ToolCallError> {
-    handle_tools_call_with_notifier(state, tool_name, arguments, None, None).await
+    Box::pin(handle_tools_call_with_notifier(
+        state, tool_name, arguments, None, None,
+    ))
+    .await
 }
 
 /// Handle a tools/call request with optional event notifications.
@@ -1363,12 +1366,18 @@ pub async fn handle_tools_call_with_notifier(
         "meerkat_run" => {
             let input: MeerkatRunInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_run(state, input, notifier, request_context).await
+            Box::pin(handle_meerkat_run(state, input, notifier, request_context)).await
         }
         "meerkat_resume" => {
             let input: MeerkatResumeInput = serde_json::from_value(arguments.clone())
                 .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_resume(state, input, notifier, request_context).await
+            Box::pin(handle_meerkat_resume(
+                state,
+                input,
+                notifier,
+                request_context,
+            ))
+            .await
         }
         "meerkat_config" => {
             let input: MeerkatConfigInput = serde_json::from_value(arguments.clone())
@@ -3812,7 +3821,7 @@ mod tests {
     async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let result = handle_meerkat_run(
+        let result = Box::pin(handle_meerkat_run(
             &state,
             MeerkatRunInput {
                 prompt: "test".to_string(),
@@ -3846,7 +3855,7 @@ mod tests {
             },
             None,
             None,
-        )
+        ))
         .await;
 
         assert!(result.is_err());
@@ -3861,7 +3870,7 @@ mod tests {
         let state = MeerkatMcpState::new_with_store(store).await;
         let context = cancelled_request_context("req-run-cancelled").await;
 
-        let result = handle_meerkat_run(
+        let result = Box::pin(handle_meerkat_run(
             &state,
             MeerkatRunInput {
                 prompt: "test".to_string(),
@@ -3895,7 +3904,7 @@ mod tests {
             },
             None,
             Some(context),
-        )
+        ))
         .await;
 
         let err = result.expect_err("pre-cancelled run should be rejected");
@@ -3910,7 +3919,7 @@ mod tests {
         let (state, session_id) = state_with_persisted_session().await;
         let context = cancelled_request_context("req-resume-cancelled").await;
 
-        let result = handle_meerkat_resume(
+        let result = Box::pin(handle_meerkat_resume(
             &state,
             MeerkatResumeInput {
                 session_id,
@@ -3943,7 +3952,7 @@ mod tests {
             },
             None,
             Some(context),
-        )
+        ))
         .await;
 
         let err = result.expect_err("pre-cancelled resume should be rejected");
@@ -3964,11 +3973,11 @@ mod tests {
             .await
             .expect("blob stored");
 
-        let result = handle_tools_call(
+        let result = Box::pin(handle_tools_call(
             &state,
             "meerkat_blob_get",
             &json!({ "blob_id": blob_ref.blob_id.as_str() }),
-        )
+        ))
         .await
         .expect("blob get succeeds");
 
@@ -4057,9 +4066,13 @@ mod tests {
     async fn test_handle_tools_call_unknown_tool_still_errors() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let err = handle_tools_call(&state, "meerkat_mob_prefabz_typo", &json!({}))
-            .await
-            .expect_err("unknown tool must error");
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_mob_prefabz_typo",
+            &json!({}),
+        ))
+        .await
+        .expect_err("unknown tool must error");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("Unknown tool"));
     }
@@ -4069,7 +4082,7 @@ mod tests {
     async fn test_public_mcp_server_rejects_raw_mob_dispatcher_tool_names() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let err = handle_tools_call(&state, "mob_create", &json!({}))
+        let err = Box::pin(handle_tools_call(&state, "mob_create", &json!({})))
             .await
             .expect_err("raw internal mob tool name must not be exposed");
         assert_eq!(err.code, -32601);
@@ -4082,7 +4095,7 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
 
-        let created = handle_tools_call(
+        let created = Box::pin(handle_tools_call(
             &state,
             "meerkat_mob_create",
             &json!({
@@ -4093,19 +4106,19 @@ mod tests {
                     }
                 }
             }),
-        )
+        ))
         .await
         .expect("typed mob create should succeed");
         let created = unwrap_tool_payload_json(created);
         assert_eq!(created["mob_id"], "mob-1");
 
-        let listed = handle_tools_call(&state, "meerkat_mob_list", &json!({}))
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_mob_list", &json!({})))
             .await
             .expect("typed mob list should succeed");
         let listed = unwrap_tool_payload_json(listed);
         assert_eq!(listed["mobs"][0]["mob_id"], "mob-1");
 
-        let err = handle_tools_call(
+        let err = Box::pin(handle_tools_call(
             &state,
             "meerkat_mob_create",
             &json!({
@@ -4121,7 +4134,7 @@ mod tests {
                     }
                 }
             }),
-        )
+        ))
         .await
         .expect_err("nested internal tool bundle fields must be rejected");
         assert_eq!(err.code, -32602);
@@ -4135,7 +4148,7 @@ mod tests {
     async fn test_mcp_handlers_sessions_read_list_interrupt_archive() {
         let (state, session_id) = state_with_persisted_session().await;
 
-        let listed = handle_tools_call(&state, "meerkat_sessions", &json!({}))
+        let listed = Box::pin(handle_tools_call(&state, "meerkat_sessions", &json!({})))
             .await
             .expect("sessions list call should succeed");
         let listed_payload = unwrap_payload(listed);
@@ -4149,20 +4162,24 @@ mod tests {
             "persisted session should appear in list"
         );
 
-        let read = handle_tools_call(&state, "meerkat_read", &json!({ "session_id": session_id }))
-            .await
-            .expect("read call should succeed");
+        let read = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_read",
+            &json!({ "session_id": session_id }),
+        ))
+        .await
+        .expect("read call should succeed");
         let read_payload = unwrap_payload(read);
         assert_eq!(
             read_payload["session_id"],
             read_payload["state"]["session_id"]
         );
 
-        let interrupt_err = handle_tools_call(
+        let interrupt_err = Box::pin(handle_tools_call(
             &state,
             "meerkat_interrupt",
             &json!({ "session_id": read_payload["session_id"] }),
-        )
+        ))
         .await
         .expect_err("interrupt should fail for non-running persisted session");
         assert!(
@@ -4171,11 +4188,11 @@ mod tests {
                 .contains("Failed to interrupt session")
         );
 
-        let archived = handle_tools_call(
+        let archived = Box::pin(handle_tools_call(
             &state,
             "meerkat_archive",
             &json!({ "session_id": read_payload["session_id"] }),
-        )
+        ))
         .await
         .expect("archive call should succeed");
         let archived_payload = unwrap_payload(archived);
@@ -4221,11 +4238,11 @@ mod tests {
             .await
             .expect("persisted history session");
 
-        let history = handle_tools_call(
+        let history = Box::pin(handle_tools_call(
             &state,
             "meerkat_history",
             &json!({ "session_id": session_id, "offset": 1, "limit": 2 }),
-        )
+        ))
         .await
         .expect("history should succeed");
         let history_payload = unwrap_payload(history);
@@ -4244,11 +4261,11 @@ mod tests {
             .await
             .expect("archive should succeed");
 
-        let archived_history = handle_tools_call(
+        let archived_history = Box::pin(handle_tools_call(
             &state,
             "meerkat_history",
             &json!({ "session_id": session_id }),
-        )
+        ))
         .await
         .expect("archived history should succeed");
         let archived_payload = unwrap_payload(archived_history);
@@ -4312,11 +4329,11 @@ mod tests {
         });
         store.save(&session).await.expect("persisted mixed session");
 
-        let history = handle_tools_call(
+        let history = Box::pin(handle_tools_call(
             &state,
             "meerkat_history",
             &json!({ "session_id": session_id }),
-        )
+        ))
         .await
         .expect("mixed history should succeed");
         let payload = unwrap_payload(history);
@@ -4343,7 +4360,7 @@ mod tests {
     async fn test_mcp_handlers_add_remove_reload_require_registered_adapter() {
         let (state, session_id) = state_with_persisted_session().await;
 
-        let err = handle_tools_call(
+        let err = Box::pin(handle_tools_call(
             &state,
             "meerkat_mcp_add",
             &json!({
@@ -4351,7 +4368,7 @@ mod tests {
                 "server_name": "demo",
                 "server_config": {"command": "cat", "args": [], "env": {}}
             }),
-        )
+        ))
         .await
         .expect_err("mcp add should fail without adapter registration");
         assert!(err.message.contains("Live MCP unavailable"));
@@ -4368,7 +4385,7 @@ mod tests {
             )
             .await;
 
-        let add = handle_tools_call(
+        let add = Box::pin(handle_tools_call(
             &state,
             "meerkat_mcp_add",
             &json!({
@@ -4376,35 +4393,35 @@ mod tests {
                 "server_name": "demo",
                 "server_config": {"command": "cat", "args": [], "env": {}}
             }),
-        )
+        ))
         .await
         .expect("mcp add should succeed");
         let add_payload = unwrap_payload(add);
         assert_eq!(add_payload["operation"], "add");
         assert_eq!(add_payload["status"], "staged");
 
-        let remove = handle_tools_call(
+        let remove = Box::pin(handle_tools_call(
             &state,
             "meerkat_mcp_remove",
             &json!({
                 "session_id": add_payload["session_id"],
                 "server_name": "demo"
             }),
-        )
+        ))
         .await
         .expect("mcp remove should succeed");
         let remove_payload = unwrap_payload(remove);
         assert_eq!(remove_payload["operation"], "remove");
         assert_eq!(remove_payload["status"], "staged");
 
-        let reload = handle_tools_call(
+        let reload = Box::pin(handle_tools_call(
             &state,
             "meerkat_mcp_reload",
             &json!({
                 "session_id": remove_payload["session_id"],
                 "server_name": "demo"
             }),
-        )
+        ))
         .await
         .expect("mcp reload should succeed");
         let reload_payload = unwrap_payload(reload);
@@ -4417,11 +4434,11 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
         let missing_id = meerkat::SessionId::new().to_string();
-        let err = handle_tools_call(
+        let err = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_open",
             &json!({ "session_id": missing_id }),
-        )
+        ))
         .await
         .expect_err("open should fail for missing session");
         assert!(err.message.contains("Failed to open session event stream"));
@@ -4440,21 +4457,21 @@ mod tests {
             }),
         );
 
-        let read = handle_tools_call(
+        let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
             &json!({ "stream_id": stream_id }),
-        )
+        ))
         .await
         .expect("read should complete with timeout");
         let read_payload = unwrap_payload(read);
         assert_eq!(read_payload["status"], "timeout");
 
-        let closed = handle_tools_call(
+        let closed = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
             &json!({ "stream_id": "stream-timeout-default" }),
-        )
+        ))
         .await
         .expect("close should succeed");
         let close_payload = unwrap_payload(closed);
@@ -4499,21 +4516,21 @@ mod tests {
             }),
         );
 
-        let read = handle_tools_call(
+        let read = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_read",
             &json!({ "stream_id": stream_id }),
-        )
+        ))
         .await
         .expect("read should succeed");
         let read_payload = unwrap_payload(read);
         assert_eq!(read_payload["status"], "closed");
 
-        let close = handle_tools_call(
+        let close = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
             &json!({ "stream_id": "stream-closed" }),
-        )
+        ))
         .await
         .expect("close should succeed");
         let close_payload = unwrap_payload(close);

@@ -153,9 +153,8 @@ impl CoreExecutor for SessionRuntimeExecutor {
             }
         });
 
-        let result = self
-            .runtime
-            .apply_runtime_turn(
+        let result = Box::pin(
+            self.runtime.apply_runtime_turn(
                 &self.session_id,
                 run_id,
                 &primitive,
@@ -189,8 +188,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
                         .turn_metadata()
                         .and_then(|meta| meta.connection_ref.clone()),
                 }),
-            )
-            .await;
+            ),
+        )
+        .await;
 
         // Wait for the event forwarder to finish
         let _ = forwarder.await;

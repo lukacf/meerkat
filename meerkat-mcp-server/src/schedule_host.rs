@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use meerkat::DeliveryTerminal;
 use meerkat::surface::prepare_surface_session;
 use meerkat::surface::{
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, accepted_scheduled_input_from_runtime_outcome,
-    build_dispatch_from_accepted, immediate_delivery_failure, schedule_attempt_idempotency_key,
+    RuntimeAdmissionProjection, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, dispatch_from_admission,
+    immediate_delivery_failure, project_runtime_admission, schedule_attempt_idempotency_key,
     schedule_host_supported, spawn_schedule_host,
 };
 #[cfg(feature = "mob")]
@@ -413,7 +413,13 @@ impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
         occurrence: &Occurrence,
         dispatch: ScheduledPromptDispatch,
     ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-        deliver_scheduled_prompt(&self.context, session_id, occurrence, dispatch).await
+        Box::pin(deliver_scheduled_prompt(
+            &self.context,
+            session_id,
+            occurrence,
+            dispatch,
+        ))
+        .await
     }
 
     async fn deliver_event(
@@ -659,7 +665,7 @@ async fn deliver_scheduled_prompt(
     occurrence: &Occurrence,
     dispatch: ScheduledPromptDispatch,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match accept_scheduled_prompt_with_completion(
+    match Box::pin(accept_scheduled_prompt_with_completion(
         context,
         session_id,
         occurrence,
@@ -667,12 +673,12 @@ async fn deliver_scheduled_prompt(
         dispatch.render_metadata,
         dispatch.skill_references,
         dispatch.additional_instructions,
-    )
+    ))
     .await
     {
-        Ok(accepted) => Ok(build_dispatch_from_accepted(
+        Ok(projection) => Ok(dispatch_from_admission(
             occurrence,
-            accepted,
+            projection,
             dispatch.materialized_session_id,
         )),
         Err(error) => Ok(immediate_delivery_failure(
@@ -704,9 +710,9 @@ async fn deliver_scheduled_event(
     )
     .await
     {
-        Ok(accepted) => Ok(build_dispatch_from_accepted(
+        Ok(projection) => Ok(dispatch_from_admission(
             occurrence,
-            accepted,
+            projection,
             materialized_session_id,
         )),
         Err(error) => Ok(immediate_delivery_failure(
@@ -727,7 +733,7 @@ async fn accept_scheduled_prompt_with_completion(
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
     skill_references: Vec<String>,
     additional_instructions: Vec<String>,
-) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
     let config = context
         .config_runtime
         .get()
@@ -770,9 +776,7 @@ async fn accept_scheduled_prompt_with_completion(
         .accept_input_with_completion(session_id, Input::Prompt(prompt_input), None)
         .await
         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(accepted_scheduled_input_from_runtime_outcome(
-        outcome, handle,
-    ))
+    Ok(project_runtime_admission(outcome, handle))
 }
 
 async fn accept_scheduled_event_with_completion(
@@ -782,7 +786,7 @@ async fn accept_scheduled_event_with_completion(
     event_type: String,
     payload: serde_json::Value,
     render_metadata: Option<meerkat_core::types::RenderMetadata>,
-) -> Result<meerkat::surface::AcceptedScheduledInput, ScheduleDomainError> {
+) -> Result<RuntimeAdmissionProjection, ScheduleDomainError> {
     context
         .ensure_runtime_session_registered(session_id)
         .await?;
@@ -815,9 +819,7 @@ async fn accept_scheduled_event_with_completion(
         .accept_input_with_completion(session_id, input, None)
         .await
         .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
-    Ok(accepted_scheduled_input_from_runtime_outcome(
-        outcome, handle,
-    ))
+    Ok(project_runtime_admission(outcome, handle))
 }
 
 async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id: &SessionId) {

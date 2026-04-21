@@ -181,8 +181,13 @@ pub trait ExternalClient: Send + Sync {
 }
 
 /// External source adapter that performs and caches capability handshake per instance.
+///
+/// The adapter owns no local source identity: every `source_uuid` used on the
+/// wire is discovered from the remote `skills/list_summaries` enumeration and
+/// cached in `skill_source_index` as a read-through projection of that
+/// canonical answer. There is intentionally no local-UUID fallback — a skill
+/// the remote has not announced resolves to `SkillError::NotFound`.
 pub struct ExternalSkillSource<C: ExternalClient> {
-    source_uuid: String,
     client: C,
     handshake: Arc<RwLock<Option<SourceCapabilityHandshake>>>,
     skill_source_index: Arc<RwLock<HashMap<SkillId, String>>>,
@@ -190,9 +195,8 @@ pub struct ExternalSkillSource<C: ExternalClient> {
 }
 
 impl<C: ExternalClient> ExternalSkillSource<C> {
-    pub fn new(source_uuid: impl Into<String>, client: C) -> Self {
+    pub fn new(client: C) -> Self {
         Self {
-            source_uuid: source_uuid.into(),
             client,
             handshake: Arc::new(RwLock::new(None)),
             skill_source_index: Arc::new(RwLock::new(HashMap::new())),
@@ -255,6 +259,11 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
         Ok(())
     }
 
+    /// Resolve the canonical `source_uuid` for a skill by consulting the remote
+    /// source's `skills/list_summaries` enumeration. The in-memory index is a
+    /// read-through projection of that canonical enumeration — never treated as
+    /// authority on its own. A miss after refresh is a typed `NotFound`, not a
+    /// silent substitution of the local source UUID.
     async fn source_for_skill(&self, skill_id: &SkillId) -> Result<String, SkillError> {
         if let Some(found) = self.skill_source_index.read().await.get(skill_id).cloned() {
             return Ok(found);
@@ -273,7 +282,9 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
             index.insert(id, summary.source_uuid);
         }
 
-        Ok(discovered.unwrap_or_else(|| self.source_uuid.clone()))
+        discovered.ok_or_else(|| SkillError::NotFound {
+            id: skill_id.clone(),
+        })
     }
 
     pub async fn list_artifacts(
@@ -285,7 +296,8 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
         let artifacts = self
             .client
             .skills_list_artifacts(&source_uuid, &skill_id.0)
-            .await?;
+            .await
+            .map_err(|error| normalize_not_found(error, skill_id))?;
         Ok(artifacts
             .into_iter()
             .map(|artifact| SkillArtifact {
@@ -306,7 +318,8 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
         let artifact = self
             .client
             .skills_read_artifact(&source_uuid, &skill_id.0, artifact_path)
-            .await?;
+            .await
+            .map_err(|error| normalize_not_found(error, skill_id))?;
         Ok(SkillArtifactContent {
             path: artifact.path,
             mime_type: artifact.mime_type,
@@ -325,6 +338,20 @@ impl<C: ExternalClient> ExternalSkillSource<C> {
         self.client
             .skills_invoke_function(&source_uuid, &skill_id.0, function_name, arguments)
             .await
+            .map_err(|error| normalize_not_found(error, skill_id))
+    }
+}
+
+/// Re-anchor remote `NotFound` errors to the caller-supplied `skill_id`.
+/// Remote sources may emit `NotFound` with the skill name they were asked about
+/// or a sentinel id; callers of these methods always expect the id they passed
+/// to come back on a miss. All other variants pass through unchanged.
+fn normalize_not_found(error: SkillError, skill_id: &SkillId) -> SkillError {
+    match error {
+        SkillError::NotFound { .. } => SkillError::NotFound {
+            id: skill_id.clone(),
+        },
+        other => other,
     }
 }
 
@@ -397,10 +424,7 @@ impl<C: ExternalClient + Send + Sync> SkillSource for ExternalSkillSource<C> {
                 .client
                 .skills_load_package(&source_uuid, &id.0)
                 .await
-                .map_err(|error| match error {
-                    SkillError::NotFound { .. } => SkillError::NotFound { id: id.clone() },
-                    other => other,
-                })?;
+                .map_err(|error| normalize_not_found(error, id))?;
 
             Ok(SkillDocument {
                 descriptor: SkillDescriptor {
@@ -1087,7 +1111,7 @@ mod tests {
     async fn test_handshake_precedes_ops_and_is_cached_per_source_instance() {
         let client = MockExternalClient::full();
         let handshake_counter = client.handshake_calls.clone();
-        let source = ExternalSkillSource::new("source-a", client);
+        let source = ExternalSkillSource::new(client);
 
         let listed = source.list(&SkillFilter::default()).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -1119,10 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_capability_mismatch_returns_typed_error() {
-        let source = ExternalSkillSource::new(
-            "source-a",
-            MockExternalClient::missing("skills/read_artifact"),
-        );
+        let source = ExternalSkillSource::new(MockExternalClient::missing("skills/read_artifact"));
 
         let error = source
             .read_artifact(
@@ -1150,6 +1171,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unknown_skill_returns_not_found_without_identity_fallback() {
+        // Remote announces `extraction/email` but caller asks for
+        // `extraction/phone`. The adapter must surface a typed NotFound — it
+        // must NOT silently substitute its own identity and proceed.
+        let source = ExternalSkillSource::new(MockExternalClient::full());
+
+        let error = source
+            .load(&SkillId("extraction/phone".to_string()))
+            .await
+            .expect_err("unknown skill should fail");
+
+        assert!(matches!(
+            error,
+            SkillError::NotFound { id: SkillId(ref id) } if id == "extraction/phone"
+        ));
+
+        let error = source
+            .list_artifacts(&SkillId("extraction/phone".to_string()))
+            .await
+            .expect_err("unknown skill should fail on list_artifacts");
+        assert!(matches!(error, SkillError::NotFound { .. }));
+
+        let error = source
+            .read_artifact(
+                &SkillId("extraction/phone".to_string()),
+                "resources/schema.json",
+            )
+            .await
+            .expect_err("unknown skill should fail on read_artifact");
+        assert!(matches!(error, SkillError::NotFound { .. }));
+
+        let error = source
+            .invoke_function(
+                &SkillId("extraction/phone".to_string()),
+                "validate",
+                serde_json::json!({}),
+            )
+            .await
+            .expect_err("unknown skill should fail on invoke_function");
+        assert!(matches!(error, SkillError::NotFound { .. }));
+    }
+
+    #[tokio::test]
     async fn test_stdio_transport_lifecycle_summaries_package_resources_functions() {
         let response_script = r##"
 read line
@@ -1174,7 +1238,7 @@ fi
             BTreeMap::new(),
             None,
         );
-        let source = ExternalSkillSource::new("source-a", client);
+        let source = ExternalSkillSource::new(client);
 
         let summaries = source.list(&SkillFilter::default()).await.unwrap();
         assert_eq!(summaries.len(), 1);

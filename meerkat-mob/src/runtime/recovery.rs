@@ -140,6 +140,7 @@ fn reconcile_ready_frames(run: &mut MobRun) {
 /// A loop instance belongs in pending_body_frame_loops iff:
 /// - it exists in `run.loops`
 /// - its kernel state phase is "Running"
+/// - its loop stage is `AwaitingBodyFrame`
 /// - its `active_body_frame_id` field is `None` (requested body frame but not yet started)
 fn reconcile_pending_body_frame_loops(run: &mut MobRun) {
     let mut pending_loop_ids: Vec<String> = run
@@ -207,13 +208,21 @@ fn reconcile_active_counts(run: &mut MobRun) {
 
 /// Return true if a loop snapshot represents a loop that is pending a body frame start.
 ///
-/// A loop is pending iff it is in Running phase with no active body frame
-/// (`active_body_frame_id == KernelValue::None`). The `None` (field absent) arm
-/// guards against corrupt snapshots — legitimate Running loops always initialize
-/// this field; if it is missing entirely, we treat the loop as pending and emit a
-/// warning so the anomaly is visible in logs.
+/// A loop is pending iff it is in Running phase, is specifically waiting for
+/// the next body frame (`stage == AwaitingBodyFrame`), and has no active body
+/// frame (`active_body_frame_id == KernelValue::None`). The `None` (field
+/// absent) arm guards against corrupt snapshots — legitimate Running loops
+/// always initialize this field; if it is missing entirely, we treat the loop
+/// as pending and emit a warning so the anomaly is visible in logs.
 fn loop_is_pending_body_frame(loop_id: &LoopInstanceId, snap: &LoopSnapshot) -> bool {
     if snap.kernel_state.phase != "Running" {
+        return false;
+    }
+    let awaiting_body_frame = matches!(
+        snap.kernel_state.fields.get("stage"),
+        Some(KernelValue::NamedVariant { variant, .. }) if variant == "AwaitingBodyFrame"
+    );
+    if !awaiting_body_frame {
         return false;
     }
     match snap.kernel_state.fields.get("active_body_frame_id") {

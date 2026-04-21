@@ -12,7 +12,7 @@ pub fn loop_iteration_machine() -> MachineSchema {
         version: 2,
         rust: RustBinding {
             crate_name: "meerkat-mob".into(),
-            module: "generated::loop_iteration".into(),
+            module: "runtime::flow_kernels::loop_iteration".into(),
         },
         state: StateSchema {
             phase: EnumSchema {

@@ -192,6 +192,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: integration-fast
+          workspaces: |
+            . -> target
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh

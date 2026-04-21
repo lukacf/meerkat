@@ -14,11 +14,11 @@ use crate::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowStepSpec, PolicyMode, StepOutputFormat,
 };
 use crate::error::MobError;
-use crate::generated::flow_frame_loop_driver::FlowFrameTerminalPhase;
 use crate::ids::{AgentIdentity, FlowId, MeerkatId, RunId, StepId};
 use crate::run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, MobRunStatus, StepLedgerEntry, StepRunStatus,
 };
+use crate::runtime::flow_frame_loop_driver::FlowFrameTerminalPhase;
 use crate::store::{MobEventStore, MobRunStore};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;

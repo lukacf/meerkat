@@ -295,7 +295,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn minimal_v2_run_running() -> MobRun {
-        use crate::generated::flow_run;
+        use crate::runtime::flow_kernels::flow_run;
         let flow_state = flow_run::initial_state().expect("init");
         MobRun {
             run_id: RunId::new(),

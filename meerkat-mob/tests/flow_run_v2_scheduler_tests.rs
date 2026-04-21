@@ -12,9 +12,9 @@ use meerkat_mob::definition::{
     CollectionPolicy, DependencyMode, DispatchMode, FlowSpec, FlowStepSpec, LimitsSpec,
     StepOutputFormat,
 };
-use meerkat_mob::generated::flow_run;
 use meerkat_mob::ids::{FlowId, ProfileName, StepId};
 use meerkat_mob::run::{FlowRunConfig, MobRun};
+use meerkat_mob::runtime::flow_kernels::flow_run;
 use std::collections::BTreeMap;
 
 fn str_val(s: &str) -> KernelValue {

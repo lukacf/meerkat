@@ -2,11 +2,11 @@
 
 use crate::definition::{DependencyMode, FlowSpec, LimitsSpec, SupervisorSpec, TopologySpec};
 use crate::error::MobError;
-use crate::generated::flow_run;
 use crate::ids::{
     AgentIdentity, BranchId, FlowId, FrameId, LoopId, LoopInstanceId, MobId, ProfileName, RunId,
     StepId,
 };
+use crate::runtime::flow_kernels::flow_run;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use meerkat_machine_kernels::{KernelState, KernelValue};

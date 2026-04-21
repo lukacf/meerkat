@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `meerkat-machine-kernels::generated` now exposes only the canonical machine kernels. The former flow compat kernels moved to `meerkat_mob::flow_kernels::{flow_frame, flow_run, loop_iteration}` as mob-local runtime ownership code.
+- `meerkat-machine-schema` no longer exports `flow_frame_machine()`, `flow_run_machine()`, or `loop_iteration_machine()` from a compat surface; mob-local replacements now live beside the corresponding `meerkat-mob` flow kernels.
+- The public kernel interpreter surface in `meerkat-machine-kernels` now uses typed wrappers for semantic ids (`KernelPhase`, `KernelField`, `KernelInputVariant`, `KernelSignalVariant`, `KernelEffectVariant`, `KernelTransitionName`, `KernelHelperName`, and typed named-enum pairs) instead of plain `String` keys.
+
 ## [0.5.2] - 2026-04-12
 
 ### Added

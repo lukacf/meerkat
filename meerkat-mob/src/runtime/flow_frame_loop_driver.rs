@@ -1,4 +1,5 @@
-// @generated — composition driver for `flow_frame_loop`
+// Local flow-frame/loop driver derived from the former `flow_frame_loop`
+// composition codegen. Ownership now lives in `meerkat-mob`.
 // Route target selectors:
 // - `loop_completed_completes_parent_loop_node` selects `frame_id` from effect/state field `parent_frame_id`
 // - `loop_exhausted_fails_parent_loop_node` selects `frame_id` from effect/state field `parent_frame_id`
@@ -16,14 +17,14 @@
 
 use crate::definition::{FlowNodeSpec, FrameSpec, RepeatUntilSpec};
 use crate::error::MobError;
-use crate::generated::protocol_flow_loop_until_evaluation::{
-    FlowLoopUntilEvaluationObligation, accept_evaluate_until_condition,
-    submit_until_condition_failed, submit_until_condition_met,
-};
-use crate::generated::{flow_frame, flow_run, loop_iteration};
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId, StepId};
 use crate::run::{FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot};
 use crate::runtime::flow_frame_kernel::{build_start_body_frame_input, topological_order};
+use crate::runtime::flow_kernels::{flow_frame, flow_run, loop_iteration};
+use crate::runtime::flow_loop_until_evaluation::{
+    FlowLoopUntilEvaluationObligation, accept_evaluate_until_condition,
+    submit_until_condition_failed, submit_until_condition_met,
+};
 use crate::runtime::loop_iteration_authority::{
     LoopIterationAuthority, LoopUntilEvaluationRequested,
 };

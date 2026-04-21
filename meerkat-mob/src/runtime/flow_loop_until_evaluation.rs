@@ -1,7 +1,5 @@
-// @generated — protocol helpers for `flow_loop_until_evaluation`
-// Composition: flow_frame_loop, Producer: loop_iteration, Effect: EvaluateUntilCondition
-// Closure policy: AckRequired
-// Liveness: eventual feedback under task-scheduling fairness
+// Local loop-until protocol helpers derived from the former
+// `flow_frame_loop` composition protocol codegen.
 
 use crate::error::MobError;
 use crate::ids::{FlowNodeId, FrameId, LoopId, LoopInstanceId};

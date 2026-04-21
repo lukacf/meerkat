@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn minimal_run_with_schema_v2() -> MobRun {
-    use meerkat_mob::generated::flow_run;
+    use meerkat_mob::runtime::flow_kernels::flow_run;
     let flow_state = flow_run::initial_state().expect("init");
     MobRun {
         run_id: RunId::new(),
